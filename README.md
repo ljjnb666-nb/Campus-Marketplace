@@ -1,0 +1,146 @@
+# 校园集市
+
+面向大学校园的二手交易、校园跑腿与技能服务撮合平台。当前优先完成网页版，使用本地 PostgreSQL、Prisma 和 Auth.js 作为第一版基础设施。
+
+## 当前状态
+
+当前仓库已经具备可运行的全栈 MVP，覆盖以下主流程：
+
+- 用户注册、登录、退出、资料编辑、校园认证
+- 二手商品发布、编辑、上下架、收藏、下单
+- 跑腿任务发布、接单、状态流转
+- 技能服务发布、编辑、上下架、预约下单
+- 订单、站内消息、通知、评价、举报
+- 管理后台、分类管理、违禁关键词管理
+
+## 技术栈
+
+- Next.js 16 App Router
+- React 19
+- TypeScript
+- Tailwind CSS v4
+- Prisma ORM
+- PostgreSQL
+- Auth.js Credentials 登录
+
+## 本地启动
+
+1. 安装依赖
+
+```bash
+npm install
+```
+
+2. 复制环境变量
+
+```bash
+cp .env.example .env
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+3. 启动本地 PostgreSQL
+
+```bash
+docker compose up -d
+```
+
+4. 生成 Prisma Client 并执行迁移
+
+```bash
+npm run prisma:generate
+npm run prisma:migrate
+```
+
+5. 数据库迁移与生产部署规范
+
+- **本地开发演进**：使用 `npx prisma migrate dev --name <migration_name>`。请勿在开发环境使用 `prisma db push`，以确保所有结构变更均落地为 `prisma/migrations` 文件夹下的版本化 SQL 文件。
+- **生产环境部署**：严格执行 `npx prisma migrate deploy`。此命令只应用已落盘的 SQL 迁移文件，不会修改已有的真实交易与会话数据。
+- **异常恢复与回滚**：如遇生产部署失败，可通过 `npx prisma migrate status` 查验失败的 Migration ID；在紧急情况下执行 `prisma migrate resolve --rolled-back <migration_name>` 标记回滚，并按照关联 SQL 文件应用逆向 DDL 脚本。
+
+6. 写入种子数据
+
+```bash
+npm run db:seed
+```
+
+可选：校验本地种子数据
+
+```bash
+npm run db:verify
+```
+
+可选：在开发服务启动后验证公开页面主链路
+
+```bash
+npm run app:smoke
+```
+
+可选：在开发服务启动后验证登录态页面主链路
+
+```bash
+npm run app:smoke:auth
+```
+
+可选：检查源码、文档和脚本里是否出现常见中文乱码片段
+
+```bash
+npm run text:verify
+```
+
+6. 启动开发服务
+
+```bash
+npm run dev
+```
+
+默认访问 [http://localhost:3000](http://localhost:3000)。
+
+## 测试账号
+
+- 管理员：`admin@campus.local / Admin123456`
+- 学生：`student1@campus.local / Student123456`
+
+## 常用命令
+
+```bash
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+npm run db:verify
+npm run app:smoke
+npm run app:smoke:auth
+npm run text:verify
+```
+
+## 文档
+
+- [docs/PRD.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/PRD.md)
+- [docs/ARCHITECTURE.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/ARCHITECTURE.md)
+- [docs/DATABASE.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/DATABASE.md)
+- [docs/API.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/API.md)
+- [docs/SECURITY.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/SECURITY.md)
+- [docs/TODO.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/TODO.md)
+
+## 验证状态
+
+最近一轮本地验证已通过以下命令：
+
+- `npm run db:seed`
+- `npm run db:verify`
+- `npm test -- src/app/products/[id]/page.test.tsx src/app/errands/[id]/page.test.tsx src/app/services/[id]/page.test.tsx`
+- `npm run lint`
+- `npm run typecheck`
+- `npm run app:smoke`
+- `npm run app:smoke:auth`
+- `npm run text:verify`
+
+当前测试基线：
+
+- `113` 个测试文件
+- `252` 个测试通过
