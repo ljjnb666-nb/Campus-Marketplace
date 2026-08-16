@@ -50,6 +50,52 @@ export const rentalExtensionSchema = z.object({
   newEndTime: z.string().trim().min(1, "请选择新结束时间"),
 });
 
+export const rentalOrderIdSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+});
+
+export const rentalRejectSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+  rejectReason: z.string().trim().max(200, "拒绝原因不能超过200字").optional(),
+});
+
+export const rentalPickupConfirmSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+  role: z.enum(["owner", "renter"], { message: "无权操作" }),
+  currentCondition: z.string().trim().max(1000, "物品现状说明不能超过1000字").optional(),
+  knownIssues: z.string().trim().max(1000, "已知问题说明不能超过1000字").optional(),
+});
+
+export const rentalReturnConfirmSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+  role: z.enum(["owner", "renter"], { message: "无权操作" }),
+  inspectionNote: z.string().trim().max(1000, "验收备注不能超过1000字").optional(),
+});
+
+export const rentalCancelSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+  cancellationReason: z.enum(
+    ["RENTER_CHANGED_PLAN", "OWNER_CANNOT_PROVIDE", "CANNOT_CONTACT", "ITEM_DAMAGED", "TIME_ERROR", "FAKE_INFO", "OTHER"],
+    { message: "取消原因不正确" },
+  ),
+  cancellationNote: z.string().trim().max(500, "取消说明不能超过500字").optional(),
+});
+
+export const rentalExtensionRequestIdSchema = z.object({
+  extensionRequestId: z.string().trim().min(1, "无效请求"),
+});
+
+export const rentalDamageClaimRespondSchema = z.object({
+  claimId: z.string().trim().min(1, "无效请求"),
+  agreed: z.enum(["true", "false"], { message: "参数不正确" }).transform((v) => v === "true"),
+  renterNote: z.string().trim().max(500, "备注不能超过500字").optional(),
+});
+
+export const rentalDisputeSchema = z.object({
+  orderId: z.string().trim().min(1, "订单不存在"),
+  reason: z.string().trim().min(5, "请填写纠纷原因（至少5个字）").max(1000, "纠纷原因不能超过1000字"),
+});
+
 export const rentalDamageClaimSchema = z.object({
   orderId: z.string().trim().min(1),
   damageDescription: z.string().trim().min(5).max(1000),

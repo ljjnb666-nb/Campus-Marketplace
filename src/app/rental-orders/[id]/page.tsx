@@ -26,6 +26,8 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
   const isOwner = user.id === order.ownerId;
   const userRole = isOwner ? "owner" : "renter";
   const counterparty = isOwner ? order.renter : order.owner;
+  // 未决损坏索赔（resolvedAt 为空）供租客在订单详情中处理
+  const pendingClaim = order.damageClaims.find((claim) => claim.resolvedAt === null) ?? null;
 
   function formatDate(value: Date | string) {
     return new Intl.DateTimeFormat("zh-CN", {
@@ -126,6 +128,15 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
               ? {
                   renterConfirmed: order.returnRecord.renterConfirmed,
                   ownerConfirmed: order.returnRecord.ownerConfirmed,
+                }
+              : null
+          }
+          pendingClaim={
+            pendingClaim
+              ? {
+                  id: pendingClaim.id,
+                  damageDescription: pendingClaim.damageDescription,
+                  requestedDeduction: Number(pendingClaim.requestedDeduction),
                 }
               : null
           }
