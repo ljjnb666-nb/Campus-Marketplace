@@ -36,7 +36,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 与生成 package-lock.json 的本地环境（npm 11）保持一致，
+          # 低版本 npm 的 npm ci 会认为该 lock 文件缺少依赖条目
+          node-version: 24
           cache: npm
 
       - name: Install dependencies
