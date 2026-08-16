@@ -202,7 +202,11 @@ export async function getProductFormMeta() {
   return { campuses, categories };
 }
 
-export async function getProductDetail(productId: string, currentUserId?: string) {
+export async function getProductDetail(
+  productId: string,
+  currentUserId?: string,
+  options?: { countView?: boolean },
+) {
   const product = await prisma.product.findFirst({
     where: { id: productId, deletedAt: null },
     include: {
@@ -236,10 +240,13 @@ export async function getProductDetail(productId: string, currentUserId?: string
     notFound();
   }
 
-  await prisma.product.update({
-    where: { id: product.id },
-    data: { viewCount: { increment: 1 } },
-  });
+  // generateMetadata 等只读调用传 countView: false，避免浏览量被重复计数
+  if (options?.countView !== false) {
+    await prisma.product.update({
+      where: { id: product.id },
+      data: { viewCount: { increment: 1 } },
+    });
+  }
 
   const recommendationPool = await prisma.product.findMany({
     where: {
@@ -324,6 +331,8 @@ export async function getMyProducts(userId: string) {
       deletedAt: null,
     },
     orderBy: { createdAt: "desc" },
+    // 个人商品列表仅保留最近 100 条，避免无界查询
+    take: 100,
     include: {
       category: true,
       images: {
@@ -338,6 +347,8 @@ export async function getMyFavoriteProducts(userId: string) {
   return prisma.favorite.findMany({
     where: { userId },
     orderBy: { createdAt: "desc" },
+    // 收藏列表仅保留最近 100 条，避免无界查询
+    take: 100,
     include: {
       product: {
         include: {

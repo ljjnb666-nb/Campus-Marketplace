@@ -1,8 +1,10 @@
 "use server";
 
 import { Prisma } from "@prisma/client";
-import { revalidatePath } from "next/cache";
+import { decimalValue } from "@/lib/decimal";
+import { createOrderNo } from "@/lib/order-no";
 import { prisma } from "@/lib/prisma";
+import { revalidateOrderViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { createNotifications } from "@/repositories/notification-repository";
 import { orderStatusSchema, productOrderFormSchema, serviceOrderFormSchema } from "@/validators/order";
@@ -17,43 +19,6 @@ const initialState: OrderActionState = {
   success: false,
   message: "",
 };
-
-function decimalValue(value: string) {
-  return new Prisma.Decimal(value);
-}
-
-function createOrderNo() {
-  const now = new Date();
-  const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
-    now.getDate(),
-  ).padStart(2, "0")}`;
-  const suffix = `${Date.now()}`.slice(-6);
-  return `CM${date}${suffix}`;
-}
-
-function revalidateOrderViews(options: {
-  productId?: string;
-  serviceId?: string;
-  errandId?: string;
-}) {
-  revalidatePath("/my/orders");
-  revalidatePath("/products");
-  revalidatePath("/services");
-  revalidatePath("/errands");
-  revalidatePath("/notifications");
-
-  if (options.productId) {
-    revalidatePath(`/products/${options.productId}`);
-  }
-
-  if (options.serviceId) {
-    revalidatePath(`/services/${options.serviceId}`);
-  }
-
-  if (options.errandId) {
-    revalidatePath(`/errands/${options.errandId}`);
-  }
-}
 
 async function incrementCompletedUsers(
   tx: Prisma.TransactionClient,

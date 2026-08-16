@@ -1,4 +1,3 @@
-import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 
 export type BizType =
@@ -68,20 +67,31 @@ export type ConversationDetailPayload = {
   nextCursor?: string | null;
 };
 
-async function hydrateConversations(
-  conversations: Array<{
-    id: string;
-    title: string | null;
-    productId: string | null;
-    errandTaskId: string | null;
-    serviceListingId: string | null;
-    rentalListingId: string | null;
-    orderId: string | null;
-    rentalOrderId: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-  }>,
-) {
+type ConversationRecord = {
+  id: string;
+  title: string | null;
+  productId: string | null;
+  errandTaskId: string | null;
+  serviceListingId: string | null;
+  rentalListingId: string | null;
+  orderId: string | null;
+  rentalOrderId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+// 会话列表默认分页大小与上限
+const DEFAULT_CONVERSATION_LIST_LIMIT = 50;
+const MAX_CONVERSATION_LIST_LIMIT = 100;
+
+function resolveConversationListLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+    return DEFAULT_CONVERSATION_LIST_LIMIT;
+  }
+  return Math.min(Math.trunc(limit), MAX_CONVERSATION_LIST_LIMIT);
+}
+
+async function hydrateConversations(conversations: ConversationRecord[], userId: string) {
   const conversationIds = conversations.map((item) => item.id);
   const productIds = conversations.map((item) => item.productId).filter((v): v is string => Boolean(v));
   const errandIds = conversations.map((item) => item.errandTaskId).filter((v): v is string => Boolean(v));
@@ -92,7 +102,8 @@ async function hydrateConversations(
 
   const [
     participants,
-    messages,
+    lastMessages,
+    unreadCounts,
     products,
     errands,
     services,
@@ -115,8 +126,11 @@ async function hydrateConversations(
       },
       orderBy: { joinedAt: "asc" },
     }),
+    // 每个会话仅取最后一条消息（PostgreSQL DISTINCT ON，避免全量加载消息）
     prisma.message.findMany({
       where: { conversationId: { in: conversationIds } },
+      orderBy: [{ conversationId: "asc" }, { createdAt: "desc" }, { id: "desc" }],
+      distinct: ["conversationId"],
       include: {
         sender: {
           select: {
@@ -126,7 +140,16 @@ async function hydrateConversations(
           },
         },
       },
-      orderBy: { createdAt: "asc" },
+    }),
+    // 每个会话的未读消息数（对方发来且尚未读）
+    prisma.message.groupBy({
+      by: ["conversationId"],
+      where: {
+        conversationId: { in: conversationIds },
+        senderId: { not: userId },
+        isRead: false,
+      },
+      _count: { conversationId: true },
     }),
     productIds.length > 0
       ? prisma.product.findMany({
@@ -173,12 +196,10 @@ async function hydrateConversations(
     participantsByConv.set(p.conversationId, list);
   }
 
-  const messagesByConv = new Map<string, typeof messages>();
-  for (const m of messages) {
-    const list = messagesByConv.get(m.conversationId) ?? [];
-    list.push(m);
-    messagesByConv.set(m.conversationId, list);
-  }
+  const lastMessageByConv = new Map(lastMessages.map((item) => [item.conversationId, item]));
+  const unreadCountByConv = new Map(
+    unreadCounts.map((item) => [item.conversationId, item._count.conversationId]),
+  );
 
   const productMap = new Map(products.map((item) => [item.id, item]));
   const errandMap = new Map(errands.map((item) => [item.id, item]));
@@ -196,40 +217,26 @@ async function hydrateConversations(
     order: conv.orderId ? orderMap.get(conv.orderId) ?? null : null,
     rentalOrder: conv.rentalOrderId ? rentalOrderMap.get(conv.rentalOrderId) ?? null : null,
     participants: participantsByConv.get(conv.id) ?? [],
-    messages: messagesByConv.get(conv.id) ?? [],
+    lastMessage: lastMessageByConv.get(conv.id) ?? null,
+    unreadCount: unreadCountByConv.get(conv.id) ?? 0,
   }));
 }
 
 export async function getUnreadConversationCount(userId: string): Promise<number> {
-  const participants = await prisma.conversationParticipant.findMany({
-    where: { userId },
-    select: {
-      conversationId: true,
-      lastReadAt: true,
+  // 单条查询：统计存在"对方发来且未读"消息的会话数量（DISTINCT 去重后按会话计数）
+  const unreadConversations = await prisma.message.findMany({
+    where: {
+      isRead: false,
+      senderId: { not: userId },
+      conversation: {
+        participants: { some: { userId } },
+      },
     },
+    select: { conversationId: true },
+    distinct: ["conversationId"],
   });
 
-  if (participants.length === 0) return 0;
-
-  const unreadFlags = await Promise.all(
-    participants.map(async (participant) => {
-      const latestMessage = await prisma.message.findFirst({
-        where: {
-          conversationId: participant.conversationId,
-          senderId: { not: userId },
-        },
-        orderBy: { createdAt: "desc" },
-        select: { createdAt: true },
-      });
-
-      return Boolean(
-        latestMessage &&
-          (!participant.lastReadAt || latestMessage.createdAt > participant.lastReadAt),
-      );
-    }),
-  );
-
-  return unreadFlags.filter(Boolean).length;
+  return unreadConversations.length;
 }
 
 export async function getConversationListItems(
@@ -237,6 +244,7 @@ export async function getConversationListItems(
   options?: {
     search?: string;
     filterType?: string;
+    limit?: number;
   },
 ): Promise<ConversationListItem[]> {
   const conversations = await prisma.conversation.findMany({
@@ -246,20 +254,19 @@ export async function getConversationListItems(
       },
     },
     orderBy: { updatedAt: "desc" },
+    take: resolveConversationListLimit(options?.limit),
   });
 
-  const hydrated = await hydrateConversations(conversations);
+  if (conversations.length === 0) return [];
+
+  const hydrated = await hydrateConversations(conversations, userId);
 
   const items: ConversationListItem[] = [];
 
   for (const conv of hydrated) {
-    const currentParticipant = conv.participants.find((item) => item.userId === userId);
     const counterpart = conv.participants.find((item) => item.userId !== userId)?.user;
-    const lastMessage = conv.messages[conv.messages.length - 1] ?? null;
-    const hasUnread =
-      Boolean(lastMessage) &&
-      lastMessage.senderId !== userId &&
-      (!currentParticipant?.lastReadAt || lastMessage.createdAt > currentParticipant.lastReadAt);
+    const lastMessage = conv.lastMessage;
+    const hasUnread = conv.unreadCount > 0;
 
     let bizType: BizType = "PRODUCT";
     let bizTitle = "站内会话";
@@ -337,12 +344,13 @@ export async function getConversationListItems(
   return items;
 }
 
+// 会话不存在或当前用户不是参与者时返回 null，由页面/API 层各自映射 404
 export async function getConversationDetailPayload(
   conversationId: string,
   userId: string,
   cursor?: string,
   limit = 20,
-): Promise<ConversationDetailPayload> {
+): Promise<ConversationDetailPayload | null> {
   const conversation = await prisma.conversation.findFirst({
     where: {
       id: conversationId,
@@ -353,14 +361,14 @@ export async function getConversationDetailPayload(
   });
 
   if (!conversation) {
-    notFound();
+    return null;
   }
 
-  const [hydrated] = await hydrateConversations([conversation]);
+  const [hydrated] = await hydrateConversations([conversation], userId);
   const counterpart = hydrated.participants.find((p) => p.userId !== userId)?.user;
 
   if (!counterpart) {
-    notFound();
+    return null;
   }
 
   // 检查拉黑状态

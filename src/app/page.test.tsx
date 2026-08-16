@@ -1,42 +1,27 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getHomepageData } = vi.hoisted(() => ({
-  auth: vi.fn(),
-  getHomepageData: vi.fn(),
-}));
-
-vi.mock("@/lib/auth", () => ({
-  auth,
-}));
-
-vi.mock("@/repositories/home-repository", () => ({
-  getHomepageData,
-}));
-
-vi.mock("@/components/site/hero", () => ({
-  HeroSection: ({ summary }: { summary: { activeCampusName: string } }) => (
-    <div>
-      <p>首页摘要 {summary.activeCampusName}</p>
-    </div>
+vi.mock("@/app/home-sections/hero-summary", () => ({
+  HomeHeroSummary: ({ campusId }: { campusId?: string }) => (
+    <p>首页摘要区 {campusId ?? "全部校区"}</p>
   ),
 }));
 
-vi.mock("@/components/site/listing-grid", () => ({
-  ListingGrid: ({
-    title,
-    description,
-    moreHref,
-  }: {
-    title: string;
-    description: string;
-    moreHref: string;
-  }) => (
-    <section>
-      <h2>{title}</h2>
-      <p>{description}</p>
-      <p>{moreHref}</p>
-    </section>
+vi.mock("@/app/home-sections/product-listings", () => ({
+  HomeProductListings: ({ campusId }: { campusId?: string }) => (
+    <p>商品分区 {campusId ?? "全部校区"}</p>
+  ),
+}));
+
+vi.mock("@/app/home-sections/errand-listings", () => ({
+  HomeErrandListings: ({ campusId }: { campusId?: string }) => (
+    <p>跑腿分区 {campusId ?? "全部校区"}</p>
+  ),
+}));
+
+vi.mock("@/app/home-sections/service-listings", () => ({
+  HomeServiceListings: ({ campusId }: { campusId?: string }) => (
+    <p>服务分区 {campusId ?? "全部校区"}</p>
   ),
 }));
 
@@ -51,33 +36,36 @@ afterEach(() => {
 });
 
 describe("Home", () => {
-  it("renders homepage sections using the selected campus", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
-    getHomepageData.mockResolvedValue({
-      summary: { activeCampusName: "主校区" },
-      latestProducts: [],
-      trendingProducts: [],
-      budgetProducts: [],
-      urgentErrands: [],
-      highRewardErrands: [],
-      verifiedServices: [],
-      topServices: [],
-    });
-
+  it("renders the streamed sections in order with the selected campus", async () => {
     render(
       await Home({
         searchParams: Promise.resolve({ campus: "campus-1" }),
       }),
     );
 
-    expect(screen.getByText("首页摘要 主校区")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "最新二手商品" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "热门商品推荐" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "低价好物" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "紧急跑腿任务" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "高赏金任务" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "认证服务精选" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "高完成度服务" })).toBeTruthy();
-    expect(screen.getByText("安全提示区")).toBeTruthy();
+    const sections = [
+      "首页摘要区 campus-1",
+      "商品分区 campus-1",
+      "跑腿分区 campus-1",
+      "服务分区 campus-1",
+      "安全提示区",
+    ];
+    // 保持原有输出顺序:摘要 → 商品 → 跑腿 → 服务 → 安全提示。
+    for (let i = 0; i < sections.length - 1; i++) {
+      const current = screen.getByText(sections[i]);
+      const next = screen.getByText(sections[i + 1]);
+      expect(
+        Boolean(current.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING),
+      ).toBe(true);
+    }
+  });
+
+  it("passes an empty campus through when no campus is selected", async () => {
+    render(await Home({ searchParams: Promise.resolve({}) }));
+
+    expect(screen.getByText("首页摘要区 全部校区")).toBeTruthy();
+    expect(screen.getByText("商品分区 全部校区")).toBeTruthy();
+    expect(screen.getByText("跑腿分区 全部校区")).toBeTruthy();
+    expect(screen.getByText("服务分区 全部校区")).toBeTruthy();
   });
 });

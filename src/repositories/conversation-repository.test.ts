@@ -2,16 +2,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   conversationParticipantFindMany,
-  messageFindFirst,
+  conversationParticipantUpdateMany,
+  conversationFindFirst,
   conversationFindMany,
   messageFindMany,
+  messageGroupBy,
+  messageUpdateMany,
+  blockedUserFindUnique,
   productFindMany,
   serviceListingFindMany,
 } = vi.hoisted(() => ({
   conversationParticipantFindMany: vi.fn(),
-  messageFindFirst: vi.fn(),
+  conversationParticipantUpdateMany: vi.fn(),
+  conversationFindFirst: vi.fn(),
   conversationFindMany: vi.fn(),
   messageFindMany: vi.fn(),
+  messageGroupBy: vi.fn(),
+  messageUpdateMany: vi.fn(),
+  blockedUserFindUnique: vi.fn(),
   productFindMany: vi.fn(),
   serviceListingFindMany: vi.fn(),
 }));
@@ -20,13 +28,19 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     conversationParticipant: {
       findMany: conversationParticipantFindMany,
-    },
-    message: {
-      findFirst: messageFindFirst,
-      findMany: messageFindMany,
+      updateMany: conversationParticipantUpdateMany,
     },
     conversation: {
+      findFirst: conversationFindFirst,
       findMany: conversationFindMany,
+    },
+    message: {
+      findMany: messageFindMany,
+      groupBy: messageGroupBy,
+      updateMany: messageUpdateMany,
+    },
+    blockedUser: {
+      findUnique: blockedUserFindUnique,
     },
     product: {
       findMany: productFindMany,
@@ -38,6 +52,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import {
+  getConversationDetailPayload,
   getConversationListItems,
   getUnreadConversationCount,
 } from "@/repositories/conversation-repository";
@@ -45,51 +60,48 @@ import {
 describe("conversation repository", () => {
   beforeEach(() => {
     conversationParticipantFindMany.mockReset();
-    messageFindFirst.mockReset();
+    conversationParticipantUpdateMany.mockReset();
+    conversationFindFirst.mockReset();
     conversationFindMany.mockReset();
     messageFindMany.mockReset();
+    messageGroupBy.mockReset();
+    messageUpdateMany.mockReset();
+    blockedUserFindUnique.mockReset();
     productFindMany.mockReset();
     serviceListingFindMany.mockReset();
   });
 
-  it("counts only conversations with messages newer than the user's last read time", async () => {
-    conversationParticipantFindMany.mockResolvedValue([
-      {
-        conversationId: "conversation-1",
-        lastReadAt: new Date("2026-07-17T08:00:00.000Z"),
-      },
-      {
-        conversationId: "conversation-2",
-        lastReadAt: null,
-      },
-      {
-        conversationId: "conversation-3",
-        lastReadAt: new Date("2026-07-17T12:00:00.000Z"),
-      },
+  it("counts unread conversations with a single distinct query instead of per-conversation lookups", async () => {
+    messageFindMany.mockResolvedValue([
+      { conversationId: "conversation-1" },
+      { conversationId: "conversation-2" },
     ]);
-
-    messageFindFirst
-      .mockResolvedValueOnce({
-        createdAt: new Date("2026-07-17T09:00:00.000Z"),
-      })
-      .mockResolvedValueOnce({
-        createdAt: new Date("2026-07-17T07:00:00.000Z"),
-      })
-      .mockResolvedValueOnce(null);
 
     const count = await getUnreadConversationCount("user-1");
 
     expect(count).toBe(2);
-    expect(messageFindFirst).toHaveBeenNthCalledWith(1, {
+    expect(messageFindMany).toHaveBeenCalledTimes(1);
+    expect(messageFindMany).toHaveBeenCalledWith({
       where: {
-        conversationId: "conversation-1",
+        isRead: false,
         senderId: { not: "user-1" },
+        conversation: {
+          participants: { some: { userId: "user-1" } },
+        },
       },
-      orderBy: { createdAt: "desc" },
-      select: {
-        createdAt: true,
-      },
+      select: { conversationId: true },
+      distinct: ["conversationId"],
     });
+    expect(conversationParticipantFindMany).not.toHaveBeenCalled();
+  });
+
+  it("returns zero unread conversations when there are no unread messages", async () => {
+    messageFindMany.mockResolvedValue([]);
+
+    const count = await getUnreadConversationCount("user-1");
+
+    expect(count).toBe(0);
+    expect(messageFindMany).toHaveBeenCalledTimes(1);
   });
 
   it("maps hydrated conversations into list items with counterpart and unread state", async () => {
@@ -100,6 +112,9 @@ describe("conversation repository", () => {
         productId: "product-1",
         errandTaskId: null,
         serviceListingId: null,
+        rentalListingId: null,
+        orderId: null,
+        rentalOrderId: null,
         createdAt: new Date("2026-07-16T10:00:00.000Z"),
         updatedAt: new Date("2026-07-17T10:00:00.000Z"),
       },
@@ -121,7 +136,7 @@ describe("conversation repository", () => {
         conversationId: "conversation-1",
         userId: "seller-1",
         lastReadAt: null,
-        joinedAt: new Date("2026-07-16T10:00:01.000Z"),
+        joinedAt: new Date("2026-07-16T10:00:00.01Z"),
         user: {
           id: "seller-1",
           name: "卖家同学",
@@ -144,6 +159,10 @@ describe("conversation repository", () => {
       },
     ]);
 
+    messageGroupBy.mockResolvedValue([
+      { conversationId: "conversation-1", _count: { conversationId: 2 } },
+    ]);
+
     productFindMany.mockResolvedValue([
       {
         id: "product-1",
@@ -154,6 +173,32 @@ describe("conversation repository", () => {
     serviceListingFindMany.mockResolvedValue([]);
 
     const items = await getConversationListItems("user-1");
+
+    // 列表查询只取最后一条消息（DISTINCT ON）而非全量消息
+    expect(messageFindMany).toHaveBeenCalledWith({
+      where: { conversationId: { in: ["conversation-1"] } },
+      orderBy: [
+        { conversationId: "asc" },
+        { createdAt: "desc" },
+        { id: "desc" },
+      ],
+      distinct: ["conversationId"],
+      include: {
+        sender: {
+          select: { id: true, name: true, avatarUrl: true },
+        },
+      },
+    });
+    // 未读数来自单次 groupBy 查询
+    expect(messageGroupBy).toHaveBeenCalledWith({
+      by: ["conversationId"],
+      where: {
+        conversationId: { in: ["conversation-1"] },
+        senderId: { not: "user-1" },
+        isRead: false,
+      },
+      _count: { conversationId: true },
+    });
 
     expect(items).toEqual([
       {
@@ -176,5 +221,241 @@ describe("conversation repository", () => {
         hasActiveOrder: false,
       },
     ]);
+  });
+
+  it("falls back to updatedAt and marks read state when a conversation has no messages", async () => {
+    conversationFindMany.mockResolvedValue([
+      {
+        id: "conversation-2",
+        title: "跑腿沟通",
+        productId: null,
+        errandTaskId: null,
+        serviceListingId: null,
+        rentalListingId: null,
+        orderId: null,
+        rentalOrderId: null,
+        createdAt: new Date("2026-07-16T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+      },
+    ]);
+
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-2",
+        userId: "user-1",
+        lastReadAt: new Date("2026-07-17T09:00:00.000Z"),
+        joinedAt: new Date("2026-07-16T10:00:00.000Z"),
+        user: { id: "user-1", name: "买家同学", schoolName: "示例大学" },
+      },
+      {
+        conversationId: "conversation-2",
+        userId: "seller-1",
+        lastReadAt: null,
+        joinedAt: new Date("2026-07-16T10:00:00.01Z"),
+        user: { id: "seller-1", name: "卖家同学", schoolName: "示例大学" },
+      },
+    ]);
+
+    messageFindMany.mockResolvedValue([]);
+    messageGroupBy.mockResolvedValue([]);
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+
+    const items = await getConversationListItems("user-1");
+
+    expect(items).toEqual([
+      {
+        id: "conversation-2",
+        title: "跑腿沟通",
+        bizTitle: "站内会话",
+        bizType: "PRODUCT",
+        bizTargetId: null,
+        bizCoverUrl: null,
+        counterpartId: "seller-1",
+        counterpartName: "卖家同学",
+        counterpartSchoolName: "示例大学",
+        counterpartAvatarUrl: null,
+        counterpartVerificationStatus: "UNVERIFIED",
+        lastMessageSenderName: "系统",
+        lastMessageContent: "你们还没有开始聊天",
+        lastMessageAt: "2026-07-17T10:00:00.000Z",
+        updatedAt: "2026-07-17T10:00:00.000Z",
+        hasUnread: false,
+        hasActiveOrder: false,
+      },
+    ]);
+  });
+
+  it("limits the conversation list to a bounded page size", async () => {
+    conversationFindMany.mockResolvedValue([]);
+
+    await getConversationListItems("user-1");
+
+    expect(conversationFindMany).toHaveBeenCalledWith({
+      where: {
+        participants: { some: { userId: "user-1" } },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 50,
+    });
+
+    await getConversationListItems("user-1", { limit: 500 });
+
+    expect(conversationFindMany).toHaveBeenLastCalledWith({
+      where: {
+        participants: { some: { userId: "user-1" } },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 100,
+    });
+
+    await getConversationListItems("user-1", { limit: 10 });
+
+    expect(conversationFindMany).toHaveBeenLastCalledWith({
+      where: {
+        participants: { some: { userId: "user-1" } },
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
+    });
+  });
+
+  it("returns null instead of throwing when the conversation does not exist", async () => {
+    conversationFindFirst.mockResolvedValue(null);
+
+    await expect(getConversationDetailPayload("missing", "user-1")).resolves.toBeNull();
+    expect(messageUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("marks unread counterpart messages as read via an idempotent updateMany", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-1",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: null,
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-1",
+        userId: "user-1",
+        lastReadAt: null,
+        joinedAt: new Date("2026-07-16T10:00:00.000Z"),
+        user: {
+          id: "user-1",
+          name: "买家同学",
+          avatarUrl: null,
+          schoolName: "示例大学",
+          verificationStatus: "UNVERIFIED",
+        },
+      },
+      {
+        conversationId: "conversation-1",
+        userId: "seller-1",
+        lastReadAt: null,
+        joinedAt: new Date("2026-07-16T10:00:00.01Z"),
+        user: {
+          id: "seller-1",
+          name: "卖家同学",
+          avatarUrl: null,
+          schoolName: "示例大学",
+          verificationStatus: "VERIFIED",
+        },
+      },
+    ]);
+
+    messageFindMany
+      .mockResolvedValueOnce([
+        {
+          id: "message-2",
+          conversationId: "conversation-1",
+          senderId: "user-1",
+          content: "可以，几点方便？",
+          createdAt: new Date("2026-07-17T09:40:00.000Z"),
+          sender: { id: "user-1", name: "买家同学", avatarUrl: null },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "message-2",
+          conversationId: "conversation-1",
+          senderId: "user-1",
+          type: "DIRECT",
+          content: "可以，几点方便？",
+          isRead: false,
+          createdAt: new Date("2026-07-17T09:40:00.000Z"),
+          sender: { id: "user-1", name: "买家同学", avatarUrl: null },
+        },
+        {
+          id: "message-1",
+          conversationId: "conversation-1",
+          senderId: "seller-1",
+          type: "DIRECT",
+          content: "还在的，可以今晚面交。",
+          isRead: false,
+          createdAt: new Date("2026-07-17T09:30:00.000Z"),
+          sender: { id: "seller-1", name: "卖家同学", avatarUrl: null },
+        },
+      ]);
+
+    messageGroupBy.mockResolvedValue([
+      { conversationId: "conversation-1", _count: { conversationId: 1 } },
+    ]);
+    blockedUserFindUnique.mockResolvedValue(null);
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 1 });
+
+    const payload = await getConversationDetailPayload("conversation-1", "user-1");
+
+    expect(payload?.id).toBe("conversation-1");
+    expect(payload?.counterpart).toEqual({
+      id: "seller-1",
+      name: "卖家同学",
+      avatarUrl: null,
+      schoolName: "示例大学",
+      verificationStatus: "VERIFIED",
+      isBlockedByMe: false,
+      hasBlockedMe: false,
+    });
+    expect(payload?.messages).toEqual([
+      {
+        id: "message-1",
+        senderId: "seller-1",
+        senderName: "卖家同学",
+        senderAvatarUrl: null,
+        type: "DIRECT",
+        content: "还在的，可以今晚面交。",
+        isRead: false,
+        createdAt: "2026-07-17T09:30:00.000Z",
+      },
+      {
+        id: "message-2",
+        senderId: "user-1",
+        senderName: "买家同学",
+        senderAvatarUrl: null,
+        type: "DIRECT",
+        content: "可以，几点方便？",
+        isRead: false,
+        createdAt: "2026-07-17T09:40:00.000Z",
+      },
+    ]);
+    expect(messageUpdateMany).toHaveBeenCalledWith({
+      where: {
+        conversationId: "conversation-1",
+        senderId: { not: "user-1" },
+        isRead: false,
+      },
+      data: { isRead: true },
+    });
+    expect(conversationParticipantUpdateMany).toHaveBeenCalledWith({
+      where: { conversationId: "conversation-1", userId: "user-1" },
+      data: { lastReadAt: expect.any(Date) },
+    });
   });
 });

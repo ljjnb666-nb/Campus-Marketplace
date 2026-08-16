@@ -1,68 +1,48 @@
-import { HeroSection } from "@/components/site/hero";
-import { ListingGrid } from "@/components/site/listing-grid";
+import { Suspense } from "react";
+import { HomeErrandListings } from "@/app/home-sections/errand-listings";
+import { HomeHeroSummary } from "@/app/home-sections/hero-summary";
+import { HomeProductListings } from "@/app/home-sections/product-listings";
+import { HomeServiceListings } from "@/app/home-sections/service-listings";
 import { SafetySection } from "@/components/site/safety-section";
-import { auth } from "@/lib/auth";
-import { getHomepageData } from "@/repositories/home-repository";
+import { CardGridSkeleton, Skeleton } from "@/components/ui/loading-skeleton";
 
 export const dynamic = "force-dynamic";
 
+// hero 摘要区占位:复用现有 Skeleton 原语,高度与 hero 量级对齐,不引入新的视觉语言。
+function HeroSummarySkeleton() {
+  return (
+    <section className="py-12 md:py-16 lg:py-20">
+      <div className="mx-auto w-full max-w-7xl px-4 sm:px-6">
+        <Skeleton className="h-[480px] w-full rounded-3xl" />
+      </div>
+    </section>
+  );
+}
+
+// 首页流式渲染:页面外壳与静态内容立即输出,各数据区块挂在自己的 Suspense 边界后,
+// 按各自查询完成的时间逐段流入,首个可见内容不再等待全部 12 个查询。
 export default async function Home({
   searchParams,
 }: {
   searchParams: Promise<{ campus?: string }>;
 }) {
   const params = await searchParams;
-  const session = await auth();
-  const homepageData = await getHomepageData({
-    userId: session?.user?.id,
-    campusId: params.campus,
-  });
+  const campusId = params.campus;
 
   return (
     <>
-      <HeroSection summary={homepageData.summary} />
-      <ListingGrid
-        title="最新二手商品"
-        description="最近发布的校园闲置，适合快速浏览当前上新内容。"
-        items={homepageData.latestProducts}
-        moreHref="/products?sort=latest"
-      />
-      <ListingGrid
-        title="热门商品推荐"
-        description="综合收藏、浏览和新鲜度排序，更接近同学们真正会点开的内容。"
-        items={homepageData.trendingProducts}
-        moreHref="/products?sort=popular"
-      />
-      <ListingGrid
-        title="低价好物"
-        description="优先展示价格更友好的在售商品，适合先淘一批高性价比闲置。"
-        items={homepageData.budgetProducts}
-        moreHref="/products?sort=price_asc"
-      />
-      <ListingGrid
-        title="紧急跑腿任务"
-        description="优先展示截止更近、需要尽快处理的即时需求。"
-        items={homepageData.urgentErrands}
-        moreHref="/errands?deadline=today&sort=deadline_asc"
-      />
-      <ListingGrid
-        title="高赏金任务"
-        description="按赏金优先排序，适合有时间时快速挑选更高回报的跑腿单。"
-        items={homepageData.highRewardErrands}
-        moreHref="/errands?sort=reward_desc"
-      />
-      <ListingGrid
-        title="认证服务精选"
-        description="优先展示已认证服务者和已有成交记录的服务。"
-        items={homepageData.verifiedServices}
-        moreHref="/services?verifiedOnly=true&sort=orders_desc"
-      />
-      <ListingGrid
-        title="高完成度服务"
-        description="按已完成订单数排序，适合优先寻找更成熟、履约更稳定的服务。"
-        items={homepageData.topServices}
-        moreHref="/services?sort=orders_desc"
-      />
+      <Suspense fallback={<HeroSummarySkeleton />}>
+        <HomeHeroSummary campusId={campusId} />
+      </Suspense>
+      <Suspense fallback={<CardGridSkeleton count={6} />}>
+        <HomeProductListings campusId={campusId} />
+      </Suspense>
+      <Suspense fallback={<CardGridSkeleton count={6} />}>
+        <HomeErrandListings campusId={campusId} />
+      </Suspense>
+      <Suspense fallback={<CardGridSkeleton count={6} />}>
+        <HomeServiceListings campusId={campusId} />
+      </Suspense>
       <SafetySection />
     </>
   );

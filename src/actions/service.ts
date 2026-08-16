@@ -1,10 +1,10 @@
 "use server";
 
-import { Prisma } from "@prisma/client";
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { decimalValue } from "@/lib/decimal";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prisma } from "@/lib/prisma";
+import { revalidateServiceViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { saveUploadedImage } from "@/lib/upload";
 import { serviceFormSchema, serviceStatusSchema } from "@/validators/service";
@@ -19,21 +19,6 @@ const initialState: ServiceActionState = {
   success: false,
   message: "",
 };
-
-function decimalValue(value: string) {
-  return new Prisma.Decimal(value);
-}
-
-function applyServiceRevalidation(serviceId?: string) {
-  revalidatePath("/");
-  revalidatePath("/services");
-  revalidatePath("/my/services");
-
-  if (serviceId) {
-    revalidatePath(`/services/${serviceId}`);
-    revalidatePath(`/services/${serviceId}/edit`);
-  }
-}
 
 async function ensureActiveServiceCategory(categoryId: string) {
   return prisma.serviceCategory.findFirst({
@@ -124,7 +109,7 @@ export async function createService(
     },
   });
 
-  applyServiceRevalidation(service.id);
+  revalidateServiceViews(service.id);
 
   return {
     success: true,
@@ -208,7 +193,7 @@ export async function updateService(
     },
   });
 
-  applyServiceRevalidation(serviceId);
+  revalidateServiceViews(serviceId);
 
   return {
     success: true,
@@ -247,7 +232,7 @@ export async function updateServiceStatus(formData: FormData) {
     data: { status: parsed.data.status },
   });
 
-  applyServiceRevalidation(parsed.data.serviceId);
+  revalidateServiceViews(parsed.data.serviceId);
 }
 
 export async function deleteService(formData: FormData) {
@@ -279,6 +264,6 @@ export async function deleteService(formData: FormData) {
     },
   });
 
-  applyServiceRevalidation(serviceId);
+  revalidateServiceViews(serviceId);
   redirect("/my/services");
 }

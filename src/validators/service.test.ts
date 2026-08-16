@@ -17,7 +17,7 @@ describe("service validators", () => {
       locationText: "图书馆南门",
       availableSchedule: "工作日晚间和周末全天可约",
       coverImageUrl:
-        "https://images.unsplash.com/photo-1516035069371-29a1b244cc32?auto=format&fit=crop&w=1200&q=80",
+        "https://example.com/photography.jpg",
     });
 
     expect(result.success).toBe(true);
@@ -48,7 +48,7 @@ describe("service validators", () => {
       locationText: "图书馆南门",
       availableSchedule: "工作日晚间和周末全天可约",
       coverImageUrl:
-        "https://images.unsplash.com/photo-1516035069371-29a1b244cc32?auto=format&fit=crop&w=1200&q=80",
+        "https://example.com/photography.jpg",
     });
 
     expect(result.success).toBe(false);

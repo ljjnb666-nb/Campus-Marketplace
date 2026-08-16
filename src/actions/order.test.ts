@@ -82,6 +82,7 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { createOrderNo } from "@/lib/order-no";
 import { createProductOrder, updateOrderStatus } from "@/actions/order";
 
 function buildProductOrderFormData() {
@@ -215,5 +216,16 @@ describe("order actions", () => {
     expect(createNotifications).toHaveBeenCalled();
     expect(revalidatePath).toHaveBeenCalledWith("/my/orders");
     expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
+  });
+});
+
+describe("createOrderNo", () => {
+  it("returns a CM order number with an 8-digit date and 8 hex chars, unique across calls", () => {
+    const first = createOrderNo();
+    const second = createOrderNo();
+
+    expect(first).toMatch(/^CM\d{8}[0-9A-F]{8}$/);
+    expect(second).toMatch(/^CM\d{8}[0-9A-F]{8}$/);
+    expect(first).not.toBe(second);
   });
 });

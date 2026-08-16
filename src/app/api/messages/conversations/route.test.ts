@@ -27,7 +27,7 @@ describe("GET /api/messages/conversations", () => {
   it("returns 401 with an empty list when the user is not logged in", async () => {
     auth.mockResolvedValue(null);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/messages/conversations"));
     const body = await response.json();
 
     expect(response.status).toBe(401);
@@ -52,7 +52,7 @@ describe("GET /api/messages/conversations", () => {
       },
     ]);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/messages/conversations"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -71,5 +71,35 @@ describe("GET /api/messages/conversations", () => {
         },
       ],
     });
+  });
+
+  it("threads a valid limit query param into the repository call", async () => {
+    auth.mockResolvedValue({
+      user: { id: "user-1" },
+    });
+    getConversationListItems.mockResolvedValue([]);
+
+    const response = await GET(
+      new Request("http://localhost/api/messages/conversations?limit=10"),
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(getConversationListItems).toHaveBeenCalledWith("user-1", { limit: 10 });
+    expect(body).toEqual({ items: [] });
+  });
+
+  it("ignores an invalid limit query param", async () => {
+    auth.mockResolvedValue({
+      user: { id: "user-1" },
+    });
+    getConversationListItems.mockResolvedValue([]);
+
+    const response = await GET(
+      new Request("http://localhost/api/messages/conversations?limit=abc"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(getConversationListItems).toHaveBeenCalledWith("user-1", { limit: undefined });
   });
 });

@@ -1,9 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-const { requireUser, getConversationListItems } = vi.hoisted(() => ({
+const { requireUser, getConversationListItems, getConversationDetailPayload } = vi.hoisted(() => ({
   requireUser: vi.fn(),
   getConversationListItems: vi.fn(),
+  getConversationDetailPayload: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -21,6 +22,7 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/repositories/conversation-repository", () => ({
   getConversationListItems,
+  getConversationDetailPayload,
 }));
 
 import MessagesPage from "@/app/messages/page";
@@ -28,6 +30,7 @@ import MessagesPage from "@/app/messages/page";
 describe("MessagesPage", () => {
   it("renders the conversation page and passes items to the client list", async () => {
     requireUser.mockResolvedValue({ id: "user-1" });
+    getConversationDetailPayload.mockResolvedValue(null);
     getConversationListItems.mockResolvedValue([
       {
         id: "conversation-1",

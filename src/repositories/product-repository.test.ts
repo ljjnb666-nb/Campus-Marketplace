@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   productFindMany,
   productCount,
+  favoriteFindMany,
 } = vi.hoisted(() => ({
   productFindMany: vi.fn(),
   productCount: vi.fn(),
+  favoriteFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -14,15 +16,23 @@ vi.mock("@/lib/prisma", () => ({
       findMany: productFindMany,
       count: productCount,
     },
+    favorite: {
+      findMany: favoriteFindMany,
+    },
   },
 }));
 
-import { getProductList } from "@/repositories/product-repository";
+import {
+  getMyFavoriteProducts,
+  getMyProducts,
+  getProductList,
+} from "@/repositories/product-repository";
 
 describe("product repository", () => {
   beforeEach(() => {
     productFindMany.mockReset();
     productCount.mockReset();
+    favoriteFindMany.mockReset();
   });
 
   it("builds product list filters, sorting, pagination and favorites include", async () => {
@@ -105,6 +115,56 @@ describe("product repository", () => {
       page: 2,
       pageSize: 12,
       totalPages: 3,
+    });
+  });
+
+  it("returns the seller's latest products bounded to the most recent 100", async () => {
+    productFindMany.mockResolvedValue([{ id: "product-1" }]);
+
+    await getMyProducts("user-1");
+
+    expect(productFindMany).toHaveBeenCalledWith({
+      where: {
+        sellerId: "user-1",
+        deletedAt: null,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: {
+        category: true,
+        images: {
+          orderBy: { sortOrder: "asc" },
+          take: 1,
+        },
+      },
+    });
+  });
+
+  it("returns the user's latest favorite products bounded to the most recent 100", async () => {
+    favoriteFindMany.mockResolvedValue([{ id: "favorite-1" }]);
+
+    await getMyFavoriteProducts("user-1");
+
+    expect(favoriteFindMany).toHaveBeenCalledWith({
+      where: { userId: "user-1" },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: {
+        product: {
+          include: {
+            category: true,
+            seller: {
+              select: {
+                name: true,
+              },
+            },
+            images: {
+              orderBy: { sortOrder: "asc" },
+              take: 1,
+            },
+          },
+        },
+      },
     });
   });
 });

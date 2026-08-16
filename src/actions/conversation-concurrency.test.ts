@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeConversationKey } from "@/actions/conversation";
+import { computeConversationKey } from "@/lib/conversation-key";
 
 describe("Conversation concurrency and key calculation", () => {
   it("computes identical deterministic conversationKey regardless of participant order", async () => {

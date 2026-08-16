@@ -46,7 +46,7 @@ export default async function MyServicesPage() {
               <img
                 src={
                   service.coverImageUrl ??
-                  "https://images.unsplash.com/photo-1521791136064-7986c2920216?auto=format&fit=crop&w=1200&q=80"
+                  "/uploads/placeholders/product-cover.svg"
                 }
                 alt={service.title}
                 className="h-40 w-full rounded-2xl object-cover"

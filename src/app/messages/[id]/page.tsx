@@ -18,11 +18,9 @@ export default async function MessageDetailPage({ params }: MessageDetailPagePro
   const { id } = await params;
 
   const conversations = await getConversationListItems(user.id);
-  let activeConversationPayload = null;
+  const activeConversationPayload = await getConversationDetailPayload(id, user.id);
 
-  try {
-    activeConversationPayload = await getConversationDetailPayload(id, user.id);
-  } catch {
+  if (!activeConversationPayload) {
     notFound();
   }
 

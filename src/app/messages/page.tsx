@@ -17,11 +17,7 @@ export default async function MessagesPage() {
 
   if (conversations.length > 0) {
     activeId = conversations[0].id;
-    try {
-      activeConversationPayload = await getConversationDetailPayload(activeId, user.id);
-    } catch {
-      activeConversationPayload = null;
-    }
+    activeConversationPayload = await getConversationDetailPayload(activeId, user.id);
   }
 
   return (

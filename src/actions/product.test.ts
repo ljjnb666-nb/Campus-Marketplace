@@ -13,6 +13,8 @@ const {
   productUpdate,
   productImageDeleteMany,
   productImageCreateMany,
+  favoriteDeleteMany,
+  favoriteCreate,
   transactionMock,
 } = vi.hoisted(() => ({
   redirect: vi.fn((location: string) => {
@@ -29,6 +31,8 @@ const {
   productUpdate: vi.fn(),
   productImageDeleteMany: vi.fn(),
   productImageCreateMany: vi.fn(),
+  favoriteDeleteMany: vi.fn(),
+  favoriteCreate: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -70,11 +74,20 @@ vi.mock("@/lib/prisma", () => ({
       deleteMany: productImageDeleteMany,
       createMany: productImageCreateMany,
     },
+    favorite: {
+      deleteMany: favoriteDeleteMany,
+      create: favoriteCreate,
+    },
     $transaction: transactionMock,
   },
 }));
 
-import { createProduct, deleteProduct, updateProduct } from "@/actions/product";
+import {
+  createProduct,
+  deleteProduct,
+  toggleFavorite,
+  updateProduct,
+} from "@/actions/product";
 
 function buildValidProductFormData() {
   const formData = new FormData();
@@ -85,10 +98,7 @@ function buildValidProductFormData() {
   formData.set("categoryId", "category-1");
   formData.set("condition", "LIKE_NEW");
   formData.set("locationText", "图书馆门口");
-  formData.append(
-    "imageUrls",
-    "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80",
-  );
+  formData.append("imageUrls", "https://example.com/textbook.jpg");
 
   return formData;
 }
@@ -107,6 +117,8 @@ describe("product actions", () => {
     productUpdate.mockReset();
     productImageDeleteMany.mockReset();
     productImageCreateMany.mockReset();
+    favoriteDeleteMany.mockReset();
+    favoriteCreate.mockReset();
     transactionMock.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
@@ -114,7 +126,19 @@ describe("product actions", () => {
     saveUploadedImage.mockResolvedValue("/uploads/products/product.jpg");
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     productCreate.mockResolvedValue({ id: "product-1" });
-    transactionMock.mockResolvedValue([]);
+    favoriteDeleteMany.mockResolvedValue({ count: 0 });
+    favoriteCreate.mockResolvedValue({ id: "favorite-1" });
+    productUpdate.mockResolvedValue({});
+    // 数组形式照旧返回空数组；事务回调形式传入共享的 mock 委托
+    transactionMock.mockImplementation(async (arg: unknown) => {
+      if (typeof arg === "function") {
+        return arg({
+          favorite: { deleteMany: favoriteDeleteMany, create: favoriteCreate },
+          product: { update: productUpdate },
+        });
+      }
+      return [];
+    });
   });
 
   it("rejects product creation when the selected category is inactive", async () => {
@@ -210,5 +234,82 @@ describe("product actions", () => {
     await expect(deleteProduct(formData)).rejects.toThrow("REDIRECT:/my/products");
 
     expect(productUpdate).not.toHaveBeenCalled();
+  });
+
+  describe("toggleFavorite", () => {
+    function buildFavoriteFormData(productId = "product-1") {
+      const formData = new FormData();
+      formData.set("productId", productId);
+      return formData;
+    }
+
+    it("adds a favorite for the session user inside one transaction", async () => {
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+      favoriteDeleteMany.mockResolvedValue({ count: 0 });
+
+      await toggleFavorite(buildFavoriteFormData());
+
+      expect(transactionMock).toHaveBeenCalledTimes(1);
+      expect(favoriteDeleteMany).toHaveBeenCalledWith({
+        where: { userId: "user-1", productId: "product-1" },
+      });
+      expect(favoriteCreate).toHaveBeenCalledWith({
+        data: { userId: "user-1", productId: "product-1" },
+      });
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: "product-1" },
+        data: { favoriteCount: { increment: 1 } },
+      });
+      expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
+    });
+
+    it("removes an existing favorite and only decrements once", async () => {
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+      favoriteDeleteMany.mockResolvedValue({ count: 1 });
+
+      await toggleFavorite(buildFavoriteFormData());
+
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: "product-1" },
+        data: { favoriteCount: { decrement: 1 } },
+      });
+      expect(productUpdate).toHaveBeenCalledTimes(1);
+      expect(favoriteCreate).not.toHaveBeenCalled();
+    });
+
+    it("treats a concurrent create that loses the unique constraint race as idempotent", async () => {
+      // 竞态模拟：另一个并发请求刚刚创建了收藏行
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+      favoriteDeleteMany.mockResolvedValue({ count: 0 });
+      favoriteCreate.mockRejectedValue(
+        Object.assign(
+          new Error("Unique constraint failed on the fields: (`userId`,`productId`)"),
+          { code: "P2002" },
+        ),
+      );
+
+      await expect(
+        toggleFavorite(buildFavoriteFormData()),
+      ).resolves.toBeUndefined();
+
+      // create 失败时绝不能增减计数器，否则 favoriteCount 漂移
+      expect(productUpdate).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the product does not exist", async () => {
+      productFindFirst.mockResolvedValue(null);
+
+      await toggleFavorite(buildFavoriteFormData());
+
+      expect(favoriteDeleteMany).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the product id is missing", async () => {
+      await toggleFavorite(new FormData());
+
+      expect(productFindFirst).not.toHaveBeenCalled();
+      expect(transactionMock).not.toHaveBeenCalled();
+    });
   });
 });

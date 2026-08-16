@@ -1,10 +1,11 @@
 "use server";
 
-import { Prisma } from "@prisma/client";
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { decimalValue } from "@/lib/decimal";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { createOrderNo } from "@/lib/order-no";
 import { prisma } from "@/lib/prisma";
+import { revalidateErrandViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { createNotifications } from "@/repositories/notification-repository";
 import { errandFormSchema, errandStatusSchema } from "@/validators/errand";
@@ -19,32 +20,6 @@ const initialState: ErrandActionState = {
   success: false,
   message: "",
 };
-
-function decimalValue(value: string) {
-  return new Prisma.Decimal(value);
-}
-
-function createOrderNo() {
-  const now = new Date();
-  const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(
-    now.getDate(),
-  ).padStart(2, "0")}`;
-  const suffix = `${Date.now()}`.slice(-6);
-  return `CM${date}${suffix}`;
-}
-
-function applyErrandRevalidation(errandId?: string) {
-  revalidatePath("/");
-  revalidatePath("/errands");
-  revalidatePath("/my/errands");
-  revalidatePath("/my/orders");
-  revalidatePath("/notifications");
-
-  if (errandId) {
-    revalidatePath(`/errands/${errandId}`);
-    revalidatePath(`/errands/${errandId}/edit`);
-  }
-}
 
 function parseDeadline(input: string) {
   const date = new Date(input);
@@ -151,7 +126,7 @@ export async function createErrand(
     },
   });
 
-  applyErrandRevalidation(errand.id);
+  revalidateErrandViews(errand.id);
 
   return {
     success: true,
@@ -252,7 +227,7 @@ export async function updateErrand(
     },
   });
 
-  applyErrandRevalidation(errandId);
+  revalidateErrandViews(errandId);
 
   return {
     success: true,
@@ -339,7 +314,7 @@ export async function claimErrand(formData: FormData) {
     ]);
   });
 
-  applyErrandRevalidation(errandId);
+  revalidateErrandViews(errandId);
 }
 
 export async function updateErrandStatus(formData: FormData) {
@@ -464,7 +439,7 @@ export async function updateErrandStatus(formData: FormData) {
     ]);
   });
 
-  applyErrandRevalidation(parsed.data.errandId);
+  revalidateErrandViews(parsed.data.errandId);
 }
 
 export async function deleteErrand(formData: FormData) {
@@ -500,6 +475,6 @@ export async function deleteErrand(formData: FormData) {
     },
   });
 
-  applyErrandRevalidation(errandId);
+  revalidateErrandViews(errandId);
   redirect("/my/errands");
 }

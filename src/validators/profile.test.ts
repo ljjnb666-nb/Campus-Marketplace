@@ -14,7 +14,7 @@ describe("profile validators", () => {
       college: "信息工程学院",
       grade: "2024级",
       phone: "18800001111",
-      avatarUrl: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=600&q=80",
+      avatarUrl: "https://example.com/avatar.jpg",
     });
 
     expect(result.success).toBe(true);

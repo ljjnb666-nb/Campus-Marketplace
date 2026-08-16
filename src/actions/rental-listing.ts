@@ -1,8 +1,9 @@
 "use server";
 
-import { Prisma, RentalListingStatus } from "@prisma/client";
+import { RentalListingStatus } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { decimalValue } from "@/lib/decimal";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
@@ -33,10 +34,6 @@ async function extractImageUrls(formData: FormData) {
   );
 
   return values.filter((value): value is string => Boolean(value));
-}
-
-function decimalValue(value: string) {
-  return new Prisma.Decimal(value);
 }
 
 export async function createRentalListing(

@@ -1,10 +1,10 @@
 "use server";
 
-import { Prisma } from "@prisma/client";
-import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { decimalValue } from "@/lib/decimal";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prisma } from "@/lib/prisma";
+import { revalidateProductViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { saveUploadedImage } from "@/lib/upload";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
@@ -38,22 +38,6 @@ async function extractImageUrls(formData: FormData) {
   );
 
   return values.filter((value): value is string => Boolean(value));
-}
-
-function decimalValue(value: string) {
-  return new Prisma.Decimal(value);
-}
-
-function applyProductPageRevalidation(productId?: string) {
-  revalidatePath("/");
-  revalidatePath("/products");
-  revalidatePath("/my/products");
-  revalidatePath("/my/favorites");
-
-  if (productId) {
-    revalidatePath(`/products/${productId}`);
-    revalidatePath(`/products/${productId}/edit`);
-  }
 }
 
 export async function createProduct(
@@ -132,7 +116,7 @@ export async function createProduct(
     },
   });
 
-  applyProductPageRevalidation(product.id);
+  revalidateProductViews(product.id);
 
   return {
     success: true,
@@ -232,7 +216,7 @@ export async function updateProduct(
     }),
   ]);
 
-  applyProductPageRevalidation(productId);
+  revalidateProductViews(productId);
 
   return {
     success: true,
@@ -271,7 +255,7 @@ export async function updateProductStatus(formData: FormData) {
     data: { status: parsed.data.status },
   });
 
-  applyProductPageRevalidation(parsed.data.productId);
+  revalidateProductViews(parsed.data.productId);
 }
 
 export async function deleteProduct(formData: FormData) {
@@ -303,7 +287,7 @@ export async function deleteProduct(formData: FormData) {
     },
   });
 
-  applyProductPageRevalidation(productId);
+  revalidateProductViews(productId);
   redirect("/my/products");
 }
 
@@ -327,44 +311,29 @@ export async function toggleFavorite(formData: FormData) {
     return;
   }
 
-  const existingFavorite = await prisma.favorite.findUnique({
-    where: {
-      userId_productId: {
-        userId: user.id,
-        productId,
-      },
-    },
-  });
+  // 同一事务内的删除/新建 + 计数增减，并发下保持一致
+  await prisma.$transaction(async (tx) =>
+    applyFavoriteToggle({
+      deleteFavorite: () =>
+        tx.favorite.deleteMany({
+          where: { userId: user.id, productId },
+        }),
+      createFavorite: () =>
+        tx.favorite.create({
+          data: { userId: user.id, productId },
+        }),
+      decrementCount: () =>
+        tx.product.update({
+          where: { id: productId },
+          data: { favoriteCount: { decrement: 1 } },
+        }),
+      incrementCount: () =>
+        tx.product.update({
+          where: { id: productId },
+          data: { favoriteCount: { increment: 1 } },
+        }),
+    }),
+  );
 
-  await applyFavoriteToggle({
-    existing: existingFavorite,
-    remove: () => [
-      prisma.favorite.delete({
-        where: {
-          userId_productId: {
-            userId: user.id,
-            productId,
-          },
-        },
-      }),
-      prisma.product.update({
-        where: { id: productId },
-        data: { favoriteCount: { decrement: 1 } },
-      }),
-    ],
-    add: () => [
-      prisma.favorite.create({
-        data: {
-          userId: user.id,
-          productId,
-        },
-      }),
-      prisma.product.update({
-        where: { id: productId },
-        data: { favoriteCount: { increment: 1 } },
-      }),
-    ],
-  });
-
-  applyProductPageRevalidation(productId);
+  revalidateProductViews(productId);
 }

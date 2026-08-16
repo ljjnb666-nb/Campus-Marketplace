@@ -36,6 +36,22 @@ describe("GET /api/messages/conversations/[id]", () => {
     expect(body).toEqual({ message: "Unauthorized" });
   });
 
+  it("returns 404 (not a crash) when the conversation does not exist or is inaccessible", async () => {
+    auth.mockResolvedValue({
+      user: { id: "user-1" },
+    });
+    getConversationDetailPayload.mockResolvedValue(null);
+
+    const response = await GET(new Request("http://localhost"), {
+      params: Promise.resolve({ id: "missing-conversation" }),
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(404);
+    expect(getConversationDetailPayload).toHaveBeenCalledWith("missing-conversation", "user-1");
+    expect(body).toEqual({ message: "会话不存在或无权访问" });
+  });
+
   it("returns the conversation detail payload for the logged-in user", async () => {
     auth.mockResolvedValue({
       user: { id: "user-1" },

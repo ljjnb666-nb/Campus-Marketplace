@@ -17,5 +17,9 @@ export async function GET(
   const { id } = await params;
   const payload = await getConversationDetailPayload(id, session.user.id);
 
+  if (!payload) {
+    return NextResponse.json({ message: "会话不存在或无权访问" }, { status: 404 });
+  }
+
   return NextResponse.json(payload);
 }

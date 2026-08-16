@@ -17,7 +17,7 @@ describe("product validators", () => {
       condition: "LIKE_NEW",
       locationText: "图书馆门口",
       imageUrls: [
-        "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80",
+        "https://example.com/textbook.jpg",
       ],
     });
 

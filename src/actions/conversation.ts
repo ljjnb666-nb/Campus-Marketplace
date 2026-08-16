@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { computeConversationKey } from "@/lib/conversation-key";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
@@ -27,16 +28,6 @@ function revalidateConversationPages(conversationId?: string) {
   if (conversationId) {
     revalidatePath(`/messages/${conversationId}`);
   }
-}
-
-// 稳定唯一的会话 Key 算法
-export async function computeConversationKey(
-  type: "PRODUCT" | "ERRAND" | "SERVICE" | "RENTAL" | "PRODUCT_ORDER" | "RENTAL_ORDER",
-  bizId: string,
-  participantIds: string[],
-): Promise<string> {
-  const sortedUsers = [...participantIds].sort();
-  return `${type}:${bizId}:${sortedUsers.join(":")}`;
 }
 
 // 统一并发安全的防重查找与创建
