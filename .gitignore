@@ -46,3 +46,10 @@ Thumbs.db
 # Local databases
 prisma/dev.db
 prisma/dev.db-journal
+
+# Dev screenshots at repo root
+/*.png
+
+# Runtime user uploads (keep bundled placeholder assets)
+public/uploads/*
+!public/uploads/placeholders/
