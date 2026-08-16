@@ -1,14 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
-const {
-  auth,
-  getUnreadConversationCount,
-  getUnreadNotificationCount,
-} = vi.hoisted(() => ({
+const { auth } = vi.hoisted(() => ({
   auth: vi.fn(),
-  getUnreadConversationCount: vi.fn(),
-  getUnreadNotificationCount: vi.fn(),
 }));
 
 vi.mock("next/link", () => ({
@@ -28,14 +22,6 @@ vi.mock("next/link", () => ({
 
 vi.mock("@/lib/auth", () => ({
   auth,
-}));
-
-vi.mock("@/repositories/conversation-repository", () => ({
-  getUnreadConversationCount,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  getUnreadNotificationCount,
 }));
 
 vi.mock("@/components/auth/sign-out-button", () => ({
@@ -95,7 +81,7 @@ describe("SiteHeader", () => {
   it("renders guest navigation when the user is not logged in", async () => {
     auth.mockResolvedValue(null);
 
-    render(await SiteHeader());
+    render(await SiteHeader({}));
 
     expect(screen.getByRole("link", { name: "登录" }).getAttribute("href")).toBe("/login");
     expect(screen.getByRole("link", { name: "注册" }).getAttribute("href")).toBe("/register");
@@ -115,10 +101,12 @@ describe("SiteHeader", () => {
         role: "ADMIN",
       },
     });
-    getUnreadNotificationCount.mockResolvedValue(6);
-    getUnreadConversationCount.mockResolvedValue(4);
-
-    render(await SiteHeader());
+    render(
+      await SiteHeader({
+        unreadNotificationCount: 6,
+        unreadConversationCount: 4,
+      }),
+    );
 
     expect(screen.getByText("平台管理员 · 管理员")).toBeTruthy();
     expect(screen.getAllByRole("link", { name: "后台总览" })[0]?.getAttribute("href")).toBe(

@@ -1,3 +1,7 @@
+# 固定项目名:仓库目录名含中文时,docker compose 会因无法推导项目名而报错
+# ("project name must be empty" / 非法字符),显式指定以避免该问题。
+name: campus-marketplace
+
 services:
   postgres:
     image: postgres:16-alpine

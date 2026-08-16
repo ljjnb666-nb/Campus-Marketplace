@@ -53,3 +53,6 @@ prisma/dev.db-journal
 # Runtime user uploads (keep bundled placeholder assets)
 public/uploads/*
 !public/uploads/placeholders/
+
+# Local tool state
+.mimosa/

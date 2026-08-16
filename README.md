@@ -1,6 +1,6 @@
 # 校园集市
 
-面向大学校园的二手交易、校园跑腿与技能服务撮合平台。当前优先完成网页版，使用本地 PostgreSQL、Prisma 和 Auth.js 作为第一版基础设施。
+面向大学校园的二手交易、校园跑腿、技能服务与闲置租赁撮合平台。当前优先完成网页版，使用本地 PostgreSQL、Prisma 和 Auth.js 作为第一版基础设施。
 
 ## 当前状态
 
@@ -10,6 +10,7 @@
 - 二手商品发布、编辑、上下架、收藏、下单
 - 跑腿任务发布、接单、状态流转
 - 技能服务发布、编辑、上下架、预约下单
+- 闲置租赁发布、租用申请、审批与归还流转
 - 订单、站内消息、通知、评价、举报
 - 管理后台、分类管理、违禁关键词管理
 
@@ -111,6 +112,7 @@ npm run dev
 npm run lint
 npm run typecheck
 npm run test
+npm run test:coverage
 npm run build
 npm run db:verify
 npm run app:smoke
@@ -131,16 +133,12 @@ npm run text:verify
 
 最近一轮本地验证已通过以下命令：
 
-- `npm run db:seed`
-- `npm run db:verify`
-- `npm test -- src/app/products/[id]/page.test.tsx src/app/errands/[id]/page.test.tsx src/app/services/[id]/page.test.tsx`
 - `npm run lint`
 - `npm run typecheck`
-- `npm run app:smoke`
-- `npm run app:smoke:auth`
-- `npm run text:verify`
+- `npx vitest run`（全量测试）
+- `npm run test:coverage`（覆盖率门槛 lines 63 / branches 66 / functions 59 / statements 63）
 
 当前测试基线：
 
-- `113` 个测试文件
-- `252` 个测试通过
+- `142` 个测试文件（另有 1 个真实数据库集成测试文件，需 `INTEGRATION_DATABASE_URL` 时才运行）
+- `459` 个测试通过

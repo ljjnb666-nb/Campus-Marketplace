@@ -2,8 +2,6 @@ import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { HeaderLiveStatus } from "@/components/site/header-live-status";
 import { UserMenu } from "@/components/site/user-menu";
-import { getUnreadConversationCount } from "@/repositories/conversation-repository";
-import { getUnreadNotificationCount } from "@/repositories/notification-repository";
 
 const publicNavItems = [
   { href: "/products", label: "二手商品" },
@@ -27,14 +25,18 @@ const accountNavItems = [
   { href: "/my/favorites", label: "我的收藏" },
 ];
 
-export async function SiteHeader() {
+type SiteHeaderProps = {
+  /** 未读通知数，由 layout（应用层）查询后通过 props 传入。 */
+  unreadNotificationCount?: number;
+  /** 未读会话数，由 layout（应用层）查询后通过 props 传入。 */
+  unreadConversationCount?: number;
+};
+
+export async function SiteHeader({
+  unreadNotificationCount = 0,
+  unreadConversationCount = 0,
+}: SiteHeaderProps) {
   const session = await auth();
-  const [unreadNotificationCount, unreadConversationCount] = session?.user?.id
-    ? await Promise.all([
-        getUnreadNotificationCount(session.user.id),
-        getUnreadConversationCount(session.user.id),
-      ])
-    : [0, 0];
 
   const adminNavItems =
     session?.user?.role === "ADMIN"
