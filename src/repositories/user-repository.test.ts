@@ -7,6 +7,7 @@ const {
   productCount,
   errandTaskCount,
   serviceListingCount,
+  campusFindMany,
 } = vi.hoisted(() => ({
   getUnreadConversationCount: vi.fn(),
   getUnreadNotificationCount: vi.fn(),
@@ -14,6 +15,7 @@ const {
   productCount: vi.fn(),
   errandTaskCount: vi.fn(),
   serviceListingCount: vi.fn(),
+  campusFindMany: vi.fn(),
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -38,10 +40,17 @@ vi.mock("@/lib/prisma", () => ({
     serviceListing: {
       count: serviceListingCount,
     },
+    campus: {
+      findMany: campusFindMany,
+    },
   },
 }));
 
-import { getProfileDashboard, getPublicUserProfile } from "@/repositories/user-repository";
+import {
+  getProfileDashboard,
+  getPublicUserProfile,
+  listActiveCampuses,
+} from "@/repositories/user-repository";
 
 describe("user repository", () => {
   beforeEach(() => {
@@ -51,6 +60,7 @@ describe("user repository", () => {
     productCount.mockReset();
     errandTaskCount.mockReset();
     serviceListingCount.mockReset();
+    campusFindMany.mockReset();
   });
 
   it("returns profile dashboard data with unread counters", async () => {
@@ -224,5 +234,22 @@ describe("user repository", () => {
         serviceListings: 3,
       },
     });
+  });
+
+  it("lists active campuses for the register page", async () => {
+    campusFindMany.mockResolvedValue([
+      { id: "campus-1", name: "主校区", schoolName: "示例大学" },
+    ]);
+
+    const result = await listActiveCampuses();
+
+    expect(campusFindMany).toHaveBeenCalledWith({
+      where: { isActive: true },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, schoolName: true },
+    });
+    expect(result).toEqual([
+      { id: "campus-1", name: "主校区", schoolName: "示例大学" },
+    ]);
   });
 });

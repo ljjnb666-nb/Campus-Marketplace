@@ -11,14 +11,34 @@ const defaultBannedKeywords = [
   "违法金融",
 ] as const;
 
-export async function containsBannedKeyword(input: string) {
+// 关键词列表变化频率极低，用短 TTL 缓存避免每次内容提交/发消息都全量查库
+const KEYWORD_CACHE_TTL_MS = 60_000;
+
+let keywordCache: { at: number; keywords: string[] } | null = null;
+
+export function resetModerationKeywordCache() {
+  keywordCache = null;
+}
+
+async function loadEnabledKeywords() {
+  if (keywordCache && Date.now() - keywordCache.at < KEYWORD_CACHE_TTL_MS) {
+    return keywordCache.keywords;
+  }
+
   const enabledKeywords = await prisma.moderationKeyword.findMany({
     where: { isEnabled: true },
     select: { keyword: true },
     orderBy: { createdAt: "asc" },
   });
 
-  const source = enabledKeywords.length > 0 ? enabledKeywords.map((item) => item.keyword) : defaultBannedKeywords;
+  const keywords =
+    enabledKeywords.length > 0 ? enabledKeywords.map((item) => item.keyword) : [...defaultBannedKeywords];
+  keywordCache = { at: Date.now(), keywords };
+  return keywords;
+}
+
+export async function containsBannedKeyword(input: string) {
+  const source = await loadEnabledKeywords();
 
   return source.find((keyword) => input.includes(keyword)) ?? null;
 }

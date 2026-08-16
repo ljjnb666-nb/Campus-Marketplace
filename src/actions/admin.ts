@@ -1,51 +1,178 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { createNotification } from "@/repositories/notification-repository";
-import { reportReviewSchema, verificationReviewSchema } from "@/validators/admin";
+import {
+  categoryFormSchema,
+  categoryStatusSchema,
+  moderateListingSchema,
+  moderationKeywordSchema,
+  moderationKeywordStatusSchema,
+  reportReviewSchema,
+  toggleUserStatusSchema,
+  verificationReviewSchema,
+} from "@/validators/admin";
 
-const toggleUserStatusSchema = z.object({
-  userId: z.string().min(1),
-  nextStatus: z.enum(["ACTIVE", "SUSPENDED"]),
-});
+export type AdminActionState = {
+  success: boolean;
+  error?: string;
+};
 
-const moderateListingSchema = z.object({
-  targetType: z.enum(["PRODUCT", "ERRAND", "SERVICE"]),
-  targetId: z.string().min(1),
-});
+function invalidFormState(): AdminActionState {
+  return { success: false, error: "参数无效" };
+}
 
-const categoryBaseSchema = z.object({
-  categoryId: z.string().optional(),
-  name: z.string().trim().min(1).max(30),
-  slug: z.string().trim().min(1).max(40),
-  description: z.string().trim().max(120).optional(),
-  sortOrder: z.coerce.number().int().min(0).max(999),
-  isActive: z.enum(["true", "false"]).transform((value) => value === "true"),
-});
+type CategoryKind = "PRODUCT" | "ERRAND" | "SERVICE";
 
-const productCategorySchema = categoryBaseSchema;
-const errandCategorySchema = categoryBaseSchema;
-const serviceCategorySchema = categoryBaseSchema;
+type CategoryPayload = {
+  name: string;
+  slug: string;
+  description: string | null;
+  sortOrder: number;
+  isActive: boolean;
+};
 
-const categoryStatusSchema = z.object({
-  categoryId: z.string().min(1),
-  isActive: z.enum(["true", "false"]).transform((value) => value === "true"),
-});
+type CategoryTable = {
+  create(args: { data: CategoryPayload }): Promise<unknown>;
+  update(args: {
+    where: { id: string };
+    data: CategoryPayload | { isActive: boolean };
+  }): Promise<unknown>;
+};
 
-const moderationKeywordSchema = z.object({
-  keywordId: z.string().optional(),
-  keyword: z.string().trim().min(1).max(40),
-  targetType: z.enum(["PRODUCT", "ERRAND", "SERVICE", "MESSAGE", "GLOBAL"]),
-  isEnabled: z.enum(["true", "false"]).transform((value) => value === "true"),
-});
+const categoryTables: Record<CategoryKind, CategoryTable> = {
+  PRODUCT: prisma.productCategory,
+  ERRAND: prisma.errandCategory,
+  SERVICE: prisma.serviceCategory,
+};
 
-const moderationKeywordStatusSchema = z.object({
-  keywordId: z.string().min(1),
-  isEnabled: z.enum(["true", "false"]).transform((value) => value === "true"),
-});
+const categoryListingPaths: Record<CategoryKind, string> = {
+  PRODUCT: "/products",
+  ERRAND: "/errands",
+  SERVICE: "/services",
+};
+
+function readCategoryForm(formData: FormData) {
+  return {
+    categoryId: formData.get("categoryId") || undefined,
+    name: formData.get("name"),
+    slug: formData.get("slug"),
+    description: formData.get("description") || "",
+    sortOrder: formData.get("sortOrder"),
+    isActive: formData.get("isActive"),
+  };
+}
+
+async function upsertCategory(
+  kind: CategoryKind,
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  const admin = await requireAdmin();
+  const parsed = categoryFormSchema.safeParse(readCategoryForm(formData));
+
+  if (!parsed.success) {
+    return invalidFormState();
+  }
+
+  const { categoryId, name, slug, description, sortOrder, isActive } = parsed.data;
+  const payload: CategoryPayload = {
+    name,
+    slug,
+    description: description || null,
+    sortOrder,
+    isActive,
+  };
+
+  if (categoryId) {
+    await categoryTables[kind].update({ where: { id: categoryId }, data: payload });
+  } else {
+    await categoryTables[kind].create({ data: payload });
+  }
+
+  await prisma.adminLog.create({
+    data: {
+      adminId: admin.id,
+      action: categoryId ? `UPDATE_${kind}_CATEGORY` : `CREATE_${kind}_CATEGORY`,
+      targetType: `${kind}_CATEGORY`,
+      targetId: categoryId ?? slug,
+      detail: name,
+    },
+  });
+
+  revalidatePath("/admin/categories");
+  revalidatePath(categoryListingPaths[kind]);
+}
+
+async function toggleCategoryStatus(
+  kind: CategoryKind,
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  const admin = await requireAdmin();
+  const parsed = categoryStatusSchema.safeParse({
+    categoryId: formData.get("categoryId"),
+    isActive: formData.get("isActive"),
+  });
+
+  if (!parsed.success) {
+    return invalidFormState();
+  }
+
+  await categoryTables[kind].update({
+    where: { id: parsed.data.categoryId },
+    data: { isActive: parsed.data.isActive },
+  });
+
+  await prisma.adminLog.create({
+    data: {
+      adminId: admin.id,
+      action: parsed.data.isActive ? `ENABLE_${kind}_CATEGORY` : `DISABLE_${kind}_CATEGORY`,
+      targetType: `${kind}_CATEGORY`,
+      targetId: parsed.data.categoryId,
+    },
+  });
+
+  revalidatePath("/admin/categories");
+  revalidatePath(categoryListingPaths[kind]);
+}
+
+export async function upsertProductCategory(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return upsertCategory("PRODUCT", formData);
+}
+
+export async function toggleProductCategoryStatus(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return toggleCategoryStatus("PRODUCT", formData);
+}
+
+export async function upsertErrandCategory(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return upsertCategory("ERRAND", formData);
+}
+
+export async function toggleErrandCategoryStatus(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return toggleCategoryStatus("ERRAND", formData);
+}
+
+export async function upsertServiceCategory(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return upsertCategory("SERVICE", formData);
+}
+
+export async function toggleServiceCategoryStatus(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
+  return toggleCategoryStatus("SERVICE", formData);
+}
 
 function getReportNotificationCopy(status: "IN_REVIEW" | "RESOLVED" | "REJECTED", handledNote?: string) {
   if (status === "IN_REVIEW") {
@@ -72,7 +199,9 @@ function getReportNotificationCopy(status: "IN_REVIEW" | "RESOLVED" | "REJECTED"
   };
 }
 
-export async function reviewVerification(formData: FormData) {
+export async function reviewVerification(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
 
   const parsed = verificationReviewSchema.safeParse({
@@ -83,7 +212,7 @@ export async function reviewVerification(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   const reviewedAt = new Date();
@@ -135,7 +264,7 @@ export async function reviewVerification(formData: FormData) {
   revalidatePath("/notifications");
 }
 
-export async function reviewReport(formData: FormData) {
+export async function reviewReport(formData: FormData): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
 
   const parsed = reportReviewSchema.safeParse({
@@ -145,7 +274,7 @@ export async function reviewReport(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
@@ -188,7 +317,9 @@ export async function reviewReport(formData: FormData) {
   revalidatePath("/notifications");
 }
 
-export async function toggleUserStatus(formData: FormData) {
+export async function toggleUserStatus(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
   const parsed = toggleUserStatusSchema.safeParse({
     userId: formData.get("userId"),
@@ -196,7 +327,7 @@ export async function toggleUserStatus(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   await prisma.$transaction(async (tx) => {
@@ -228,7 +359,9 @@ export async function toggleUserStatus(formData: FormData) {
   revalidatePath("/admin/users");
 }
 
-export async function moderateListing(formData: FormData) {
+export async function moderateListing(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
   const parsed = moderateListingSchema.safeParse({
     targetType: formData.get("targetType"),
@@ -236,7 +369,7 @@ export async function moderateListing(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   await prisma.$transaction(async (tx) => {
@@ -276,250 +409,9 @@ export async function moderateListing(formData: FormData) {
   revalidatePath("/admin/services");
 }
 
-export async function upsertProductCategory(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = productCategorySchema.safeParse({
-    categoryId: formData.get("categoryId") || undefined,
-    name: formData.get("name"),
-    slug: formData.get("slug"),
-    description: formData.get("description") || "",
-    sortOrder: formData.get("sortOrder"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  if (parsed.data.categoryId) {
-    await prisma.productCategory.update({
-      where: { id: parsed.data.categoryId },
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  } else {
-    await prisma.productCategory.create({
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  }
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.categoryId ? "UPDATE_PRODUCT_CATEGORY" : "CREATE_PRODUCT_CATEGORY",
-      targetType: "PRODUCT_CATEGORY",
-      targetId: parsed.data.categoryId ?? parsed.data.slug,
-      detail: parsed.data.name,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/products");
-}
-
-export async function toggleProductCategoryStatus(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = categoryStatusSchema.safeParse({
-    categoryId: formData.get("categoryId"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  await prisma.productCategory.update({
-    where: { id: parsed.data.categoryId },
-    data: { isActive: parsed.data.isActive },
-  });
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.isActive ? "ENABLE_PRODUCT_CATEGORY" : "DISABLE_PRODUCT_CATEGORY",
-      targetType: "PRODUCT_CATEGORY",
-      targetId: parsed.data.categoryId,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/products");
-}
-
-export async function upsertErrandCategory(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = errandCategorySchema.safeParse({
-    categoryId: formData.get("categoryId") || undefined,
-    name: formData.get("name"),
-    slug: formData.get("slug"),
-    description: formData.get("description") || "",
-    sortOrder: formData.get("sortOrder"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  if (parsed.data.categoryId) {
-    await prisma.errandCategory.update({
-      where: { id: parsed.data.categoryId },
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  } else {
-    await prisma.errandCategory.create({
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  }
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.categoryId ? "UPDATE_ERRAND_CATEGORY" : "CREATE_ERRAND_CATEGORY",
-      targetType: "ERRAND_CATEGORY",
-      targetId: parsed.data.categoryId ?? parsed.data.slug,
-      detail: parsed.data.name,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/errands");
-}
-
-export async function toggleErrandCategoryStatus(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = categoryStatusSchema.safeParse({
-    categoryId: formData.get("categoryId"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  await prisma.errandCategory.update({
-    where: { id: parsed.data.categoryId },
-    data: { isActive: parsed.data.isActive },
-  });
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.isActive ? "ENABLE_ERRAND_CATEGORY" : "DISABLE_ERRAND_CATEGORY",
-      targetType: "ERRAND_CATEGORY",
-      targetId: parsed.data.categoryId,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/errands");
-}
-
-export async function upsertServiceCategory(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = serviceCategorySchema.safeParse({
-    categoryId: formData.get("categoryId") || undefined,
-    name: formData.get("name"),
-    slug: formData.get("slug"),
-    description: formData.get("description") || "",
-    sortOrder: formData.get("sortOrder"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  if (parsed.data.categoryId) {
-    await prisma.serviceCategory.update({
-      where: { id: parsed.data.categoryId },
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  } else {
-    await prisma.serviceCategory.create({
-      data: {
-        name: parsed.data.name,
-        slug: parsed.data.slug,
-        description: parsed.data.description || null,
-        sortOrder: parsed.data.sortOrder,
-        isActive: parsed.data.isActive,
-      },
-    });
-  }
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.categoryId ? "UPDATE_SERVICE_CATEGORY" : "CREATE_SERVICE_CATEGORY",
-      targetType: "SERVICE_CATEGORY",
-      targetId: parsed.data.categoryId ?? parsed.data.slug,
-      detail: parsed.data.name,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/services");
-}
-
-export async function toggleServiceCategoryStatus(formData: FormData) {
-  const admin = await requireAdmin();
-  const parsed = categoryStatusSchema.safeParse({
-    categoryId: formData.get("categoryId"),
-    isActive: formData.get("isActive"),
-  });
-
-  if (!parsed.success) {
-    return;
-  }
-
-  await prisma.serviceCategory.update({
-    where: { id: parsed.data.categoryId },
-    data: { isActive: parsed.data.isActive },
-  });
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.isActive ? "ENABLE_SERVICE_CATEGORY" : "DISABLE_SERVICE_CATEGORY",
-      targetType: "SERVICE_CATEGORY",
-      targetId: parsed.data.categoryId,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath("/services");
-}
-
-export async function upsertModerationKeyword(formData: FormData) {
+export async function upsertModerationKeyword(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
   const parsed = moderationKeywordSchema.safeParse({
     keywordId: formData.get("keywordId") || undefined,
@@ -529,7 +421,7 @@ export async function upsertModerationKeyword(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   if (parsed.data.keywordId) {
@@ -562,10 +454,13 @@ export async function upsertModerationKeyword(formData: FormData) {
     },
   });
 
+  resetModerationKeywordCache();
   revalidatePath("/admin/keywords");
 }
 
-export async function toggleModerationKeywordStatus(formData: FormData) {
+export async function toggleModerationKeywordStatus(
+  formData: FormData,
+): Promise<AdminActionState | undefined> {
   const admin = await requireAdmin();
   const parsed = moderationKeywordStatusSchema.safeParse({
     keywordId: formData.get("keywordId"),
@@ -573,7 +468,7 @@ export async function toggleModerationKeywordStatus(formData: FormData) {
   });
 
   if (!parsed.success) {
-    return;
+    return invalidFormState();
   }
 
   await prisma.moderationKeyword.update({
@@ -590,5 +485,6 @@ export async function toggleModerationKeywordStatus(formData: FormData) {
     },
   });
 
+  resetModerationKeywordCache();
   revalidatePath("/admin/keywords");
 }

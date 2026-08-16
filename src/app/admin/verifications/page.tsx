@@ -53,7 +53,13 @@ export default async function AdminVerificationsPage() {
                   {item.reviewNote ? <p>上次备注：{item.reviewNote}</p> : null}
                 </div>
 
-                <form action={reviewVerification} className="space-y-3 rounded-[24px] bg-slate-50 p-5">
+                <form
+                  action={async (formData) => {
+                    "use server";
+                    await reviewVerification(formData);
+                  }}
+                  className="space-y-3 rounded-[24px] bg-slate-50 p-5"
+                >
                   <input type="hidden" name="verificationId" value={item.id} />
                   <input type="hidden" name="userId" value={item.userId} />
                   <label className="flex flex-col gap-2 text-sm">

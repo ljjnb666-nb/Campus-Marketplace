@@ -12,11 +12,12 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
-import { containsBannedKeyword } from "@/lib/moderation";
+import { containsBannedKeyword, resetModerationKeywordCache } from "@/lib/moderation";
 
 describe("containsBannedKeyword", () => {
   beforeEach(() => {
     findMany.mockReset();
+    resetModerationKeywordCache();
   });
 
   it("uses enabled moderation keywords from the database first", async () => {
@@ -43,5 +44,28 @@ describe("containsBannedKeyword", () => {
     findMany.mockResolvedValue([{ keyword: "刷单" }]);
 
     await expect(containsBannedKeyword("帮忙带饭，晚饭后送到宿舍楼下")).resolves.toBeNull();
+  });
+
+  it("caches keywords within the TTL window", async () => {
+    findMany.mockResolvedValue([{ keyword: "刷单" }]);
+
+    await containsBannedKeyword("第一次调用，落库查询");
+    await containsBannedKeyword("第二次调用，命中缓存");
+    await containsBannedKeyword("第三次调用，命中缓存");
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+    // 缓存期间仍然能用已加载的关键词完成匹配
+    await expect(containsBannedKeyword("兼职刷单")).resolves.toBe("刷单");
+  });
+
+  it("re-queries after the cache is reset", async () => {
+    findMany.mockResolvedValue([{ keyword: "刷单" }]);
+    await containsBannedKeyword("预热缓存");
+
+    resetModerationKeywordCache();
+    findMany.mockResolvedValue([{ keyword: "代打卡" }]);
+
+    await expect(containsBannedKeyword("需要代打卡")).resolves.toBe("代打卡");
+    expect(findMany).toHaveBeenCalledTimes(2);
   });
 });

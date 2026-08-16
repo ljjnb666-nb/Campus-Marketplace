@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { reportReviewSchema, verificationReviewSchema } from "@/validators/admin";
+import {
+  categoryFormSchema,
+  categoryStatusSchema,
+  moderateListingSchema,
+  moderationKeywordSchema,
+  moderationKeywordStatusSchema,
+  reportReviewSchema,
+  toggleUserStatusSchema,
+  verificationReviewSchema,
+} from "@/validators/admin";
 
 describe("admin validators", () => {
   it("accepts a valid verification review payload", () => {
@@ -84,6 +93,135 @@ describe("admin validators", () => {
       reportId: "report-id",
       status: "RESOLVED",
       handledNote: "a".repeat(301),
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a valid user status toggle payload", () => {
+    const result = toggleUserStatusSchema.safeParse({
+      userId: "user-1",
+      nextStatus: "SUSPENDED",
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects an invalid user status toggle payload", () => {
+    const result = toggleUserStatusSchema.safeParse({
+      userId: "user-1",
+      nextStatus: "DELETED",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a valid listing moderation payload", () => {
+    const result = moderateListingSchema.safeParse({
+      targetType: "PRODUCT",
+      targetId: "product-1",
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a moderation payload with a blank target id", () => {
+    const result = moderateListingSchema.safeParse({
+      targetType: "PRODUCT",
+      targetId: "   ",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("coerces and transforms a valid category form payload", () => {
+    const result = categoryFormSchema.parse({
+      name: "代取快递",
+      slug: "pickup",
+      description: "快递代取类任务",
+      sortOrder: "2",
+      isActive: "false",
+    });
+
+    expect(result).toEqual({
+      categoryId: undefined,
+      name: "代取快递",
+      slug: "pickup",
+      description: "快递代取类任务",
+      sortOrder: 2,
+      isActive: false,
+    });
+  });
+
+  it("rejects a category form with an empty name", () => {
+    const result = categoryFormSchema.safeParse({
+      name: "  ",
+      slug: "pickup",
+      sortOrder: "2",
+      isActive: "true",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a category form with an out-of-range sort order", () => {
+    const result = categoryFormSchema.safeParse({
+      name: "代取快递",
+      slug: "pickup",
+      sortOrder: "1000",
+      isActive: "true",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("transforms the category status payload into booleans", () => {
+    const result = categoryStatusSchema.parse({
+      categoryId: "category-1",
+      isActive: "false",
+    });
+
+    expect(result).toEqual({ categoryId: "category-1", isActive: false });
+  });
+
+  it("rejects a category status payload without an id", () => {
+    const result = categoryStatusSchema.safeParse({
+      categoryId: "",
+      isActive: "false",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts and transforms a valid moderation keyword payload", () => {
+    const result = moderationKeywordSchema.parse({
+      keyword: "代考",
+      targetType: "GLOBAL",
+      isEnabled: "false",
+    });
+
+    expect(result).toEqual({
+      keywordId: undefined,
+      keyword: "代考",
+      targetType: "GLOBAL",
+      isEnabled: false,
+    });
+  });
+
+  it("rejects a moderation keyword that is too long", () => {
+    const result = moderationKeywordSchema.safeParse({
+      keyword: "a".repeat(41),
+      targetType: "GLOBAL",
+      isEnabled: "true",
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a keyword status payload without an id", () => {
+    const result = moderationKeywordStatusSchema.safeParse({
+      keywordId: "",
+      isEnabled: "true",
     });
 
     expect(result.success).toBe(false);

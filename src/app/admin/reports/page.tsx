@@ -69,7 +69,13 @@ export default async function AdminReportsPage() {
                   {item.handledNote ? <p>上次处理备注：{item.handledNote}</p> : null}
                 </div>
 
-                <form action={reviewReport} className="space-y-3 rounded-[24px] bg-slate-50 p-5">
+                <form
+                  action={async (formData) => {
+                    "use server";
+                    await reviewReport(formData);
+                  }}
+                  className="space-y-3 rounded-[24px] bg-slate-50 p-5"
+                >
                   <input type="hidden" name="reportId" value={item.id} />
                   <label className="flex flex-col gap-2 text-sm">
                     处理备注

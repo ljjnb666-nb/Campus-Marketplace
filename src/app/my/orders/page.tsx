@@ -5,7 +5,11 @@ import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
 import { OrderCardUnified, UnifiedOrderData } from "@/components/order/order-card-unified";
 import { requireUser } from "@/lib/server-auth";
-import { prisma } from "@/lib/prisma";
+import { getOrdersInvolvingUser } from "@/repositories/order-repository";
+import {
+  getMyOwnerOrdersDetailed,
+  getMyRenterOrdersDetailed,
+} from "@/repositories/rental-order-repository";
 import { Search, RotateCcw, Filter, ShoppingBag, Package, Truck, Briefcase, Repeat } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -33,45 +37,16 @@ export default async function MyOrdersPage({
   const currentTab = params.type || "all";
   const searchKeyword = params.q?.trim() || "";
 
-  // 1. 并行拉取用户参与的 Order 与 RentalOrder 模型数据
+  // 1. 并行拉取用户参与的 Order 与 RentalOrder 模型数据(经仓储层访问数据库)
   const [orders, renterRentalOrders, ownerRentalOrders] = await Promise.all([
     // 普通商品/跑腿/服务 Orders
-    prisma.order.findMany({
-      where: {
-        OR: [{ buyerId: user.id }, { sellerId: user.id }],
-      },
-      include: {
-        buyer: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
-        seller: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
-        product: { select: { id: true, title: true, images: { take: 1 } } },
-        errandTask: { select: { id: true, title: true } },
-        serviceListing: { select: { id: true, title: true, coverImageUrl: true } },
-        reviews: { select: { authorId: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
+    getOrdersInvolvingUser(user.id),
 
     // 我的租用 RentalOrders
-    prisma.rentalOrder.findMany({
-      where: { renterId: user.id },
-      include: {
-        owner: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
-        rentalListing: { select: { id: true, title: true, images: { take: 1 } } },
-        reviews: { select: { authorId: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
+    getMyRenterOrdersDetailed(user.id),
 
     // 我的出租 RentalOrders
-    prisma.rentalOrder.findMany({
-      where: { ownerId: user.id },
-      include: {
-        renter: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
-        rentalListing: { select: { id: true, title: true, images: { take: 1 } } },
-        reviews: { select: { authorId: true } },
-      },
-      orderBy: { createdAt: "desc" },
-    }),
+    getMyOwnerOrdersDetailed(user.id),
   ]);
 
   // 2. 映射归一化为 UnifiedOrderData 数组

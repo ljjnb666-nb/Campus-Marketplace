@@ -185,6 +185,8 @@ export async function getVerificationReviewQueue() {
         },
       },
     },
+    // 审核队列最多返回 50 条，与后台列表页的条数上限保持一致
+    take: 50,
   });
 }
 
@@ -232,6 +234,8 @@ export async function getReportReviewQueue() {
         },
       },
     },
+    // 举报队列最多返回 50 条，与后台列表页的条数上限保持一致
+    take: 50,
   });
 }
 

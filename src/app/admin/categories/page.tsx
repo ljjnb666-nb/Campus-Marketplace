@@ -6,6 +6,7 @@ import {
   upsertProductCategory,
   upsertServiceCategory,
 } from "@/actions/admin";
+import type { AdminActionState } from "@/actions/admin";
 import { requireAdmin } from "@/lib/server-auth";
 import {
   getAdminCategoryList,
@@ -27,9 +28,9 @@ function CategorySection({
   title: string;
   description: string;
   countLabel: string;
-  createAction: (formData: FormData) => Promise<void>;
-  updateAction: (formData: FormData) => Promise<void>;
-  toggleAction: (formData: FormData) => Promise<void>;
+  createAction: (formData: FormData) => Promise<AdminActionState | undefined>;
+  updateAction: (formData: FormData) => Promise<AdminActionState | undefined>;
+  toggleAction: (formData: FormData) => Promise<AdminActionState | undefined>;
   categories: Array<{
     id: string;
     name: string;
@@ -50,7 +51,10 @@ function CategorySection({
       <div className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
         <h3 className="text-xl font-semibold text-slate-950">新增分类</h3>
         <form
-          action={createAction}
+          action={async (formData) => {
+            "use server";
+            await createAction(formData);
+          }}
           className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1.2fr_120px_120px_auto]"
         >
           <input
@@ -107,7 +111,10 @@ function CategorySection({
               >
                 <div className="grid gap-6 xl:grid-cols-[1fr_auto]">
                   <form
-                    action={updateAction}
+                    action={async (formData) => {
+                      "use server";
+                      await updateAction(formData);
+                    }}
                     className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1.2fr_120px_120px_auto]"
                   >
                     <input type="hidden" name="categoryId" value={category.id} />
@@ -152,7 +159,12 @@ function CategorySection({
                     <span>
                       {countLabel}：{relatedCount}
                     </span>
-                    <form action={toggleAction}>
+                    <form
+                      action={async (formData) => {
+                        "use server";
+                        await toggleAction(formData);
+                      }}
+                    >
                       <input type="hidden" name="categoryId" value={category.id} />
                       <input
                         type="hidden"

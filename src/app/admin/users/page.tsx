@@ -69,7 +69,13 @@ export default async function AdminUsersPage() {
                   </div>
                 </div>
 
-                <form action={toggleUserStatus} className="flex items-center">
+                <form
+                  action={async (formData) => {
+                    "use server";
+                    await toggleUserStatus(formData);
+                  }}
+                  className="flex items-center"
+                >
                   <input type="hidden" name="userId" value={user.id} />
                   <input
                     type="hidden"

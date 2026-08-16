@@ -67,6 +67,7 @@ import {
   getAdminModerationKeywords,
   getAdminServiceCategoryList,
   getReportReviewQueue,
+  getVerificationReviewQueue,
 } from "@/repositories/admin-repository";
 
 describe("admin repository", () => {
@@ -248,8 +249,39 @@ describe("admin repository", () => {
           },
         },
       },
+      take: 50,
     });
     expect(result).toEqual([{ id: "report-2" }]);
+  });
+
+  it("returns the verification review queue bounded with sort and take", async () => {
+    userVerificationFindMany.mockResolvedValue([{ id: "verification-2" }]);
+
+    const result = await getVerificationReviewQueue();
+
+    expect(userVerificationFindMany).toHaveBeenCalledWith({
+      where: {
+        status: { in: ["PENDING", "REJECTED"] },
+      },
+      orderBy: [{ status: "asc" }, { submittedAt: "asc" }],
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            schoolName: true,
+            campus: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
+      },
+      take: 50,
+    });
+    expect(result).toEqual([{ id: "verification-2" }]);
   });
 
   it("returns product, errand, service categories and moderation keywords in admin order", async () => {

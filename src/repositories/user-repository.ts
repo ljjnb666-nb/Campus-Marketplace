@@ -3,6 +3,15 @@ import { prisma } from "@/lib/prisma";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
 
+// 注册页:列出启用中的校区(按创建时间升序)
+export async function listActiveCampuses() {
+  return prisma.campus.findMany({
+    where: { isActive: true },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, name: true, schoolName: true },
+  });
+}
+
 export async function getProfileDashboard(userId: string) {
   const user = await prisma.user.findFirst({
     where: {

@@ -1,16 +1,16 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { requireUser, prisma } = vi.hoisted(() => ({
+const {
+  requireUser,
+  getOrdersInvolvingUser,
+  getMyRenterOrdersDetailed,
+  getMyOwnerOrdersDetailed,
+} = vi.hoisted(() => ({
   requireUser: vi.fn(),
-  prisma: {
-    order: {
-      findMany: vi.fn(),
-    },
-    rentalOrder: {
-      findMany: vi.fn(),
-    },
-  },
+  getOrdersInvolvingUser: vi.fn(),
+  getMyRenterOrdersDetailed: vi.fn(),
+  getMyOwnerOrdersDetailed: vi.fn(),
 }));
 
 vi.mock("next/link", () => ({
@@ -32,8 +32,13 @@ vi.mock("@/lib/server-auth", () => ({
   requireUser,
 }));
 
-vi.mock("@/lib/prisma", () => ({
-  prisma,
+vi.mock("@/repositories/order-repository", () => ({
+  getOrdersInvolvingUser,
+}));
+
+vi.mock("@/repositories/rental-order-repository", () => ({
+  getMyRenterOrdersDetailed,
+  getMyOwnerOrdersDetailed,
 }));
 
 import MyOrdersPage from "@/app/my/orders/page";
@@ -45,8 +50,9 @@ afterEach(() => {
 describe("MyOrdersPage Unified Order Center Test Suite", () => {
   it("renders header, tab bar and empty state when user has no orders", async () => {
     requireUser.mockResolvedValue({ id: "user-1" });
-    prisma.order.findMany.mockResolvedValue([]);
-    prisma.rentalOrder.findMany.mockResolvedValue([]);
+    getOrdersInvolvingUser.mockResolvedValue([]);
+    getMyRenterOrdersDetailed.mockResolvedValue([]);
+    getMyOwnerOrdersDetailed.mockResolvedValue([]);
 
     render(await MyOrdersPage({ searchParams: Promise.resolve({}) }));
 
@@ -65,7 +71,7 @@ describe("MyOrdersPage Unified Order Center Test Suite", () => {
     requireUser.mockResolvedValue({ id: "user-1" });
 
     // Mock 综合订单数据
-    prisma.order.findMany.mockResolvedValue([
+    getOrdersInvolvingUser.mockResolvedValue([
       {
         id: "order-product-1",
         orderNo: "PO202607190001",
@@ -106,23 +112,22 @@ describe("MyOrdersPage Unified Order Center Test Suite", () => {
       },
     ]);
 
-    prisma.rentalOrder.findMany
-      .mockResolvedValueOnce([
-        {
-          id: "rental-order-1",
-          orderNumber: "RT202607190003",
-          status: "IN_RENTAL",
-          finalAmount: "120.00",
-          depositAmount: "500.00",
-          rentalListingId: "rental-1",
-          rentalListing: { title: "索尼单反相机", images: [{ url: "/camera.jpg" }] },
-          pickupLocationSnapshot: "实验楼二楼",
-          createdAt: new Date("2026-07-19T10:00:00.000Z"),
-          owner: { id: "user-4", name: "王出租者", avatarUrl: null, schoolName: "示例大学" },
-          reviews: [],
-        },
-      ])
-      .mockResolvedValueOnce([]);
+    getMyRenterOrdersDetailed.mockResolvedValue([
+      {
+        id: "rental-order-1",
+        orderNumber: "RT202607190003",
+        status: "IN_RENTAL",
+        finalAmount: "120.00",
+        depositAmount: "500.00",
+        rentalListingId: "rental-1",
+        rentalListing: { title: "索尼单反相机", images: [{ url: "/camera.jpg" }] },
+        pickupLocationSnapshot: "实验楼二楼",
+        createdAt: new Date("2026-07-19T10:00:00.000Z"),
+        owner: { id: "user-4", name: "王出租者", avatarUrl: null, schoolName: "示例大学" },
+        reviews: [],
+      },
+    ]);
+    getMyOwnerOrdersDetailed.mockResolvedValue([]);
 
     render(await MyOrdersPage({ searchParams: Promise.resolve({ type: "all" }) }));
 

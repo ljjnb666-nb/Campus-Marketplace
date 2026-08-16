@@ -28,7 +28,10 @@ export default async function AdminKeywordsPage() {
       <section className="mb-8 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
         <h2 className="text-xl font-semibold text-slate-950">新增关键词</h2>
         <form
-          action={upsertModerationKeyword}
+          action={async (formData) => {
+            "use server";
+            await upsertModerationKeyword(formData);
+          }}
           className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-[1.4fr_140px_120px_auto]"
         >
           <input
@@ -74,7 +77,10 @@ export default async function AdminKeywordsPage() {
             <article key={item.id} className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
               <div className="grid gap-6 xl:grid-cols-[1fr_auto]">
                 <form
-                  action={upsertModerationKeyword}
+                  action={async (formData) => {
+                    "use server";
+                    await upsertModerationKeyword(formData);
+                  }}
                   className="grid gap-4 md:grid-cols-2 xl:grid-cols-[1.4fr_140px_120px_auto]"
                 >
                   <input type="hidden" name="keywordId" value={item.id} />
@@ -110,7 +116,13 @@ export default async function AdminKeywordsPage() {
                   </button>
                 </form>
 
-                <form action={toggleModerationKeywordStatus} className="flex items-center">
+                <form
+                  action={async (formData) => {
+                    "use server";
+                    await toggleModerationKeywordStatus(formData);
+                  }}
+                  className="flex items-center"
+                >
                   <input type="hidden" name="keywordId" value={item.id} />
                   <input type="hidden" name="isEnabled" value={item.isEnabled ? "false" : "true"} />
                   <button

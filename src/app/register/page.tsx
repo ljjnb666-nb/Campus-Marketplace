@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { RegisterForm } from "@/components/auth/register-form";
-import { prisma } from "@/lib/prisma";
+import { listActiveCampuses } from "@/repositories/user-repository";
 
 export const metadata: Metadata = {
   title: "注册 | 校园集市",
@@ -9,13 +9,7 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function RegisterPage() {
-  const campuses = await prisma.campus
-    .findMany({
-      where: { isActive: true },
-      orderBy: { createdAt: "asc" },
-      select: { id: true, name: true, schoolName: true },
-    })
-    .catch(() => []);
+  const campuses = await listActiveCampuses().catch(() => []);
 
   return (
     <div className="mx-auto flex w-full max-w-5xl px-4 py-16 sm:px-6">

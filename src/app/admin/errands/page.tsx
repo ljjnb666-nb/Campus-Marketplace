@@ -42,7 +42,13 @@ export default async function AdminErrandsPage() {
                     查看详情
                   </Link>
                 </div>
-                <form action={moderateListing} className="flex items-center">
+                <form
+                  action={async (formData) => {
+                    "use server";
+                    await moderateListing(formData);
+                  }}
+                  className="flex items-center"
+                >
                   <input type="hidden" name="targetType" value="ERRAND" />
                   <input type="hidden" name="targetId" value={errand.id} />
                   <button
