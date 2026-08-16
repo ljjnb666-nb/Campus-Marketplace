@@ -1,31 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { isRateLimited } from "@/lib/rate-limit";
 import { saveUploadedImage, UPLOAD_LIMITS, type UploadCategory } from "@/lib/upload";
 
 type AllowedMimeType = "image/jpeg" | "image/png" | "image/webp";
 
-const RATE_LIMIT_MAP = new Map<string, { count: number; resetAt: number }>();
 const MAX_REQUESTS_PER_MINUTE = 20;
-
-function checkRateLimit(userId: string): boolean {
-  const now = Date.now();
-  const userLimit = RATE_LIMIT_MAP.get(userId);
-
-  if (!userLimit || now > userLimit.resetAt) {
-    RATE_LIMIT_MAP.set(userId, {
-      count: 1,
-      resetAt: now + 60000,
-    });
-    return true;
-  }
-
-  if (userLimit.count >= MAX_REQUESTS_PER_MINUTE) {
-    return false;
-  }
-
-  userLimit.count++;
-  return true;
-}
+const RATE_LIMIT_WINDOW_MS = 60000;
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,7 +19,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!checkRateLimit(session.user.id)) {
+    const { limited } = isRateLimited({
+      key: session.user.id,
+      limit: MAX_REQUESTS_PER_MINUTE,
+      windowMs: RATE_LIMIT_WINDOW_MS,
+    });
+
+    if (limited) {
       return NextResponse.json(
         { error: "上传过于频繁，请稍后再试" },
         { status: 429 }

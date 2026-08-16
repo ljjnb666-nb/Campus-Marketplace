@@ -4,11 +4,40 @@ import { getServerSession } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
+
+const LOGIN_RATE_LIMIT = 10;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 
 const credentialsSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
 });
+
+function resolveClientIp(headers: Record<string, unknown> | undefined) {
+  const forwardedFor = headers?.["x-forwarded-for"];
+  const headerValue = Array.isArray(forwardedFor)
+    ? forwardedFor.join(",")
+    : forwardedFor;
+
+  if (typeof headerValue === "string") {
+    const ip = headerValue.split(",")[0]?.trim();
+    if (ip) {
+      return ip;
+    }
+  }
+
+  return "unknown";
+}
+
+function resolveLoginRateLimitKey(
+  credentials: Record<string, string> | undefined,
+  headers: Record<string, unknown> | undefined,
+) {
+  const identifier = credentials?.email?.trim().toLowerCase();
+
+  return `login:${identifier || resolveClientIp(headers)}`;
+}
 
 export const authOptions: NextAuthOptions = {
   session: {
@@ -24,7 +53,24 @@ export const authOptions: NextAuthOptions = {
         email: { label: "邮箱", type: "email" },
         password: { label: "密码", type: "password" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, req) {
+        const rateLimitKey = resolveLoginRateLimitKey(
+          credentials,
+          req?.headers,
+        );
+
+        const { limited } = isRateLimited({
+          key: rateLimitKey,
+          limit: LOGIN_RATE_LIMIT,
+          windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
+        });
+
+        if (limited) {
+          // 与密码错误同样返回 null，不向客户端泄露限流状态
+          console.warn(`Login rate limit exceeded for ${rateLimitKey}`);
+          return null;
+        }
+
         const parsed = credentialsSchema.safeParse(credentials);
 
         if (!parsed.success) {
@@ -49,6 +95,9 @@ export const authOptions: NextAuthOptions = {
           where: { id: user.id },
           data: { lastLoginAt: new Date() },
         });
+
+        // 登录成功后重置该账号的失败计数
+        resetRateLimit(rateLimitKey);
 
         return {
           id: user.id,
