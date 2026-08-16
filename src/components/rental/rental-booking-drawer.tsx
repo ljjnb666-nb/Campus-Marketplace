@@ -164,6 +164,8 @@ export function RentalBookingDrawer({
                   <img
                     src={listing.images[0].url}
                     alt={listing.title}
+                    loading="lazy"
+                    decoding="async"
                     className="h-full w-full object-cover"
                   />
                 )}

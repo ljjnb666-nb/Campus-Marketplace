@@ -1,4 +1,5 @@
 import React from "react";
+import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
@@ -17,6 +18,37 @@ const conditionMapping: Record<string, string> = {
   NORMAL_USED: "9成新",
   HEAVILY_USED: "8成新及以下",
 };
+
+const RENTAL_DETAIL_FALLBACK_METADATA: Metadata = {
+  title: "租赁物品详情 - 校园集市",
+  description: "查看校园集市闲置租赁物品的租金、押金与租借规则。",
+};
+
+function truncateForMetadata(text: string, maxLength = 80) {
+  const trimmed = text.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}…` : trimmed;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const result = await getRentalListingDetail(id, undefined, { countView: false }).catch(() => null);
+
+  if (!result) {
+    return RENTAL_DETAIL_FALLBACK_METADATA;
+  }
+
+  const { listing } = result;
+  const title = `${listing.title} - 校园集市`;
+  const description = truncateForMetadata(
+    listing.description || `查看校园集市闲置租赁「${listing.title}」的租金、押金与租借规则。`,
+  );
+
+  return { title, description, openGraph: { title, description } };
+}
 
 export default async function RentalDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;

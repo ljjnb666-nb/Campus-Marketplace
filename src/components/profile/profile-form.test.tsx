@@ -37,7 +37,7 @@ afterEach(() => {
 
 describe("ProfileForm", () => {
   it("renders initial profile values and upload inputs", () => {
-    const { container } = render(
+    render(
       <ProfileForm
         action={async () => ({ success: false, message: "" })}
         initialValues={{

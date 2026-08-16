@@ -50,7 +50,7 @@ vi.mock("@/components/service/service-card", () => ({
   ServiceCard: ({ title }: { title: string }) => <p>{title}</p>,
 }));
 
-import PublicUserPage from "@/app/users/[id]/page";
+import PublicUserPage, { generateMetadata } from "@/app/users/[id]/page";
 
 afterEach(() => {
   cleanup();
@@ -158,5 +158,33 @@ describe("PublicUserPage", () => {
     expect(screen.getByText("高数教材")).toBeTruthy();
     expect(screen.getByText("代取快递")).toBeTruthy();
     expect(screen.getByText("PPT 美化")).toBeTruthy();
+  });
+});
+
+describe("PublicUserPage generateMetadata", () => {
+  it("returns SEO metadata from public profile fields", async () => {
+    getPublicUserProfile.mockResolvedValue({
+      name: "张同学",
+      schoolName: "示例大学",
+      bio: null,
+    });
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "user-1" }),
+    });
+
+    expect(metadata.title).toBe("张同学 的个人主页 - 校园集市");
+    expect(metadata.description).toBe("张同学 的校园集市个人主页，来自示例大学。");
+    expect(metadata.openGraph?.title).toBe("张同学 的个人主页 - 校园集市");
+  });
+
+  it("falls back to generic metadata when the user is missing", async () => {
+    getPublicUserProfile.mockRejectedValue(new Error("notFound"));
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "missing-user" }),
+    });
+
+    expect(metadata.title).toBe("用户主页 - 校园集市");
   });
 });

@@ -1,4 +1,5 @@
 import React from "react";
+import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
@@ -8,6 +9,36 @@ import { auth } from "@/lib/auth";
 import { getProductDetail } from "@/repositories/product-repository";
 
 export const dynamic = "force-dynamic";
+
+const PRODUCT_DETAIL_FALLBACK_METADATA: Metadata = {
+  title: "商品详情 - 校园集市",
+  description: "查看校园集市同校在售二手闲置商品详情。",
+};
+
+function truncateForMetadata(text: string, maxLength = 80) {
+  const trimmed = text.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}…` : trimmed;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  try {
+    const { product } = await getProductDetail(id, undefined, { countView: false });
+    const title = `${product.title} - 校园集市`;
+    const description = truncateForMetadata(
+      product.description || `查看校园集市在售二手闲置「${product.title}」的价格、成色与卖家信息。`,
+    );
+
+    return { title, description, openGraph: { title, description } };
+  } catch {
+    return PRODUCT_DETAIL_FALLBACK_METADATA;
+  }
+}
 
 export default async function ProductDetailPage({
   params,

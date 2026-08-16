@@ -82,7 +82,11 @@ export async function getRentalListings(query: RentalListingQuery = {}) {
   };
 }
 
-export async function getRentalListingDetail(id: string, currentUserId?: string) {
+export async function getRentalListingDetail(
+  id: string,
+  currentUserId?: string,
+  options?: { countView?: boolean },
+) {
   const listing = await prisma.rentalListing.findFirst({
     where: { id, deletedAt: null },
     include: {
@@ -105,10 +109,13 @@ export async function getRentalListingDetail(id: string, currentUserId?: string)
 
   if (!listing) notFound();
 
-  await prisma.rentalListing.update({
-    where: { id: listing.id },
-    data: { viewCount: { increment: 1 } },
-  });
+  // generateMetadata 等只读调用传 countView: false，避免浏览量被重复计数
+  if (options?.countView !== false) {
+    await prisma.rentalListing.update({
+      where: { id: listing.id },
+      data: { viewCount: { increment: 1 } },
+    });
+  }
 
   const [reviews, isFavorited] = await Promise.all([
     prisma.rentalReview.findMany({

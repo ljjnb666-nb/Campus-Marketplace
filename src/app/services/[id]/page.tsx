@@ -1,4 +1,5 @@
 import React from "react";
+import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
@@ -9,6 +10,36 @@ import { getServiceDetail } from "@/repositories/service-repository";
 import { CheckCircle2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
+
+const SERVICE_DETAIL_FALLBACK_METADATA: Metadata = {
+  title: "技能服务详情 - 校园集市",
+  description: "查看校园集市同校技能服务的内容、价格与预约方式。",
+};
+
+function truncateForMetadata(text: string, maxLength = 80) {
+  const trimmed = text.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}…` : trimmed;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  try {
+    const { service } = await getServiceDetail(id);
+    const title = `${service.title} - 校园集市`;
+    const description = truncateForMetadata(
+      service.description || `查看校园集市技能服务「${service.title}」的服务内容与价格。`,
+    );
+
+    return { title, description, openGraph: { title, description } };
+  } catch {
+    return SERVICE_DETAIL_FALLBACK_METADATA;
+  }
+}
 
 export default async function ServiceDetailPage({
   params,

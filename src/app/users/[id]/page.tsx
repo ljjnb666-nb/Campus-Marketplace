@@ -1,4 +1,5 @@
 import React from "react";
+import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ProductCard } from "@/components/product/product-card";
@@ -9,6 +10,36 @@ import { getPublicUserProfile } from "@/repositories/user-repository";
 import { ShieldCheck, Calendar, Award, Package, HeartHandshake, CheckCircle2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
+
+const USER_PROFILE_FALLBACK_METADATA: Metadata = {
+  title: "用户主页 - 校园集市",
+  description: "查看校园集市同学的个人主页与其发布的二手、跑腿与技能服务。",
+};
+
+function truncateForMetadata(text: string, maxLength = 80) {
+  const trimmed = text.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}…` : trimmed;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  try {
+    const user = await getPublicUserProfile(id);
+    const title = `${user.name} 的个人主页 - 校园集市`;
+    const description = truncateForMetadata(
+      user.bio || `${user.name} 的校园集市个人主页，来自${user.schoolName}。`,
+    );
+
+    return { title, description, openGraph: { title, description } };
+  } catch {
+    return USER_PROFILE_FALLBACK_METADATA;
+  }
+}
 
 function formatDate(value: Date | string) {
   return new Intl.DateTimeFormat("zh-CN", {

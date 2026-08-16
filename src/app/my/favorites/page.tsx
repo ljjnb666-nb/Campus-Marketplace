@@ -4,8 +4,16 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { Heart, Package, Key, Briefcase, ClipboardList } from "lucide-react";
 import { ProductCard } from "@/components/product/product-card";
+import { ErrandCard } from "@/components/errand/errand-card";
+import { ServiceCard } from "@/components/service/service-card";
 import { RentalListingStatusBadge } from "@/components/rental/rental-status-badge";
 import { RentalFavoriteButton } from "@/components/rental/rental-favorite-button";
+import { RENTAL_PRICING_UNIT_LABELS } from "@/constants/rental";
+import { ERRAND_STATUS_LABELS } from "@/constants/errand";
+import {
+  SERVICE_PRICING_UNIT_LABELS,
+  SERVICE_STATUS_LABELS,
+} from "@/constants/service";
 import type { ListingStatus, RentalListingStatus } from "@prisma/client";
 
 type TabType = "products" | "rentals" | "errands" | "services";
@@ -70,19 +78,91 @@ type ServiceFavorite = {
     pricingUnit: string;
     category: { name: string };
     provider: { name: string; verificationStatus: string };
+    locationText: string;
     favoriteCount: number;
   };
 };
 
-const unitMapping: Record<string, string> = {
-  PER_HOUR: "/小时",
-  PER_DAY: "/天",
-  PER_WEEK: "/周",
-  PER_MONTH: "/月",
-  PER_SESSION: "/次",
-  NEGOTIABLE: "面议",
-  PER_ORDER: "/单",
-};
+/**
+ * 租赁收藏卡片：RentalCard 需要 pickupLocation（收藏接口不返回，只返回 campus）
+ * 且不带收藏切换按钮，无法承载本页的取消收藏交互，故保留原有内联标记。
+ */
+function RentalFavoriteCard({
+  rentalListing,
+}: {
+  rentalListing: RentalFavorite["rentalListing"];
+}) {
+  return (
+    <div className="group relative flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md">
+      <Link href={`/rentals/${rentalListing.id}`} className="block">
+        <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
+          {rentalListing.images[0]?.url ? (
+            <img
+              src={rentalListing.images[0].url}
+              alt={rentalListing.title}
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center">
+              <span className="text-xs text-slate-400">暂无图片</span>
+            </div>
+          )}
+          <div className="absolute left-3 top-3">
+            <RentalListingStatusBadge status={rentalListing.status as RentalListingStatus} />
+          </div>
+        </div>
+      </Link>
+
+      <div className="flex flex-1 flex-col p-4">
+        <Link href={`/rentals/${rentalListing.id}`}>
+          <h3 className="mb-1 line-clamp-2 font-bold text-slate-900 transition hover:text-indigo-600">
+            {rentalListing.title}
+          </h3>
+        </Link>
+
+        <div className="mb-3 flex items-end gap-1">
+          <span className="text-xl font-bold text-indigo-600">
+            ¥{Number(rentalListing.price).toFixed(2)}
+          </span>
+          <span className="mb-0.5 text-xs text-slate-500">
+            {RENTAL_PRICING_UNIT_LABELS[
+              rentalListing.pricingUnit as keyof typeof RENTAL_PRICING_UNIT_LABELS
+            ] ?? ""}
+          </span>
+        </div>
+
+        <div className="mb-3 flex flex-wrap gap-1.5 text-xs text-slate-500">
+          <span className="rounded-lg bg-slate-50 px-2 py-0.5">
+            {rentalListing.category.name}
+          </span>
+          <span className="rounded-lg bg-slate-50 px-2 py-0.5">
+            {rentalListing.campus.name}
+          </span>
+          {Number(rentalListing.depositAmount) === 0 && (
+            <span className="rounded-lg bg-indigo-50 px-2 py-0.5 text-indigo-600">
+              免押金
+            </span>
+          )}
+        </div>
+
+        <div className="mt-auto flex items-center justify-between">
+          <span className="text-xs text-slate-400">
+            {rentalListing.owner.name}
+            {rentalListing.owner.verificationStatus === "VERIFIED" && " ✓"}
+          </span>
+          <RentalFavoriteButton
+            rentalListingId={rentalListing.id}
+            isFavorited={true}
+            count={rentalListing.favoriteCount}
+            isLoggedIn={true}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function UnifiedFavoritesPage() {
   const [activeTab, setActiveTab] = useState<TabType>("products");
@@ -268,73 +348,10 @@ export default function UnifiedFavoritesPage() {
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {rentalFavorites.map(({ rentalListing }) => (
-                    <div
+                    <RentalFavoriteCard
                       key={rentalListing.id}
-                      className="group relative flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
-                    >
-                      <Link href={`/rentals/${rentalListing.id}`} className="block">
-                        <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
-                          {rentalListing.images[0]?.url ? (
-                            <img
-                              src={rentalListing.images[0].url}
-                              alt={rentalListing.title}
-                              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                            />
-                          ) : (
-                            <div className="flex h-full items-center justify-center">
-                              <span className="text-xs text-slate-400">暂无图片</span>
-                            </div>
-                          )}
-                          <div className="absolute left-3 top-3">
-                            <RentalListingStatusBadge status={rentalListing.status as RentalListingStatus} />
-                          </div>
-                        </div>
-                      </Link>
-
-                      <div className="flex flex-1 flex-col p-4">
-                        <Link href={`/rentals/${rentalListing.id}`}>
-                          <h3 className="mb-1 line-clamp-2 font-bold text-slate-900 transition hover:text-indigo-600">
-                            {rentalListing.title}
-                          </h3>
-                        </Link>
-
-                        <div className="mb-3 flex items-end gap-1">
-                          <span className="text-xl font-bold text-indigo-600">
-                            ¥{Number(rentalListing.price).toFixed(2)}
-                          </span>
-                          <span className="mb-0.5 text-xs text-slate-500">
-                            {unitMapping[rentalListing.pricingUnit] ?? ""}
-                          </span>
-                        </div>
-
-                        <div className="mb-3 flex flex-wrap gap-1.5 text-xs text-slate-500">
-                          <span className="rounded-lg bg-slate-50 px-2 py-0.5">
-                            {rentalListing.category.name}
-                          </span>
-                          <span className="rounded-lg bg-slate-50 px-2 py-0.5">
-                            {rentalListing.campus.name}
-                          </span>
-                          {Number(rentalListing.depositAmount) === 0 && (
-                            <span className="rounded-lg bg-indigo-50 px-2 py-0.5 text-indigo-600">
-                              免押金
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="mt-auto flex items-center justify-between">
-                          <span className="text-xs text-slate-400">
-                            {rentalListing.owner.name}
-                            {rentalListing.owner.verificationStatus === "VERIFIED" && " ✓"}
-                          </span>
-                          <RentalFavoriteButton
-                            rentalListingId={rentalListing.id}
-                            isFavorited={true}
-                            count={rentalListing.favoriteCount}
-                            isLoggedIn={true}
-                          />
-                        </div>
-                      </div>
-                    </div>
+                      rentalListing={rentalListing}
+                    />
                   ))}
                 </div>
               )}
@@ -360,46 +377,16 @@ export default function UnifiedFavoritesPage() {
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {errandFavorites.map(({ errandTask }) => (
-                    <Link
+                    <ErrandCard
                       key={errandTask.id}
-                      href={`/errands/${errandTask.id}`}
-                      className="group flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md"
-                    >
-                      <div className="mb-3 flex items-start justify-between">
-                        <span className="inline-flex rounded-lg bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
-                          {errandTask.category.name}
-                        </span>
-                        <span className="text-lg font-bold text-emerald-600">
-                          ¥{Number(errandTask.reward).toFixed(2)}
-                        </span>
-                      </div>
-
-                      <h3 className="mb-2 line-clamp-2 text-base font-bold text-slate-900 transition group-hover:text-indigo-600">
-                        {errandTask.title}
-                      </h3>
-
-                      <p className="mb-3 line-clamp-2 text-sm text-slate-600">
-                        {errandTask.description}
-                      </p>
-
-                      <div className="mt-auto space-y-2 text-xs text-slate-500">
-                        <div className="flex items-center gap-2">
-                          <span>📍 {errandTask.pickupLocation}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span>🎯 {errandTask.deliveryLocation}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span>
-                            {errandTask.publisher.name}
-                            {errandTask.publisher.verificationStatus === "VERIFIED" && " ✓"}
-                          </span>
-                          <span className="text-slate-400">
-                            {new Date(errandTask.deadline).toLocaleDateString()}
-                          </span>
-                        </div>
-                      </div>
-                    </Link>
+                      id={errandTask.id}
+                      title={errandTask.title}
+                      reward={errandTask.reward}
+                      pickupLocation={errandTask.pickupLocation}
+                      deliveryLocation={errandTask.deliveryLocation}
+                      publisher={errandTask.publisher.name}
+                      status={errandTask.status as keyof typeof ERRAND_STATUS_LABELS}
+                    />
                   ))}
                 </div>
               )}
@@ -425,54 +412,21 @@ export default function UnifiedFavoritesPage() {
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {serviceFavorites.map(({ serviceListing }) => (
-                    <Link
+                    <ServiceCard
                       key={serviceListing.id}
-                      href={`/services/${serviceListing.id}`}
-                      className="group flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
-                    >
-                      {serviceListing.coverImage ? (
-                        <div className="relative aspect-video overflow-hidden bg-slate-100">
-                          <img
-                            src={serviceListing.coverImage}
-                            alt={serviceListing.title}
-                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                          />
-                        </div>
-                      ) : (
-                        <div className="flex aspect-video items-center justify-center bg-slate-100">
-                          <Briefcase className="h-12 w-12 text-slate-300" />
-                        </div>
-                      )}
-
-                      <div className="flex flex-1 flex-col p-4">
-                        <h3 className="mb-2 line-clamp-2 font-bold text-slate-900 transition group-hover:text-indigo-600">
-                          {serviceListing.title}
-                        </h3>
-
-                        <p className="mb-3 line-clamp-2 text-sm text-slate-600">
-                          {serviceListing.description}
-                        </p>
-
-                        <div className="mb-3 flex items-end gap-1">
-                          <span className="text-xl font-bold text-indigo-600">
-                            ¥{Number(serviceListing.price).toFixed(2)}
-                          </span>
-                          <span className="mb-0.5 text-xs text-slate-500">
-                            {unitMapping[serviceListing.pricingUnit] ?? ""}
-                          </span>
-                        </div>
-
-                        <div className="mt-auto flex items-center justify-between text-xs text-slate-500">
-                          <span className="rounded-lg bg-slate-50 px-2 py-1">
-                            {serviceListing.category.name}
-                          </span>
-                          <span>
-                            {serviceListing.provider.name}
-                            {serviceListing.provider.verificationStatus === "VERIFIED" && " ✓"}
-                          </span>
-                        </div>
-                      </div>
-                    </Link>
+                      id={serviceListing.id}
+                      title={serviceListing.title}
+                      description={serviceListing.description}
+                      price={serviceListing.price}
+                      pricingUnit={
+                        serviceListing.pricingUnit as keyof typeof SERVICE_PRICING_UNIT_LABELS
+                      }
+                      status={serviceListing.status as keyof typeof SERVICE_STATUS_LABELS}
+                      provider={serviceListing.provider.name}
+                      locationText={serviceListing.locationText}
+                      categoryName={serviceListing.category.name}
+                      coverImageUrl={serviceListing.coverImage}
+                    />
                   ))}
                 </div>
               )}

@@ -62,7 +62,7 @@ vi.mock("@/actions/trust", () => ({
   createReport,
 }));
 
-import ProductDetailPage from "@/app/products/[id]/page";
+import ProductDetailPage, { generateMetadata } from "@/app/products/[id]/page";
 
 afterEach(() => {
   cleanup();
@@ -165,5 +165,30 @@ describe("ProductDetailPage Comprehensive Test Suite", () => {
     expect(screen.getAllByRole("button", { name: "私聊卖家" })[0]).toBeTruthy();
     expect(screen.getAllByText("已收藏")[0]).toBeTruthy();
     expect(screen.getAllByText("6")[0]).toBeTruthy();
+  });
+});
+
+describe("ProductDetailPage generateMetadata", () => {
+  it("returns SEO metadata from the product detail", async () => {
+    getProductDetail.mockResolvedValue(buildProductDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "product-1" }),
+    });
+
+    expect(metadata.title).toBe("高数教材 - 校园集市");
+    expect(metadata.description).toBe("九成新，含课堂笔记。");
+    expect(metadata.openGraph?.title).toBe("高数教材 - 校园集市");
+    expect(metadata.openGraph?.description).toBe("九成新，含课堂笔记。");
+  });
+
+  it("falls back to generic metadata when the product is missing", async () => {
+    getProductDetail.mockRejectedValue(new Error("notFound"));
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "missing-product" }),
+    });
+
+    expect(metadata.title).toBe("商品详情 - 校园集市");
   });
 });

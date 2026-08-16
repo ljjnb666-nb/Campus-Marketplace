@@ -11,9 +11,7 @@ import type { RentalListingStatus } from "@prisma/client";
 import { Search, RotateCcw, PlusCircle, Filter } from "lucide-react";
 import {
   buildListingSearchParams,
-  hrefWithQuery,
   parsePageParam,
-  withSortParam,
 } from "@/lib/listing-search-params";
 
 export const dynamic = "force-dynamic";

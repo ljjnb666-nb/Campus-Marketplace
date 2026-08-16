@@ -59,7 +59,7 @@ vi.mock("@/actions/trust", () => ({
   createReport,
 }));
 
-import ServiceDetailPage from "@/app/services/[id]/page";
+import ServiceDetailPage, { generateMetadata } from "@/app/services/[id]/page";
 
 afterEach(() => {
   cleanup();
@@ -148,5 +148,29 @@ describe("ServiceDetailPage Test Suite", () => {
     expect(screen.getAllByRole("button", { name: "预约服务" })[0]).toBeTruthy();
     expect(screen.getByRole("button", { name: "私聊服务者" })).toBeTruthy();
     expect(screen.getByText("同类服务推荐")).toBeTruthy();
+  });
+});
+
+describe("ServiceDetailPage generateMetadata", () => {
+  it("returns SEO metadata from the service detail", async () => {
+    getServiceDetail.mockResolvedValue(buildServiceDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "service-1" }),
+    });
+
+    expect(metadata.title).toBe("PPT 美化 - 校园集市");
+    expect(metadata.description).toBe("答辩排版与演示优化。");
+    expect(metadata.openGraph?.title).toBe("PPT 美化 - 校园集市");
+  });
+
+  it("falls back to generic metadata when the service is missing", async () => {
+    getServiceDetail.mockRejectedValue(new Error("notFound"));
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "missing-service" }),
+    });
+
+    expect(metadata.title).toBe("技能服务详情 - 校园集市");
   });
 });

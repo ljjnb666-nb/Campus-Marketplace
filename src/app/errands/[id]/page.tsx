@@ -1,4 +1,5 @@
 import React from "react";
+import type { Metadata } from "next";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ErrandCard } from "@/components/errand/errand-card";
@@ -8,6 +9,36 @@ import { getErrandDetail } from "@/repositories/errand-repository";
 import { MapPin, Navigation, Info, ShieldAlert } from "lucide-react";
 
 export const dynamic = "force-dynamic";
+
+const ERRAND_DETAIL_FALLBACK_METADATA: Metadata = {
+  title: "跑腿任务详情 - 校园集市",
+  description: "查看校园集市同校跑腿求助任务的取送路线与跑腿报酬。",
+};
+
+function truncateForMetadata(text: string, maxLength = 80) {
+  const trimmed = text.trim();
+  return trimmed.length > maxLength ? `${trimmed.slice(0, maxLength)}…` : trimmed;
+}
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+
+  try {
+    const { errand } = await getErrandDetail(id);
+    const title = `${errand.title} - 校园集市`;
+    const description = truncateForMetadata(
+      errand.description || `查看校园集市跑腿任务「${errand.title}」的取送路线与跑腿报酬。`,
+    );
+
+    return { title, description, openGraph: { title, description } };
+  } catch {
+    return ERRAND_DETAIL_FALLBACK_METADATA;
+  }
+}
 
 export default async function ErrandDetailPage({
   params,

@@ -88,7 +88,7 @@ vi.mock("@/components/trust/report-form", () => ({
   ),
 }));
 
-import ErrandDetailPage from "@/app/errands/[id]/page";
+import ErrandDetailPage, { generateMetadata } from "@/app/errands/[id]/page";
 
 afterEach(() => {
   cleanup();
@@ -176,5 +176,29 @@ describe("ErrandDetailPage", () => {
     expect(screen.getAllByRole("button", { name: "立即接单" })[0]).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "私聊发布者" })[0]).toBeTruthy();
     expect(screen.getByTitle("举报此任务")).toBeTruthy();
+  });
+});
+
+describe("ErrandDetailPage generateMetadata", () => {
+  it("returns SEO metadata from the errand detail", async () => {
+    getErrandDetail.mockResolvedValue(buildErrandDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "errand-1" }),
+    });
+
+    expect(metadata.title).toBe("代取快递 - 校园集市");
+    expect(metadata.description).toBe("下午五点前送到宿舍。");
+    expect(metadata.openGraph?.title).toBe("代取快递 - 校园集市");
+  });
+
+  it("falls back to generic metadata when the errand is missing", async () => {
+    getErrandDetail.mockRejectedValue(new Error("notFound"));
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: "missing-errand" }),
+    });
+
+    expect(metadata.title).toBe("跑腿任务详情 - 校园集市");
   });
 });
