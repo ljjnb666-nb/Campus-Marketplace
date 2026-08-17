@@ -36,8 +36,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          # 与生成 package-lock.json 的本地环境（npm 11）保持一致，
-          # 低版本 npm 的 npm ci 会认为该 lock 文件缺少依赖条目
+          # package-lock.json 在 Linux 容器（node:24）中生成：Windows 上的 npm 会按平台裁剪
+          # 可选依赖条目（如 @tailwindcss/oxide-linux-*），导致 Linux 上 npm ci 报 Missing
           node-version: 24
           cache: npm
 

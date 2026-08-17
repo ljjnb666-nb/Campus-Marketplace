@@ -138,6 +138,11 @@ npm run text:verify
 - `npx vitest run`（全量测试）
 - `npm run test:coverage`（覆盖率门槛 lines 63 / branches 66 / functions 59 / statements 63）
 
+依赖与 lock 文件注意事项：
+
+- `package-lock.json` 在 Linux 容器中生成（`docker run --rm -v "%cd%:/app" -w /app node:24 npm install`，Git Bash 下加 `MSYS_NO_PATHCONV=1`）。Windows 上的 npm 会按当前平台裁剪 lock 的可选依赖条目（如 `@tailwindcss/oxide-linux-*`），提交后会导致 CI（Linux）的 `npm ci` 报 Missing。
+- 本地开发用 `npm install`（宽松）即可，无需 `npm ci`；重装 node_modules 后记得 `npx prisma generate`。
+
 当前测试基线：
 
 - `142` 个测试文件（另有 1 个真实数据库集成测试文件，需 `INTEGRATION_DATABASE_URL` 时才运行）
