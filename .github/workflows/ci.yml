@@ -60,6 +60,9 @@ jobs:
         run: npm run test:coverage
         env:
           INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
+          # 部分测试的导入链会校验 next-auth 环境变量（本地由 .env 提供）
+          NEXTAUTH_URL: http://localhost:3000
+          NEXTAUTH_SECRET: dummy-secret-for-ci-tests-only
 
       - name: Build
         run: npm run build
