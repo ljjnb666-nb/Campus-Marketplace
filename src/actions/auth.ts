@@ -1,8 +1,10 @@
 "use server";
 
+import { headers } from "next/headers";
 import { hash } from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import { registerSchema } from "@/validators/auth";
+import { isRateLimited } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 
 export type ActionState = {
@@ -10,10 +12,28 @@ export type ActionState = {
   message: string;
 };
 
+const REGISTER_RATE_LIMIT = 5;
+const REGISTER_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+
+async function resolveClientIp(): Promise<string> {
+  const forwardedFor = (await headers()).get("x-forwarded-for");
+  return forwardedFor?.split(",")[0]?.trim() || "unknown";
+}
+
 export async function registerUser(
   _prevState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const { limited } = isRateLimited({
+    key: `register:${await resolveClientIp()}`,
+    limit: REGISTER_RATE_LIMIT,
+    windowMs: REGISTER_RATE_LIMIT_WINDOW_MS,
+  });
+
+  if (limited) {
+    return { success: false, message: "注册操作过于频繁，请稍后再试" };
+  }
+
   const parsed = registerSchema.safeParse({
     name: formData.get("name"),
     email: formData.get("email"),

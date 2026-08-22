@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { computeConversationKey } from "@/lib/conversation-key";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import { createNotification } from "@/repositories/notification-repository";
 import {
@@ -74,7 +74,7 @@ async function getOrCreateConversationSafe(
 
   // 2. 数据库事务并发创建
   try {
-    const created = await prisma.$transaction(async (tx) => {
+    const created = await withTransaction(async (tx) => {
       const conv = await tx.conversation.create({
         data: {
           title: initialData.title,
@@ -431,7 +431,7 @@ export async function sendMessage(
   }
 
   // 4. 发送消息并更新会话更新时间
-  await prisma.$transaction(async (tx) => {
+  await withTransaction(async (tx) => {
     await tx.message.create({
       data: {
         conversationId,

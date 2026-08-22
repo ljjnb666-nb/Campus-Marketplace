@@ -1,7 +1,8 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
+import { prisma, withTransaction } from "@/lib/prisma";
+import { logger } from "@/lib/logger";
 import { requireUser } from "@/lib/server-auth";
 import { auth } from "@/lib/auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
@@ -12,7 +13,7 @@ export async function toggleServiceFavorite(serviceListingId: string) {
 
   try {
     // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-    const result = await prisma.$transaction(async (tx) =>
+    const result = await withTransaction((tx) =>
       applyFavoriteToggle({
         deleteFavorite: () =>
           tx.serviceFavorite.deleteMany({
@@ -39,7 +40,7 @@ export async function toggleServiceFavorite(serviceListingId: string) {
     revalidatePath("/my/favorites");
     return result;
   } catch (error) {
-    console.error("Failed to toggle service favorite:", error);
+    logger.error("切换服务收藏失败", "toggleServiceFavorite", { error });
     return { success: false as const, error: "操作失败" };
   }
 }

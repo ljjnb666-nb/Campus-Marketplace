@@ -1,7 +1,8 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { prisma } from "@/lib/prisma";
+import { actionErrorMessage } from "@/lib/error-handler";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { createNotification } from "@/repositories/notification-repository";
@@ -70,72 +71,80 @@ async function upsertCategory(
   kind: CategoryKind,
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = categoryFormSchema.safeParse(readCategoryForm(formData));
+  try {
+    const admin = await requireAdmin();
+    const parsed = categoryFormSchema.safeParse(readCategoryForm(formData));
 
-  if (!parsed.success) {
-    return invalidFormState();
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    const { categoryId, name, slug, description, sortOrder, isActive } = parsed.data;
+    const payload: CategoryPayload = {
+      name,
+      slug,
+      description: description || null,
+      sortOrder,
+      isActive,
+    };
+
+    if (categoryId) {
+      await categoryTables[kind].update({ where: { id: categoryId }, data: payload });
+    } else {
+      await categoryTables[kind].create({ data: payload });
+    }
+
+    await prisma.adminLog.create({
+      data: {
+        adminId: admin.id,
+        action: categoryId ? `UPDATE_${kind}_CATEGORY` : `CREATE_${kind}_CATEGORY`,
+        targetType: `${kind}_CATEGORY`,
+        targetId: categoryId ?? slug,
+        detail: name,
+      },
+    });
+
+    revalidatePath("/admin/categories");
+    revalidatePath(categoryListingPaths[kind]);
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, `upsertCategory:${kind}`) };
   }
-
-  const { categoryId, name, slug, description, sortOrder, isActive } = parsed.data;
-  const payload: CategoryPayload = {
-    name,
-    slug,
-    description: description || null,
-    sortOrder,
-    isActive,
-  };
-
-  if (categoryId) {
-    await categoryTables[kind].update({ where: { id: categoryId }, data: payload });
-  } else {
-    await categoryTables[kind].create({ data: payload });
-  }
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: categoryId ? `UPDATE_${kind}_CATEGORY` : `CREATE_${kind}_CATEGORY`,
-      targetType: `${kind}_CATEGORY`,
-      targetId: categoryId ?? slug,
-      detail: name,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath(categoryListingPaths[kind]);
 }
 
 async function toggleCategoryStatus(
   kind: CategoryKind,
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = categoryStatusSchema.safeParse({
-    categoryId: formData.get("categoryId"),
-    isActive: formData.get("isActive"),
-  });
+  try {
+    const admin = await requireAdmin();
+    const parsed = categoryStatusSchema.safeParse({
+      categoryId: formData.get("categoryId"),
+      isActive: formData.get("isActive"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    await categoryTables[kind].update({
+      where: { id: parsed.data.categoryId },
+      data: { isActive: parsed.data.isActive },
+    });
+
+    await prisma.adminLog.create({
+      data: {
+        adminId: admin.id,
+        action: parsed.data.isActive ? `ENABLE_${kind}_CATEGORY` : `DISABLE_${kind}_CATEGORY`,
+        targetType: `${kind}_CATEGORY`,
+        targetId: parsed.data.categoryId,
+      },
+    });
+
+    revalidatePath("/admin/categories");
+    revalidatePath(categoryListingPaths[kind]);
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, `toggleCategoryStatus:${kind}`) };
   }
-
-  await categoryTables[kind].update({
-    where: { id: parsed.data.categoryId },
-    data: { isActive: parsed.data.isActive },
-  });
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.isActive ? `ENABLE_${kind}_CATEGORY` : `DISABLE_${kind}_CATEGORY`,
-      targetType: `${kind}_CATEGORY`,
-      targetId: parsed.data.categoryId,
-    },
-  });
-
-  revalidatePath("/admin/categories");
-  revalidatePath(categoryListingPaths[kind]);
 }
 
 export async function upsertProductCategory(
@@ -202,289 +211,332 @@ function getReportNotificationCopy(status: "IN_REVIEW" | "RESOLVED" | "REJECTED"
 export async function reviewVerification(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
+  try {
+    const admin = await requireAdmin();
 
-  const parsed = verificationReviewSchema.safeParse({
-    verificationId: formData.get("verificationId"),
-    userId: formData.get("userId"),
-    status: formData.get("status"),
-    reviewNote: formData.get("reviewNote"),
-  });
+    const parsed = verificationReviewSchema.safeParse({
+      verificationId: formData.get("verificationId"),
+      userId: formData.get("userId"),
+      status: formData.get("status"),
+      reviewNote: formData.get("reviewNote"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    const reviewedAt = new Date();
+
+    await withTransaction(async (tx) => {
+      await tx.userVerification.update({
+        where: { id: parsed.data.verificationId },
+        data: {
+          status: parsed.data.status,
+          reviewNote: parsed.data.reviewNote || null,
+          reviewedAt,
+        },
+      });
+
+      await tx.user.update({
+        where: { id: parsed.data.userId },
+        data: {
+          verificationStatus: parsed.data.status,
+        },
+      });
+
+      await tx.adminLog.create({
+        data: {
+          adminId: admin.id,
+          action: parsed.data.status === "VERIFIED" ? "APPROVE_VERIFICATION" : "REJECT_VERIFICATION",
+          targetType: "USER_VERIFICATION",
+          targetId: parsed.data.verificationId,
+          detail: parsed.data.reviewNote || null,
+        },
+      });
+
+      await createNotification(tx, {
+        userId: parsed.data.userId,
+        type: "SYSTEM",
+        title: parsed.data.status === "VERIFIED" ? "校园认证已通过" : "校园认证未通过",
+        content:
+          parsed.data.status === "VERIFIED"
+            ? "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。"
+            : `你的校园认证未通过审核。${
+                parsed.data.reviewNote ? `原因：${parsed.data.reviewNote}` : "请完善材料后重新提交。"
+              }`,
+      });
+    });
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/verifications");
+    revalidatePath("/verification");
+    revalidatePath("/profile");
+    revalidatePath("/notifications");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "reviewVerification") };
   }
-
-  const reviewedAt = new Date();
-
-  await prisma.$transaction(async (tx) => {
-    await tx.userVerification.update({
-      where: { id: parsed.data.verificationId },
-      data: {
-        status: parsed.data.status,
-        reviewNote: parsed.data.reviewNote || null,
-        reviewedAt,
-      },
-    });
-
-    await tx.user.update({
-      where: { id: parsed.data.userId },
-      data: {
-        verificationStatus: parsed.data.status,
-      },
-    });
-
-    await tx.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: parsed.data.status === "VERIFIED" ? "APPROVE_VERIFICATION" : "REJECT_VERIFICATION",
-        targetType: "USER_VERIFICATION",
-        targetId: parsed.data.verificationId,
-        detail: parsed.data.reviewNote || null,
-      },
-    });
-
-    await createNotification(tx, {
-      userId: parsed.data.userId,
-      type: "SYSTEM",
-      title: parsed.data.status === "VERIFIED" ? "校园认证已通过" : "校园认证未通过",
-      content:
-        parsed.data.status === "VERIFIED"
-          ? "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。"
-          : `你的校园认证未通过审核。${
-              parsed.data.reviewNote ? `原因：${parsed.data.reviewNote}` : "请完善材料后重新提交。"
-            }`,
-    });
-  });
-
-  revalidatePath("/admin");
-  revalidatePath("/admin/verifications");
-  revalidatePath("/verification");
-  revalidatePath("/profile");
-  revalidatePath("/notifications");
 }
 
 export async function reviewReport(formData: FormData): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
+  try {
+    const admin = await requireAdmin();
 
-  const parsed = reportReviewSchema.safeParse({
-    reportId: formData.get("reportId"),
-    status: formData.get("status"),
-    handledNote: formData.get("handledNote"),
-  });
+    const parsed = reportReviewSchema.safeParse({
+      reportId: formData.get("reportId"),
+      status: formData.get("status"),
+      handledNote: formData.get("handledNote"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
+
+    await withTransaction(async (tx) => {
+      const report = await tx.report.update({
+        where: { id: parsed.data.reportId },
+        data: {
+          status: parsed.data.status,
+          handledById: admin.id,
+          handledNote: parsed.data.handledNote || null,
+          handledAt:
+            parsed.data.status === "RESOLVED" || parsed.data.status === "REJECTED" ? new Date() : null,
+        },
+        select: {
+          reporterId: true,
+        },
+      });
+
+      await tx.adminLog.create({
+        data: {
+          adminId: admin.id,
+          action: `REPORT_${parsed.data.status}`,
+          targetType: "REPORT",
+          targetId: parsed.data.reportId,
+          detail: parsed.data.handledNote || null,
+        },
+      });
+
+      await createNotification(tx, {
+        userId: report.reporterId,
+        type: "REPORT",
+        title: notification.title,
+        content: notification.content,
+      });
+    });
+
+    revalidatePath("/admin");
+    revalidatePath("/admin/reports");
+    revalidatePath("/notifications");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "reviewReport") };
   }
-
-  const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
-
-  await prisma.$transaction(async (tx) => {
-    const report = await tx.report.update({
-      where: { id: parsed.data.reportId },
-      data: {
-        status: parsed.data.status,
-        handledById: admin.id,
-        handledNote: parsed.data.handledNote || null,
-        handledAt:
-          parsed.data.status === "RESOLVED" || parsed.data.status === "REJECTED" ? new Date() : null,
-      },
-      select: {
-        reporterId: true,
-      },
-    });
-
-    await tx.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: `REPORT_${parsed.data.status}`,
-        targetType: "REPORT",
-        targetId: parsed.data.reportId,
-        detail: parsed.data.handledNote || null,
-      },
-    });
-
-    await createNotification(tx, {
-      userId: report.reporterId,
-      type: "REPORT",
-      title: notification.title,
-      content: notification.content,
-    });
-  });
-
-  revalidatePath("/admin");
-  revalidatePath("/admin/reports");
-  revalidatePath("/notifications");
 }
 
 export async function toggleUserStatus(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = toggleUserStatusSchema.safeParse({
-    userId: formData.get("userId"),
-    nextStatus: formData.get("nextStatus"),
-  });
+  try {
+    const admin = await requireAdmin();
+    const parsed = toggleUserStatusSchema.safeParse({
+      userId: formData.get("userId"),
+      nextStatus: formData.get("nextStatus"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
-  }
+    if (!parsed.success) {
+      return invalidFormState();
+    }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.user.update({
+    // 防止管理员停用自己，导致所有后台入口被锁死
+    if (parsed.data.userId === admin.id) {
+      return { success: false, error: "不能停用或恢复自己的账号" };
+    }
+
+    const target = await prisma.user.findUnique({
       where: { id: parsed.data.userId },
-      data: { status: parsed.data.nextStatus },
+      select: { role: true },
     });
 
-    await tx.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: parsed.data.nextStatus === "SUSPENDED" ? "SUSPEND_USER" : "RESTORE_USER",
-        targetType: "USER",
-        targetId: parsed.data.userId,
-      },
+    if (!target) {
+      return { success: false, error: "用户不存在" };
+    }
+
+    // 其他管理员同样依赖后台权限，停用后无法自助恢复，一律拒绝
+    if (target.role === "ADMIN") {
+      return { success: false, error: "不能停用或恢复其他管理员账号" };
+    }
+
+    await withTransaction(async (tx) => {
+      await tx.user.update({
+        where: { id: parsed.data.userId },
+        data: { status: parsed.data.nextStatus },
+      });
+
+      await tx.adminLog.create({
+        data: {
+          adminId: admin.id,
+          action: parsed.data.nextStatus === "SUSPENDED" ? "SUSPEND_USER" : "RESTORE_USER",
+          targetType: "USER",
+          targetId: parsed.data.userId,
+        },
+      });
+
+      await createNotification(tx, {
+        userId: parsed.data.userId,
+        type: "SYSTEM",
+        title: parsed.data.nextStatus === "SUSPENDED" ? "账号已被停用" : "账号已恢复正常",
+        content:
+          parsed.data.nextStatus === "SUSPENDED"
+            ? "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。"
+            : "你的账号已恢复正常使用。",
+      });
     });
 
-    await createNotification(tx, {
-      userId: parsed.data.userId,
-      type: "SYSTEM",
-      title: parsed.data.nextStatus === "SUSPENDED" ? "账号已被停用" : "账号已恢复正常",
-      content:
-        parsed.data.nextStatus === "SUSPENDED"
-          ? "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。"
-          : "你的账号已恢复正常使用。",
-    });
-  });
-
-  revalidatePath("/admin/users");
+    revalidatePath("/admin/users");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "toggleUserStatus") };
+  }
 }
 
 export async function moderateListing(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = moderateListingSchema.safeParse({
-    targetType: formData.get("targetType"),
-    targetId: formData.get("targetId"),
-  });
-
-  if (!parsed.success) {
-    return invalidFormState();
-  }
-
-  await prisma.$transaction(async (tx) => {
-    if (parsed.data.targetType === "PRODUCT") {
-      await tx.product.update({
-        where: { id: parsed.data.targetId },
-        data: { status: "OFFLINE" },
-      });
-    }
-
-    if (parsed.data.targetType === "ERRAND") {
-      await tx.errandTask.update({
-        where: { id: parsed.data.targetId },
-        data: { status: "CANCELLED" },
-      });
-    }
-
-    if (parsed.data.targetType === "SERVICE") {
-      await tx.serviceListing.update({
-        where: { id: parsed.data.targetId },
-        data: { status: "OFFLINE" },
-      });
-    }
-
-    await tx.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: "MODERATE_LISTING",
-        targetType: parsed.data.targetType,
-        targetId: parsed.data.targetId,
-      },
+  try {
+    const admin = await requireAdmin();
+    const parsed = moderateListingSchema.safeParse({
+      targetType: formData.get("targetType"),
+      targetId: formData.get("targetId"),
     });
-  });
 
-  revalidatePath("/admin/products");
-  revalidatePath("/admin/errands");
-  revalidatePath("/admin/services");
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    await withTransaction(async (tx) => {
+      if (parsed.data.targetType === "PRODUCT") {
+        await tx.product.update({
+          where: { id: parsed.data.targetId },
+          data: { status: "OFFLINE" },
+        });
+      }
+
+      if (parsed.data.targetType === "ERRAND") {
+        await tx.errandTask.update({
+          where: { id: parsed.data.targetId },
+          data: { status: "CANCELLED" },
+        });
+      }
+
+      if (parsed.data.targetType === "SERVICE") {
+        await tx.serviceListing.update({
+          where: { id: parsed.data.targetId },
+          data: { status: "OFFLINE" },
+        });
+      }
+
+      await tx.adminLog.create({
+        data: {
+          adminId: admin.id,
+          action: "MODERATE_LISTING",
+          targetType: parsed.data.targetType,
+          targetId: parsed.data.targetId,
+        },
+      });
+    });
+
+    revalidatePath("/admin/products");
+    revalidatePath("/admin/errands");
+    revalidatePath("/admin/services");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "moderateListing") };
+  }
 }
 
 export async function upsertModerationKeyword(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = moderationKeywordSchema.safeParse({
-    keywordId: formData.get("keywordId") || undefined,
-    keyword: formData.get("keyword"),
-    targetType: formData.get("targetType"),
-    isEnabled: formData.get("isEnabled"),
-  });
+  try {
+    const admin = await requireAdmin();
+    const parsed = moderationKeywordSchema.safeParse({
+      keywordId: formData.get("keywordId") || undefined,
+      keyword: formData.get("keyword"),
+      targetType: formData.get("targetType"),
+      isEnabled: formData.get("isEnabled"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
-  }
+    if (!parsed.success) {
+      return invalidFormState();
+    }
 
-  if (parsed.data.keywordId) {
-    await prisma.moderationKeyword.update({
-      where: { id: parsed.data.keywordId },
+    if (parsed.data.keywordId) {
+      await prisma.moderationKeyword.update({
+        where: { id: parsed.data.keywordId },
+        data: {
+          keyword: parsed.data.keyword,
+          targetType: parsed.data.targetType,
+          isEnabled: parsed.data.isEnabled,
+        },
+      });
+    } else {
+      await prisma.moderationKeyword.create({
+        data: {
+          keyword: parsed.data.keyword,
+          targetType: parsed.data.targetType,
+          isEnabled: parsed.data.isEnabled,
+          createdById: admin.id,
+        },
+      });
+    }
+
+    await prisma.adminLog.create({
       data: {
-        keyword: parsed.data.keyword,
-        targetType: parsed.data.targetType,
-        isEnabled: parsed.data.isEnabled,
+        adminId: admin.id,
+        action: parsed.data.keywordId ? "UPDATE_MODERATION_KEYWORD" : "CREATE_MODERATION_KEYWORD",
+        targetType: "MODERATION_KEYWORD",
+        targetId: parsed.data.keywordId ?? parsed.data.keyword,
+        detail: parsed.data.targetType,
       },
     });
-  } else {
-    await prisma.moderationKeyword.create({
-      data: {
-        keyword: parsed.data.keyword,
-        targetType: parsed.data.targetType,
-        isEnabled: parsed.data.isEnabled,
-        createdById: admin.id,
-      },
-    });
+
+    resetModerationKeywordCache();
+    revalidatePath("/admin/keywords");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "upsertModerationKeyword") };
   }
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.keywordId ? "UPDATE_MODERATION_KEYWORD" : "CREATE_MODERATION_KEYWORD",
-      targetType: "MODERATION_KEYWORD",
-      targetId: parsed.data.keywordId ?? parsed.data.keyword,
-      detail: parsed.data.targetType,
-    },
-  });
-
-  resetModerationKeywordCache();
-  revalidatePath("/admin/keywords");
 }
 
 export async function toggleModerationKeywordStatus(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
-  const admin = await requireAdmin();
-  const parsed = moderationKeywordStatusSchema.safeParse({
-    keywordId: formData.get("keywordId"),
-    isEnabled: formData.get("isEnabled"),
-  });
+  try {
+    const admin = await requireAdmin();
+    const parsed = moderationKeywordStatusSchema.safeParse({
+      keywordId: formData.get("keywordId"),
+      isEnabled: formData.get("isEnabled"),
+    });
 
-  if (!parsed.success) {
-    return invalidFormState();
+    if (!parsed.success) {
+      return invalidFormState();
+    }
+
+    await prisma.moderationKeyword.update({
+      where: { id: parsed.data.keywordId },
+      data: { isEnabled: parsed.data.isEnabled },
+    });
+
+    await prisma.adminLog.create({
+      data: {
+        adminId: admin.id,
+        action: parsed.data.isEnabled ? "ENABLE_MODERATION_KEYWORD" : "DISABLE_MODERATION_KEYWORD",
+        targetType: "MODERATION_KEYWORD",
+        targetId: parsed.data.keywordId,
+      },
+    });
+
+    resetModerationKeywordCache();
+    revalidatePath("/admin/keywords");
+  } catch (error) {
+    return { success: false, error: actionErrorMessage(error, "toggleModerationKeywordStatus") };
   }
-
-  await prisma.moderationKeyword.update({
-    where: { id: parsed.data.keywordId },
-    data: { isEnabled: parsed.data.isEnabled },
-  });
-
-  await prisma.adminLog.create({
-    data: {
-      adminId: admin.id,
-      action: parsed.data.isEnabled ? "ENABLE_MODERATION_KEYWORD" : "DISABLE_MODERATION_KEYWORD",
-      targetType: "MODERATION_KEYWORD",
-      targetId: parsed.data.keywordId,
-    },
-  });
-
-  resetModerationKeywordCache();
-  revalidatePath("/admin/keywords");
 }

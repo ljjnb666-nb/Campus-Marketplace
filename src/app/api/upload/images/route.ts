@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { logger } from "@/lib/logger";
 import { isRateLimited } from "@/lib/rate-limit";
-import { saveUploadedImage, UPLOAD_LIMITS, type UploadCategory } from "@/lib/upload";
+import { saveUploadedImage, UPLOAD_LIMITS, isUploadCategory } from "@/lib/upload";
 
 type AllowedMimeType = "image/jpeg" | "image/png" | "image/webp";
 
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
-    const category = (formData.get("category") as UploadCategory) || "product";
+    const category = String(formData.get("category") ?? "product");
 
     if (!file) {
       return NextResponse.json(
@@ -43,13 +44,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const limits = UPLOAD_LIMITS[category];
-    if (!limits) {
+    // 白名单校验，避免原型链属性（如 "constructor"）绕过下标检查
+    if (!isUploadCategory(category)) {
       return NextResponse.json(
         { error: "无效的上传分类" },
         { status: 400 }
       );
     }
+
+    const limits = UPLOAD_LIMITS[category];
 
     if (!limits.allowedTypes.includes(file.type as AllowedMimeType)) {
       return NextResponse.json(
@@ -82,7 +85,7 @@ export async function POST(request: NextRequest) {
       mimeType: file.type,
     });
   } catch (error) {
-    console.error("Upload error:", error);
+    logger.error("图片上传失败", "POST /api/upload/images", { error });
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "上传失败" },
       { status: 500 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { handleError } from "@/lib/error-handler";
 import { getMyServiceFavorites } from "@/actions/service-favorite";
 
 export async function GET() {
@@ -17,10 +18,10 @@ export async function GET() {
 
     return NextResponse.json({ favorites });
   } catch (error) {
-    console.error("Error fetching service favorites:", error);
+    const handled = handleError(error, "GET /api/favorites/services");
     return NextResponse.json(
-      { error: "Failed to fetch favorites" },
-      { status: 500 }
+      { error: handled.message },
+      { status: handled.statusCode }
     );
   }
 }

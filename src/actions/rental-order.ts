@@ -1,6 +1,7 @@
 "use server";
 
-import { prisma } from "@/lib/prisma";
+import { withTransaction } from "@/lib/prisma";
+import { logger } from "@/lib/logger";
 import { requireUser } from "@/lib/server-auth";
 import {
   revalidateRentalOrderCreationViews,
@@ -84,7 +85,7 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
   }
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       createRentalOrderTx(tx, {
         userId: user.id,
         rentalListingId: parsed.data.rentalListingId,
@@ -101,7 +102,7 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
 
     return { success: true, message: '租赁申请已提交', redirectTo: `/rental-orders/${result.orderId}` };
   } catch (error) {
-    console.error("createRentalOrder failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "createRentalOrder", error });
     return { success: false, message: '提交租赁申请失败，请稍后重试' };
   }
 }
@@ -115,10 +116,10 @@ export async function approveRentalOrder(formData: FormData): Promise<RentalOrde
   const orderId = parsed.data.orderId;
 
   try {
-    const result = await prisma.$transaction((tx) => approveRentalOrderTx(tx, { orderId, userId: user.id }));
+    const result = await withTransaction((tx) => approveRentalOrderTx(tx, { orderId, userId: user.id }));
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("approveRentalOrder failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "approveRentalOrder", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -139,12 +140,12 @@ export async function rejectRentalOrder(formData: FormData): Promise<RentalOrder
   const rejectReason = parsed.data.rejectReason ?? "";
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       rejectRentalOrderTx(tx, { orderId, userId: user.id, rejectReason }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("rejectRentalOrder failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "rejectRentalOrder", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -168,7 +169,7 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
   const validPhotos = await saveFormPhotos(formData.getAll("photos"), "handover");
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       confirmPickupTx(tx, {
         orderId,
         userId: user.id,
@@ -180,7 +181,7 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("confirmPickup failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "confirmPickup", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -197,10 +198,10 @@ export async function requestReturn(formData: FormData): Promise<RentalOrderActi
   const orderId = parsed.data.orderId;
 
   try {
-    const result = await prisma.$transaction((tx) => requestReturnTx(tx, { orderId, userId: user.id }));
+    const result = await withTransaction((tx) => requestReturnTx(tx, { orderId, userId: user.id }));
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("requestReturn failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "requestReturn", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -226,7 +227,7 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
   const validPhotos = await saveFormPhotos(formData.getAll("photos"), "return");
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       confirmReturnTx(tx, {
         orderId,
         userId: user.id,
@@ -240,7 +241,7 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("confirmReturn failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "confirmReturn", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -261,12 +262,12 @@ export async function cancelRentalOrder(formData: FormData): Promise<RentalOrder
   const { orderId, cancellationReason, cancellationNote } = parsed.data;
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       cancelRentalOrderTx(tx, { orderId, userId: user.id, cancellationReason, cancellationNote }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("cancelRentalOrder failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "cancelRentalOrder", error });
     return { success: false, message: "取消订单失败，请稍后重试" };
   }
 
@@ -287,12 +288,12 @@ export async function requestExtension(formData: FormData): Promise<RentalOrderA
   const newEndTime = new Date(endStr);
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       requestExtensionTx(tx, { orderId, userId: user.id, newEndTime }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("requestExtension failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "requestExtension", error });
     return { success: false, message: "提交续租请求失败，请稍后重试" };
   }
 
@@ -311,12 +312,12 @@ export async function approveExtension(formData: FormData): Promise<RentalOrderA
   const extensionRequestId = parsed.data.extensionRequestId;
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       approveExtensionTx(tx, { extensionRequestId, userId: user.id }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("approveExtension failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "approveExtension", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -335,12 +336,12 @@ export async function rejectExtension(formData: FormData): Promise<RentalOrderAc
   const extensionRequestId = parsed.data.extensionRequestId;
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       rejectExtensionTx(tx, { extensionRequestId, userId: user.id }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("rejectExtension failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "rejectExtension", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -362,7 +363,7 @@ export async function submitDamageClaim(formData: FormData): Promise<RentalOrder
   const validPhotos = await saveFormPhotos(formData.getAll("photos"), "report");
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       submitDamageClaimTx(tx, {
         orderId,
         userId: user.id,
@@ -373,7 +374,7 @@ export async function submitDamageClaim(formData: FormData): Promise<RentalOrder
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("submitDamageClaim failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "submitDamageClaim", error });
     return { success: false, message: "提交索赔失败，请稍后重试" };
   }
 
@@ -394,12 +395,12 @@ export async function respondDamageClaim(formData: FormData): Promise<RentalOrde
   const { claimId, agreed, renterNote } = parsed.data;
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       respondDamageClaimTx(tx, { claimId, userId: user.id, agreed, renterNote }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("respondDamageClaim failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "respondDamageClaim", error });
     return { success: false, message: "操作失败，请稍后重试" };
   }
 
@@ -421,12 +422,12 @@ export async function initiateDispute(formData: FormData): Promise<RentalOrderAc
   const evidencePhotos = await saveFormPhotos(formData.getAll("evidencePhotos"), "report");
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       initiateDisputeTx(tx, { orderId, userId: user.id, reason, evidencePhotos }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("initiateDispute failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "initiateDispute", error });
     return { success: false, message: "发起纠纷失败，请稍后重试" };
   }
 
@@ -447,12 +448,12 @@ export async function submitRentalReview(formData: FormData): Promise<RentalOrde
   const { orderId, overallRating, content } = parsed.data;
 
   try {
-    const result = await prisma.$transaction((tx) =>
+    const result = await withTransaction((tx) =>
       submitRentalReviewTx(tx, { orderId, userId: user.id, overallRating, content }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
   } catch (error) {
-    console.error("submitRentalReview failed:", error);
+    logger.error("rental-order action failed", "rental-order", { action: "submitRentalReview", error });
     return { success: false, message: "提交评价失败，请稍后重试" };
   }
 

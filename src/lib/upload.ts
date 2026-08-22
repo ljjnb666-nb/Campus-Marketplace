@@ -58,6 +58,42 @@ export const UPLOAD_LIMITS = {
 
 export type UploadCategory = keyof typeof UPLOAD_LIMITS;
 
+// 显式白名单：直接用 UPLOAD_LIMITS[category] 索引会被 "constructor" 等
+// Object.prototype 上的属性命中，绕过空值检查
+const UPLOAD_CATEGORIES = new Set<string>(Object.keys(UPLOAD_LIMITS));
+
+export function isUploadCategory(value: string): value is UploadCategory {
+  return UPLOAD_CATEGORIES.has(value);
+}
+
+function hasValidImageMagicBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) {
+    return false;
+  }
+
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return true;
+  }
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+  ) {
+    return true;
+  }
+
+  // WebP: "RIFF" + 4 字节长度 + "WEBP"
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function resolveUploadRoot() {
   return path.resolve(process.cwd(), env.UPLOAD_DIR);
 }
@@ -106,6 +142,10 @@ export async function saveUploadedImage(
     return null;
   }
 
+  if (!isUploadCategory(category)) {
+    throw new Error("无效的上传分类");
+  }
+
   const limits = UPLOAD_LIMITS[category];
 
   if (!limits.allowedTypes.includes(file.type as AllowedMimeType)) {
@@ -117,13 +157,20 @@ export async function saveUploadedImage(
     throw new Error(`图片大小不能超过${maxSizeMB}MB`);
   }
 
+  const fileBytes = new Uint8Array(await file.arrayBuffer());
+
+  // Content-Type 由客户端声明可伪造，校验文件头防止伪装成图片存储任意内容
+  if (!hasValidImageMagicBytes(fileBytes)) {
+    throw new Error("文件内容不是有效的图片，仅支持JPG、PNG和WebP");
+  }
+
   const targetDirectory = path.join(resolveUploadRoot(), `${category}s`);
   const extension = resolveExtension(file);
   const fileName = `${Date.now()}-${randomUUID()}${extension}`;
   const outputPath = path.join(targetDirectory, fileName);
 
   await mkdir(targetDirectory, { recursive: true });
-  await writeFile(outputPath, Buffer.from(await file.arrayBuffer()));
+  await writeFile(outputPath, Buffer.from(fileBytes));
 
   return `/uploads/${category}/${fileName}`.replace(/\\/g, "/");
 }

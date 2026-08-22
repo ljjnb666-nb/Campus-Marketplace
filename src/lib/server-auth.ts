@@ -11,10 +11,11 @@ export async function requireUser() {
 
   const dbUser = await prisma.user.findUnique({
     where: { id: session.user.id },
-    select: { id: true, role: true, email: true, name: true, avatarUrl: true, verificationStatus: true },
+    select: { id: true, role: true, email: true, name: true, avatarUrl: true, verificationStatus: true, status: true, deletedAt: true },
   });
 
-  if (!dbUser) {
+  // 每次请求都对照数据库最新状态：账号被停用或删除后立即失效旧会话
+  if (!dbUser || dbUser.status !== "ACTIVE" || dbUser.deletedAt) {
     redirect("/login");
   }
 

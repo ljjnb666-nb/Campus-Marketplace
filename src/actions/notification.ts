@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import { actionErrorMessage } from "@/lib/error-handler";
 import { requireUser } from "@/lib/server-auth";
 
 function revalidateNotificationViews() {
@@ -10,39 +11,47 @@ function revalidateNotificationViews() {
 }
 
 export async function markNotificationRead(formData: FormData) {
-  const user = await requireUser();
-  const notificationId = String(formData.get("notificationId") ?? "");
+  try {
+    const user = await requireUser();
+    const notificationId = String(formData.get("notificationId") ?? "");
 
-  if (!notificationId) {
-    return;
+    if (!notificationId) {
+      return;
+    }
+
+    await prisma.notification.updateMany({
+      where: {
+        id: notificationId,
+        userId: user.id,
+        isRead: false,
+      },
+      data: {
+        isRead: true,
+      },
+    });
+
+    revalidateNotificationViews();
+  } catch (error) {
+    actionErrorMessage(error, "markNotificationRead");
   }
-
-  await prisma.notification.updateMany({
-    where: {
-      id: notificationId,
-      userId: user.id,
-      isRead: false,
-    },
-    data: {
-      isRead: true,
-    },
-  });
-
-  revalidateNotificationViews();
 }
 
 export async function markAllNotificationsRead() {
-  const user = await requireUser();
+  try {
+    const user = await requireUser();
 
-  await prisma.notification.updateMany({
-    where: {
-      userId: user.id,
-      isRead: false,
-    },
-    data: {
-      isRead: true,
-    },
-  });
+    await prisma.notification.updateMany({
+      where: {
+        userId: user.id,
+        isRead: false,
+      },
+      data: {
+        isRead: true,
+      },
+    });
 
-  revalidateNotificationViews();
+    revalidateNotificationViews();
+  } catch (error) {
+    actionErrorMessage(error, "markAllNotificationsRead");
+  }
 }

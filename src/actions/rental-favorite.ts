@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import { auth } from "@/lib/auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
@@ -19,7 +19,7 @@ export async function toggleRentalFavorite(formData: FormData) {
   if (!listing) return;
 
   // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-  await prisma.$transaction(async (tx) =>
+  await withTransaction((tx) =>
     applyFavoriteToggle({
       deleteFavorite: () =>
         tx.rentalFavorite.deleteMany({

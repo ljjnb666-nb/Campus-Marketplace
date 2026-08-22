@@ -2,8 +2,9 @@
 
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
+import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { saveUploadedImage } from "@/lib/upload";
@@ -44,154 +45,58 @@ export async function createProduct(
   _prevState: ProductActionState | null,
   formData: FormData,
 ): Promise<ProductActionState> {
-  const user = await requireUser();
-  const imageUrls = await extractImageUrls(formData);
+  try {
+    const user = await requireUser();
+    const imageUrls = await extractImageUrls(formData);
 
-  const parsed = productFormSchema.safeParse({
-    title: formData.get("title"),
-    description: formData.get("description"),
-    price: formData.get("price"),
-    originalPrice: formData.get("originalPrice"),
-    categoryId: formData.get("categoryId"),
-    condition: formData.get("condition"),
-    locationText: formData.get("locationText"),
-    imageUrls,
-  });
+    const parsed = productFormSchema.safeParse({
+      title: formData.get("title"),
+      description: formData.get("description"),
+      price: formData.get("price"),
+      originalPrice: formData.get("originalPrice"),
+      categoryId: formData.get("categoryId"),
+      condition: formData.get("condition"),
+      locationText: formData.get("locationText"),
+      imageUrls,
+    });
 
-  if (!parsed.success) {
-    return {
-      ...initialState,
-      message: parsed.error.issues[0]?.message ?? "商品信息不完整",
-    };
-  }
+    if (!parsed.success) {
+      return {
+        ...initialState,
+        message: parsed.error.issues[0]?.message ?? "商品信息不完整",
+      };
+    }
 
-  const bannedKeyword = await containsBannedKeyword(
-    `${parsed.data.title}\n${parsed.data.description}`,
-  );
+    const bannedKeyword = await containsBannedKeyword(
+      `${parsed.data.title}\n${parsed.data.description}`,
+    );
 
-  if (bannedKeyword) {
-    return {
-      ...initialState,
-      message: `内容命中违规关键词：${bannedKeyword}`,
-    };
-  }
+    if (bannedKeyword) {
+      return {
+        ...initialState,
+        message: `内容命中违规关键词：${bannedKeyword}`,
+      };
+    }
 
-  const seller = await prisma.user.findUnique({
-    where: { id: user.id },
-    select: { campusId: true },
-  });
+    const seller = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { campusId: true },
+    });
 
-  if (!seller) {
-    return { ...initialState, message: "用户不存在" };
-  }
+    if (!seller) {
+      return { ...initialState, message: "用户不存在" };
+    }
 
-  const category = await prisma.productCategory.findUnique({
-    where: { id: parsed.data.categoryId },
-    select: { id: true, isActive: true },
-  });
-
-  if (!category || !category.isActive) {
-    return { ...initialState, message: "商品分类不存在或已停用" };
-  }
-
-  const product = await prisma.product.create({
-    data: {
-      title: parsed.data.title,
-      description: parsed.data.description,
-      price: decimalValue(parsed.data.price),
-      originalPrice: parsed.data.originalPrice
-        ? decimalValue(parsed.data.originalPrice)
-        : null,
-      categoryId: parsed.data.categoryId,
-      condition: parsed.data.condition,
-      locationText: parsed.data.locationText,
-      campusId: seller.campusId,
-      sellerId: user.id,
-      images: {
-        create: parsed.data.imageUrls.map((url, index) => ({
-          url,
-          sortOrder: index,
-        })),
-      },
-    },
-  });
-
-  revalidateProductViews(product.id);
-
-  return {
-    success: true,
-    message: "商品发布成功",
-    redirectTo: `/products/${product.id}`,
-  };
-}
-
-export async function updateProduct(
-  _prevState: ProductActionState | null,
-  formData: FormData,
-): Promise<ProductActionState> {
-  const user = await requireUser();
-  const productId = String(formData.get("productId") ?? "");
-  const imageUrls = await extractImageUrls(formData);
-
-  const parsed = productFormSchema.safeParse({
-    title: formData.get("title"),
-    description: formData.get("description"),
-    price: formData.get("price"),
-    originalPrice: formData.get("originalPrice"),
-    categoryId: formData.get("categoryId"),
-    condition: formData.get("condition"),
-    locationText: formData.get("locationText"),
-    imageUrls,
-  });
-
-  if (!productId) {
-    return { ...initialState, message: "商品不存在" };
-  }
-
-  if (!parsed.success) {
-    return {
-      ...initialState,
-      message: parsed.error.issues[0]?.message ?? "商品信息不完整",
-    };
-  }
-
-  const bannedKeyword = await containsBannedKeyword(
-    `${parsed.data.title}\n${parsed.data.description}`,
-  );
-
-  if (bannedKeyword) {
-    return {
-      ...initialState,
-      message: `内容命中违规关键词：${bannedKeyword}`,
-    };
-  }
-
-  const [existingProduct, category] = await Promise.all([
-    prisma.product.findFirst({
-      where: {
-        id: productId,
-        sellerId: user.id,
-        deletedAt: null,
-      },
-      select: { id: true },
-    }),
-    prisma.productCategory.findUnique({
+    const category = await prisma.productCategory.findUnique({
       where: { id: parsed.data.categoryId },
       select: { id: true, isActive: true },
-    }),
-  ]);
+    });
 
-  if (!existingProduct) {
-    return { ...initialState, message: "无权修改该商品" };
-  }
+    if (!category || !category.isActive) {
+      return { ...initialState, message: "商品分类不存在或已停用" };
+    }
 
-  if (!category || !category.isActive) {
-    return { ...initialState, message: "商品分类不存在或已停用" };
-  }
-
-  await prisma.$transaction([
-    prisma.product.update({
-      where: { id: productId },
+    const product = await prisma.product.create({
       data: {
         title: parsed.data.title,
         description: parsed.data.description,
@@ -202,60 +107,168 @@ export async function updateProduct(
         categoryId: parsed.data.categoryId,
         condition: parsed.data.condition,
         locationText: parsed.data.locationText,
+        campusId: seller.campusId,
+        sellerId: user.id,
+        images: {
+          create: parsed.data.imageUrls.map((url, index) => ({
+            url,
+            sortOrder: index,
+          })),
+        },
       },
-    }),
-    prisma.productImage.deleteMany({
-      where: { productId },
-    }),
-    prisma.productImage.createMany({
-      data: parsed.data.imageUrls.map((url, index) => ({
-        productId,
-        url,
-        sortOrder: index,
-      })),
-    }),
-  ]);
+    });
 
-  revalidateProductViews(productId);
+    revalidateProductViews(product.id);
 
-  return {
-    success: true,
-    message: "商品已更新",
-    redirectTo: `/products/${productId}`,
-  };
+    return {
+      success: true,
+      message: "商品发布成功",
+      redirectTo: `/products/${product.id}`,
+    };
+  } catch (error) {
+    return { ...initialState, message: actionErrorMessage(error, "createProduct") };
+  }
+}
+
+export async function updateProduct(
+  _prevState: ProductActionState | null,
+  formData: FormData,
+): Promise<ProductActionState> {
+  try {
+    const user = await requireUser();
+    const productId = String(formData.get("productId") ?? "");
+    const imageUrls = await extractImageUrls(formData);
+
+    const parsed = productFormSchema.safeParse({
+      title: formData.get("title"),
+      description: formData.get("description"),
+      price: formData.get("price"),
+      originalPrice: formData.get("originalPrice"),
+      categoryId: formData.get("categoryId"),
+      condition: formData.get("condition"),
+      locationText: formData.get("locationText"),
+      imageUrls,
+    });
+
+    if (!productId) {
+      return { ...initialState, message: "商品不存在" };
+    }
+
+    if (!parsed.success) {
+      return {
+        ...initialState,
+        message: parsed.error.issues[0]?.message ?? "商品信息不完整",
+      };
+    }
+
+    const bannedKeyword = await containsBannedKeyword(
+      `${parsed.data.title}\n${parsed.data.description}`,
+    );
+
+    if (bannedKeyword) {
+      return {
+        ...initialState,
+        message: `内容命中违规关键词：${bannedKeyword}`,
+      };
+    }
+
+    const [existingProduct, category] = await Promise.all([
+      prisma.product.findFirst({
+        where: {
+          id: productId,
+          sellerId: user.id,
+          deletedAt: null,
+        },
+        select: { id: true },
+      }),
+      prisma.productCategory.findUnique({
+        where: { id: parsed.data.categoryId },
+        select: { id: true, isActive: true },
+      }),
+    ]);
+
+    if (!existingProduct) {
+      return { ...initialState, message: "无权修改该商品" };
+    }
+
+    if (!category || !category.isActive) {
+      return { ...initialState, message: "商品分类不存在或已停用" };
+    }
+
+    await prisma.$transaction([
+      prisma.product.update({
+        where: { id: productId },
+        data: {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          price: decimalValue(parsed.data.price),
+          originalPrice: parsed.data.originalPrice
+            ? decimalValue(parsed.data.originalPrice)
+            : null,
+          categoryId: parsed.data.categoryId,
+          condition: parsed.data.condition,
+          locationText: parsed.data.locationText,
+        },
+      }),
+      prisma.productImage.deleteMany({
+        where: { productId },
+      }),
+      prisma.productImage.createMany({
+        data: parsed.data.imageUrls.map((url, index) => ({
+          productId,
+          url,
+          sortOrder: index,
+        })),
+      }),
+    ]);
+
+    revalidateProductViews(productId);
+
+    return {
+      success: true,
+      message: "商品已更新",
+      redirectTo: `/products/${productId}`,
+    };
+  } catch (error) {
+    return { ...initialState, message: actionErrorMessage(error, "updateProduct") };
+  }
 }
 
 export async function updateProductStatus(formData: FormData) {
-  const user = await requireUser();
+  try {
+    const user = await requireUser();
 
-  const parsed = productStatusSchema.safeParse({
-    productId: formData.get("productId"),
-    status: formData.get("status"),
-  });
+    const parsed = productStatusSchema.safeParse({
+      productId: formData.get("productId"),
+      status: formData.get("status"),
+    });
 
-  if (!parsed.success) {
-    return;
+    if (!parsed.success) {
+      return;
+    }
+
+    const product = await prisma.product.findFirst({
+      where: {
+        id: parsed.data.productId,
+        sellerId: user.id,
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+
+    if (!product) {
+      return;
+    }
+
+    await prisma.product.update({
+      where: { id: parsed.data.productId },
+      data: { status: parsed.data.status },
+    });
+
+    revalidateProductViews(parsed.data.productId);
+  } catch (error) {
+    actionErrorMessage(error, "updateProductStatus");
   }
-
-  const product = await prisma.product.findFirst({
-    where: {
-      id: parsed.data.productId,
-      sellerId: user.id,
-      deletedAt: null,
-    },
-    select: { id: true },
-  });
-
-  if (!product) {
-    return;
-  }
-
-  await prisma.product.update({
-    where: { id: parsed.data.productId },
-    data: { status: parsed.data.status },
-  });
-
-  revalidateProductViews(parsed.data.productId);
 }
 
 export async function deleteProduct(formData: FormData) {
@@ -279,61 +292,70 @@ export async function deleteProduct(formData: FormData) {
     redirect("/my/products");
   }
 
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      status: "OFFLINE",
-      deletedAt: new Date(),
-    },
-  });
+  try {
+    await prisma.product.update({
+      where: { id: productId },
+      data: {
+        status: "OFFLINE",
+        deletedAt: new Date(),
+      },
+    });
 
-  revalidateProductViews(productId);
+    revalidateProductViews(productId);
+  } catch (error) {
+    actionErrorMessage(error, "deleteProduct");
+  }
+
   redirect("/my/products");
 }
 
 export async function toggleFavorite(formData: FormData) {
-  const user = await requireUser();
-  const productId = String(formData.get("productId") ?? "");
+  try {
+    const user = await requireUser();
+    const productId = String(formData.get("productId") ?? "");
 
-  if (!productId) {
-    return;
+    if (!productId) {
+      return;
+    }
+
+    const product = await prisma.product.findFirst({
+      where: {
+        id: productId,
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+
+    if (!product) {
+      return;
+    }
+
+    // 同一事务内的删除/新建 + 计数增减，并发下保持一致
+    await withTransaction(async (tx) =>
+      applyFavoriteToggle({
+        deleteFavorite: () =>
+          tx.favorite.deleteMany({
+            where: { userId: user.id, productId },
+          }),
+        createFavorite: () =>
+          tx.favorite.create({
+            data: { userId: user.id, productId },
+          }),
+        decrementCount: () =>
+          tx.product.update({
+            where: { id: productId },
+            data: { favoriteCount: { decrement: 1 } },
+          }),
+        incrementCount: () =>
+          tx.product.update({
+            where: { id: productId },
+            data: { favoriteCount: { increment: 1 } },
+          }),
+      }),
+    );
+
+    revalidateProductViews(productId);
+  } catch (error) {
+    actionErrorMessage(error, "toggleFavorite");
   }
-
-  const product = await prisma.product.findFirst({
-    where: {
-      id: productId,
-      deletedAt: null,
-    },
-    select: { id: true },
-  });
-
-  if (!product) {
-    return;
-  }
-
-  // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-  await prisma.$transaction(async (tx) =>
-    applyFavoriteToggle({
-      deleteFavorite: () =>
-        tx.favorite.deleteMany({
-          where: { userId: user.id, productId },
-        }),
-      createFavorite: () =>
-        tx.favorite.create({
-          data: { userId: user.id, productId },
-        }),
-      decrementCount: () =>
-        tx.product.update({
-          where: { id: productId },
-          data: { favoriteCount: { decrement: 1 } },
-        }),
-      incrementCount: () =>
-        tx.product.update({
-          where: { id: productId },
-          data: { favoriteCount: { increment: 1 } },
-        }),
-    }),
-  );
-
-  revalidateProductViews(productId);
 }

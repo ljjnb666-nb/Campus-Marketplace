@@ -3,6 +3,7 @@ import type { NextAuthOptions } from "next-auth";
 import { getServerSession } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { z } from "zod";
+import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
 
@@ -67,7 +68,7 @@ export const authOptions: NextAuthOptions = {
 
         if (limited) {
           // 与密码错误同样返回 null，不向客户端泄露限流状态
-          console.warn(`Login rate limit exceeded for ${rateLimitKey}`);
+          logger.warn("登录限流触发", "auth", { rateLimitKey });
           return null;
         }
 
