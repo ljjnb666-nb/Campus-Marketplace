@@ -11,6 +11,10 @@ const {
   blockedUserFindUnique,
   productFindMany,
   serviceListingFindMany,
+  errandTaskFindMany,
+  rentalListingFindMany,
+  orderFindMany,
+  rentalOrderFindMany,
 } = vi.hoisted(() => ({
   conversationParticipantFindMany: vi.fn(),
   conversationParticipantUpdateMany: vi.fn(),
@@ -22,6 +26,10 @@ const {
   blockedUserFindUnique: vi.fn(),
   productFindMany: vi.fn(),
   serviceListingFindMany: vi.fn(),
+  errandTaskFindMany: vi.fn(),
+  rentalListingFindMany: vi.fn(),
+  orderFindMany: vi.fn(),
+  rentalOrderFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -48,6 +56,18 @@ vi.mock("@/lib/prisma", () => ({
     serviceListing: {
       findMany: serviceListingFindMany,
     },
+    errandTask: {
+      findMany: errandTaskFindMany,
+    },
+    rentalListing: {
+      findMany: rentalListingFindMany,
+    },
+    order: {
+      findMany: orderFindMany,
+    },
+    rentalOrder: {
+      findMany: rentalOrderFindMany,
+    },
   },
 }));
 
@@ -69,6 +89,10 @@ describe("conversation repository", () => {
     blockedUserFindUnique.mockReset();
     productFindMany.mockReset();
     serviceListingFindMany.mockReset();
+    errandTaskFindMany.mockReset();
+    rentalListingFindMany.mockReset();
+    orderFindMany.mockReset();
+    rentalOrderFindMany.mockReset();
   });
 
   it("counts unread conversations with a single distinct query instead of per-conversation lookups", async () => {
@@ -457,5 +481,267 @@ describe("conversation repository", () => {
       where: { conversationId: "conversation-1", userId: "user-1" },
       data: { lastReadAt: expect.any(Date) },
     });
+  });
+
+  it("marks errand conversations with active order state", async () => {
+    conversationFindMany.mockResolvedValue([
+      {
+        id: "conversation-errand",
+        title: null,
+        productId: null,
+        errandTaskId: "errand-1",
+        serviceListingId: null,
+        rentalListingId: null,
+        orderId: null,
+        rentalOrderId: null,
+        createdAt: new Date("2026-07-16T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+      },
+    ]);
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-errand",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学" },
+      },
+      {
+        conversationId: "conversation-errand",
+        userId: "publisher-1",
+        joinedAt: new Date(),
+        user: { id: "publisher-1", name: "发布者", schoolName: "示例大学" },
+      },
+    ]);
+    messageFindMany.mockResolvedValue([]);
+    messageGroupBy.mockResolvedValue([]);
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+    errandTaskFindMany.mockResolvedValue([
+      { id: "errand-1", title: "帮我取快递", reward: { toString: () => "5" }, status: "IN_PROGRESS" },
+    ]);
+
+    const items = await getConversationListItems("user-1");
+
+    expect(items[0].bizType).toBe("ERRAND");
+    expect(items[0].bizTitle).toBe("帮我取快递");
+    expect(items[0].hasActiveOrder).toBe(true);
+  });
+
+  it("exposes order conversations with an active flag while pending", async () => {
+    conversationFindMany.mockResolvedValue([
+      {
+        id: "conversation-order",
+        title: null,
+        productId: null,
+        errandTaskId: null,
+        serviceListingId: null,
+        rentalListingId: null,
+        orderId: "order-1",
+        rentalOrderId: null,
+        createdAt: new Date("2026-07-16T10:00:00.000Z"),
+        updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+      },
+    ]);
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-order",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学" },
+      },
+      {
+        conversationId: "conversation-order",
+        userId: "seller-1",
+        joinedAt: new Date(),
+        user: { id: "seller-1", name: "卖家", schoolName: "示例大学" },
+      },
+    ]);
+    messageFindMany.mockResolvedValue([]);
+    messageGroupBy.mockResolvedValue([]);
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+    orderFindMany.mockResolvedValue([
+      { id: "order-1", orderNo: "CM2026082100000001", amount: 30, status: "PENDING", type: "PRODUCT" },
+    ]);
+
+    const items = await getConversationListItems("user-1");
+
+    expect(items[0].bizType).toBe("PRODUCT_ORDER");
+    expect(items[0].bizTitle).toBe("订单：CM2026082100000001");
+    expect(items[0].hasActiveOrder).toBe(true);
+
+    orderFindMany.mockResolvedValue([
+      { id: "order-1", orderNo: "CM2026082100000001", amount: 30, status: "COMPLETED", type: "PRODUCT" },
+    ]);
+    const completed = await getConversationListItems("user-1");
+    expect(completed[0].hasActiveOrder).toBe(false);
+  });
+
+  it("pushes the search keyword into the database query and filters by type in memory", async () => {
+    conversationFindMany.mockResolvedValue([
+      {
+        id: "conversation-a",
+        title: null,
+        productId: "product-1",
+        errandTaskId: null,
+        serviceListingId: null,
+        rentalListingId: null,
+        orderId: null,
+        rentalOrderId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-a",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学" },
+      },
+      {
+        conversationId: "conversation-a",
+        userId: "seller-1",
+        joinedAt: new Date(),
+        user: { id: "seller-1", name: "卖家甲", schoolName: "示例大学" },
+      },
+    ]);
+    messageFindMany.mockResolvedValue([]);
+    messageGroupBy.mockResolvedValue([]);
+    productFindMany.mockResolvedValue([{ id: "product-1", title: "高等数学教材", images: [] }]);
+    serviceListingFindMany.mockResolvedValue([]);
+
+    // 搜索已下推：where 中包含标题/昵称/消息内容的 OR 谓词
+    const items = await getConversationListItems("user-1", { search: "教材" });
+    expect(conversationFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          participants: { some: { userId: "user-1" } },
+          OR: expect.arrayContaining([
+            expect.objectContaining({ title: { contains: "教材", mode: "insensitive" } }),
+            expect.objectContaining({ participants: expect.anything() }),
+            expect.objectContaining({ messages: expect.anything() }),
+          ]),
+        }),
+      }),
+    );
+    expect(items.map((item) => item.id)).toEqual(["conversation-a"]);
+
+    // filterType ALL 保留全部
+    const all = await getConversationListItems("user-1", { filterType: "ALL" });
+    expect(all).toHaveLength(1);
+
+    // filterType 不匹配时内存过滤掉
+    const none = await getConversationListItems("user-1", { filterType: "ERRAND" });
+    expect(none).toHaveLength(0);
+  });
+
+  it("builds a rental-order relatedBiz snapshot in the detail payload", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-rental-order",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: "rental-order-1",
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-rental-order",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-rental-order",
+        userId: "owner-1",
+        joinedAt: new Date(),
+        user: { id: "owner-1", name: "出租者", schoolName: "示例大学", verificationStatus: "VERIFIED" },
+      },
+    ]);
+    messageFindMany
+      .mockResolvedValueOnce([]) // hydrate: 最后一条消息
+      .mockResolvedValueOnce([]); // 分页消息
+    messageGroupBy.mockResolvedValue([]);
+    blockedUserFindUnique.mockResolvedValue({ id: "block-1" });
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+    rentalOrderFindMany.mockResolvedValue([
+      { id: "rental-order-1", orderNumber: "RT2026082100000001", finalAmount: 40, status: "IN_RENTAL" },
+    ]);
+
+    const payload = await getConversationDetailPayload("conversation-rental-order", "user-1");
+
+    expect(payload?.bizType).toBe("RENTAL_ORDER");
+    expect(payload?.relatedBiz).toEqual({
+      type: "RENTAL_ORDER",
+      id: "rental-order-1",
+      title: "租赁订单 (RT2026082100000001)",
+      priceText: "总额 ¥40.00",
+      detailUrl: "/rental-orders/rental-order-1",
+    });
+    // 拉黑状态双向查询
+    expect(payload?.counterpart.isBlockedByMe).toBe(true);
+    expect(payload?.counterpart.hasBlockedMe).toBe(true);
+  });
+
+  it("paginates messages with a next cursor when more exist", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-1",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-1",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-1",
+        userId: "seller-1",
+        joinedAt: new Date(),
+        user: { id: "seller-1", name: "卖家", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+    ]);
+    const messages = Array.from({ length: 3 }, (_, i) => ({
+      id: `message-${i + 1}`,
+      conversationId: "conversation-1",
+      senderId: "seller-1",
+      type: "DIRECT",
+      content: `消息 ${i + 1}`,
+      isRead: true,
+      createdAt: new Date(`2026-07-17T09:3${i}:00.000Z`),
+      sender: { id: "seller-1", name: "卖家", avatarUrl: null },
+    }));
+    messageFindMany
+      .mockResolvedValueOnce([]) // hydrate
+      .mockResolvedValueOnce(messages); // take: limit + 1 → 3 条，limit=2
+    messageGroupBy.mockResolvedValue([]);
+    blockedUserFindUnique.mockResolvedValue(null);
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+
+    const payload = await getConversationDetailPayload("conversation-1", "user-1", undefined, 2);
+
+    // 倒序取 limit+1 条，数组末尾一条被弹出作为向上翻页的 cursor
+    expect(payload?.messages.map((m) => m.id)).toEqual(["message-2", "message-1"]);
+    expect(payload?.nextCursor).toBe("message-3");
   });
 });
