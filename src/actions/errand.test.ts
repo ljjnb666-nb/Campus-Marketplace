@@ -100,6 +100,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import {
@@ -338,6 +339,315 @@ describe("errand actions", () => {
 
     await expect(deleteErrand(formData)).rejects.toThrow("REDIRECT:/my/errands");
 
+    expect(errandTaskUpdate).not.toHaveBeenCalled();
+  });
+
+  it("creates an errand with campus scope and notifications", async () => {
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+    errandTaskCreate.mockResolvedValue({ id: "errand-new" });
+
+    const result = await createErrand(
+      { success: false, message: "" },
+      buildValidErrandFormData(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(errandTaskCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        title: "帮我取快递",
+        campusId: "campus-1",
+        publisherId: "user-1",
+      }),
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/errands");
+  });
+
+  it("rejects errand creation that hits a banned keyword", async () => {
+    containsBannedKeyword.mockResolvedValue("代考");
+
+    const result = await createErrand(
+      { success: false, message: "" },
+      buildValidErrandFormData(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("代考");
+    expect(errandTaskCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects errand creation with invalid form data", async () => {
+    const formData = buildValidErrandFormData();
+    formData.set("reward", "not-a-number");
+
+    const result = await createErrand({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(containsBannedKeyword).not.toHaveBeenCalled();
+  });
+
+  it("claims an open errand and creates an accepted order for the runner", async () => {
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "publisher-1",
+      accepterId: null,
+      status: "OPEN",
+      reward: 8,
+    });
+    txOrderCreate.mockResolvedValue({ id: "order-1" });
+
+    const formData = new FormData();
+    formData.set("errandId", "errand-1");
+
+    await claimErrand(formData);
+
+    expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+      where: { id: "errand-1", status: "OPEN", accepterId: null },
+      data: { accepterId: "user-1", status: "CLAIMED" },
+    });
+    expect(txOrderCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "ERRAND",
+        status: "ACCEPTED",
+        buyerId: "publisher-1",
+        sellerId: "user-1",
+        errandTaskId: "errand-1",
+      }),
+    });
+    expect(createNotifications).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([
+        expect.objectContaining({ userId: "publisher-1" }),
+        expect.objectContaining({ userId: "user-1" }),
+      ]),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
+  });
+
+  it("ignores claims for missing or non-open errands", async () => {
+    errandTaskFindFirst.mockResolvedValue(null);
+    const formData = new FormData();
+    formData.set("errandId", "errand-1");
+    await claimErrand(formData);
+    expect(transactionMock).not.toHaveBeenCalled();
+
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "publisher-1",
+      accepterId: "runner-9",
+      status: "OPEN",
+      reward: 8,
+    });
+    await claimErrand(formData);
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("lets the accepter start a claimed errand", async () => {
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "publisher-1",
+      accepterId: "user-1",
+      status: "CLAIMED",
+    });
+    txOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      buyerId: "publisher-1",
+      sellerId: "user-1",
+    });
+
+    await updateErrandStatus(buildErrandStatusFormData("IN_PROGRESS"));
+
+    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      data: { status: "IN_PROGRESS" },
+    });
+    expect(txOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: { status: "IN_PROGRESS" },
+    });
+  });
+
+  it("lets the accepter submit the errand for confirmation", async () => {
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "publisher-1",
+      accepterId: "user-1",
+      status: "IN_PROGRESS",
+    });
+    txOrderFindFirst.mockResolvedValue(null);
+
+    await updateErrandStatus(buildErrandStatusFormData("PENDING_CONFIRMATION"));
+
+    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      data: { status: "PENDING_CONFIRMATION" },
+    });
+    // 没有关联订单时仅更新任务并通知
+    expect(txOrderUpdate).not.toHaveBeenCalled();
+  });
+
+  it("completes the errand and bumps both counters", async () => {
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "user-1",
+      accepterId: "runner-1",
+      status: "PENDING_CONFIRMATION",
+    });
+    txOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      buyerId: "user-1",
+      sellerId: "runner-1",
+    });
+
+    await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
+
+    expect(txOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: { status: "COMPLETED", completedAt: expect.any(Date) },
+    });
+    expect(txUserUpdate).toHaveBeenNthCalledWith(1, {
+      where: { id: "user-1" },
+      data: { completedOrdersCount: { increment: 1 } },
+    });
+    expect(txUserUpdate).toHaveBeenNthCalledWith(2, {
+      where: { id: "runner-1" },
+      data: { completedOrdersCount: { increment: 1 } },
+    });
+  });
+
+  it("ignores status changes that violate the state machine", async () => {
+    // 接单者不能直接完成任务
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "publisher-1",
+      accepterId: "user-1",
+      status: "IN_PROGRESS",
+    });
+
+    await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
+
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("ignores invalid status payloads", async () => {
+    const formData = new FormData();
+    formData.set("errandId", "errand-1");
+    formData.set("status", "NOT_A_STATUS");
+
+    await updateErrandStatus(formData);
+
+    expect(errandTaskFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("creates an errand with advance pay fields when requested", async () => {
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+    errandTaskCreate.mockResolvedValue({ id: "errand-adv" });
+
+    const formData = buildValidErrandFormData();
+    formData.set("needsAdvancePay", "true");
+    formData.set("advanceAmount", "12.5");
+
+    const result = await createErrand({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(true);
+    expect(errandTaskCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        needsAdvancePay: true,
+        advanceAmount: expect.anything(),
+        contactNote: "到了发消息",
+      }),
+    });
+  });
+
+  it("rejects errand creation with a past deadline", async () => {
+    const formData = buildValidErrandFormData();
+    formData.set("deadline", "2020-01-01T10:00");
+
+    const result = await createErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "截止时间必须晚于当前时间" });
+    expect(errandTaskCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects errand creation when the publisher record is missing", async () => {
+    userFindUnique.mockResolvedValue(null);
+
+    const result = await createErrand({ success: false, message: "" }, buildValidErrandFormData());
+
+    expect(result).toEqual({ success: false, message: "用户不存在" });
+  });
+
+  it("updates an open errand for its publisher", async () => {
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", status: "OPEN" });
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-1");
+    formData.set("title", "帮我取顺丰快递");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({
+      success: true,
+      message: "任务已更新",
+      redirectTo: "/errands/errand-1",
+    });
+    expect(errandTaskUpdate).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      data: expect.objectContaining({ title: "帮我取顺丰快递" }),
+    });
+  });
+
+  it("rejects updates without an errand id", async () => {
+    const result = await updateErrand({ success: false, message: "" }, buildValidErrandFormData());
+
+    expect(result).toEqual({ success: false, message: "任务不存在" });
+  });
+
+  it("rejects updates with a past deadline", async () => {
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-1");
+    formData.set("deadline", "2020-01-01T10:00");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "截止时间必须晚于当前时间" });
+  });
+
+  it("rejects updates for errands owned by others", async () => {
+    errandTaskFindFirst.mockResolvedValue(null);
+
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-2");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "无权修改该任务" });
+  });
+
+  it("rejects updates that hit a banned keyword", async () => {
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", status: "OPEN" });
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+    containsBannedKeyword.mockResolvedValue("刷单");
+
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-1");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("刷单");
     expect(errandTaskUpdate).not.toHaveBeenCalled();
   });
 });

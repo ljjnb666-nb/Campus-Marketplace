@@ -72,4 +72,17 @@ describe("notification actions", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/notifications");
     expect(revalidatePath).toHaveBeenCalledWith("/profile");
   });
+
+  it("ignores requests without a notification id", async () => {
+    await markNotificationRead(new FormData());
+
+    expect(notificationUpdateMany).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("does not throw when the database update fails", async () => {
+    notificationUpdateMany.mockRejectedValue(new Error("db down"));
+
+    await expect(markAllNotificationsRead()).resolves.toBeUndefined();
+  });
 });

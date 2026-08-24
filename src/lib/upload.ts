@@ -169,6 +169,13 @@ export async function saveUploadedImage(
   const fileName = `${Date.now()}-${randomUUID()}${extension}`;
   const outputPath = path.join(targetDirectory, fileName);
 
+  // 纵深防御：文件名由时间戳+UUID+白名单扩展名拼成，不含任何用户输入；
+  // 仍然校验最终路径落在上传根目录内，杜绝一切路径穿越形态。
+  const uploadRoot = path.resolve(resolveUploadRoot());
+  if (!path.resolve(outputPath).startsWith(uploadRoot + path.sep)) {
+    throw new Error("非法的存储路径");
+  }
+
   await mkdir(targetDirectory, { recursive: true });
   await writeFile(outputPath, Buffer.from(fileBytes));
 

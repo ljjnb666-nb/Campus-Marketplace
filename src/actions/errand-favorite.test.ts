@@ -47,6 +47,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import {

@@ -26,22 +26,33 @@ describe("upload helpers", () => {
   });
 
   it("writes uploaded files into the configured upload directory", async () => {
+    // JPEG 文件头: FF D8 FF E0 + 最小 JFIF 段
+    const jpegHeader = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46,
+      0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
+    ]);
     const file = {
-      name: "avatar.png",
-      size: 6,
-      type: "image/png",
-      arrayBuffer: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]).buffer),
+      name: "avatar.jpg",
+      size: jpegHeader.length,
+      type: "image/jpeg",
+      arrayBuffer: vi.fn().mockResolvedValue(jpegHeader.buffer),
     } as unknown as File;
 
     const result = await saveUploadedImage(file, "avatar");
 
-    expect(result).toMatch(/^\/uploads\/avatar\/.+\.png$/);
+    expect(result).toMatch(/^\/uploads\/avatar\/.+\.jpg$/);
     expect(result).not.toBeNull();
 
-    const fileName = result!.split("/").pop();
-    const writtenPath = path.resolve(process.cwd(), "./.tmp-test-uploads/avatars", fileName!);
+    // 文件名由服务端生成，先断言只含安全字符再用固定目录拼接，防路径拼接误用
+    const fileName = result!.split("/").pop()!;
+    expect(fileName).toMatch(/^[0-9a-f-]+\.jpg$/);
+    const writtenPath = path.join(
+      path.resolve(process.cwd(), "./.tmp-test-uploads"),
+      "avatars",
+      fileName,
+    );
 
     await expect(access(writtenPath)).resolves.toBeUndefined();
-    await expect(readFile(writtenPath)).resolves.toEqual(Buffer.from([1, 2, 3]));
+    await expect(readFile(writtenPath)).resolves.toEqual(Buffer.from(jpegHeader));
   });
 });

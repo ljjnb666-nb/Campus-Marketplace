@@ -82,4 +82,25 @@ describe("VerificationPage", () => {
     expect(screen.getByText(/提交说明：/)).toBeTruthy();
     expect(screen.getByText(/学生证材料目前通过图片链接提交/)).toBeTruthy();
   });
+
+  it("shows placeholders for users without any verification record", async () => {
+    requireUser.mockResolvedValue({ id: "user-1" });
+    getProfileDashboard.mockResolvedValue({
+      user: {
+        verificationStatus: "UNVERIFIED",
+        schoolName: null,
+        campus: { name: "主校区" },
+        studentIdLast4: null,
+        verification: null,
+      },
+    });
+
+    render(await VerificationPage());
+
+    expect(screen.getByText("未认证")).toBeTruthy();
+    expect(screen.getAllByText("校区：主校区").length).toBeGreaterThan(0);
+    expect(screen.getByText("学号后四位：未填写")).toBeTruthy();
+    expect(screen.getByText("提交时间：暂无")).toBeTruthy();
+    expect(screen.getByText("审核时间：暂无")).toBeTruthy();
+  });
 });

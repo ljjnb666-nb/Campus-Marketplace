@@ -59,6 +59,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import { submitVerification, updateProfile } from "@/actions/user";
@@ -183,6 +184,92 @@ describe("user actions", () => {
       create: expect.objectContaining({
         studentCardImage: "/uploads/verification/student-card.jpg",
       }),
+    });
+  });
+
+  it("rejects verification submissions with invalid form data", async () => {
+    const formData = new FormData();
+    formData.set("schoolName", "示例大学");
+    formData.set("campusName", "主校区");
+    formData.set("studentIdLast4", "12");
+    formData.set("studentCardImage", "/uploads/verification/card.jpg");
+
+    const result = await submitVerification({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a friendly message when verification submission fails", async () => {
+    const formData = new FormData();
+    formData.set("schoolName", "示例大学");
+    formData.set("campusName", "主校区");
+    formData.set("studentIdLast4", "1234");
+    formData.set("studentCardImage", "/uploads/verification/card.jpg");
+    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const result = await submitVerification({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+  });
+
+  it("rejects profile updates with invalid form data", async () => {
+    const formData = new FormData();
+    formData.set("name", "");
+    formData.set("bio", "");
+    formData.set("college", "");
+    formData.set("grade", "");
+    formData.set("phone", "");
+    formData.set("avatarUrl", "");
+
+    const result = await updateProfile({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns a friendly message when the profile update fails", async () => {
+    const formData = new FormData();
+    formData.set("name", "李同学");
+    formData.set("bio", "大三");
+    formData.set("college", "信息学院");
+    formData.set("grade", "2023");
+    formData.set("phone", "");
+    formData.set("avatarUrl", "");
+    userUpdate.mockRejectedValue(new Error("db down"));
+
+    const result = await updateProfile({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+  });
+
+  it("updates the avatar through an uploaded file", async () => {
+    saveUploadedImage.mockResolvedValue("/uploads/avatar/me.jpg");
+    const formData = new FormData();
+    formData.set("name", "李同学");
+    formData.set("bio", "");
+    formData.set("college", "");
+    formData.set("grade", "");
+    formData.set("phone", "");
+    formData.set(
+      "avatarFile",
+      new File(["binary"], "me.png", { type: "image/png" }),
+    );
+
+    const result = await updateProfile({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(true);
+    expect(saveUploadedImage).toHaveBeenCalledWith(expect.any(File), "avatar");
+    expect(userUpdate).toHaveBeenCalledWith({
+      where: { id: "user-1" },
+      data: expect.objectContaining({
+        name: "李同学",
+        avatarUrl: "/uploads/avatar/me.jpg",
+        bio: null,
+      }),
+      select: expect.anything(),
     });
   });
 });

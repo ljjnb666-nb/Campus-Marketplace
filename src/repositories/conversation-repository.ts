@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 export type BizType =
@@ -247,12 +248,29 @@ export async function getConversationListItems(
     limit?: number;
   },
 ): Promise<ConversationListItem[]> {
-  const conversations = await prisma.conversation.findMany({
-    where: {
-      participants: {
-        some: { userId },
-      },
+  // 搜索条件下推到数据库 where（标题/对方昵称/任意消息内容），
+  // 避免先全量水合 50 条会话再在内存里逐条过滤。
+  const where: Prisma.ConversationWhereInput = {
+    participants: {
+      some: { userId },
     },
+    ...(options?.search
+      ? {
+          OR: [
+            { title: { contains: options.search, mode: "insensitive" } },
+            {
+              participants: {
+                some: { user: { name: { contains: options.search, mode: "insensitive" } } },
+              },
+            },
+            { messages: { some: { content: { contains: options.search, mode: "insensitive" } } } },
+          ],
+        }
+      : {}),
+  };
+
+  const conversations = await prisma.conversation.findMany({
+    where,
     orderBy: { updatedAt: "desc" },
     take: resolveConversationListLimit(options?.limit),
   });
@@ -306,16 +324,7 @@ export async function getConversationListItems(
       hasActiveOrder = !["COMPLETED", "CANCELLED", "REJECTED", "CLOSED"].includes(conv.rentalOrder.status);
     }
 
-    // 搜索过滤
-    if (options?.search) {
-      const q = options.search.toLowerCase();
-      const matchName = counterpart?.name.toLowerCase().includes(q);
-      const matchTitle = bizTitle.toLowerCase().includes(q);
-      const matchMsg = lastMessage?.content.toLowerCase().includes(q);
-      if (!matchName && !matchTitle && !matchMsg) continue;
-    }
-
-    // 类型过滤
+    // 类型过滤（bizType 为水合后的派生值，只能在内存过滤）
     if (options?.filterType && options.filterType !== "ALL") {
       if (options.filterType !== bizType) continue;
     }

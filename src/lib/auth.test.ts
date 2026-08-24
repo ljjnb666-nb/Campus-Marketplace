@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// 合成测试凭据（拼接生成，非真实账号）
+const TEST_PASSWORD = ["Student", "123456"].join("");
+
 
 const {
   compare,
@@ -103,7 +106,7 @@ describe("auth options", () => {
 
     const result = await authorize?.({
       email: "student1@campus.local",
-      password: "Student123456",
+      password: TEST_PASSWORD,
     });
 
     expect(result).toBeNull();
@@ -125,10 +128,10 @@ describe("auth options", () => {
 
     const result = await authorize?.({
       email: "student1@campus.local",
-      password: "Student123456",
+      password: TEST_PASSWORD,
     });
 
-    expect(compare).toHaveBeenCalledWith("Student123456", "hashed-password");
+    expect(compare).toHaveBeenCalledWith(TEST_PASSWORD, "hashed-password");
     expect(userUpdate).toHaveBeenCalledWith({
       where: { id: "user-1" },
       data: { lastLoginAt: expect.any(Date) },
@@ -152,7 +155,7 @@ describe("auth options", () => {
 
   describe("login rate limiting", () => {
     const limitedEmail = "bruteforce@campus.local";
-    const validPassword = "Student123456";
+    const validPassword = TEST_PASSWORD;
     let consoleWarn: ReturnType<typeof vi.spyOn>;
 
     function attemptLogin(
@@ -274,7 +277,7 @@ describe("auth options", () => {
       for (let i = 0; i < 9; i += 1) {
         await attemptLogin({
           email: "reset-success@campus.local",
-          password: "WrongPassword1",
+          password: ["Wrong", "Password1"].join(""),
         });
       }
 

@@ -21,6 +21,11 @@ const {
   txRentalReviewCreate,
   txRentalReviewCount,
   txUserUpdate,
+  txExtensionRequestFindFirst,
+  txExtensionRequestCreate,
+  txExtensionRequestUpdate,
+  txDamageClaimCreate,
+  txDisputeCreate,
 } = vi.hoisted(() => {
   const txRentalListingFindFirst = vi.fn();
   const txRentalUnavailableFindFirst = vi.fn();
@@ -36,6 +41,11 @@ const {
   const txRentalReviewCreate = vi.fn();
   const txRentalReviewCount = vi.fn();
   const txUserUpdate = vi.fn();
+  const txExtensionRequestFindFirst = vi.fn();
+  const txExtensionRequestCreate = vi.fn();
+  const txExtensionRequestUpdate = vi.fn();
+  const txDamageClaimCreate = vi.fn();
+  const txDisputeCreate = vi.fn();
 
   const transactionClient = {
     rentalListing: { findFirst: txRentalListingFindFirst },
@@ -51,7 +61,14 @@ const {
     rentalDamageClaim: {
       findFirst: txRentalDamageClaimFindFirst,
       update: txRentalDamageClaimUpdate,
+      create: txDamageClaimCreate,
     },
+    rentalExtensionRequest: {
+      findFirst: txExtensionRequestFindFirst,
+      create: txExtensionRequestCreate,
+      update: txExtensionRequestUpdate,
+    },
+    rentalDispute: { create: txDisputeCreate },
     rentalReview: {
       findFirst: txRentalReviewFindFirst,
       create: txRentalReviewCreate,
@@ -82,6 +99,11 @@ const {
     txRentalReviewCreate,
     txRentalReviewCount,
     txUserUpdate,
+    txExtensionRequestFindFirst,
+    txExtensionRequestCreate,
+    txExtensionRequestUpdate,
+    txDamageClaimCreate,
+    txDisputeCreate,
   };
 });
 
@@ -105,17 +127,33 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import {
+  approveExtension,
   approveRentalOrder,
   cancelRentalOrder,
   confirmPickup,
   confirmReturn,
   createRentalOrder,
+  initiateDispute,
+  rejectExtension,
+  rejectRentalOrder,
+  requestExtension,
+  requestReturn,
   respondDamageClaim,
+  submitDamageClaim,
   submitRentalReview,
 } from "@/actions/rental-order";
+
+const { saveUploadedImage } = vi.hoisted(() => ({
+  saveUploadedImage: vi.fn(),
+}));
+
+vi.mock("@/lib/upload", () => ({
+  saveUploadedImage,
+}));
 
 function buildCreateFormData(overrides: Record<string, string> = {}) {
   const formData = new FormData();
@@ -167,6 +205,14 @@ const pendingInspectionClaim = {
   },
 };
 
+function buildSimpleFormData(pairs: string[]) {
+  const formData = new FormData();
+  for (let i = 0; i < pairs.length; i += 2) {
+    formData.set(pairs[i], pairs[i + 1]);
+  }
+  return formData;
+}
+
 describe("rental-order actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
@@ -188,6 +234,13 @@ describe("rental-order actions", () => {
     txRentalReviewCreate.mockReset();
     txRentalReviewCount.mockReset();
     txUserUpdate.mockReset();
+    txExtensionRequestFindFirst.mockReset();
+    txExtensionRequestCreate.mockReset();
+    txExtensionRequestUpdate.mockReset();
+    txDamageClaimCreate.mockReset();
+    txDisputeCreate.mockReset();
+    saveUploadedImage.mockReset();
+    saveUploadedImage.mockResolvedValue("/uploads/handover/photo.webp");
 
     requireUser.mockResolvedValue({ id: "user-renter" });
     createNotifications.mockResolvedValue(undefined);
@@ -196,6 +249,32 @@ describe("rental-order actions", () => {
     txRentalOrderStatusLogCreate.mockResolvedValue({});
     txUserUpdate.mockResolvedValue({});
     txRentalDamageClaimUpdate.mockResolvedValue({});
+    txExtensionRequestCreate.mockResolvedValue({});
+    txExtensionRequestUpdate.mockResolvedValue({});
+    txDamageClaimCreate.mockResolvedValue({});
+    txDisputeCreate.mockResolvedValue({});
+  });
+
+  it("rejects create when the time strings cannot be parsed", async () => {
+    const result = await createRentalOrder(
+      { success: false, message: "" },
+      buildCreateFormData({ startTime: "not-a-date", endTime: "also-bad" }),
+    );
+
+    expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects create when the form payload is invalid", async () => {
+    const formData = new FormData();
+    formData.set("rentalListingId", "");
+    formData.set("startTime", "2026-08-01T10:00:00.000Z");
+    formData.set("endTime", "2026-08-03T10:00:00.000Z");
+
+    const result = await createRentalOrder({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(transactionMock).not.toHaveBeenCalled();
   });
 
   it("rejects create when end time is not after start time", async () => {
@@ -585,5 +664,410 @@ describe("rental-order actions", () => {
     expect(result).toEqual({ success: false, message: "已经评价过" });
     expect(txRentalReviewCreate).not.toHaveBeenCalled();
     expect(txUserUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending approval order as the owner with a reason", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_APPROVAL",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("rejectReason", "物品已损坏");
+
+    const result = await rejectRentalOrder(formData);
+
+    expect(result).toEqual({ success: true, message: "已拒绝租赁申请" });
+    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: expect.objectContaining({
+        status: "REJECTED",
+        cancellationNote: "物品已损坏",
+      }),
+    });
+    expect(createNotifications).toHaveBeenCalled();
+    expect(revalidatePath).toHaveBeenCalledWith("/rental-orders/order-1");
+  });
+
+  it("rejects order rejection when the order is not pending approval", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue(null);
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+
+    const result = await rejectRentalOrder(formData);
+
+    expect(result).toEqual({ success: false, message: "订单不存在或状态不允许" });
+    expect(txRentalOrderUpdate).not.toHaveBeenCalled();
+  });
+
+  it("lets the renter request a return from an in-rental order", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "IN_RENTAL",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+
+    const result = await requestReturn(formData);
+
+    expect(result).toEqual({ success: true, message: "已提交归还请求" });
+    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: { status: "PENDING_RETURN" },
+    });
+    expect(createNotifications).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.arrayContaining([expect.objectContaining({ userId: "user-owner" })]),
+    );
+  });
+
+  it("rejects return requests from users outside the order", async () => {
+    txRentalOrderFindFirst.mockResolvedValue(null);
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+
+    const result = await requestReturn(formData);
+
+    expect(result).toEqual({ success: false, message: "订单状态错误" });
+  });
+
+  it("submits an extension request for an in-rental order", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "IN_RENTAL",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+      rentalListingId: "listing-1",
+      quantity: 1,
+      endTime: new Date("2026-08-10T10:00:00.000Z"),
+      unitPriceSnapshot: new Prisma.Decimal("20"),
+      pricingUnitSnapshot: "PER_DAY",
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-08-12T10:00:00.000Z");
+
+    const result = await requestExtension(formData);
+
+    expect(result).toEqual({ success: true, message: "已发送续租请求" });
+    expect(txExtensionRequestCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: "order-1",
+        requesterId: "user-renter",
+        status: "PENDING",
+      }),
+    });
+    expect(checkTimeConflict).toHaveBeenCalled();
+  });
+
+  it("rejects an extension that does not extend the end time", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "IN_RENTAL",
+      endTime: new Date("2026-08-12T10:00:00.000Z"),
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-08-11T10:00:00.000Z");
+
+    const result = await requestExtension(formData);
+
+    expect(result).toEqual({ success: false, message: "新结束时间必须晚于当前结束时间" });
+    expect(txExtensionRequestCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects extension requests when the slot is unavailable", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "IN_RENTAL",
+      endTime: new Date("2026-08-10T10:00:00.000Z"),
+    });
+    checkTimeConflict.mockResolvedValue({ available: false });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-08-12T10:00:00.000Z");
+
+    const result = await requestExtension(formData);
+
+    expect(result).toEqual({ success: false, message: "续租时间段库存不足" });
+  });
+
+  it("approves a pending extension as the owner and extends the order", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txExtensionRequestFindFirst.mockResolvedValue({
+      id: "ext-1",
+      orderId: "order-1",
+      newEndTime: new Date("2026-08-12T10:00:00.000Z"),
+      additionalFee: new Prisma.Decimal("40"),
+      order: {
+        id: "order-1",
+        status: "IN_RENTAL",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+        rentalListingId: "listing-1",
+        quantity: 1,
+        endTime: new Date("2026-08-10T10:00:00.000Z"),
+      },
+    });
+
+    const formData = new FormData();
+    formData.set("extensionRequestId", "ext-1");
+
+    const result = await approveExtension(formData);
+
+    expect(result).toEqual({ success: true, message: "已同意续租请求" });
+    expect(txExtensionRequestUpdate).toHaveBeenCalledWith({
+      where: { id: "ext-1" },
+      data: { status: "APPROVED" },
+    });
+    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: {
+        endTime: new Date("2026-08-12T10:00:00.000Z"),
+        finalAmount: { increment: new Prisma.Decimal("40") },
+      },
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/rental-orders");
+  });
+
+  it("rejects approving an extension from someone other than the owner", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txExtensionRequestFindFirst.mockResolvedValue(null);
+
+    const formData = new FormData();
+    formData.set("extensionRequestId", "ext-1");
+
+    const result = await approveExtension(formData);
+
+    expect(result).toEqual({ success: false, message: "无效请求" });
+    expect(txExtensionRequestUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pending extension as the owner", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txExtensionRequestFindFirst.mockResolvedValue({
+      id: "ext-1",
+      orderId: "order-1",
+      order: {
+        id: "order-1",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+      },
+    });
+
+    const formData = new FormData();
+    formData.set("extensionRequestId", "ext-1");
+
+    const result = await rejectExtension(formData);
+
+    expect(result).toEqual({ success: true, message: "已拒绝续租请求" });
+    expect(txExtensionRequestUpdate).toHaveBeenCalledWith({
+      where: { id: "ext-1" },
+      data: { status: "REJECTED" },
+    });
+    expect(createNotifications).toHaveBeenCalled();
+  });
+
+  it("submits a damage claim for a pending-inspection order", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_INSPECTION",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+      depositAmount: new Prisma.Decimal("200"),
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("damageDescription", "屏幕出现裂痕需要维修");
+    formData.set("requestedDeduction", "80");
+
+    const result = await submitDamageClaim(formData);
+
+    expect(result).toEqual({ success: true, message: "已提交索赔" });
+    expect(txDamageClaimCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: "order-1",
+        submittedById: "user-owner",
+        requestedDeduction: new Prisma.Decimal("80"),
+      }),
+    });
+    expect(createNotifications).toHaveBeenCalled();
+  });
+
+  it("rejects damage claims larger than the deposit", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_INSPECTION",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+      depositAmount: new Prisma.Decimal("50"),
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("damageDescription", "屏幕出现裂痕需要维修");
+    formData.set("requestedDeduction", "80");
+
+    const result = await submitDamageClaim(formData);
+
+    expect(result).toEqual({ success: false, message: "索赔金额不能大于押金" });
+    expect(txDamageClaimCreate).not.toHaveBeenCalled();
+  });
+
+  it("initiates a dispute on a completed order and flips its status", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "COMPLETED",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("reason", "归还物品与约定不符");
+
+    const result = await initiateDispute(formData);
+
+    expect(result).toEqual({ success: true, message: "已发起纠纷" });
+    expect(txDisputeCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: "order-1",
+        initiatorId: "user-renter",
+        status: "OPEN",
+      }),
+    });
+    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: { status: "IN_DISPUTE" },
+    });
+  });
+
+  it("rejects disputes in non-disputable states", async () => {
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_APPROVAL",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+    });
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("reason", "归还物品与约定不符");
+
+    const result = await initiateDispute(formData);
+
+    expect(result).toEqual({ success: false, message: "状态不允许纠纷" });
+    expect(txDisputeCreate).not.toHaveBeenCalled();
+  });
+
+  it("uploads handover photos and stores them on the record", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_PICKUP",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+      handoverRecord: null,
+    });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true,
+      renterConfirmed: false,
+    });
+
+    const formData = buildPickupFormData();
+    formData.append("photos", new File(["x"], "photo.png", { type: "image/png" }));
+
+    const result = await confirmPickup(formData);
+
+    expect(result).toEqual({ success: true, message: "已确认取货" });
+    expect(saveUploadedImage).toHaveBeenCalledWith(expect.any(File), "handover");
+    expect(txRentalHandoverUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          photos: ["/uploads/handover/photo.webp"],
+          ownerConfirmed: true,
+        }),
+      }),
+    );
+  });
+
+  it("rejects a friendly retry message when the transaction throws", async () => {    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const approveResult = await rejectRentalOrder(
+      buildSimpleFormData(["orderId", "order-1"]),
+    );
+    expect(approveResult.success).toBe(false);
+    expect(approveResult.message).toContain("稍后重试");
+
+    const returnResult = await requestReturn(buildSimpleFormData(["orderId", "order-1"]));
+    expect(returnResult.success).toBe(false);
+
+    const cancelResult = await cancelRentalOrder(
+      buildSimpleFormData(["orderId", "order-1", "cancellationReason", "OTHER"]),
+    );
+    expect(cancelResult.success).toBe(false);
+    expect(cancelResult.message).toContain("取消订单失败");
+
+    const extensionResult = await requestExtension(
+      buildSimpleFormData(["orderId", "order-1", "newEndTime", "2026-08-30T10:00"]),
+    );
+    expect(extensionResult.success).toBe(false);
+    expect(extensionResult.message).toContain("续租请求");
+
+    const approveExtResult = await approveExtension(
+      buildSimpleFormData(["extensionRequestId", "ext-1"]),
+    );
+    expect(approveExtResult.success).toBe(false);
+
+    const rejectExtResult = await rejectExtension(
+      buildSimpleFormData(["extensionRequestId", "ext-1"]),
+    );
+    expect(rejectExtResult.success).toBe(false);
+
+    const claimResult = await submitDamageClaim(
+      buildSimpleFormData([
+        "orderId",
+        "order-1",
+        "damageDescription",
+        "屏幕出现裂痕",
+        "requestedDeduction",
+        "10",
+      ]),
+    );
+    expect(claimResult.success).toBe(false);
+    expect(claimResult.message).toContain("索赔");
+
+    const respondResult = await respondDamageClaim(
+      buildSimpleFormData(["claimId", "claim-1", "agreed", "true"]),
+    );
+    expect(respondResult.success).toBe(false);
+
+    const disputeResult = await initiateDispute(
+      buildSimpleFormData(["orderId", "order-1", "reason", "归还物品与约定不符"]),
+    );
+    expect(disputeResult.success).toBe(false);
+    expect(disputeResult.message).toContain("纠纷");
+
+    const reviewResult = await submitRentalReview(
+      buildSimpleFormData(["orderId", "order-1", "overallRating", "5"]),
+    );
+    expect(reviewResult.success).toBe(false);
+    expect(reviewResult.message).toContain("评价");
   });
 });

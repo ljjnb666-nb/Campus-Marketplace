@@ -80,6 +80,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import {
@@ -87,6 +88,7 @@ import {
   deleteProduct,
   toggleFavorite,
   updateProduct,
+  updateProductStatus,
 } from "@/actions/product";
 
 function buildValidProductFormData() {
@@ -310,6 +312,172 @@ describe("product actions", () => {
 
       expect(productFindFirst).not.toHaveBeenCalled();
       expect(transactionMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("createProduct 补充分支", () => {
+    it("creates a product with campus scope and image ordering", async () => {
+      productCategoryFindUnique.mockResolvedValue({ id: "category-1", isActive: true });
+
+      const result = await createProduct(null, buildValidProductFormData());
+
+      expect(result).toEqual({
+        success: true,
+        message: "商品发布成功",
+        redirectTo: "/products/product-1",
+      });
+      expect(productCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          title: "九成新概率论教材",
+          campusId: "campus-1",
+          sellerId: "user-1",
+          originalPrice: expect.anything(),
+          images: {
+            create: [{ url: "https://example.com/textbook.jpg", sortOrder: 0 }],
+          },
+        }),
+      });
+      expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
+    });
+
+    it("rejects creation that hits a banned keyword", async () => {
+      containsBannedKeyword.mockResolvedValue("代考");
+
+      const result = await createProduct(null, buildValidProductFormData());
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("代考");
+      expect(productCreate).not.toHaveBeenCalled();
+    });
+
+    it("rejects creation with invalid form data", async () => {
+      const formData = buildValidProductFormData();
+      formData.set("price", "abc");
+
+      const result = await createProduct(null, formData);
+
+      expect(result.success).toBe(false);
+      expect(containsBannedKeyword).not.toHaveBeenCalled();
+    });
+
+    it("rejects creation when the seller record is missing", async () => {
+      userFindUnique.mockResolvedValue(null);
+
+      const result = await createProduct(null, buildValidProductFormData());
+
+      expect(result).toEqual({ success: false, message: "用户不存在" });
+    });
+
+    it("returns a friendly message when creation throws", async () => {
+      productCategoryFindUnique.mockResolvedValue({ id: "category-1", isActive: true });
+      productCreate.mockRejectedValue(new Error("db down"));
+
+      const result = await createProduct(null, buildValidProductFormData());
+
+      expect(result.success).toBe(false);
+      expect(result.message).toBeTruthy();
+    });
+  });
+
+  describe("updateProduct 补充分支", () => {
+    it("updates an owned product and replaces images in one transaction", async () => {
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+      productCategoryFindUnique.mockResolvedValue({ id: "category-1", isActive: true });
+
+      const formData = buildValidProductFormData();
+      formData.set("productId", "product-1");
+
+      const result = await updateProduct(null, formData);
+
+      expect(result.success).toBe(true);
+      expect(result.redirectTo).toBe("/products/product-1");
+      expect(productUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "product-1" },
+          data: expect.objectContaining({ title: "九成新概率论教材" }),
+        }),
+      );
+      expect(productImageDeleteMany).toHaveBeenCalledWith({
+        where: { productId: "product-1" },
+      });
+      expect(productImageCreateMany).toHaveBeenCalledWith({
+        data: [
+          { productId: "product-1", url: "https://example.com/textbook.jpg", sortOrder: 0 },
+        ],
+      });
+    });
+
+    it("rejects updates without a product id", async () => {
+      const result = await updateProduct(null, buildValidProductFormData());
+
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects updates for products owned by others", async () => {
+      productFindFirst.mockResolvedValue(null);
+      productCategoryFindUnique.mockResolvedValue({ id: "category-1", isActive: true });
+
+      const formData = buildValidProductFormData();
+      formData.set("productId", "product-2");
+
+      const result = await updateProduct(null, formData);
+
+      expect(result.success).toBe(false);
+      expect(productUpdate).not.toHaveBeenCalled();
+    });
+
+    it("rejects updates with invalid form data", async () => {
+      const formData = buildValidProductFormData();
+      formData.set("title", "短");
+      formData.set("productId", "product-1");
+
+      const result = await updateProduct(null, formData);
+
+      expect(result.success).toBe(false);
+      expect(productFindFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("updateProductStatus", () => {
+    function statusFormData(status: string) {
+      const formData = new FormData();
+      formData.set("productId", "product-1");
+      formData.set("status", status);
+      return formData;
+    }
+
+    it("updates the status of an owned product", async () => {
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+
+      await updateProductStatus(statusFormData("OFFLINE"));
+
+      expect(productUpdate).toHaveBeenCalledWith({
+        where: { id: "product-1" },
+        data: { status: "OFFLINE" },
+      });
+      expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
+    });
+
+    it("ignores invalid statuses", async () => {
+      await updateProductStatus(statusFormData("BANNED"));
+
+      expect(productFindFirst).not.toHaveBeenCalled();
+    });
+
+    it("ignores products owned by others", async () => {
+      productFindFirst.mockResolvedValue(null);
+
+      await updateProductStatus(statusFormData("OFFLINE"));
+
+      expect(productUpdate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("deleteProduct 补充分支", () => {
+    it("redirects when deleting without a product id", async () => {
+      await expect(deleteProduct(new FormData())).rejects.toThrow("REDIRECT:/my/products");
+
+      expect(productFindFirst).not.toHaveBeenCalled();
     });
   });
 });

@@ -63,7 +63,7 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
-import { createService, deleteService, updateService } from "@/actions/service";
+import { createService, deleteService, updateService, updateServiceStatus } from "@/actions/service";
 
 function buildValidServiceFormData() {
   const formData = new FormData();
@@ -207,5 +207,140 @@ describe("service actions", () => {
     await expect(deleteService(formData)).rejects.toThrow("REDIRECT:/my/services");
 
     expect(serviceListingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("redirects when deleting without a service id", async () => {
+    const formData = new FormData();
+
+    await expect(deleteService(formData)).rejects.toThrow("REDIRECT:/my/services");
+
+    expect(serviceListingFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("creates a service with parsed fields and campus of the provider", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+
+    const result = await createService({ success: false, message: "" }, buildValidServiceFormData());
+
+    expect(result).toEqual({
+      success: true,
+      message: "服务已发布",
+      redirectTo: "/services/service-1",
+    });
+    expect(serviceListingCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        title: "高数一对一辅导",
+        categoryId: "service-category-1",
+        pricingUnit: "PER_HOUR",
+        campusId: "campus-1",
+        providerId: "user-1",
+      }),
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/services/service-1");
+  });
+
+  it("rejects service creation with invalid form data", async () => {
+    const formData = buildValidServiceFormData();
+    formData.set("price", "not-a-number");
+
+    const result = await createService({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+    expect(containsBannedKeyword).not.toHaveBeenCalled();
+  });
+
+  it("rejects service creation when the provider record is missing", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    userFindUnique.mockResolvedValue(null);
+
+    const result = await createService({ success: false, message: "" }, buildValidServiceFormData());
+
+    expect(result).toEqual({ success: false, message: "用户不存在" });
+  });
+
+  it("returns a friendly message when creation throws", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    serviceListingCreate.mockRejectedValue(new Error("db down"));
+
+    const result = await createService({ success: false, message: "" }, buildValidServiceFormData());
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+  });
+
+  it("rejects service update without a service id", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+
+    const result = await updateService({ success: false, message: "" }, buildValidServiceFormData());
+
+    expect(result).toEqual({ success: false, message: "服务不存在" });
+  });
+
+  it("rejects service update when the category is inactive", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    serviceListingFindFirst.mockResolvedValue({ id: "service-1" });
+    serviceCategoryFindFirst.mockResolvedValue(null);
+
+    const formData = buildValidServiceFormData();
+    formData.set("serviceId", "service-1");
+
+    const result = await updateService({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "服务分类不存在或已停用" });
+    expect(serviceListingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects service update with invalid form data", async () => {
+    const formData = buildValidServiceFormData();
+    formData.set("title", "短");
+    formData.set("serviceId", "service-1");
+
+    const result = await updateService({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+    expect(serviceListingFindFirst).not.toHaveBeenCalled();
+  });
+
+  describe("updateServiceStatus", () => {
+    it("updates the status of an owned service", async () => {
+      serviceListingFindFirst.mockResolvedValue({ id: "service-1" });
+
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+      formData.set("status", "PAUSED");
+
+      await updateServiceStatus(formData);
+
+      expect(serviceListingUpdate).toHaveBeenCalledWith({
+        where: { id: "service-1" },
+        data: { status: "PAUSED" },
+      });
+      expect(revalidatePath).toHaveBeenCalledWith("/services/service-1");
+    });
+
+    it("ignores invalid status values", async () => {
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+      formData.set("status", "NOT_A_STATUS");
+
+      await updateServiceStatus(formData);
+
+      expect(serviceListingFindFirst).not.toHaveBeenCalled();
+      expect(serviceListingUpdate).not.toHaveBeenCalled();
+    });
+
+    it("ignores services owned by others", async () => {
+      serviceListingFindFirst.mockResolvedValue(null);
+
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+      formData.set("status", "PAUSED");
+
+      await updateServiceStatus(formData);
+
+      expect(serviceListingUpdate).not.toHaveBeenCalled();
+    });
   });
 });

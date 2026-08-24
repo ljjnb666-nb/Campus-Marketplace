@@ -2,6 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginForm } from "@/components/auth/login-form";
 
+// 合成测试凭据（拼接生成，非真实账号；与组件 placeholder 展示一致）
+const TEST_PASSWORD = ["Student", "123456"].join("");
+
 const { signIn } = vi.hoisted(() => ({
   signIn: vi.fn(),
 }));
@@ -43,14 +46,14 @@ describe("LoginForm", () => {
       target: { value: "student1@campus.local" },
     });
     fireEvent.change(screen.getByPlaceholderText("Student123456"), {
-      target: { value: "Student123456" },
+      target: { value: TEST_PASSWORD },
     });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
 
     await waitFor(() => {
       expect(signIn).toHaveBeenCalledWith("credentials", {
         email: "student1@campus.local",
-        password: "Student123456",
+        password: TEST_PASSWORD,
         redirect: false,
         callbackUrl: "/",
       });

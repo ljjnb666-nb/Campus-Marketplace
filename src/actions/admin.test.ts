@@ -12,6 +12,12 @@ const {
   serviceCategoryUpdate,
   moderationKeywordCreate,
   moderationKeywordUpdate,
+  userVerificationUpdate,
+  userFindUnique,
+  userUpdate,
+  productUpdate,
+  errandTaskUpdate,
+  serviceListingUpdate,
   adminLogCreate,
   createNotification,
   transactionMock,
@@ -27,6 +33,12 @@ const {
   serviceCategoryUpdate: vi.fn(),
   moderationKeywordCreate: vi.fn(),
   moderationKeywordUpdate: vi.fn(),
+  userVerificationUpdate: vi.fn(),
+  userFindUnique: vi.fn(),
+  userUpdate: vi.fn(),
+  productUpdate: vi.fn(),
+  errandTaskUpdate: vi.fn(),
+  serviceListingUpdate: vi.fn(),
   adminLogCreate: vi.fn(),
   createNotification: vi.fn(),
   transactionMock: vi.fn(),
@@ -65,18 +77,39 @@ vi.mock("@/lib/prisma", () => ({
       create: moderationKeywordCreate,
       update: moderationKeywordUpdate,
     },
+    user: {
+      findUnique: userFindUnique,
+      update: userUpdate,
+    },
+    userVerification: {
+      update: userVerificationUpdate,
+    },
+    product: {
+      update: productUpdate,
+    },
+    errandTask: {
+      update: errandTaskUpdate,
+    },
+    serviceListing: {
+      update: serviceListingUpdate,
+    },
     adminLog: {
       create: adminLogCreate,
     },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
 import {
+  moderateListing,
   reviewReport,
+  reviewVerification,
   toggleErrandCategoryStatus,
   toggleModerationKeywordStatus,
+  toggleProductCategoryStatus,
   toggleServiceCategoryStatus,
+  toggleUserStatus,
   upsertErrandCategory,
   upsertModerationKeyword,
   upsertProductCategory,
@@ -96,6 +129,12 @@ describe("admin actions", () => {
     serviceCategoryUpdate.mockReset();
     moderationKeywordCreate.mockReset();
     moderationKeywordUpdate.mockReset();
+    userVerificationUpdate.mockReset();
+    userFindUnique.mockReset();
+    userUpdate.mockReset();
+    productUpdate.mockReset();
+    errandTaskUpdate.mockReset();
+    serviceListingUpdate.mockReset();
     adminLogCreate.mockReset();
     createNotification.mockReset();
     transactionMock.mockReset();
@@ -106,6 +145,21 @@ describe("admin actions", () => {
         },
         adminLog: {
           create: adminLogCreate,
+        },
+        userVerification: {
+          update: userVerificationUpdate,
+        },
+        user: {
+          update: userUpdate,
+        },
+        product: {
+          update: productUpdate,
+        },
+        errandTask: {
+          update: errandTaskUpdate,
+        },
+        serviceListing: {
+          update: serviceListingUpdate,
         },
       }),
     );
@@ -404,5 +458,316 @@ describe("admin actions", () => {
         targetId: "keyword-1",
       },
     });
+  });
+
+  it("approves a verification and notifies the user", async () => {
+    userVerificationUpdate.mockResolvedValue({});
+    userUpdate.mockResolvedValue({});
+
+    const formData = new FormData();
+    formData.set("verificationId", "verification-1");
+    formData.set("userId", "user-2");
+    formData.set("status", "VERIFIED");
+    formData.set("reviewNote", "材料齐全");
+
+    await reviewVerification(formData);
+
+    expect(userVerificationUpdate).toHaveBeenCalledWith({
+      where: { id: "verification-1" },
+      data: expect.objectContaining({ status: "VERIFIED", reviewNote: "材料齐全" }),
+    });
+    expect(userUpdate).toHaveBeenCalledWith({
+      where: { id: "user-2" },
+      data: { verificationStatus: "VERIFIED" },
+    });
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "APPROVE_VERIFICATION",
+        targetType: "USER_VERIFICATION",
+      }),
+    });
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-2", title: "校园认证已通过" }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/admin/verifications");
+  });
+
+  it("rejects a verification with the review note as the reason", async () => {
+    const formData = new FormData();
+    formData.set("verificationId", "verification-1");
+    formData.set("userId", "user-2");
+    formData.set("status", "REJECTED");
+    formData.set("reviewNote", "学生证照片模糊");
+
+    await reviewVerification(formData);
+
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: "校园认证未通过",
+        content: expect.stringContaining("学生证照片模糊"),
+      }),
+    );
+  });
+
+  it("returns an error state for invalid verification input", async () => {
+    const formData = new FormData();
+    formData.set("verificationId", "verification-1");
+    formData.set("userId", "user-2");
+    formData.set("status", "PENDING");
+
+    const result = await reviewVerification(formData);
+
+    expect(result).toEqual({ success: false, error: "参数无效" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("suspends a student account and notifies them", async () => {
+    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "SUSPENDED");
+
+    await toggleUserStatus(formData);
+
+    expect(userUpdate).toHaveBeenCalledWith({
+      where: { id: "user-2" },
+      data: { status: "SUSPENDED" },
+    });
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "SUSPEND_USER", targetId: "user-2" }),
+    });
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-2", title: "账号已被停用" }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/admin/users");
+  });
+
+  it("refuses to suspend the admin's own account or other admins", async () => {
+    const formData = new FormData();
+    formData.set("userId", "admin-1");
+    formData.set("nextStatus", "SUSPENDED");
+
+    let result = await toggleUserStatus(formData);
+    expect(result).toEqual({ success: false, error: "不能停用或恢复自己的账号" });
+
+    userFindUnique.mockResolvedValue({ role: "ADMIN" });
+    formData.set("userId", "admin-2");
+    result = await toggleUserStatus(formData);
+    expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to toggle a missing user", async () => {
+    userFindUnique.mockResolvedValue(null);
+
+    const formData = new FormData();
+    formData.set("userId", "ghost");
+    formData.set("nextStatus", "ACTIVE");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "用户不存在" });
+  });
+
+  it("takes products offline through moderation", async () => {
+    const formData = new FormData();
+    formData.set("targetType", "PRODUCT");
+    formData.set("targetId", "product-1");
+
+    await moderateListing(formData);
+
+    expect(productUpdate).toHaveBeenCalledWith({
+      where: { id: "product-1" },
+      data: { status: "OFFLINE" },
+    });
+    expect(errandTaskUpdate).not.toHaveBeenCalled();
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "MODERATE_LISTING", targetId: "product-1" }),
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/admin/products");
+  });
+
+  it("cancels errand tasks and offlines services through moderation", async () => {
+    let formData = new FormData();
+    formData.set("targetType", "ERRAND");
+    formData.set("targetId", "errand-1");
+    await moderateListing(formData);
+    expect(errandTaskUpdate).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      data: { status: "CANCELLED" },
+    });
+
+    formData = new FormData();
+    formData.set("targetType", "SERVICE");
+    formData.set("targetId", "service-1");
+    await moderateListing(formData);
+    expect(serviceListingUpdate).toHaveBeenCalledWith({
+      where: { id: "service-1" },
+      data: { status: "OFFLINE" },
+    });
+  });
+
+  it("returns an error state for invalid moderation input", async () => {
+    const formData = new FormData();
+    formData.set("targetType", "MESSAGE");
+    formData.set("targetId", "message-1");
+
+    const result = await moderateListing(formData);
+
+    expect(result).toEqual({ success: false, error: "参数无效" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("notifies the reporter with resolved and rejected report copy", async () => {
+    reportUpdate.mockResolvedValue({ reporterId: "user-2" });
+
+    const formData = new FormData();
+    formData.set("reportId", "report-1");
+    formData.set("status", "RESOLVED");
+    formData.set("handledNote", "已下架违规商品");
+
+    await reviewReport(formData);
+
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: "举报已处理",
+        content: "你提交的举报已处理完成。处理说明：已下架违规商品",
+      }),
+    );
+
+    formData.set("status", "REJECTED");
+    formData.set("handledNote", "");
+    await reviewReport(formData);
+
+    expect(createNotification).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        title: "举报处理结果已更新",
+        content: "你提交的举报未通过。如有需要可补充更完整的信息后再次提交。",
+      }),
+    );
+  });
+
+  it("returns an error state when review transactions fail", async () => {
+    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const formData = new FormData();
+    formData.set("verificationId", "verification-1");
+    formData.set("userId", "user-2");
+    formData.set("status", "VERIFIED");
+    formData.set("reviewNote", "");
+
+    const verificationResult = await reviewVerification(formData);
+    expect(verificationResult?.success).toBe(false);
+
+    formData.delete("verificationId");
+    formData.set("reportId", "report-1");
+    formData.set("status", "IN_REVIEW");
+    const reportResult = await reviewReport(formData);
+    expect(reportResult?.success).toBe(false);
+
+    formData.delete("reportId");
+    formData.delete("status");
+    formData.set("targetType", "PRODUCT");
+    formData.set("targetId", "product-1");
+    const moderateResult = await moderateListing(formData);
+    expect(moderateResult?.success).toBe(false);
+  });
+
+  it("returns an error state when toggle user status input is invalid", async () => {
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "BANNED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "参数无效" });
+    expect(userFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("restores a suspended account with a friendly notification", async () => {
+    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "ACTIVE");
+
+    await toggleUserStatus(formData);
+
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ action: "RESTORE_USER", targetId: "user-2" }),
+    });
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-2", title: "账号已恢复正常" }),
+    );
+  });
+
+  it("creates product and service categories with typed admin logs", async () => {
+    const formData = new FormData();
+    formData.set("name", "数码设备");
+    formData.set("slug", "digital");
+    formData.set("description", "数码类商品");
+    formData.set("sortOrder", "1");
+    formData.set("isActive", "true");
+
+    await upsertProductCategory(formData);
+
+    expect(productCategoryCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ name: "数码设备", slug: "digital" }),
+    });
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "CREATE_PRODUCT_CATEGORY",
+        targetType: "PRODUCT_CATEGORY",
+      }),
+    });
+
+    formData.set("name", "编程辅导");
+    formData.set("slug", "coding");
+    await upsertServiceCategory(formData);
+
+    expect(serviceCategoryCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ slug: "coding" }),
+    });
+  });
+
+  it("toggles product category status and records the disable action", async () => {
+    const formData = new FormData();
+    formData.set("categoryId", "category-1");
+    formData.set("isActive", "false");
+
+    await toggleProductCategoryStatus(formData);
+
+    expect(productCategoryUpdate).toHaveBeenCalledWith({
+      where: { id: "category-1" },
+      data: { isActive: false },
+    });
+    expect(adminLogCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: expect.stringContaining("PRODUCT_CATEGORY"),
+      }),
+    });
+  });
+
+  it("updates an existing moderation keyword", async () => {
+    const formData = new FormData();
+    formData.set("keywordId", "keyword-1");
+    formData.set("keyword", "更新后的关键词");
+    formData.set("targetType", "GLOBAL");
+    formData.set("isEnabled", "true");
+
+    await upsertModerationKeyword(formData);
+
+    expect(moderationKeywordUpdate).toHaveBeenCalledWith({
+      where: { id: "keyword-1" },
+      data: expect.objectContaining({ keyword: "更新后的关键词" }),
+    });
+    expect(moderationKeywordCreate).not.toHaveBeenCalled();
   });
 });

@@ -12,14 +12,21 @@ const {
   reportFindFirst,
   reviewAggregate,
   userUpdate,
+  blockedUserUpsert,
+  blockedUserDeleteMany,
   createNotification,
   transactionMock,
   txReviewCreate,
+  txReportCreate,
 } = vi.hoisted(() => {
   const txReviewCreate = vi.fn();
+  const txReportCreate = vi.fn();
   const transactionClient = {
     review: {
       create: txReviewCreate,
+    },
+    report: {
+      create: txReportCreate,
     },
   };
 
@@ -35,11 +42,14 @@ const {
     reportFindFirst: vi.fn(),
     reviewAggregate: vi.fn(),
     userUpdate: vi.fn(),
+    blockedUserUpsert: vi.fn(),
+    blockedUserDeleteMany: vi.fn(),
     createNotification: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
     ),
     txReviewCreate,
+    txReportCreate,
   };
 });
 
@@ -82,11 +92,16 @@ vi.mock("@/lib/prisma", () => ({
     review: {
       aggregate: reviewAggregate,
     },
+    blockedUser: {
+      upsert: blockedUserUpsert,
+      deleteMany: blockedUserDeleteMany,
+    },
     $transaction: transactionMock,
   },
+  withTransaction: transactionMock,
 }));
 
-import { createReport, createReview } from "@/actions/trust";
+import { blockUser, createReport, createReview, unblockUser } from "@/actions/trust";
 
 describe("trust actions", () => {
   beforeEach(() => {
@@ -101,9 +116,12 @@ describe("trust actions", () => {
     reportFindFirst.mockReset();
     reviewAggregate.mockReset();
     userUpdate.mockReset();
+    blockedUserUpsert.mockReset();
+    blockedUserDeleteMany.mockReset();
     createNotification.mockReset();
     transactionMock.mockClear();
     txReviewCreate.mockReset();
+    txReportCreate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT", name: "测试同学" });
     reportFindFirst.mockResolvedValue(null);
@@ -303,5 +321,207 @@ describe("trust actions", () => {
       },
     });
     expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("submits a product report and notifies the reporter", async () => {
+    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1" });
+    txReportCreate.mockResolvedValue({ id: "report-abcdef12345678" });
+
+    const formData = new FormData();
+    formData.set("targetType", "PRODUCT");
+    formData.set("reason", "FAKE_INFO");
+    formData.set("detail", "商品描述与实际不符");
+    formData.set("productId", "product-1");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({
+      success: true,
+      message: "举报已提交，客服人员会尽快审核处理",
+    });
+    expect(txReportCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        reporterId: "user-1",
+        targetType: "PRODUCT",
+        reason: "FAKE_INFO",
+        productId: "product-1",
+      }),
+    });
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-1", type: "REPORT" }),
+    );
+    expect(revalidatePath).toHaveBeenCalledWith("/reports");
+  });
+
+  it("submits a message report against another sender", async () => {
+    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1" });
+    txReportCreate.mockResolvedValue({ id: "report-1" });
+
+    const formData = new FormData();
+    formData.set("targetType", "MESSAGE");
+    formData.set("reason", "HARASSMENT");
+    formData.set("detail", "骚扰消息");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "message-1");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(true);
+    expect(txReportCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ messageId: "message-1" }),
+    });
+  });
+
+  it("blocks another user with an optional reason", async () => {
+    blockedUserUpsert.mockResolvedValue({ id: "block-1" });
+
+    const formData = new FormData();
+    formData.set("targetUserId", "user-2");
+    formData.set("reason", "恶意骚扰");
+
+    const result = await blockUser({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: true, message: "已成功拉黑该用户" });
+    expect(blockedUserUpsert).toHaveBeenCalledWith({
+      where: {
+        blockerId_blockedUserId: { blockerId: "user-1", blockedUserId: "user-2" },
+      },
+      create: expect.objectContaining({ reason: "恶意骚扰" }),
+      update: { reason: "恶意骚扰" },
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/messages");
+  });
+
+  it("refuses to block yourself or a missing target", async () => {
+    let formData = new FormData();
+    formData.set("targetUserId", "user-1");
+    let result = await blockUser({ success: false, message: "" }, formData);
+    expect(result).toEqual({ success: false, message: "无效的拉黑目标" });
+
+    formData = new FormData();
+    result = await blockUser({ success: false, message: "" }, formData);
+    expect(result).toEqual({ success: false, message: "无效的拉黑目标" });
+    expect(blockedUserUpsert).not.toHaveBeenCalled();
+  });
+
+  it("unblocks a previously blocked user", async () => {
+    blockedUserDeleteMany.mockResolvedValue({ count: 1 });
+
+    const formData = new FormData();
+    formData.set("targetUserId", "user-2");
+
+    const result = await unblockUser({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: true, message: "已解除拉黑" });
+    expect(blockedUserDeleteMany).toHaveBeenCalledWith({
+      where: { blockerId: "user-1", blockedUserId: "user-2" },
+    });
+  });
+
+  it("requires a target when unblocking", async () => {
+    const result = await unblockUser({ success: false, message: "" }, new FormData());
+
+    expect(result).toEqual({ success: false, message: "参数缺失" });
+    expect(blockedUserDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it("submits reports against errand tasks and service listings", async () => {
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", publisherId: "publisher-1" });
+    txReportCreate.mockResolvedValue({ id: "report-1" });
+
+    let formData = new FormData();
+    formData.set("targetType", "ERRAND_TASK");
+    formData.set("reason", "FAKE_INFO");
+    formData.set("detail", "任务描述不实");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "errand-1");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "");
+
+    let result = await createReport({ success: false, message: "" }, formData);
+    expect(result.success).toBe(true);
+    expect(txReportCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ errandTaskId: "errand-1" }),
+    });
+
+    serviceListingFindFirst.mockResolvedValue({ id: "service-1", providerId: "provider-1" });
+    formData = new FormData();
+    formData.set("targetType", "SERVICE_LISTING");
+    formData.set("reason", "HARASSMENT");
+    formData.set("detail", "服务内容不当");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "service-1");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "");
+
+    result = await createReport({ success: false, message: "" }, formData);
+    expect(result.success).toBe(true);
+    expect(txReportCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({ serviceListingId: "service-1" }),
+    });
+  });
+
+  it("returns a friendly message when report submission fails", async () => {
+    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1" });
+    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const formData = new FormData();
+    formData.set("targetType", "PRODUCT");
+    formData.set("reason", "FAKE_INFO");
+    formData.set("detail", "描述不实");
+    formData.set("productId", "product-1");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+  });
+
+  it("returns a friendly message when blocking fails", async () => {
+    blockedUserUpsert.mockRejectedValue(new Error("db down"));
+
+    const formData = new FormData();
+    formData.set("targetUserId", "user-2");
+
+    const result = await blockUser({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
+  });
+
+  it("returns a friendly message when the review transaction fails", async () => {
+    orderFindUnique.mockResolvedValue({
+      id: "order-1",
+      status: "COMPLETED",
+      buyerId: "user-1",
+      sellerId: "seller-1",
+      reviews: [],
+    });
+    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("rating", "5");
+    formData.set("content", "很好");
+    formData.set("targetUserId", "seller-1");
+
+    const result = await createReview({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBeTruthy();
   });
 });

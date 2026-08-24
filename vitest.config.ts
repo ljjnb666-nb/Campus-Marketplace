@@ -10,12 +10,12 @@ export default defineConfig({
       include: ["src/**"],
       exclude: ["src/**/*.test.*", "src/**/*.d.ts", "src/types/**"],
       thresholds: {
-        // 实测基线(2026-08-17):lines 66.06 / branches 69.27 / functions 61.95 / statements 66.06,
-        // 门槛按实测值留约 3 个点缓冲设置,只升不降。
-        lines: 63,
-        branches: 66,
-        functions: 59,
-        statements: 63,
+        // 实测(2026-08-21): lines/statements 86.94 / branches 80.04 / functions 81.24，
+        // 统一提升至 80 门槛（用户路线图目标），后续只升不降。
+        lines: 80,
+        branches: 80,
+        functions: 80,
+        statements: 80,
       },
     },
   },
