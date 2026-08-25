@@ -122,12 +122,12 @@ npm run text:verify
 
 ## 文档
 
-- [docs/PRD.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/PRD.md)
-- [docs/ARCHITECTURE.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/ARCHITECTURE.md)
-- [docs/DATABASE.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/DATABASE.md)
-- [docs/API.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/API.md)
-- [docs/SECURITY.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/SECURITY.md)
-- [docs/TODO.md](/C:/Users/LJJ2004/所有项目/校园集市/docs/TODO.md)
+- [docs/PRD.md](docs/PRD.md)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/DATABASE.md](docs/DATABASE.md)
+- [docs/API.md](docs/API.md)
+- [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/TODO.md](docs/TODO.md)
 
 ## 验证状态
 
@@ -136,7 +136,7 @@ npm run text:verify
 - `npm run lint`
 - `npm run typecheck`
 - `npx vitest run`（全量测试）
-- `npm run test:coverage`（覆盖率门槛 lines 63 / branches 66 / functions 59 / statements 63）
+- `npm run test:coverage`（覆盖率门槛全局 80%：lines / branches / functions / statements）
 
 依赖与 lock 文件注意事项：
 
@@ -145,5 +145,6 @@ npm run text:verify
 
 当前测试基线：
 
-- `142` 个测试文件（另有 1 个真实数据库集成测试文件，需 `INTEGRATION_DATABASE_URL` 时才运行）
-- `459` 个测试通过
+- 全量测试约 `850+` 个用例通过，覆盖单元、组件与 API 路由层
+- 另有 1 个真实数据库集成测试文件，需设置 `INTEGRATION_DATABASE_URL` 时才运行
+- 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件，以及会话搜索下推数据库的查询优化
