@@ -108,7 +108,10 @@ export async function createRentalOrderTx(
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
-  // 用行锁（FOR UPDATE）防止并发订单同时通过冲突检测导致重复预订
+  // ⚠️ 维护注意：此处使用 $queryRaw + FOR UPDATE 绕过 Prisma 类型化查询以获取行锁。
+  // 代价是字段列表、返回类型需与 prisma/schema.prisma 的 RentalListing 模型手动同步。
+  // 如果 RentalListing 新增/重命名字段且此处遗漏，TypeScript 不会在编译期报错。
+  // 修改 RentalListing schema 时请同步检查此处的 SELECT 列表。
   const listings = await tx.$queryRaw<Array<{
     id: string; ownerId: string; totalQuantity: number;
     minimumDuration: number; maximumDuration: number;
@@ -127,7 +130,8 @@ export async function createRentalOrderTx(
 
   if (!rawListing) return { error: '出租物品不存在或已下架' };
 
-  // $queryRaw 返回的 Decimal 列是原始类型（string/number），需手动包装为 Prisma.Decimal
+  // ⚠️ $queryRaw 返回的 Decimal 列是原始类型（string/number），pricingUnit 是 string 而非枚举。
+  // 需手动包装为 Prisma.Decimal 和 as RentalPricingUnit，绕开了 TypeScript 的类型保护。
   const listing = {
     ...rawListing,
     price: new Prisma.Decimal(String(rawListing.price)),

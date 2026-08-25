@@ -271,4 +271,19 @@ describe("rental-order-machine", () => {
     expect(tx.rentalDamageClaim.update).not.toHaveBeenCalled();
     expect(tx.rentalOrder.update).not.toHaveBeenCalled();
   });
+
+  // ⚠️ Schema 漂移防护：createRentalOrderTx 使用 $queryRaw 绕过 Prisma 类型化查询，
+  // 手动列举了 RentalListing 的字段。此测试确保这些字段仍存在于 schema 中，
+  // 如果 RentalListing 模型重命名/删除了字段，这个测试会失败提醒开发者同步 raw SQL。
+  it("raw SQL 查询的 RentalListing 字段与 schema 保持同步", () => {
+    const rawSqlFields = [
+      "id", "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
+      "price", "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
+      "requiresApproval", "status", "title",
+    ];
+    const schemaFields = Object.values(Prisma.RentalListingScalarFieldEnum);
+    for (const field of rawSqlFields) {
+      expect(schemaFields, `字段 "${field}" 在 Prisma schema 中不存在，请同步 rental-order-machine.ts 的 raw SQL`).toContain(field);
+    }
+  });
 });
