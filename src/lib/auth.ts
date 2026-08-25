@@ -43,6 +43,8 @@ function resolveLoginRateLimitKey(
 export const authOptions: NextAuthOptions = {
   session: {
     strategy: "jwt",
+    maxAge: 7 * 24 * 60 * 60,   // 7 天（缩短默认的 30 天，降低会话固定攻击窗口）
+    updateAge: 24 * 60 * 60,    // 每 24 小时刷新 JWT
   },
   pages: {
     signIn: "/login",

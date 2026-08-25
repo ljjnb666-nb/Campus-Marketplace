@@ -2,6 +2,18 @@ import { PrismaClient, type Prisma } from "@prisma/client";
 
 const isDev = process.env.NODE_ENV === "development";
 
+// 为 DATABASE_URL 注入连接池参数（Prisma 通过 URL 查询参数控制连接池行为）
+// 仅在 URL 中未显式配置时追加默认值
+function buildDatasourceUrl(): string {
+  const baseUrl = process.env.DATABASE_URL ?? "";
+  const params: string[] = [];
+  if (!baseUrl.includes("connection_limit")) params.push("connection_limit=10");
+  if (!baseUrl.includes("pool_timeout")) params.push("pool_timeout=10");
+  if (params.length === 0) return baseUrl;
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}${params.join("&")}`;
+}
+
 declare global {
   var prisma: PrismaClient | undefined;
 }
@@ -10,6 +22,7 @@ export const prisma =
   global.prisma ??
   new PrismaClient({
     log: isDev ? ["error", "warn", "query"] : ["error"],
+    datasourceUrl: buildDatasourceUrl(),
   });
 
 if (process.env.NODE_ENV !== "production") {

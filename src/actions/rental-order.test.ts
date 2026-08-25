@@ -9,6 +9,7 @@ const {
   transactionMock,
   txRentalListingFindFirst,
   txRentalUnavailableFindFirst,
+  txQueryRaw,
   txRentalOrderCreate,
   txRentalOrderFindFirst,
   txRentalOrderUpdate,
@@ -29,6 +30,7 @@ const {
 } = vi.hoisted(() => {
   const txRentalListingFindFirst = vi.fn();
   const txRentalUnavailableFindFirst = vi.fn();
+  const txQueryRaw = vi.fn();
   const txRentalOrderCreate = vi.fn();
   const txRentalOrderFindFirst = vi.fn();
   const txRentalOrderUpdate = vi.fn();
@@ -48,6 +50,7 @@ const {
   const txDisputeCreate = vi.fn();
 
   const transactionClient = {
+    $queryRaw: txQueryRaw,
     rentalListing: { findFirst: txRentalListingFindFirst },
     rentalUnavailablePeriod: { findFirst: txRentalUnavailableFindFirst },
     rentalOrder: {
@@ -87,6 +90,7 @@ const {
     ),
     txRentalListingFindFirst,
     txRentalUnavailableFindFirst,
+    txQueryRaw,
     txRentalOrderCreate,
     txRentalOrderFindFirst,
     txRentalOrderUpdate,
@@ -221,6 +225,7 @@ describe("rental-order actions", () => {
     checkTimeConflict.mockReset();
     transactionMock.mockClear();
     txRentalListingFindFirst.mockReset();
+    txQueryRaw.mockReset();
     txRentalUnavailableFindFirst.mockReset();
     txRentalOrderCreate.mockReset();
     txRentalOrderFindFirst.mockReset();
@@ -292,20 +297,20 @@ describe("rental-order actions", () => {
   });
 
   it("rejects renting your own listing", async () => {
-    txRentalListingFindFirst.mockResolvedValue({
+    txQueryRaw.mockResolvedValue([{
       id: "listing-1",
       ownerId: "user-renter",
       totalQuantity: 1,
       pricingUnit: "PER_DAY",
       minimumDuration: 1,
       maximumDuration: 30,
-      price: new Prisma.Decimal("20"),
-      depositAmount: new Prisma.Decimal("50"),
+      price: "20",
+      depositAmount: "50",
       requiresApproval: true,
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
-    });
+    }]);
 
     const result = await createRentalOrder(
       { success: false, message: "" },
@@ -319,20 +324,20 @@ describe("rental-order actions", () => {
   });
 
   it("accepts an explicitly empty renter note from the form helper", async () => {
-    txRentalListingFindFirst.mockResolvedValue({
+    txQueryRaw.mockResolvedValue([{
       id: "listing-1",
       ownerId: "user-renter",
       totalQuantity: 1,
       pricingUnit: "PER_DAY",
       minimumDuration: 1,
       maximumDuration: 30,
-      price: new Prisma.Decimal("20"),
-      depositAmount: new Prisma.Decimal("50"),
+      price: "20",
+      depositAmount: "50",
       requiresApproval: true,
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
-    });
+    }]);
 
     const result = await createRentalOrder(
       { success: false, message: "" },
@@ -347,20 +352,20 @@ describe("rental-order actions", () => {
   });
 
   it("creates a pending-approval order for approval listings", async () => {
-    txRentalListingFindFirst.mockResolvedValue({
+    txQueryRaw.mockResolvedValue([{
       id: "listing-1",
       ownerId: "user-owner",
       totalQuantity: 2,
       pricingUnit: "PER_DAY",
       minimumDuration: 1,
       maximumDuration: 30,
-      price: new Prisma.Decimal("20"),
-      depositAmount: new Prisma.Decimal("50"),
+      price: "20",
+      depositAmount: "50",
       requiresApproval: true,
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
-    });
+    }]);
     txRentalUnavailableFindFirst.mockResolvedValue(null);
     txRentalOrderCreate.mockResolvedValue({ id: "order-1" });
     txRentalOrderStatusLogCreate.mockResolvedValue({});

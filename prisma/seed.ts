@@ -8,6 +8,11 @@ import {
 } from "@prisma/client";
 import { hashSync } from "bcryptjs";
 
+if (process.env.NODE_ENV === "production") {
+  console.error("❌ 禁止在生产环境运行 seed 脚本！");
+  process.exit(1);
+}
+
 const prisma = new PrismaClient();
 
 async function main() {

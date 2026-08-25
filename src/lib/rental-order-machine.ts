@@ -1,4 +1,4 @@
-import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus } from "@prisma/client";
+import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
 import { createNotifications } from "@/repositories/notification-repository";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
@@ -107,11 +107,33 @@ export async function createRentalOrderTx(
   },
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
-  const listing = await tx.rentalListing.findFirst({
-    where: { id: input.rentalListingId, deletedAt: null, status: 'AVAILABLE' },
-  });
 
-  if (!listing) return { error: '出租物品不存在或已下架' };
+  // 用行锁（FOR UPDATE）防止并发订单同时通过冲突检测导致重复预订
+  const listings = await tx.$queryRaw<Array<{
+    id: string; ownerId: string; totalQuantity: number;
+    minimumDuration: number; maximumDuration: number;
+    price: unknown; pricingUnit: string; depositAmount: unknown;
+    pickupLocation: string; returnLocation: string;
+    requiresApproval: boolean; status: string; title: string;
+  }>>`
+    SELECT id, "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
+           price, "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
+           "requiresApproval", status, title
+    FROM "RentalListing"
+    WHERE id = ${input.rentalListingId} AND "deletedAt" IS NULL AND status = 'AVAILABLE'
+    FOR UPDATE
+  `;
+  const rawListing = listings[0];
+
+  if (!rawListing) return { error: '出租物品不存在或已下架' };
+
+  // $queryRaw 返回的 Decimal 列是原始类型（string/number），需手动包装为 Prisma.Decimal
+  const listing = {
+    ...rawListing,
+    price: new Prisma.Decimal(String(rawListing.price)),
+    depositAmount: new Prisma.Decimal(String(rawListing.depositAmount)),
+  };
+
   if (listing.ownerId === userId) return { error: '不能租用自己的物品' };
   if (quantity > listing.totalQuantity) return { error: '租赁数量超过可用库存' };
 
@@ -147,7 +169,7 @@ export async function createRentalOrderTx(
       endTime,
       quantity,
       unitPriceSnapshot: listing.price,
-      pricingUnitSnapshot: listing.pricingUnit,
+      pricingUnitSnapshot: listing.pricingUnit as RentalPricingUnit,
       rentalDuration: duration,
       rentalAmount,
       depositAmount,

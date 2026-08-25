@@ -148,3 +148,17 @@ npm run text:verify
 - 全量测试约 `850+` 个用例通过，覆盖单元、组件与 API 路由层
 - 另有 1 个真实数据库集成测试文件，需设置 `INTEGRATION_DATABASE_URL` 时才运行
 - 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件，以及会话搜索下推数据库的查询优化
+
+## 安全加固
+
+最近一轮安全审查修复了以下问题：
+
+| # | 问题 | 修复方式 | 涉及文件 |
+|---|------|----------|----------|
+| 1 | Session 未显式设置有效期 | `maxAge` 缩短至 7 天，`updateAge` 显式声明 24h | `src/lib/auth.ts` |
+| 2 | 数据库连接池未配置 | 自动注入 `connection_limit=10`、`pool_timeout=10` | `src/lib/prisma.ts` |
+| 3 | 租赁订单并发无行锁兜底 | `createRentalOrderTx` 使用 `SELECT ... FOR UPDATE` 行锁 | `src/lib/rental-order-machine.ts` |
+| 4 | 图片上传仅校验 MIME 类型 | 已有文件魔数校验（JPEG/PNG/WebP），无需额外修复 | `src/lib/upload.ts` |
+| 5 | 密码强度无复杂度限制 | 注册 schema 增加大小写字母 + 数字要求 | `src/validators/auth.ts` |
+| 6 | Seed 脚本无生产环境保护 | 入口处检查 `NODE_ENV`，生产环境直接退出 | `prisma/seed.ts` |
+| 7 | 无 CORS 白名单配置 | Middleware 对 `/api/*` 收紧为仅允许同源请求 | `middleware.ts` |
