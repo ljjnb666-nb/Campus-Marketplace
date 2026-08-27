@@ -141,4 +141,15 @@ describe("POST /api/upload/images", () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "图片上传失败" });
   });
+
+  it("hides internal error details when saving throws", async () => {
+    saveUploadedImage.mockRejectedValue(
+      new Error("EACCES: permission denied, open '/uploads/products/photo.jpg'"),
+    );
+
+    const response = await POST(buildUploadRequest());
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "服务器内部错误，请稍后重试" });
+  });
 });

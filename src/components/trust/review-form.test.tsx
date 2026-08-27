@@ -1,4 +1,3 @@
-import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewForm } from "@/components/trust/review-form";

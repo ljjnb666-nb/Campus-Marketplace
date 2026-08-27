@@ -1,4 +1,3 @@
-import "@testing-library/jest-dom/vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HeaderLiveStatus } from "@/components/site/header-live-status";

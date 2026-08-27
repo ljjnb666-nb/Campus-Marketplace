@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { actionErrorMessage } from "@/lib/error-handler";
 import { logger } from "@/lib/logger";
 import { isRateLimited } from "@/lib/rate-limit";
 import { saveUploadedImage, UPLOAD_LIMITS, isUploadCategory } from "@/lib/upload";
@@ -20,7 +21,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { limited } = isRateLimited({
+    const { limited } = await isRateLimited({
       key: session.user.id,
       limit: MAX_REQUESTS_PER_MINUTE,
       windowMs: RATE_LIMIT_WINDOW_MS,
@@ -87,7 +88,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     logger.error("图片上传失败", "POST /api/upload/images", { error });
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "上传失败" },
+      { error: actionErrorMessage(error, "POST /api/upload/images") },
       { status: 500 }
     );
   }

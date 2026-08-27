@@ -1,4 +1,3 @@
-import "@testing-library/jest-dom/vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SendMessageForm } from "@/components/conversation/send-message-form";
