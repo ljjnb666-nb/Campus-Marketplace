@@ -20,8 +20,9 @@
 - React 19
 - TypeScript
 - Tailwind CSS v4
-- Prisma ORM
+- Prisma ORM（挂载软删除统一拦截）
 - PostgreSQL
+- Redis（可选，限流计数外部化，见下方启动说明）
 - Auth.js Credentials 登录
 
 ## 本地启动
@@ -148,9 +149,9 @@ npm run text:verify
 
 当前测试基线：
 
-- 全量测试约 `860+` 个用例通过，覆盖单元、组件与 API 路由层
+- 全量测试约 `890+` 个用例通过（2026-08-27 实测 182 文件 / 894 通过），覆盖单元、组件与 API 路由层
 - 另有真实数据库 / Redis 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL` 时才运行
-- 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件，以及会话搜索下推数据库的查询优化
+- 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；以及安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
 
 ## 安全加固
 

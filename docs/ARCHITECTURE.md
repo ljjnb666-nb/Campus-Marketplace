@@ -12,12 +12,14 @@
 - Next.js Route Handlers 提供少量读取接口
 - Server Actions 承担主要写操作
 - Auth.js Credentials 处理登录与会话
+- `middleware.ts` 承担请求计时（Server-Timing）、CSP nonce 生成（script-src 每请求 nonce + strict-dynamic，见 SECURITY.md）与 API 同源收紧
 
 ## 数据层
 
 - PostgreSQL 作为主数据库
-- Prisma 负责 Schema、迁移与查询
-- 本地通过 Docker Compose 运行数据库容器
+- Prisma 负责 Schema、迁移与查询；导出的客户端挂载软删除统一拦截（`src/lib/prisma-soft-delete.ts`）
+- Redis（可选）作为限流计数的外部存储：配置 `REDIS_URL` 启用多实例共享计数，未配置或故障时回退进程内计数
+- 本地通过 Docker Compose 运行数据库与 Redis 容器
 
 ## 目录职责
 
@@ -25,7 +27,7 @@
 - `src/components`：页面组件与通用 UI
 - `src/actions`：Server Actions（写操作入口）
 - `src/repositories`：读模型查询与数据拼装
-- `src/lib`：认证、上传、审核、限流、订单状态机、工具函数
+- `src/lib`：认证、上传、审核、限流、订单状态机、软删除拦截、工具函数
 - `src/constants`：状态、选项、枚举标签
 - `src/validators`：Zod 校验
 - `prisma`：Schema、迁移、种子数据

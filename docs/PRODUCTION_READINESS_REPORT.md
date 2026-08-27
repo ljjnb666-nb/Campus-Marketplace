@@ -146,7 +146,8 @@ npm run typecheck 失败，存在 10 个类型错误：
 
 **优先级**: P0（安全风险）
 
-**复核状态**: ✅ 已修复 2026-08-17 — 共享限流器 `src/lib/rate-limit.ts`（进程内固定窗口 + 惰性清理）；登录防爆破 10 次/15 分钟（`src/lib/auth.ts` 的 `LOGIN_RATE_LIMIT`），上传接口接入同一限流器。
+**复核状态**: ✅ 已修复 2026-08-17 — 共享限流器 `src/lib/rate-limit.ts`：登录防爆破 10 次/15 分钟（`src/lib/auth.ts` 的 `LOGIN_RATE_LIMIT`），上传接口接入同一限流器。
+✅ 升级 2026-08-27 — 计数存储外部化到 Redis（ioredis + 原子 Lua 固定窗口）：配置 `REDIS_URL` 时多实例共享计数；未配置或 Redis 故障时自动回退进程内计数（单实例语义），注册接口（5 次/小时）同样接入。
 
 ---
 
@@ -399,7 +400,7 @@ npm run typecheck 失败，存在 10 个类型错误：
 2. TypeScript 类型检查失败 — ✅ 已修复 2026-08-17
 3. 测试套件失败 — ✅ 已修复 2026-08-17
 4. 价格参数可被伪造 — ✅ 已修复 2026-08-17（订单金额改为服务端取库）
-5. 缺少全局速率限制 — ✅ 已修复 2026-08-17（共享限流器 + 登录防爆破）
+5. 缺少全局速率限制 — ✅ 已修复 2026-08-17（共享限流器 + 登录防爆破）；✅ 2026-08-27 升级为 Redis 外部化计数（`REDIS_URL` 可选配置 + 本地回退）
 6. Session 固定漏洞 — ✅ 已修复 2026-08-25（maxAge 7 天 + updateAge 24h）
 7. 商品购买竞态条件 — ✅ 已修复 2026-08-17（条件 updateMany 原子预留）
 8. 跑腿接单竞态条件 — ✅ 已修复 2026-08-17（条件 updateMany 原子接单）
@@ -429,9 +430,10 @@ npm run typecheck 失败，存在 10 个类型错误：
 - **收藏接口无鉴权** — ✅ 已修复 2026-08-17：`src/actions/errand-favorite.ts` / `service-favorite.ts` / `rental-favorite.ts` 均先经 `requireUser` / 会话校验再操作。
 - **Action 静默吞错** — ✅ 已修复 2026-08-17：`src/actions/rental-order.ts` 全部路径返回 `RentalOrderActionState`（`{ success, message }`），无静默失败分支。
 - **无 loading / error 边界** — ✅ 已修复 2026-08-17：根 `src/app/error.tsx` + 8 个 `loading.tsx`（admin / errands / 根 / messages / my/orders / products / rentals / services）。
-- **无 CI / 覆盖率门槛** — ✅ 已修复 2026-08-17：`.github/workflows/ci.yml` 存在；`vitest.config.ts` 覆盖率门槛已提升至 lines 63 / branches 66 / functions 59 / statements 63（实测 66.06 / 69.27 / 61.95 / 66.06）。
-- **测试基线陈旧** — ✅ README 测试计数随最新验证轮次维护（本次实测 142 个测试文件、459 通过 + 3 跳过）。
-- **next-auth v4 → v5 / Auth.js 迁移、next/image 全面迁移、应用层 CSP** — ❌ 保持开放：均为较大改造，未在本轮修复范围内动工，需单独立项。
+- **无 CI / 覆盖率门槛** — ✅ 已修复 2026-08-17：`.github/workflows/ci.yml` 存在；`vitest.config.ts` 覆盖率四项硬门槛已统一提升至 80%（2026-08-25，只升不降）。
+- **测试基线陈旧** — ✅ README 测试计数随最新验证轮次维护（2026-08-27 实测 182 个测试文件、894 通过 + 4 跳过；另有真实数据库 / Redis 集成测试按环境变量门控运行）。
+- **next-auth v4 → v5 / Auth.js 迁移、next/image 全面迁移** — ❌ 保持开放：均为较大改造，未在本轮修复范围内动工，需单独立项。
+- **应用层 CSP** — ✅ 已修复 2026-08-27：script-src 采用每请求 nonce + strict-dynamic，由 middleware 按请求生成；style-src 因 React 行内样式保留 inline。
 
 ---
 
@@ -460,11 +462,11 @@ npm run typecheck 失败，存在 10 个类型错误：
 
 #### 第三阶段（上线后优化）
 12. 添加缓存、CDN、监控告警等优化项
-13. next-auth v4 → v5 迁移、next/image 全面迁移、应用层 CSP
+13. next-auth v4 → v5 迁移、next/image 全面迁移 ← 开放；~~应用层 CSP~~ ✅ 2026-08-27（nonce + strict-dynamic）
 14. 图片上传重编码（sharp 等）
 
 ---
 
 **审计完成时间**: 2026-07-19  
-**最近复核时间**: 2026-08-25  
+**最近复核时间**: 2026-08-27
 **下次审计建议**: P1-6（上传存储配额）修复后及正式上线前进行全面复审
