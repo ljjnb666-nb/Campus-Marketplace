@@ -56,3 +56,4 @@ public/uploads/*
 
 # Local tool state
 .mimosa/
+.vscode/
