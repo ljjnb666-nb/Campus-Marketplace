@@ -21,5 +21,19 @@ services:
       timeout: 5s
       retries: 5
 
+  # 限流计数存储（登录/注册/上传）。未配置 REDIS_URL 时应用回退进程内计数，
+  # 仅单实例部署有效；多实例部署必须启动本服务。
+  redis:
+    image: redis:7-alpine
+    container_name: campus-marketplace-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   campus_marketplace_pgdata:

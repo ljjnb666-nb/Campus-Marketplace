@@ -24,7 +24,7 @@ export async function registerUser(
   _prevState: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const { limited } = isRateLimited({
+  const { limited } = await isRateLimited({
     key: `register:${await resolveClientIp()}`,
     limit: REGISTER_RATE_LIMIT,
     windowMs: REGISTER_RATE_LIMIT_WINDOW_MS,

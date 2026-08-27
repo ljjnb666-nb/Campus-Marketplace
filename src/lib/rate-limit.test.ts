@@ -1,93 +1,173 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const { evalFn, delFn } = vi.hoisted(() => ({
+  evalFn: vi.fn(),
+  delFn: vi.fn(),
+}));
+
+vi.mock("ioredis", () => ({
+  Redis: vi.fn().mockImplementation(() => ({
+    eval: evalFn,
+    del: delFn,
+    on: vi.fn(),
+  })),
+}));
+
 import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
+
+type RateLimitGlobal = typeof globalThis & { rateLimitRedis?: unknown };
 
 describe("rate limiter", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    // 默认走本地计数路径；需要 Redis 路径的用例单独覆盖环境变量
+    vi.stubEnv("REDIS_URL", "");
+    (globalThis as RateLimitGlobal).rateLimitRedis = undefined;
+    evalFn.mockReset();
+    delFn.mockReset();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
-  it("allows requests under the limit", () => {
-    const results = Array.from({ length: 5 }, () =>
-      isRateLimited({ key: "under-limit", limit: 10, windowMs: 60000 }),
+  it("counts locally when REDIS_URL is not configured", async () => {
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        isRateLimited({ key: "under-limit", limit: 10, windowMs: 60000 }),
+      ),
     );
 
     expect(results.every((result) => !result.limited)).toBe(true);
     expect(results[0]).toEqual({ limited: false, remaining: 9 });
     expect(results[4]).toEqual({ limited: false, remaining: 5 });
+    expect(evalFn).not.toHaveBeenCalled();
   });
 
-  it("blocks requests once the limit is reached", () => {
+  it("blocks locally once the limit is reached", async () => {
     for (let i = 0; i < 3; i += 1) {
-      isRateLimited({ key: "over-limit", limit: 3, windowMs: 60000 });
-    }
-
-    const blocked = isRateLimited({
-      key: "over-limit",
-      limit: 3,
-      windowMs: 60000,
-    });
-
-    expect(blocked).toEqual({ limited: true, remaining: 0 });
-  });
-
-  it("tracks keys independently", () => {
-    for (let i = 0; i < 3; i += 1) {
-      isRateLimited({ key: "user-a", limit: 3, windowMs: 60000 });
-    }
-
-    const otherUser = isRateLimited({
-      key: "user-b",
-      limit: 3,
-      windowMs: 60000,
-    });
-
-    expect(otherUser).toEqual({ limited: false, remaining: 2 });
-  });
-
-  it("allows requests again after the window expires", () => {
-    for (let i = 0; i < 3; i += 1) {
-      isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 });
+      await isRateLimited({ key: "over-limit", limit: 3, windowMs: 60000 });
     }
 
     expect(
-      isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 }),
+      await isRateLimited({ key: "over-limit", limit: 3, windowMs: 60000 }),
+    ).toEqual({ limited: true, remaining: 0 });
+  });
+
+  it("tracks keys independently", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await isRateLimited({ key: "user-a", limit: 3, windowMs: 60000 });
+    }
+
+    expect(
+      await isRateLimited({ key: "user-b", limit: 3, windowMs: 60000 }),
+    ).toEqual({ limited: false, remaining: 2 });
+  });
+
+  it("allows requests again after the window expires", async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 });
+    }
+
+    expect(
+      await isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 }),
     ).toEqual({ limited: true, remaining: 0 });
 
     vi.advanceTimersByTime(60001);
 
     expect(
-      isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 }),
+      await isRateLimited({ key: "expiry", limit: 3, windowMs: 60000 }),
     ).toEqual({ limited: false, remaining: 2 });
   });
 
-  it("prunes stale keys so the bucket map does not grow forever", () => {
-    isRateLimited({ key: "stale", limit: 2, windowMs: 1000 });
-    isRateLimited({ key: "fresh", limit: 2, windowMs: 60000 });
+  it("prunes stale keys so the bucket map does not grow forever", async () => {
+    await isRateLimited({ key: "stale", limit: 2, windowMs: 1000 });
+    await isRateLimited({ key: "fresh", limit: 2, windowMs: 60000 });
 
     vi.advanceTimersByTime(1001);
-    isRateLimited({ key: "another", limit: 2, windowMs: 60000 });
+    await isRateLimited({ key: "another", limit: 2, windowMs: 60000 });
 
     // "stale" 已过期并被顺带清理，重新计数而不是继续累加
     expect(
-      isRateLimited({ key: "stale", limit: 2, windowMs: 60000 }),
+      await isRateLimited({ key: "stale", limit: 2, windowMs: 60000 }),
     ).toEqual({ limited: false, remaining: 1 });
   });
 
-  it("resets a key explicitly", () => {
+  it("resets a local key explicitly", async () => {
     for (let i = 0; i < 3; i += 1) {
-      isRateLimited({ key: "reset-me", limit: 3, windowMs: 60000 });
+      await isRateLimited({ key: "reset-me", limit: 3, windowMs: 60000 });
     }
 
-    resetRateLimit("reset-me");
+    await resetRateLimit("reset-me");
 
     expect(
-      isRateLimited({ key: "reset-me", limit: 3, windowMs: 60000 }),
+      await isRateLimited({ key: "reset-me", limit: 3, windowMs: 60000 }),
     ).toEqual({ limited: false, remaining: 2 });
+  });
+
+  it("counts against Redis when REDIS_URL is configured", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    evalFn.mockResolvedValue(1);
+
+    const result = await isRateLimited({
+      key: "login:a@campus.local",
+      limit: 10,
+      windowMs: 900000,
+    });
+
+    expect(result).toEqual({ limited: false, remaining: 9 });
+    expect(evalFn).toHaveBeenCalledWith(
+      expect.any(String),
+      1,
+      "ratelimit:login:a@campus.local",
+      900000,
+    );
+  });
+
+  it("marks limited once the Redis counter exceeds the limit", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    evalFn.mockResolvedValue(11);
+
+    expect(
+      await isRateLimited({ key: "login:b@campus.local", limit: 10, windowMs: 900000 }),
+    ).toEqual({ limited: true, remaining: 0 });
+  });
+
+  it("never reports remaining below zero from Redis counting", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    evalFn.mockResolvedValue(999);
+
+    const result = await isRateLimited({ key: "flood", limit: 10, windowMs: 60000 });
+
+    expect(result.remaining).toBe(0);
+  });
+
+  it("falls back to the local counter when Redis errors", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    evalFn.mockRejectedValue(new Error("Connection refused"));
+
+    expect(await isRateLimited({ key: "fallback", limit: 2, windowMs: 60000 })).toEqual({
+      limited: false,
+      remaining: 1,
+    });
+    expect(await isRateLimited({ key: "fallback", limit: 2, windowMs: 60000 })).toEqual({
+      limited: false,
+      remaining: 0,
+    });
+    expect(await isRateLimited({ key: "fallback", limit: 2, windowMs: 60000 })).toEqual({
+      limited: true,
+      remaining: 0,
+    });
+  });
+
+  it("resets the Redis counter on explicit reset", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    delFn.mockResolvedValue(1);
+
+    await resetRateLimit("reset-me-redis");
+
+    expect(delFn).toHaveBeenCalledWith("ratelimit:reset-me-redis");
   });
 });

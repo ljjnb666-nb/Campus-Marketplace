@@ -1,4 +1,5 @@
 import { PrismaClient, type Prisma } from "@prisma/client";
+import { softDeleteExtension } from "@/lib/prisma-soft-delete";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -18,7 +19,7 @@ declare global {
   var prisma: PrismaClient | undefined;
 }
 
-export const prisma =
+const basePrisma =
   global.prisma ??
   new PrismaClient({
     log: isDev ? ["error", "warn", "query"] : ["error"],
@@ -26,8 +27,12 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== "production") {
-  global.prisma = prisma;
+  global.prisma = basePrisma;
 }
+
+// 对外导出的客户端统一挂载软删除拦截（deletedAt 过滤/delete 映射），
+// 业务代码无需逐查询手写 deletedAt: null，详见 prisma-soft-delete.ts
+export const prisma = basePrisma.$extends(softDeleteExtension);
 
 // 交互事务的默认超时时间（毫秒），防止慢查询阻塞连接池
 const TRANSACTION_TIMEOUT_MS = 10_000;
@@ -41,9 +46,14 @@ export async function withTransaction<T>(
   callback: (tx: Prisma.TransactionClient) => Promise<T>,
   options?: { timeout?: number },
 ): Promise<T> {
-  return prisma.$transaction(callback, {
-    timeout: options?.timeout ?? TRANSACTION_TIMEOUT_MS,
-  });
+  // 在带软删除扩展的客户端上开启事务，tx 的查询同样经过软删除拦截；
+  // 类型上收窄为 Prisma.TransactionClient 以兼容既有仓储签名
+  return prisma.$transaction(
+    async (tx) => callback(tx as unknown as Prisma.TransactionClient),
+    {
+      timeout: options?.timeout ?? TRANSACTION_TIMEOUT_MS,
+    },
+  );
 }
 
 // 生产环境启动时验证数据库连通性

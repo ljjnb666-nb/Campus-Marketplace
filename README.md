@@ -44,11 +44,14 @@ Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-3. 启动本地 PostgreSQL
+3. 启动本地 PostgreSQL 与 Redis
 
 ```bash
 docker compose up -d
 ```
+
+> Redis 用于限流计数外部化（可选）：在 `.env` 中设置 `REDIS_URL="redis://localhost:6379"` 启用；
+> 不设置时回退进程内计数，仅单实例部署语义。
 
 4. 生成 Prisma Client 并执行迁移
 
@@ -93,7 +96,7 @@ npm run app:smoke:auth
 npm run text:verify
 ```
 
-6. 启动开发服务
+7. 启动开发服务
 
 ```bash
 npm run dev
@@ -145,8 +148,8 @@ npm run text:verify
 
 当前测试基线：
 
-- 全量测试约 `850+` 个用例通过，覆盖单元、组件与 API 路由层
-- 另有 1 个真实数据库集成测试文件，需设置 `INTEGRATION_DATABASE_URL` 时才运行
+- 全量测试约 `860+` 个用例通过，覆盖单元、组件与 API 路由层
+- 另有真实数据库 / Redis 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL` 时才运行
 - 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件，以及会话搜索下推数据库的查询优化
 
 ## 安全加固
@@ -162,3 +165,6 @@ npm run text:verify
 | 5 | 密码强度无复杂度限制 | 注册 schema 增加大小写字母 + 数字要求 | `src/validators/auth.ts` |
 | 6 | Seed 脚本无生产环境保护 | 入口处检查 `NODE_ENV`，生产环境直接退出 | `prisma/seed.ts` |
 | 7 | 无 CORS 白名单配置 | Middleware 对 `/api/*` 收紧为仅允许同源请求 | `middleware.ts` |
+| 8 | 限流计数进程内存储，多实例部署失效 | 支持配置 `REDIS_URL` 外部化（原子 Lua 固定窗口），未配置或 Redis 故障自动回退进程内；docker compose/CI 已加 Redis 服务 | `src/lib/rate-limit.ts` |
+| 9 | 生产 CSP script-src 含 `unsafe-inline` | CSP 移至 middleware 按请求生成，script-src 采用每请求 nonce + `strict-dynamic`；style-src 因 React 行内样式保留 | `middleware.ts`、`next.config.ts` |
+| 10 | 软删除过滤逐查询手写，有遗漏风险 | Prisma client extension 统一注入 `deletedAt: null` 过滤并将 delete 映射为软删除，显式声明 `deletedAt` 时豁免 | `src/lib/prisma-soft-delete.ts` |

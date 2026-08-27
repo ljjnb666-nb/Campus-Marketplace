@@ -25,6 +25,16 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       # 与 .env.example 的连接串格式保持一致;指向 CI 服务容器中的 PostgreSQL
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
@@ -60,6 +70,8 @@ jobs:
         run: npm run test:coverage
         env:
           INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
+          # 限流集成测试指向 CI 服务容器中的 Redis（未设置时该测试跳过）
+          INTEGRATION_REDIS_URL: redis://localhost:6379
           # 部分测试的导入链会校验 next-auth 环境变量（本地由 .env 提供）
           NEXTAUTH_URL: http://localhost:3000
           NEXTAUTH_SECRET: dummy-secret-for-ci-tests-only

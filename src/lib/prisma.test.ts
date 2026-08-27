@@ -4,12 +4,26 @@ const { prismaTransactionMock } = vi.hoisted(() => ({
   prismaTransactionMock: vi.fn(),
 }));
 
-// mock PrismaClient 构造器，让真实的 src/lib/prisma.ts 在测试中持有可控的客户端实例
+// mock PrismaClient 构造器，让真实的 src/lib/prisma.ts 在测试中持有可控的客户端实例；
+// $extends 直接返回自身，使导出的扩展客户端与底层实例共享同一个 $transaction mock
 vi.mock("@prisma/client", () => ({
   PrismaClient: class FakePrismaClient {
     $transaction = prismaTransactionMock;
     $connect = vi.fn().mockResolvedValue(undefined);
     $disconnect = vi.fn().mockResolvedValue(undefined);
+    $extends = vi.fn().mockReturnThis();
+  },
+  // prisma-soft-delete.ts 在模块加载期引用 Prisma 命名空间
+  Prisma: {
+    defineExtension: (extension: unknown) => extension,
+    PrismaClientKnownRequestError: class extends Error {
+      code: string;
+      constructor(message: string, options?: { code?: string }) {
+        super(message);
+        this.code = options?.code ?? "P0000";
+      }
+    },
+    prismaVersion: { client: "test" },
   },
 }));
 
@@ -31,7 +45,7 @@ describe("withTransaction", () => {
     expect(prismaTransactionMock).toHaveBeenCalledTimes(1);
     const [passedCallback, options] = prismaTransactionMock.mock.calls[0];
     expect(options).toEqual({ timeout: 10_000 });
-    // 回调应原样传给 Prisma，不做包装拦截
+    // 回调经类型收窄包装后传入，运行时仍以事务 client 原样调用
     await passedCallback(txClient);
     expect(callback).toHaveBeenCalledWith(txClient);
   });

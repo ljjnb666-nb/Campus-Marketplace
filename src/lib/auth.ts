@@ -62,7 +62,7 @@ export const authOptions: NextAuthOptions = {
           req?.headers,
         );
 
-        const { limited } = isRateLimited({
+        const { limited } = await isRateLimited({
           key: rateLimitKey,
           limit: LOGIN_RATE_LIMIT,
           windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
@@ -100,7 +100,7 @@ export const authOptions: NextAuthOptions = {
         });
 
         // 登录成功后重置该账号的失败计数
-        resetRateLimit(rateLimitKey);
+        await resetRateLimit(rateLimitKey);
 
         return {
           id: user.id,
