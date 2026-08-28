@@ -21,7 +21,11 @@
 - 生产级对象存储体系（2026-08-28，Production Phase 1，详见 [STORAGE.md](STORAGE.md)）：
   - 全部上传改走 S3 兼容对象存储（MinIO / AWS S3 / Cloudflare R2），本地磁盘与 `public/uploads` 不再承接生产上传
   - 公私 bucket 隔离：avatar/product/rental/service 为公开对象；verification/handover/return/report 为私有对象，无永久公开 URL，仅业务鉴权后签发短时（默认 5 分钟）签名 URL
-  - 私有访问授权：`GET /api/assets/{assetId}/access` 按资源归属校验（本人 / 对应订单参与方 / ADMIN），已删除 404、过期 410、无权 403
+  - 私有访问授权：`GET /api/assets/{assetId}/access` 按资源归属校验（本人 / 对应订单参与方 / ADMIN），已删除/上传中 404、过期 410、无权 403
+  - 资产绑定兼容性：AssetCategory ↔ 业务目标唯一映射，跨类使用与跨实体复用一律拒绝（ASSET_CATEGORY_MISMATCH / ASSET_ALREADY_ATTACHED），上传接口的 category 标签无法绕过
+  - 缓存策略：公开对象 `public, max-age=31536000, immutable`；私有对象元数据与签名响应均为 `private, no-store`（签名过期 ≠ 缓存自动消失），真实 MinIO 集成测试验证
+  - 可恢复配额状态机：预留与 UPLOADING 行同事务创建、DELETED 转移与减额同事务提交，任意步骤崩溃由 cleanup 恢复（stale UPLOADING / 并发 worker exactly-once 均有集成测试）
+  - 生产启动校验 fail fast：默认 MinIO 凭据 / localhost 对象存储端点在 `NODE_ENV=production` 下拒绝启动
   - 图片内容安全管线（sharp）：魔数 + 真实 decode + 像素上限（12000px / 40MP）+ autoRotate + EXIF/GPS/相机 metadata 完全剥离 + 重编码（WebP，透明通道保留 PNG）
   - object key 全服务端生成（UUID），白名单校验拒绝路径穿越；用户输入不参与 key 拼接
   - 并发安全配额：`User.storageUsedBytes` 条件原子 UPDATE 预留/释放，配额默认 500MB/用户；S3/DB 失败路径均完整补偿，不留脏数据与永久占用

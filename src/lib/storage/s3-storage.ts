@@ -26,9 +26,11 @@ export class S3Storage implements StorageClient {
   private readonly client: S3Client;
 
   constructor(client?: S3Client) {
+    // 生产配置的权威校验在 env.ts 的 assertProductionStorageConfig（fail fast）。
+    // 这里仅作防御性兜底：绕过 env 导入直接构造时仍然告警。
     if (process.env.NODE_ENV === "production" && env.S3_ACCESS_KEY_ID === KNOWN_DEV_CREDENTIALS) {
       logger.warn(
-        "对象存储仍在使用本地 MinIO 默认凭据，生产环境必须配置专属 S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY",
+        "对象存储使用本地 MinIO 默认凭据（生产启动校验应已在 env 阶段拦截，请检查导入链）",
         "S3Storage",
       );
     }
@@ -62,7 +64,9 @@ export class S3Storage implements StorageClient {
         Key: input.objectKey,
         Body: input.body,
         ContentType: input.contentType,
-        CacheControl: "public, max-age=31536000, immutable",
+        // Cache-Control 由调用方按访问级别显式提供（types.ts 契约），
+        // 私有对象禁止落入任何公开缓存
+        CacheControl: input.cacheControl,
       }),
     );
   }
@@ -92,11 +96,16 @@ export class S3Storage implements StorageClient {
     }
   }
 
-  async getSignedReadUrl(ref: ObjectRef, expiresInSeconds: number): Promise<string> {
+  async getSignedReadUrl(
+    ref: ObjectRef,
+    expiresInSeconds: number,
+    responseCacheControl?: string,
+  ): Promise<string> {
     this.assertRef(ref);
     const command = new GetObjectCommand({
       Bucket: ref.bucket,
       Key: ref.objectKey,
+      ...(responseCacheControl ? { ResponseCacheControl: responseCacheControl } : {}),
     });
     return getSignedUrl(this.client, command, { expiresIn: expiresInSeconds });
   }

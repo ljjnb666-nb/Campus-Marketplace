@@ -9,8 +9,9 @@ const booleanFromEnv = z.preprocess((value) => {
 
 /**
  * S3 兼容对象存储配置。
- * 默认值指向本地 docker compose 启动的 MinIO（开发/测试零配置），
- * 生产部署必须显式覆盖——S3Storage 初始化时对默认凭据发出告警。
+ * 默认值指向本地 docker compose 启动的 MinIO（开发/测试零配置）；
+ * 生产环境由 assertProductionStorageConfig 强制校验（默认凭据/localhost
+ * 端点直接拒绝启动，fail fast）。
  */
 const s3EnvSchema = z.object({
   S3_ENDPOINT: z.string().default("http://localhost:9100"),
@@ -81,3 +82,62 @@ export const env = {
 };
 
 export type Env = typeof env;
+
+/**
+ * 生产启动校验：配置错误 fail fast，绝不带默认开发凭据上线。
+ * 本地 development / test 保留零配置 MinIO 体验。
+ *
+ * - 禁止默认 MinIO 凭据（minioadmin）
+ * - 禁止 localhost 对象存储端点，除非显式设置 ALLOW_LOCAL_S3_IN_PRODUCTION
+ *   （仅供以生产模式在本机做冒烟验证，默认拒绝）
+ *
+ * 注意：`next build` 的 page data 收集阶段也会置 NODE_ENV=production，
+ * 但那是构建而非启动（NEXT_PHASE=phase-production-build），此时跳过校验；
+ * 真正的生产运行（next start）没有该 phase，校验生效。
+ */
+export function assertProductionStorageConfig(envConfig: Env = env): void {
+  if (process.env.NODE_ENV !== "production") {
+    return;
+  }
+  if (process.env.NEXT_PHASE === "phase-production-build") {
+    return;
+  }
+
+  const problems: string[] = [];
+
+  if (envConfig.S3_ACCESS_KEY_ID === "minioadmin") {
+    problems.push("S3_ACCESS_KEY_ID 不能使用本地 MinIO 默认凭据");
+  }
+  if (envConfig.S3_SECRET_ACCESS_KEY === "minioadmin") {
+    problems.push("S3_SECRET_ACCESS_KEY 不能使用本地 MinIO 默认凭据");
+  }
+
+  const endpointHost = (() => {
+    try {
+      return new URL(envConfig.S3_ENDPOINT).hostname;
+    } catch {
+      return envConfig.S3_ENDPOINT;
+    }
+  })();
+  const isLocalHost =
+    endpointHost === "localhost" ||
+    endpointHost === "127.0.0.1" ||
+    endpointHost === "::1" ||
+    endpointHost === "[::1]";
+  if (
+    isLocalHost &&
+    process.env.ALLOW_LOCAL_S3_IN_PRODUCTION !== "true"
+  ) {
+    problems.push(
+      "S3_ENDPOINT 指向 localhost（生产必须使用真实对象存储；确属本机冒烟验证请显式设置 ALLOW_LOCAL_S3_IN_PRODUCTION=true）",
+    );
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      `[env] 生产环境对象存储配置不合规，拒绝启动：\n- ${problems.join("\n- ")}`,
+    );
+  }
+}
+
+assertProductionStorageConfig();

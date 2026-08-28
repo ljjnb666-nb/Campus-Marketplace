@@ -35,21 +35,6 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      # S3 兼容对象存储：MinIO 集成测试必须真实执行，不允许静默跳过。
-      # API 端口映射为宿主机 9100（与 docker-compose.yml / .env.example 一致）。
-      minio:
-        image: minio/minio
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9100:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/ready"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
       # 与 .env.example 的连接串格式保持一致;指向 CI 服务容器中的 PostgreSQL
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
@@ -68,6 +53,27 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # GitHub Actions 的 service container 不支持 command 覆盖，
+      # minio/minio 无参启动只会打印 usage 后退出（run 33133052499 的根因）。
+      # 因此 MinIO 改为步骤内显式 docker run server，并在 runner 侧等待健康端点。
+      - name: Start MinIO (S3 compatible storage)
+        run: |
+          docker run -d --name minio \
+            -p 9100:9000 -p 9101:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data --console-address ":9001"
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
+              echo "MinIO ready after ${i} probe(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MinIO failed to become ready; container logs:"
+          docker logs minio
+          exit 1
 
       - name: Bootstrap MinIO buckets
         # 幂等创建 public/private bucket 并设置匿名策略：

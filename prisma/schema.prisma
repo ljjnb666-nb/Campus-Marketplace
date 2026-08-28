@@ -151,7 +151,8 @@ enum AssetCategory {
 }
 
 enum AssetStatus {
-  UPLOADED // 已上传，尚未绑定业务实体（超过 TTL 由 cleanup 回收）
+  UPLOADING // 预留事务已提交、S3 PUT 进行中（崩溃后由 cleanup 按 stale 回收）
+  UPLOADED // S3 PUT 已确认，尚未绑定业务实体（超过 TTL 由 cleanup 回收）
   ATTACHED // 已绑定业务实体
   PENDING_DELETE // 已标记待删除（对象清理中/待重试）
   DELETED // 远端对象已删除，配额已释放（保留审计行）

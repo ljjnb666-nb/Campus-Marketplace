@@ -11,6 +11,12 @@ export interface ObjectRef {
 export interface PutObjectInput extends ObjectRef {
   body: Buffer;
   contentType: string;
+  /**
+   * 对象 Cache-Control 元数据。由调用方按访问级别显式给出：
+   * PUBLIC → 长期公开不可变缓存；PRIVATE → 禁止存储。
+   * 存储层不做任何猜测，避免私有对象被公开缓存策略污染。
+   */
+  cacheControl: string;
 }
 
 export interface ObjectMetadata {
@@ -31,6 +37,12 @@ export interface StorageClient {
   /**
    * 生成短时签名读 URL。
    * 仅允许用于 PRIVATE 对象；PUBLIC 对象使用公开 URL/CDN。
+   * responseCacheControl 可覆盖响应头（S3 response-cache-control），
+   * 私有对象应传 "private, no-store" 防止浏览器/代理长期缓存。
    */
-  getSignedReadUrl(ref: ObjectRef, expiresInSeconds: number): Promise<string>;
+  getSignedReadUrl(
+    ref: ObjectRef,
+    expiresInSeconds: number,
+    responseCacheControl?: string,
+  ): Promise<string>;
 }

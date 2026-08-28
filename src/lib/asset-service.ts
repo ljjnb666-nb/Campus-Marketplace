@@ -28,12 +28,22 @@ export { buildAssetReference, isAssetReference, parseAssetReference };
 /**
  * 上传资源服务：所有上传文件（公私）的唯一入口。
  *
- * 可靠性约定（与 STORAGE.md 对应）：
- * - 配额预留 = 单条条件 UPDATE（行锁串行化），并发上传无法突破总额；
- * - S3 上传失败 → 立即释放配额，不产生任何持久化痕迹；
- * - DB 登记失败 → 删除已上传对象 + 释放配额（compensation）；
- * - 对象删除走 PENDING_DELETE → DELETED 条件转移，配额释放 exactly-once；
- * - 重复删除 / cleanup 重跑均幂等。
+ * 上传状态机（可恢复，配额与 DB 记录永不脱钩）：
+ *
+ *   [事务 T1: 原子预留配额 + 创建行(status=UPLOADING)]  ← 任何崩溃都一起回滚/留存
+ *     ↓ S3 PUT（外部副作用）
+ *   [UPLOADED]（条件转移）
+ *     ↓ attach
+ *   [ATTACHED] ⇄（编辑复用，仅同实体幂等）
+ *     ↓ 标记
+ *   [PENDING_DELETE] → S3 DeleteObject（幂等）
+ *     ↓ [事务 T2: 条件转移 DELETED + 同事务配额减额]（exactly-once）
+ *   [DELETED]
+ *
+ * 崩溃恢复（cleanup）：
+ * - stale UPLOADING（TTL 24h）：对象可能存在也可能不存在 → deleteObject（幂等）
+ *   → PENDING_DELETE → T2 释放
+ * - 任意 PENDING_DELETE：重复执行安全，两个 worker 并发只有一个完成转移与减额
  */
 
 export type AssetServiceErrorCode =
@@ -44,7 +54,9 @@ export type AssetServiceErrorCode =
   | "QUOTA_EXCEEDED"
   | "STORAGE_UPLOAD_FAILED"
   | "ASSET_RECORD_FAILED"
-  | "INVALID_ASSET_REFERENCE";
+  | "INVALID_ASSET_REFERENCE"
+  | "ASSET_CATEGORY_MISMATCH"
+  | "ASSET_ALREADY_ATTACHED";
 
 export class AssetServiceError extends Error {
   readonly code: AssetServiceErrorCode;
@@ -57,6 +69,25 @@ export class AssetServiceError extends Error {
     this.status = status;
   }
 }
+
+/** 对象 Cache-Control 策略：按访问级别显式给定，存储层不做猜测 */
+export const PUBLIC_OBJECT_CACHE_CONTROL = "public, max-age=31536000, immutable";
+export const PRIVATE_OBJECT_CACHE_CONTROL = "private, no-store";
+
+/**
+ * AssetCategory ↔ 业务绑定目标 的唯一兼容映射。
+ * 任何资产只能绑定到其语义对应的实体类型，跨类使用一律拒绝。
+ */
+export const ATTACH_COMPATIBILITY: Record<AssetCategory, AssetAttachTarget["type"][]> = {
+  AVATAR: ["avatar"],
+  PRODUCT: ["product"],
+  RENTAL: ["rentalListing"],
+  SERVICE: ["serviceListing"],
+  VERIFICATION: ["verification"],
+  HANDOVER: ["rentalOrder"],
+  RETURN: ["rentalOrder"],
+  REPORT: ["rentalOrder"],
+};
 
 export interface UploadedAssetResult {
   assetId: string;
@@ -102,8 +133,12 @@ export function quotaBytes(): number {
  * 单条 UPDATE 在行锁下串行执行，两个并发请求不可能同时通过判定。
  * @returns 是否预留成功
  */
-async function reserveQuotaBytes(userId: string, sizeBytes: number): Promise<boolean> {
-  const reserved = await prisma.$executeRaw`
+async function reserveQuotaBytes(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  sizeBytes: number,
+): Promise<boolean> {
+  const reserved = await tx.$executeRaw`
     UPDATE "User"
     SET "storageUsedBytes" = "storageUsedBytes" + ${sizeBytes}
     WHERE "id" = ${userId}
@@ -114,10 +149,14 @@ async function reserveQuotaBytes(userId: string, sizeBytes: number): Promise<boo
 
 /**
  * 释放配额（下限 0，防重复释放导致负数）。
- * 调用方必须保证释放路径与预留一一对应（详见文件头注释）。
+ * 仅在与状态转移相同的显式事务内调用，保证 exactly-once。
  */
-async function releaseQuotaBytes(userId: string, sizeBytes: number): Promise<void> {
-  await prisma.$executeRaw`
+async function releaseQuotaBytes(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  sizeBytes: number,
+): Promise<void> {
+  await tx.$executeRaw`
     UPDATE "User"
     SET "storageUsedBytes" = GREATEST(0, "storageUsedBytes" - ${sizeBytes})
     WHERE "id" = ${userId}
@@ -138,9 +177,16 @@ export async function getStorageUsage(userId: string): Promise<{
   };
 }
 
+// ============================================================
+// 上传（可恢复状态机）
+// ============================================================
+
 /**
- * 上传图片资源：校验 → 重编码 → 配额预留 → 对象上传 → 资源登记。
- * 失败路径见文件头可靠性约定。
+ * 上传图片资源：
+ * 校验 → 重编码 → [T1: 配额预留 + UPLOADING 行] → S3 PUT → UPLOADED。
+ *
+ * T1 事务性：预留与行创建同生共死——行创建失败则预留一并回滚；
+ * 进程在 T1 后任意时刻崩溃，UPLOADING 行都在，cleanup 可恢复。
  */
 export async function uploadImageAsset(params: {
   userId: string;
@@ -167,21 +213,6 @@ export async function uploadImageAsset(params: {
   const processed = await processUploadedImage(bytes);
   const sizeBytes = processed.buffer.byteLength;
 
-  const reserved = await reserveQuotaBytes(userId, sizeBytes);
-  if (!reserved) {
-    logger.warn("上传配额不足，已拒绝", "asset-service", {
-      operation: "upload",
-      userId,
-      category,
-      sizeBytes,
-    });
-    throw new AssetServiceError(
-      "QUOTA_EXCEEDED",
-      "存储空间不足，请删除旧图片后再试",
-      413,
-    );
-  }
-
   const assetCategory = ASSET_CATEGORY_BY_UPLOAD_CATEGORY[category];
   const access = assetAccessForCategory(assetCategory);
   const objectKey = buildObjectKey({
@@ -191,6 +222,51 @@ export async function uploadImageAsset(params: {
     fileExtension: processed.format === "png" ? ".png" : ".webp",
   });
   const bucket = bucketForAccess(access);
+  const cacheControl =
+    access === "PUBLIC" ? PUBLIC_OBJECT_CACHE_CONTROL : PRIVATE_OBJECT_CACHE_CONTROL;
+
+  // T1：配额预留与可恢复记录同一事务提交——不存在"已预留但无记录"的窗口
+  let assetId: string;
+  try {
+    const created = await prisma.$transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Prisma.TransactionClient;
+      const reserved = await reserveQuotaBytes(tx, userId, sizeBytes);
+      if (!reserved) {
+        throw new AssetServiceError(
+          "QUOTA_EXCEEDED",
+          "存储空间不足，请删除旧图片后再试",
+          413,
+        );
+      }
+      return tx.uploadedAsset.create({
+        data: {
+          ownerId: userId,
+          category: assetCategory,
+          access,
+          bucket,
+          objectKey,
+          mimeType: processed.mimeType,
+          sizeBytes,
+          width: processed.width,
+          height: processed.height,
+          originalFileName: sanitizeOriginalFileName(file.name),
+          status: "UPLOADING",
+        },
+        select: { id: true },
+      });
+    });
+    assetId = created.id;
+  } catch (error) {
+    if (error instanceof AssetServiceError) throw error;
+    logger.error("资源登记事务失败（配额已一并回滚）", "asset-service", {
+      operation: "upload",
+      userId,
+      category,
+      sizeBytes,
+      error,
+    });
+    throw new AssetServiceError("ASSET_RECORD_FAILED", "图片上传失败，请稍后重试", 500);
+  }
 
   const storage = getStorage();
   try {
@@ -199,19 +275,23 @@ export async function uploadImageAsset(params: {
       objectKey,
       body: processed.buffer,
       contentType: processed.mimeType,
+      cacheControl,
     });
   } catch (error) {
-    // CASE A：S3 失败 → 释放配额，不留任何持久化痕迹
-    await releaseQuotaBytes(userId, sizeBytes).catch((releaseError) => {
-      logger.error("配额释放失败（S3 上传失败补偿）", "asset-service", {
+    // CASE A：S3 失败 → 尽力补偿（删行 + 释放配额，同一事务）；
+    // 补偿失败时行保持 UPLOADING，由 cleanup 按 stale 恢复
+    await abandonUploadingAsset(assetId, userId, sizeBytes).catch((abandonError) => {
+      logger.error("UPLOADING 补偿失败，留待 cleanup 恢复", "asset-service", {
         operation: "upload-compensate",
+        assetId,
         userId,
         sizeBytes,
-        error: releaseError,
+        error: abandonError,
       });
     });
     logger.error("对象存储上传失败", "asset-service", {
       operation: "upload",
+      assetId,
       userId,
       category,
       sizeBytes,
@@ -220,49 +300,17 @@ export async function uploadImageAsset(params: {
     throw new AssetServiceError("STORAGE_UPLOAD_FAILED", "图片上传失败，请稍后重试", 500);
   }
 
-  let assetId: string;
-  try {
-    const asset = await prisma.uploadedAsset.create({
-      data: {
-        ownerId: userId,
-        category: assetCategory,
-        access,
-        bucket,
-        objectKey,
-        mimeType: processed.mimeType,
-        sizeBytes,
-        width: processed.width,
-        height: processed.height,
-        originalFileName: sanitizeOriginalFileName(file.name),
-        status: "UPLOADED",
-      },
-      select: { id: true },
-    });
-    assetId = asset.id;
-  } catch (error) {
-    // CASE B：DB 失败 → 删除已上传对象 + 释放配额
-    await storage.deleteObject({ bucket, objectKey }).catch((deleteError) => {
-      logger.error("补偿删除对象失败（DB 写入失败）", "asset-service", {
-        operation: "upload-compensate",
-        userId,
-        sizeBytes,
-        error: deleteError,
-      });
-    });
-    await releaseQuotaBytes(userId, sizeBytes).catch((releaseError) => {
-      logger.error("配额释放失败（DB 写入失败补偿）", "asset-service", {
-        operation: "upload-compensate",
-        userId,
-        sizeBytes,
-        error: releaseError,
-      });
-    });
-    logger.error("资源登记失败", "asset-service", {
+  // PUT 成功：条件转移 UPLOADING → UPLOADED。
+  // 转移失败（DB 故障）：行停留 UPLOADING，cleanup 会删除对象并释放配额（用户重试即可）
+  const uploaded = await prisma.uploadedAsset.updateMany({
+    where: { id: assetId, status: "UPLOADING" },
+    data: { status: "UPLOADED" },
+  });
+  if (batchCount(uploaded) !== 1) {
+    logger.error("UPLOADED 状态转移未命中，资源将由 cleanup 回收", "asset-service", {
       operation: "upload",
+      assetId,
       userId,
-      category,
-      sizeBytes,
-      error,
     });
     throw new AssetServiceError("ASSET_RECORD_FAILED", "图片上传失败，请稍后重试", 500);
   }
@@ -285,13 +333,30 @@ export async function uploadImageAsset(params: {
   };
 }
 
+/** 放弃一条 UPLOADING 资源：单事务内删行 + 释放配额（上传失败的即时补偿） */
+async function abandonUploadingAsset(
+  assetId: string,
+  userId: string,
+  sizeBytes: number,
+): Promise<void> {
+  await prisma.$transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Prisma.TransactionClient;
+    const removed = await tx.uploadedAsset.deleteMany({
+      where: { id: assetId, status: "UPLOADING" },
+    });
+    if (batchCount(removed) === 1) {
+      await releaseQuotaBytes(tx, userId, sizeBytes);
+    }
+  });
+}
+
 /** 图片内容校验错误统一转成用户可读 message（保留类型码供日志使用） */
 export function isImageValidationError(error: unknown): error is ImageValidationError {
   return error instanceof ImageValidationError;
 }
 
 // ============================================================
-// 业务绑定（attachment）
+// 业务绑定（attachment）与兼容性校验
 // ============================================================
 
 export type AssetAttachTarget =
@@ -319,7 +384,74 @@ function attachTargetData(target: AssetAttachTarget): Record<string, string> {
   }
 }
 
+/** 资产类别是否允许绑定到该目标类型（唯一映射，见 ATTACH_COMPATIBILITY） */
+export function isAssetCompatibleWithTarget(
+  category: AssetCategory,
+  target: AssetAttachTarget,
+): boolean {
+  return ATTACH_COMPATIBILITY[category]?.includes(target.type) ?? false;
+}
+
+/**
+ * 已 ATTACHED 的资产是否绑定在"同一个目标实体"上（幂等复用的唯一许可）。
+ * avatar 无独立实体：同 owner 的 ATTACHED avatar 视为同目标。
+ */
+export function isSameAttachment(
+  asset: Pick<
+    UploadedAsset,
+    | "category"
+    | "productId"
+    | "rentalListingId"
+    | "serviceListingId"
+    | "rentalOrderId"
+    | "verificationId"
+  >,
+  target: AssetAttachTarget,
+): boolean {
+  switch (target.type) {
+    case "avatar":
+      return asset.category === "AVATAR";
+    case "product":
+      return asset.productId === target.id;
+    case "rentalListing":
+      return asset.rentalListingId === target.id;
+    case "serviceListing":
+      return asset.serviceListingId === target.id;
+    case "rentalOrder":
+      return asset.rentalOrderId === target.id;
+    case "verification":
+      return asset.verificationId === target.id;
+  }
+}
+
 type PrismaTx = Prisma.TransactionClient;
+
+/**
+ * 校验资产可否用于目标（owner / category / access / 状态 / 当前绑定）。
+ * 抛出带稳定错误码的 AssetServiceError。
+ */
+function assertAssetUsableForTarget(
+  asset: UploadedAsset,
+  ownerId: string,
+  target: AssetAttachTarget,
+): void {
+  if (!isAssetCompatibleWithTarget(asset.category, target)) {
+    throw new AssetServiceError(
+      "ASSET_CATEGORY_MISMATCH",
+      "图片类型与用途不匹配，请重新上传",
+    );
+  }
+  if (asset.status === "ATTACHED") {
+    if (!isSameAttachment(asset, target)) {
+      // 同 owner 也不允许跨实体复用（含 PRIVATE 资产跨实体转移）
+      throw new AssetServiceError(
+        "ASSET_ALREADY_ATTACHED",
+        "图片已被其他内容使用，请重新上传",
+      );
+    }
+    return; // 同实体幂等复用
+  }
+}
 
 /**
  * 将用户自己的 UPLOADED 资源绑定到业务实体（条件转移，幂等）。
@@ -353,7 +485,8 @@ function canonicalAssetValue(asset: UploadedAsset): string {
 
 /**
  * 解析表单图片 token 列表：
- * - `asset:<id>` → 校验归属并绑定到业务实体，返回规范化值（公开 URL / asset 引用）
+ * - `asset:<id>` → 严格解析（前缀匹配但格式非法直接拒绝），校验
+ *   owner/category/access/状态/当前绑定 后绑定到目标，返回规范化值
  * - 其余（http(s) 外链、历史 /uploads/ 路径）原样保留，由 zod 层做格式校验
  *
  * 顺序保持不变（业务侧 sortOrder / 封面顺序依赖输入顺序）。
@@ -374,27 +507,37 @@ export async function resolveImageTokens(params: {
       continue;
     }
 
-    const assetId = parseAssetReference(token);
-    if (!assetId) {
-      resolved.push(token);
+    if (token.startsWith("asset:")) {
+      // 以 asset: 开头的一律按严格引用处理：解析失败即拒绝，绝不透传进 DB
+      const assetId = parseAssetReference(token);
+      if (!assetId) {
+        throw new AssetServiceError("INVALID_ASSET_REFERENCE", "图片引用格式不正确");
+      }
+
+      const asset = await tx.uploadedAsset.findFirst({
+        where: { id: assetId, ownerId },
+      });
+      if (
+        !asset ||
+        (asset.status !== "UPLOADED" && asset.status !== "ATTACHED")
+      ) {
+        throw new AssetServiceError("INVALID_ASSET_REFERENCE", "图片资源不存在或已失效");
+      }
+
+      assertAssetUsableForTarget(asset, ownerId, target);
+
+      if (asset.status === "UPLOADED") {
+        await attachAssetsToEntity(tx, {
+          ownerId,
+          assetIds: [asset.id],
+          target,
+        });
+      }
+      resolved.push(canonicalAssetValue(asset));
       continue;
     }
 
-    const asset = await tx.uploadedAsset.findFirst({
-      where: { id: assetId, ownerId },
-    });
-    if (!asset || asset.status === "DELETED" || asset.status === "PENDING_DELETE") {
-      throw new AssetServiceError("INVALID_ASSET_REFERENCE", "图片资源不存在或已失效");
-    }
-
-    if (asset.status === "UPLOADED") {
-      await attachAssetsToEntity(tx, {
-        ownerId,
-        assetIds: [asset.id],
-        target,
-      });
-    }
-    resolved.push(canonicalAssetValue(asset));
+    resolved.push(token);
   }
 
   return resolved;
@@ -432,8 +575,11 @@ export async function markAssetPendingDelete(assetId: string): Promise<boolean> 
 
 /**
  * 物理删除 PENDING_DELETE 资源的对象并完成状态转移 + 配额释放。
- * 条件转移（PENDING_DELETE → DELETED）保证配额释放 exactly-once；
- * 对象删除失败时保留 PENDING_DELETE，由 cleanup 重试。
+ *
+ * S3 DeleteObject 幂等（对象不存在视为成功）；随后在【同一事务】内完成
+ * 条件转移（PENDING_DELETE → DELETED）与配额减额——转移只可能命中一次，
+ * 因此两个并发 cleanup worker 也只会有一个完成减额（exactly-once）。
+ * 对象删除或事务失败时保留 PENDING_DELETE，由 cleanup 重试。
  */
 export async function purgePendingDeleteAsset(asset: {
   id: string;
@@ -455,13 +601,32 @@ export async function purgePendingDeleteAsset(asset: {
     return false;
   }
 
-  const completed = await prisma.uploadedAsset.updateMany({
-    where: { id: asset.id, status: "PENDING_DELETE" },
-    data: { status: "DELETED", expiresAt: null },
-  });
+  let completed = false;
+  try {
+    completed = await prisma.$transaction(async (rawTx) => {
+      const tx = rawTx as unknown as Prisma.TransactionClient;
+      const claimed = await tx.uploadedAsset.updateMany({
+        where: { id: asset.id, status: "PENDING_DELETE" },
+        data: { status: "DELETED", expiresAt: null },
+      });
+      if (batchCount(claimed) !== 1) {
+        return false;
+      }
+      await releaseQuotaBytes(tx, asset.ownerId, asset.sizeBytes);
+      return true;
+    });
+  } catch (error) {
+    // 事务失败：转移与减额一并回滚，行保持 PENDING_DELETE 由下次 cleanup 重试
+    logger.error("PENDING_DELETE 完成事务失败，保留待重试", "asset-service", {
+      operation: "purge",
+      assetId: asset.id,
+      userId: asset.ownerId,
+      error,
+    });
+    return false;
+  }
 
-  if (batchCount(completed) > 0) {
-    await releaseQuotaBytes(asset.ownerId, asset.sizeBytes);
+  if (completed) {
     logger.info("资源已删除", "asset-service", {
       operation: "purge",
       assetId: asset.id,
@@ -469,7 +634,7 @@ export async function purgePendingDeleteAsset(asset: {
       sizeBytes: asset.sizeBytes,
     });
   }
-  return true;
+  return completed;
 }
 
 /** 标记 + 物理删除一条资源（业务删除路径的完整入口） */
@@ -513,9 +678,12 @@ export async function markAssetsForValuesPendingDelete(
     if (!trimmed) {
       continue;
     }
-    const assetId = parseAssetReference(trimmed);
-    if (assetId) {
-      assetIds.add(assetId);
+    if (trimmed.startsWith("asset:")) {
+      const assetId = parseAssetReference(trimmed);
+      if (assetId) {
+        assetIds.add(assetId);
+      }
+      // asset: 前缀但非法的值不参与匹配（不应存在）
       continue;
     }
     const objectKey = objectKeyFromPublicUrl(trimmed);
@@ -570,7 +738,7 @@ export type PrivateAssetAccessResult =
  * 私有资源访问授权：
  * - VERIFICATION：仅资源本人与 ADMIN
  * - HANDOVER / RETURN / REPORT：资源本人、对应租赁订单的租客/出租者、ADMIN
- * - 已删除/待删除 → not_found；已过保留期 → expired
+ * - UPLOADING（上传中）/已删除/待删除 → not_found；已过保留期 → expired
  */
 export async function resolvePrivateAssetAccess(
   assetId: string,
@@ -584,7 +752,12 @@ export async function resolvePrivateAssetAccess(
     },
   });
 
-  if (!asset || asset.status === "DELETED" || asset.status === "PENDING_DELETE") {
+  if (
+    !asset ||
+    asset.status === "DELETED" ||
+    asset.status === "PENDING_DELETE" ||
+    asset.status === "UPLOADING"
+  ) {
     return { ok: false, reason: "not_found" };
   }
   if (asset.access === "PUBLIC") {
@@ -611,7 +784,8 @@ export async function resolvePrivateAssetAccess(
   return { ok: false, reason: "forbidden" };
 }
 
-/** 生成私有资源短时签名读 URL（TTL 来自 env，默认 5 分钟） */
+/** 生成私有资源短时签名读 URL（TTL 来自 env，默认 5 分钟）。
+ * 响应 Cache-Control 强制 private, no-store：签名过期不等于缓存自动消失。 */
 export async function createPrivateAssetSignedUrl(asset: {
   bucket: string;
   objectKey: string;
@@ -620,6 +794,7 @@ export async function createPrivateAssetSignedUrl(asset: {
   const url = await getStorage().getSignedReadUrl(
     { bucket: asset.bucket, objectKey: asset.objectKey },
     expiresIn,
+    PRIVATE_OBJECT_CACHE_CONTROL,
   );
   return { url, expiresIn };
 }

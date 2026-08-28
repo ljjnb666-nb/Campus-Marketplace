@@ -8,7 +8,9 @@ const {
   assetCreate,
   assetFindFirst,
   assetUpdateMany,
+  assetDeleteMany,
   userFindUnique,
+  transactionMock,
 } = vi.hoisted(() => ({
   putObject: vi.fn(),
   deleteObject: vi.fn(),
@@ -17,7 +19,9 @@ const {
   assetCreate: vi.fn(),
   assetFindFirst: vi.fn(),
   assetUpdateMany: vi.fn(),
+  assetDeleteMany: vi.fn(),
   userFindUnique: vi.fn(),
+  transactionMock: vi.fn(),
 }));
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -51,20 +55,25 @@ vi.mock("@/lib/image-processing", () => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    $executeRaw: executeRaw,
+    $transaction: transactionMock,
     uploadedAsset: {
       create: assetCreate,
       findFirst: assetFindFirst,
       updateMany: assetUpdateMany,
+      deleteMany: assetDeleteMany,
     },
     user: { findUnique: userFindUnique },
   },
 }));
 
+import type { UploadedAsset } from "@prisma/client";
 import {
+  ATTACH_COMPATIBILITY,
   AssetServiceError,
   attachAssetsToEntity,
   createPrivateAssetSignedUrl,
+  isAssetCompatibleWithTarget,
+  isSameAttachment,
   markAssetPendingDelete,
   markAssetsForValuesPendingDelete,
   purgePendingDeleteAsset,
@@ -72,6 +81,8 @@ import {
   resolveImageTokens,
   resolvePrivateAssetAccess,
   uploadImageAsset,
+  PRIVATE_OBJECT_CACHE_CONTROL,
+  PUBLIC_OBJECT_CACHE_CONTROL,
 } from "@/lib/asset-service";
 
 function buildImageFile(size = 16) {
@@ -85,12 +96,20 @@ function buildImageFile(size = 16) {
   } as unknown as File;
 }
 
-/** 事务客户端桩：attachAssetsToEntity 直接在 tx 上操作 */
+/** 事务客户端桩：T1 预留事务直接透传 $executeRaw / uploadedAsset 委托 */
 const txStub = {
-  uploadedAsset: { updateMany: assetUpdateMany, findFirst: assetFindFirst },
+  $executeRaw: executeRaw,
+  uploadedAsset: {
+    create: assetCreate,
+    updateMany: assetUpdateMany,
+    deleteMany: assetDeleteMany,
+    findFirst: assetFindFirst,
+  },
 } as unknown as Parameters<typeof attachAssetsToEntity>[0];
 
-const baseAsset = {
+const baseAsset: UploadedAsset & {
+  rentalOrder: { renterId: string; ownerId: string } | null;
+} = {
   id: "asset-1",
   ownerId: "user-1",
   category: "VERIFICATION",
@@ -99,21 +118,43 @@ const baseAsset = {
   objectKey: "private/verification/user-1/abcd1234.webp",
   mimeType: "image/webp",
   sizeBytes: 1024,
-  status: "ATTACHED",
+  width: 64,
+  height: 48,
+  originalFileName: null,
+  status: "UPLOADED",
+  productId: null,
+  rentalListingId: null,
+  serviceListingId: null,
+  rentalOrderId: null,
+  verificationId: null,
+  attachedAt: null,
   expiresAt: null,
+  createdAt: new Date("2026-08-01T00:00:00Z"),
+  updatedAt: new Date("2026-08-01T00:00:00Z"),
   rentalOrder: null,
 };
 
-describe("uploadImageAsset", () => {
+/** 以指定类别/状态派生测试资产 */
+function assetWith(overrides: Partial<UploadedAsset>): UploadedAsset {
+  return { ...baseAsset, ...overrides };
+}
+
+describe("uploadImageAsset（可恢复状态机）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     executeRaw.mockResolvedValue(1);
     putObject.mockResolvedValue(undefined);
     deleteObject.mockResolvedValue(undefined);
     assetCreate.mockResolvedValue({ id: "asset-1" });
+    assetUpdateMany.mockResolvedValue({ count: 1 });
+    assetDeleteMany.mockResolvedValue({ count: 1 });
+    // T1：交互事务直接以 txStub 执行回调
+    transactionMock.mockImplementation(
+      async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub),
+    );
   });
 
-  it("uploads a public image and returns the public url", async () => {
+  it("uploads a public image with long-lived public cache control", async () => {
     const result = await uploadImageAsset({
       userId: "user-1",
       category: "product",
@@ -124,14 +165,29 @@ describe("uploadImageAsset", () => {
     expect(result.access).toBe("PUBLIC");
     expect(result.url).toMatch(/^http:\/\/localhost:9100\/campus-public\/public\/products\//);
     expect(result.sizeBytes).toBe(1024);
-    // 配额预留 = 条件原子 UPDATE
-    expect(executeRaw).toHaveBeenCalledTimes(1);
-    expect(putObject).toHaveBeenCalledWith(
-      expect.objectContaining({ bucket: "campus-public", contentType: "image/webp" }),
+
+    // T1：配额预留与 UPLOADING 行创建在同一事务
+    expect(assetCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "UPLOADING", objectKey: expect.any(String) }),
+      }),
     );
+    // 公开对象：长期 public immutable 缓存
+    expect(putObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bucket: "campus-public",
+        cacheControl: PUBLIC_OBJECT_CACHE_CONTROL,
+        contentType: "image/webp",
+      }),
+    );
+    // S3 PUT 成功后条件转移 UPLOADED
+    expect(assetUpdateMany).toHaveBeenCalledWith({
+      where: { id: "asset-1", status: "UPLOADING" },
+      data: { status: "UPLOADED" },
+    });
   });
 
-  it("uploads a private image without any permanent url", async () => {
+  it("uploads a private image with no-store cache control and no permanent url", async () => {
     const result = await uploadImageAsset({
       userId: "user-1",
       category: "verification",
@@ -140,10 +196,11 @@ describe("uploadImageAsset", () => {
 
     expect(result.access).toBe("PRIVATE");
     expect(result.url).toBeNull();
-    // 私有对象必须落在 private bucket，key 在 private/ 前缀下
+    // 私有对象：禁止任何缓存存储
     expect(putObject).toHaveBeenCalledWith(
       expect.objectContaining({
         bucket: "campus-private",
+        cacheControl: PRIVATE_OBJECT_CACHE_CONTROL,
         objectKey: expect.stringMatching(/^private\/verification\//),
       }),
     );
@@ -176,40 +233,49 @@ describe("uploadImageAsset", () => {
     ).rejects.toMatchObject({ code: "FILE_TOO_LARGE", status: 413 });
   });
 
-  it("rejects with QUOTA_EXCEEDED when the reservation update matches no row", async () => {
+  it("rejects with QUOTA_EXCEEDED when the reservation matches no row", async () => {
     executeRaw.mockResolvedValue(0);
 
     await expect(
       uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
     ).rejects.toMatchObject({ code: "QUOTA_EXCEEDED", status: 413 });
-    expect(putObject).not.toHaveBeenCalled();
+    // 预留失败时行不允许创建（事务回滚语义由 mock 委托透传，这里断言未创建）
     expect(assetCreate).not.toHaveBeenCalled();
+    expect(putObject).not.toHaveBeenCalled();
   });
 
-  it("releases the quota when the S3 upload fails (CASE A)", async () => {
+  it("T1 失败（配额+建行同事务）：整体失败且无 S3 副作用", async () => {
+    assetCreate.mockRejectedValue(new Error("db down"));
+
+    await expect(
+      uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
+    ).rejects.toMatchObject({ code: "ASSET_RECORD_FAILED", status: 500 });
+    expect(putObject).not.toHaveBeenCalled();
+  });
+
+  it("S3 PUT 失败：补偿删除 UPLOADING 行并释放配额（CASE A）", async () => {
     putObject.mockRejectedValue(new Error("connection reset"));
 
     await expect(
       uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
     ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 500 });
 
-    // 预留(1) + 释放(1)，无资源登记
-    expect(executeRaw).toHaveBeenCalledTimes(2);
-    expect(assetCreate).not.toHaveBeenCalled();
+    // 补偿事务：删除 UPLOADING 行 + 释放配额（同一事务）
+    expect(assetDeleteMany).toHaveBeenCalledWith({
+      where: { id: "asset-1", status: "UPLOADING" },
+    });
+    expect(executeRaw).toHaveBeenCalledTimes(2); // 预留 + 释放
+    expect(assetUpdateMany).not.toHaveBeenCalled(); // 未进入 UPLOADED
   });
 
-  it("deletes the uploaded object and releases quota when the DB insert fails (CASE B)", async () => {
-    assetCreate.mockRejectedValue(new Error("db down"));
+  it("S3 成功但状态转移失败：报错且资源停留 UPLOADING 等待 cleanup", async () => {
+    assetUpdateMany.mockResolvedValue({ count: 0 });
 
     await expect(
       uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
     ).rejects.toMatchObject({ code: "ASSET_RECORD_FAILED", status: 500 });
-
-    expect(deleteObject).toHaveBeenCalledWith(
-      expect.objectContaining({ bucket: "campus-public" }),
-    );
-    // 预留(1) + 释放(1)
-    expect(executeRaw).toHaveBeenCalledTimes(2);
+    // 不做即时删除（对象已存在），由 stale UPLOADING cleanup 恢复
+    expect(assetDeleteMany).not.toHaveBeenCalled();
   });
 
   it("reflects the configured default quota (500MB)", () => {
@@ -217,14 +283,44 @@ describe("uploadImageAsset", () => {
   });
 });
 
-describe("attachAssetsToEntity and resolveImageTokens", () => {
+describe("attach compatibility mapping", () => {
+  it("maps every category to exactly its semantic target(s)", () => {
+    expect(ATTACH_COMPATIBILITY.AVATAR).toEqual(["avatar"]);
+    expect(ATTACH_COMPATIBILITY.PRODUCT).toEqual(["product"]);
+    expect(ATTACH_COMPATIBILITY.RENTAL).toEqual(["rentalListing"]);
+    expect(ATTACH_COMPATIBILITY.SERVICE).toEqual(["serviceListing"]);
+    expect(ATTACH_COMPATIBILITY.VERIFICATION).toEqual(["verification"]);
+    expect(ATTACH_COMPATIBILITY.HANDOVER).toEqual(["rentalOrder"]);
+    expect(ATTACH_COMPATIBILITY.RETURN).toEqual(["rentalOrder"]);
+    expect(ATTACH_COMPATIBILITY.REPORT).toEqual(["rentalOrder"]);
+  });
+
+  it("cross-category usage is rejected (helpers)", () => {
+    expect(isAssetCompatibleWithTarget("AVATAR", { type: "product", id: "p1" })).toBe(false);
+    expect(isAssetCompatibleWithTarget("PRODUCT", { type: "verification", id: "v1" })).toBe(false);
+    expect(isAssetCompatibleWithTarget("VERIFICATION", { type: "avatar" })).toBe(false);
+    expect(isAssetCompatibleWithTarget("HANDOVER", { type: "product", id: "p1" })).toBe(false);
+    expect(isAssetCompatibleWithTarget("RETURN", { type: "serviceListing", id: "s1" })).toBe(false);
+    expect(isAssetCompatibleWithTarget("PRODUCT", { type: "product", id: "p1" })).toBe(true);
+  });
+
+  it("isSameAttachment matches the exact entity", () => {
+    const attached = assetWith({ category: "PRODUCT", productId: "product-A" });
+    expect(isSameAttachment(attached, { type: "product", id: "product-A" })).toBe(true);
+    expect(isSameAttachment(attached, { type: "product", id: "product-B" })).toBe(false);
+    expect(
+      isSameAttachment(assetWith({ category: "AVATAR" }), { type: "avatar" }),
+    ).toBe(true);
+  });
+});
+
+describe("resolveImageTokens（授权绑定）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    assetUpdateMany.mockResolvedValue({ count: 1 });
   });
 
   it("claims only the owner's UPLOADED assets (conditional update)", async () => {
-    assetUpdateMany.mockResolvedValue({ count: 1 });
-
     const attached = await attachAssetsToEntity(txStub, {
       ownerId: "user-1",
       assetIds: ["asset-1"],
@@ -242,19 +338,22 @@ describe("attachAssetsToEntity and resolveImageTokens", () => {
     });
   });
 
-  it("resolves asset tokens of the owner and keeps foreign urls untouched", async () => {
-    assetFindFirst.mockResolvedValue({ ...baseAsset, access: "PUBLIC", status: "UPLOADED" });
-    assetUpdateMany.mockResolvedValue({ count: 1 });
+  it("attaches a compatible owned asset and keeps foreign urls untouched", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "PRODUCT",
+      access: "PUBLIC",
+      objectKey: "public/products/user-1/xyz.webp",
+    });
 
     const resolved = await resolveImageTokens({
       ownerId: "user-1",
       tokens: ["asset:asset-1", "https://cdn.example.com/external.jpg", "  "],
-      target: { type: "avatar" },
+      target: { type: "product", id: "product-9" },
     });
 
-    // 公开资源 → 公开 URL；外链透传；空 token 丢弃
     expect(resolved).toEqual([
-      "http://localhost:9100/campus-public/private/verification/user-1/abcd1234.webp",
+      "http://localhost:9100/campus-public/public/products/user-1/xyz.webp",
       "https://cdn.example.com/external.jpg",
     ]);
   });
@@ -278,29 +377,147 @@ describe("attachAssetsToEntity and resolveImageTokens", () => {
       resolveImageTokens({
         ownerId: "user-2",
         tokens: ["asset:asset-1"],
-        target: { type: "avatar" },
+        target: { type: "verification", id: "verification-1" },
       }),
     ).rejects.toMatchObject({ code: "INVALID_ASSET_REFERENCE" });
   });
 
-  it("rejects deleted or pending-delete assets", async () => {
-    assetFindFirst.mockResolvedValue({ ...baseAsset, status: "DELETED" });
+  it("rejects malformed asset: tokens instead of passing them through", async () => {
+    for (const malformed of [
+      "asset:***",
+      "asset:..",
+      "asset:/",
+      "asset: ",
+      `asset:${"x".repeat(80)}`,
+      "asset:%2f..%2fetc",
+    ]) {
+      await expect(
+        resolveImageTokens({
+          ownerId: "user-1",
+          tokens: [malformed],
+          target: { type: "product", id: "product-9" },
+        }),
+        `token: ${JSON.stringify(malformed)}`,
+      ).rejects.toMatchObject({ code: "INVALID_ASSET_REFERENCE" });
+    }
+    expect(assetFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("rejects category mismatches with a stable error code", async () => {
+    // PRODUCT 资产用于 verification 目标
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "PRODUCT",
+      access: "PUBLIC",
+    });
 
     await expect(
       resolveImageTokens({
         ownerId: "user-1",
         tokens: ["asset:asset-1"],
-        target: { type: "avatar" },
+        target: { type: "verification", id: "verification-1" },
       }),
-    ).rejects.toMatchObject({ code: "INVALID_ASSET_REFERENCE" });
+    ).rejects.toMatchObject({ code: "ASSET_CATEGORY_MISMATCH" });
+
+    // AVATAR 资产用于 product 目标
+    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "AVATAR", access: "PUBLIC" });
+    await expect(
+      resolveImageTokens({
+        ownerId: "user-1",
+        tokens: ["asset:asset-1"],
+        target: { type: "product", id: "product-9" },
+      }),
+    ).rejects.toMatchObject({ code: "ASSET_CATEGORY_MISMATCH" });
+
+    // HANDOVER（订单证据）用于 product 目标
+    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "HANDOVER" });
+    await expect(
+      resolveImageTokens({
+        ownerId: "user-1",
+        tokens: ["asset:asset-1"],
+        target: { type: "product", id: "product-9" },
+      }),
+    ).rejects.toMatchObject({ code: "ASSET_CATEGORY_MISMATCH" });
+  });
+
+  it("same-entity ATTACHED asset is idempotently reusable", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "PRODUCT",
+      access: "PUBLIC",
+      status: "ATTACHED",
+      productId: "product-9",
+      objectKey: "public/products/user-1/xyz.webp",
+    });
+
+    const [resolved] = await resolveImageTokens({
+      ownerId: "user-1",
+      tokens: ["asset:asset-1"],
+      target: { type: "product", id: "product-9" },
+    });
+
+    expect(resolved).toBe("http://localhost:9100/campus-public/public/products/user-1/xyz.webp");
+    // 幂等复用不再次转移状态
+    expect(assetUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("ATTACHED asset cannot be reused for a different entity (even same owner)", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "PRODUCT",
+      status: "ATTACHED",
+      productId: "product-A",
+    });
+
+    await expect(
+      resolveImageTokens({
+        ownerId: "user-1",
+        tokens: ["asset:asset-1"],
+        target: { type: "product", id: "product-B" },
+      }),
+    ).rejects.toMatchObject({ code: "ASSET_ALREADY_ATTACHED" });
+  });
+
+  it("private assets cannot migrate across entities (verification → rentalOrder)", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      status: "ATTACHED",
+      verificationId: "verification-A",
+    });
+
+    await expect(
+      resolveImageTokens({
+        ownerId: "user-1",
+        tokens: ["asset:asset-1"],
+        target: { type: "rentalOrder", id: "order-B" },
+      }),
+    ).rejects.toMatchObject({ code: "ASSET_CATEGORY_MISMATCH" });
+  });
+
+  it("rejects deleted / pending-delete / uploading assets", async () => {
+    for (const status of ["DELETED", "PENDING_DELETE", "UPLOADING"] as const) {
+      assetFindFirst.mockResolvedValue({ ...baseAsset, status });
+      await expect(
+        resolveImageTokens({
+          ownerId: "user-1",
+          tokens: ["asset:asset-1"],
+          target: { type: "verification", id: "verification-1" },
+        }),
+        `status: ${status}`,
+      ).rejects.toMatchObject({ code: "INVALID_ASSET_REFERENCE" });
+    }
   });
 });
 
-describe("delete lifecycle", () => {
+describe("delete lifecycle（exactly-once 配额）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     deleteObject.mockResolvedValue(undefined);
     assetUpdateMany.mockResolvedValue({ count: 1 });
+    executeRaw.mockResolvedValue(1);
+    transactionMock.mockImplementation(
+      async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub),
+    );
   });
 
   it("marks pending delete idempotently", async () => {
@@ -310,7 +527,7 @@ describe("delete lifecycle", () => {
     expect(await markAssetPendingDelete("asset-1")).toBe(false);
   });
 
-  it("purges the object, completes the transition and releases quota exactly once", async () => {
+  it("purges: S3 delete → 单事务 [DELETED 转移 + 配额减额]", async () => {
     const purged = await purgePendingDeleteAsset({
       id: "asset-1",
       ownerId: "user-1",
@@ -325,7 +542,7 @@ describe("delete lifecycle", () => {
       where: { id: "asset-1", status: "PENDING_DELETE" },
       data: { status: "DELETED", expiresAt: null },
     });
-    // 释放配额的原子 UPDATE
+    // 转移与减额在同一事务（executeRaw 在 transactionMock 回调内被调用）
     expect(executeRaw).toHaveBeenCalledTimes(1);
   });
 
@@ -341,15 +558,14 @@ describe("delete lifecycle", () => {
     });
 
     expect(purged).toBe(false);
-    expect(assetUpdateMany).not.toHaveBeenCalled();
-    expect(executeRaw).not.toHaveBeenCalled();
+    expect(transactionMock).not.toHaveBeenCalled();
   });
 
-  it("does not release quota twice when the transition already completed", async () => {
-    // 第二次条件转移匹配 0 行（已是 DELETED）
+  it("does not release quota when the DELETED transition loses the race", async () => {
+    // 并发 cleanup：条件转移匹配 0 行（对方已完成）
     assetUpdateMany.mockResolvedValue({ count: 0 });
 
-    await purgePendingDeleteAsset({
+    const purged = await purgePendingDeleteAsset({
       id: "asset-1",
       ownerId: "user-1",
       bucket: "campus-private",
@@ -357,7 +573,22 @@ describe("delete lifecycle", () => {
       sizeBytes: 1024,
     });
 
+    expect(purged).toBe(false);
     expect(executeRaw).not.toHaveBeenCalled();
+  });
+
+  it("transaction failure keeps PENDING_DELETE for the next run", async () => {
+    transactionMock.mockRejectedValue(new Error("db down"));
+
+    const purged = await purgePendingDeleteAsset({
+      id: "asset-1",
+      ownerId: "user-1",
+      bucket: "campus-private",
+      objectKey: baseAsset.objectKey,
+      sizeBytes: 1024,
+    });
+
+    expect(purged).toBe(false);
   });
 
   it("marks assets by asset id and by public url value", async () => {
@@ -386,13 +617,14 @@ describe("resolvePrivateAssetAccess", () => {
     vi.clearAllMocks();
   });
 
-  it("returns not_found for missing, deleted or pending-delete assets", async () => {
+  it("returns not_found for missing, deleted, pending-delete or uploading assets", async () => {
     assetFindFirst.mockResolvedValueOnce(null);
     assetFindFirst.mockResolvedValueOnce({ ...baseAsset, status: "DELETED" });
     assetFindFirst.mockResolvedValueOnce({ ...baseAsset, status: "PENDING_DELETE" });
+    assetFindFirst.mockResolvedValueOnce({ ...baseAsset, status: "UPLOADING" });
 
     const stranger = { id: "user-2", role: "STUDENT" };
-    for (let i = 0; i < 3; i += 1) {
+    for (let i = 0; i < 4; i += 1) {
       expect(await resolvePrivateAssetAccess("asset-1", stranger)).toEqual({
         ok: false,
         reason: "not_found",
@@ -463,13 +695,12 @@ describe("resolvePrivateAssetAccess", () => {
       rentalOrder: { renterId: "user-renter", ownerId: "user-owner" },
     });
 
-    // 订单参与关系不能打开别人的学生证材料
     expect(
       await resolvePrivateAssetAccess("asset-1", { id: "user-renter", role: "STUDENT" }),
     ).toEqual({ ok: false, reason: "forbidden" });
   });
 
-  it("signs a short-lived read url with the configured ttl", async () => {
+  it("signs a short-lived read url with private no-store response policy", async () => {
     getSignedReadUrl.mockResolvedValue("http://localhost:9100/campus-private/signed?token=x");
 
     const result = await createPrivateAssetSignedUrl({
@@ -482,6 +713,7 @@ describe("resolvePrivateAssetAccess", () => {
     expect(getSignedReadUrl).toHaveBeenCalledWith(
       { bucket: "campus-private", objectKey: baseAsset.objectKey },
       300,
+      "private, no-store",
     );
   });
 });

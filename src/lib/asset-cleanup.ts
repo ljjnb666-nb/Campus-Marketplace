@@ -7,12 +7,14 @@ import { batchCount, purgePendingDeleteAsset } from "@/lib/asset-service";
 /**
  * 存储清理任务（可重复执行、幂等、支持 dry-run）：
  *
- * 1. 孤儿回收：UPLOADED 且 createdAt 超过 ASSET_ORPHAN_TTL_HOURS 的临时资源
- *    （用户上传后未完成发品/提交即离开）→ 标记 PENDING_DELETE
+ * 1. 孤儿/僵死回收：UPLOADING（预留后崩溃，对象可能存在也可能不存在）与
+ *    UPLOADED（上传完成但未绑定业务）超过 ASSET_ORPHAN_TTL_HOURS 的资源
+ *    → 标记 PENDING_DELETE（对象删除幂等，两种情形都安全）
  * 2. 保留期到期：expiresAt 已过的敏感资源（如审核完成后的学生证材料）
  *    → 标记 PENDING_DELETE；认证结论等业务数据不受影响
- * 3. 物理清理：所有 PENDING_DELETE 资源删除远端对象 → DELETED + 释放配额；
- *    删除失败保留 PENDING_DELETE，下次执行自动重试（CASE F）
+ * 3. 物理清理：所有 PENDING_DELETE 资源删除远端对象 → 单事务完成
+ *    DELETED 转移 + 配额减额（exactly-once，并发 worker 安全）；
+ *    失败保留 PENDING_DELETE，下次执行自动重试（CASE F）
  */
 
 export interface CleanupSummary {
@@ -47,9 +49,12 @@ export async function runStorageCleanup(options: CleanupOptions = {}): Promise<C
     failures: 0,
   };
 
-  // 1. 孤儿临时资源
+  // 1. 孤儿与僵死资源：UPLOADING（崩溃遗留，对象可能存在）+ UPLOADED（未绑定业务）
   const orphanCutoff = new Date(now.getTime() - env.ASSET_ORPHAN_TTL_HOURS * 60 * 60 * 1000);
-  const orphanWhere = { status: "UPLOADED" as const, createdAt: { lt: orphanCutoff } };
+  const orphanWhere = {
+    status: { in: ["UPLOADING", "UPLOADED"] as AssetStatus[] },
+    createdAt: { lt: orphanCutoff },
+  };
   if (dryRun) {
     summary.orphansMarked = await prisma.uploadedAsset.count({ where: orphanWhere });
   } else {
@@ -103,9 +108,9 @@ export async function runStorageCleanup(options: CleanupOptions = {}): Promise<C
       if (purged) {
         summary.objectsDeleted += 1;
         summary.quotaReleasedBytes += asset.sizeBytes;
-      } else {
-        summary.failures += 1;
       }
+      // purged=false：条件转移被并发 worker 抢先完成（或对象删除失败已被 purge 内部
+      // 记录）——前者是正常竞争结果，不计入 failures，配额也只会被对方释放一次
     } catch (error) {
       // 单条失败不中断批次（下一条继续），下次执行重试
       summary.failures += 1;

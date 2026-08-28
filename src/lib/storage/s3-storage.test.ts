@@ -27,7 +27,13 @@ describe("S3Storage", () => {
     const client = storage as unknown as { client: { send: ReturnType<typeof vi.fn> } };
 
     await expect(
-      storage.putObject({ ...ref, bucket: "BAD_BUCKET!", body: Buffer.alloc(1), contentType: "image/webp" }),
+      storage.putObject({
+        ...ref,
+        bucket: "BAD_BUCKET!",
+        body: Buffer.alloc(1),
+        contentType: "image/webp",
+        cacheControl: "private, no-store",
+      }),
     ).rejects.toThrow("bucket");
     expect(client.client.send).not.toHaveBeenCalled();
   });
@@ -45,17 +51,32 @@ describe("S3Storage", () => {
     expect(client.client.send).not.toHaveBeenCalled();
   });
 
-  it("puts objects with immutable cache headers", async () => {
+  it("puts objects with the caller-provided cache policy verbatim", async () => {
     const storage = new S3Storage(buildFakeClient(() => ({})));
 
-    await storage.putObject({ ...ref, body: Buffer.alloc(4), contentType: "image/webp" });
+    await storage.putObject({
+      ...ref,
+      body: Buffer.alloc(4),
+      contentType: "image/webp",
+      // 私有对象策略必须原样透传（public 缓存策略绝不能出现在私有对象上）
+      cacheControl: "private, no-store",
+    });
 
     const client = storage as unknown as { client: { send: ReturnType<typeof vi.fn> } };
     const input = client.client.send.mock.calls[0][0].input;
     expect(input.Bucket).toBe("campus-private");
     expect(input.Key).toBe(ref.objectKey);
     expect(input.ContentType).toBe("image/webp");
-    expect(input.CacheControl).toContain("immutable");
+    expect(input.CacheControl).toBe("private, no-store");
+  });
+
+  it("signs read urls with an optional response cache-control override", async () => {
+    const storage = new S3Storage(buildFakeClient(() => ({})));
+
+    const url = await storage.getSignedReadUrl(ref, 300, "private, no-store");
+
+    expect(url).toContain("expires=300");
+    expect(url).toContain(`key=${ref.objectKey}`);
   });
 
   it("maps missing objects from headObject to null", async () => {
@@ -86,15 +107,6 @@ describe("S3Storage", () => {
       sizeBytes: 2048,
       contentType: "image/webp",
     });
-  });
-
-  it("signs read urls with the requested expiry", async () => {
-    const storage = new S3Storage(buildFakeClient(() => ({})));
-
-    const url = await storage.getSignedReadUrl(ref, 300);
-
-    expect(url).toContain("expires=300");
-    expect(url).toContain(`key=${ref.objectKey}`);
   });
 
   it("propagates non-404 head errors", async () => {

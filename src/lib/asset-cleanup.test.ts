@@ -50,16 +50,21 @@ describe("runStorageCleanup", () => {
     purgePendingDeleteAsset.mockResolvedValue(true);
   });
 
-  it("marks orphan uploads past the ttl as pending delete", async () => {
+  it("marks stale UPLOADING and orphan UPLOADED past the ttl as pending delete", async () => {
     assetUpdateMany.mockResolvedValue({ count: 3 });
 
     const summary = await runStorageCleanup({ now });
 
     expect(summary.orphansMarked).toBe(3);
     const orphanCall = assetUpdateMany.mock.calls.find(
-      (call) => "status" in call[0].where && call[0].where.status === "UPLOADED",
+      (call) =>
+        call[0].where.status &&
+        typeof call[0].where.status === "object" &&
+        "in" in (call[0].where.status as Record<string, unknown>),
     );
     expect(orphanCall).toBeDefined();
+    // 孤儿扫描同时覆盖：UPLOADING（预留后崩溃）与 UPLOADED（未绑定业务）
+    expect(orphanCall![0].where.status.in).toEqual(["UPLOADING", "UPLOADED"]);
     expect(orphanCall![0].where.createdAt.lt).toEqual(
       new Date("2026-08-26T12:00:00.000Z"),
     );
@@ -91,19 +96,18 @@ describe("runStorageCleanup", () => {
     expect(purgePendingDeleteAsset).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps going when a single purge fails (retry next run)", async () => {
+  it("keeps going when a single purge throws (retry next run)", async () => {
     assetFindMany.mockResolvedValue([
       pendingAsset,
       { ...pendingAsset, id: "asset-2", sizeBytes: 512 },
     ]);
-    purgePendingDeleteAsset
-      .mockResolvedValueOnce(false)
-      .mockRejectedValueOnce(new Error("s3 down"));
+    // 一路被并发 worker 抢先完成（false，正常竞争不计失败），一路抛错（计入 failures）
+    purgePendingDeleteAsset.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("s3 down"));
 
     const summary = await runStorageCleanup({ now });
 
     expect(summary.objectsDeleted).toBe(0);
-    expect(summary.failures).toBe(2);
+    expect(summary.failures).toBe(1);
   });
 
   it("dry-run reports counts without mutating anything", async () => {

@@ -62,12 +62,27 @@ describe("upload helpers", () => {
     expect(UPLOAD_LIMITS.report.maxCount).toBe(5);
   });
 
-  it("accepts http urls, legacy paths and asset references as image values", () => {
+  it("accepts http urls, legacy paths and strictly valid asset references", () => {
     expect(isManageableImageValue("https://example.com/a.jpg")).toBe(true);
     expect(isManageableImageValue("/uploads/products/a.jpg")).toBe(true);
     expect(isManageableImageValue("asset:ckv123abc")).toBe(true);
     expect(isManageableImageValue("javascript:alert(1)")).toBe(false);
     expect(isManageableImageValue("data:text/html,<h1>x</h1>")).toBe(false);
+  });
+
+  it("rejects malformed asset: tokens instead of treating them as raw urls", () => {
+    // 以 asset: 开头但严格解析失败的值一律拒绝，不得作为普通 token 透传进 DB
+    for (const malformed of [
+      "asset:***",
+      "asset:..",
+      "asset:/",
+      "asset: ",
+      `asset:${"x".repeat(80)}`,
+      "asset:%2f..%2fetc",
+      "asset:",
+    ]) {
+      expect(isManageableImageValue(malformed), `value: ${JSON.stringify(malformed)}`).toBe(false);
+    }
   });
 
   it("returns null when no file is provided", async () => {

@@ -49,22 +49,40 @@ UploadedAsset 登记（Prisma）+ User.storageUsedBytes 配额记账
 - PRIVATE 资源：不返回永久 URL、不落 `public/` 静态目录、DB 中只保存 `asset:<assetId>` 引用。
 - 公开资源在业务表中保存完整公开 URL（`PUBLIC_ASSET_BASE_URL` 前缀，可切 CDN）。
 
+**绑定兼容性（唯一映射，服务端强制）**：AVATAR→avatar、PRODUCT→product、
+RENTAL→rentalListing、SERVICE→serviceListing、VERIFICATION→verification、
+HANDOVER/RETURN/REPORT→rentalOrder。`resolveImageTokens` 校验 owner、类别、
+访问级别、生命周期状态与当前绑定：跨类使用（如 PRODUCT 用于 verification）→
+`ASSET_CATEGORY_MISMATCH`；已 ATTACHED 的资产仅允许绑定同一实体的幂等复用，
+跨实体复用 → `ASSET_ALREADY_ATTACHED`；`asset:` 前缀但格式非法 →
+`INVALID_ASSET_REFERENCE`（不透传）。上传接口的 category 只是提示，
+最终语义以 attach 时的兼容性校验为准（category spoofing 无法绕过）。
+
 ## 3. 环境变量
 
 | 变量 | 默认（本地 MinIO） | 说明 |
 |---|---|---|
-| S3_ENDPOINT | http://localhost:9100 | S3 兼容 API 端点 |
+| S3_ENDPOINT | http://localhost:9100 | S3 兼容 API 端点（生产禁止 localhost，见 §13.1） |
 | S3_REGION | us-east-1 | 区域 |
-| S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY | minioadmin | 服务端凭据（生产必须覆盖，使用默认值会告警） |
+| S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY | minioadmin | 服务端凭据（生产使用默认值将拒绝启动） |
 | S3_BUCKET_PUBLIC / S3_BUCKET_PRIVATE | campus-public / campus-private | bucket 名 |
 | S3_FORCE_PATH_STYLE | true | MinIO/R2 为 true，AWS S3 通常 false |
 | PUBLIC_ASSET_BASE_URL | http://localhost:9100/campus-public | 公开对象基础 URL（可指向 CDN） |
 | PRIVATE_SIGNED_URL_TTL_SECONDS | 300 | 私有签名 URL 有效期（下限 60s） |
 | STORAGE_QUOTA_MB | 500 | 每用户总上传配额 |
-| ASSET_ORPHAN_TTL_HOURS | 24 | 未绑定业务资源的回收时限 |
+| ASSET_ORPHAN_TTL_HOURS | 24 | 未绑定业务/stale UPLOADING 资源的回收时限 |
 | VERIFICATION_ASSET_RETENTION_DAYS | 30 | 认证材料审核后的保留天数 |
 
 历史变量 `UPLOAD_DIR` 已废弃删除；生产上传不依赖本地磁盘。
+
+### 13.1 生产启动校验（fail fast）
+
+`NODE_ENV=production` 时 `assertProductionStorageConfig` 在应用导入即校验：
+
+- `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` 为 minioadmin → 拒绝启动
+- `S3_ENDPOINT` 为 localhost/127.0.0.1 → 拒绝启动
+  （仅显式设置 `ALLOW_LOCAL_S3_IN_PRODUCTION=true` 时放行，供本机生产模式冒烟）
+- 开发/测试环境保持零配置本地 MinIO 体验，不受影响
 
 ## 4. MinIO 本地开发
 
@@ -77,17 +95,32 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
 - `minio-init` 一次性任务：`mc mb` 两个 bucket；`campus-public` 匿名策略 `download`
   （可读禁写），`campus-private` 策略 `none`（完全禁匿名）。
 
-## 5. 上传流程（uploadImageAsset）
+## 5. 上传流程（uploadImageAsset，可恢复状态机）
 
 1. Auth（会话）+ 分类白名单
 2. MIME 白名单 + 单文件大小上限（保留原有限额：avatar 5MB/1、product 10MB/9、
    rental 10MB/9、service 10MB/5、verification 5MB/2、handover 10MB/5、return 10MB/5、report 10MB/5）
 3. sharp 真实 decode（magic bytes → 解码 → 像素上限 12000px / 40MP）
 4. autoRotate + metadata 剥离 + 重编码（默认 WebP q85；带透明通道保留 PNG）
-5. 配额原子预留（见 §7）
-6. `putObject` 到对应 bucket
-7. 写入 `UploadedAsset`（status=UPLOADED）
+5. **[事务 T1]** 条件原子 UPDATE 预留配额 + 创建 `UploadedAsset(status=UPLOADING)`——
+   两者同生共死，不存在"已预留但无记录"的窗口
+6. `putObject`（Cache-Control 按访问级别显式给定：PUBLIC=长期公开不可变；
+   PRIVATE=`private, no-store`）
+7. 条件转移 `UPLOADING → UPLOADED`
 8. 返回 `{ assetId, access, url?, mimeType, sizeBytes }`；私有资源 `url=null`
+
+状态机与崩溃恢复：
+
+```
+[T1: 预留 + UPLOADING 行] → S3 PUT → [UPLOADED] → attach → [ATTACHED]
+                                        ↓ 标记
+[PENDING_DELETE] → S3 DeleteObject → [T2: DELETED 转移 + 配额减额（同一事务）]
+```
+
+- S3 PUT 失败：即时补偿（单事务删行+释放）；补偿失败则行停留 UPLOADING
+- 任意时刻崩溃：UPLOADING 行必然存在，cleanup 按 TTL（24h）回收——
+  对象不存在 → deleteObject 幂等无操作；对象已写入 → 删除对象，随后释放配额
+- T2 条件转移保证 exactly-once：两个并发 cleanup worker 只有一路完成转移与减额
 
 前端 `ImageUploader` 选图后立即上传并把 token（公开 URL / `asset:<id>`）放进表单；
 提交时服务端 `resolveImageTokens` 校验归属并把 UPLOADED 资源转成 ATTACHED（绑定业务实体）。
@@ -108,7 +141,7 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
 
 管理端 `admin/verifications` 通过 `PrivateAssetViewer` 客户端组件调本接口查看学生证材料。
 
-## 7. 配额（并发安全）
+## 7. 配额（并发安全 + 崩溃可恢复）
 
 - 记账字段：`User.storageUsedBytes`；判定用单条条件原子 UPDATE：
 
@@ -119,7 +152,26 @@ WHERE id = $user AND "storageUsedBytes" + $size <= $quota
 
   行锁天然串行化，两个并发上传不可能同时通过判定（真实数据库集成测试：
   8 路并发 300KB、配额 1MB，恰好 3 路成功，记账精确 900000）。
+- **预留与记录同事务（T1）**：任何崩溃后要么两者都不存在，要么 UPLOADING 行在，
+  cleanup 可恢复——不存在配额永久虚高的窗口。
+- **释放与 DELETED 转移同事务（T2）**：条件转移只可能命中一次，
+  两个并发 cleanup worker 也不会 double-release；转移失败则整体回滚，
+  行保持 PENDING_DELETE 待重试。
 - 释放走 `GREATEST(0, used - size)`，重复释放不会出现负数。
+- 崩溃恢复集成测试覆盖：stale UPLOADING（对象存在/不存在）、并发 cleanup、
+  重复 cleanup、repeat purge 不二次减额、最终配额精确。
+
+## 7.1 缓存策略（Cache-Control）
+
+| 访问级别 | 对象元数据 | 签名 GET 响应 |
+|---|---|---|
+| PUBLIC | `public, max-age=31536000, immutable` | —（走公开 URL） |
+| PRIVATE | `private, no-store` | `private, no-store`（S3 `response-cache-control` 覆盖） |
+
+签名 URL 过期 ≠ 浏览器/代理已缓存的响应自动消失，因此私有对象从
+对象元数据到签名响应头都禁止任何存储；真实 MinIO 集成测试验证
+HEAD 元数据与 GET 响应头的实际值。`PutObjectInput.cacheControl`
+由调用方显式给定，存储层不做字符串猜测。
 
 ## 8. 孤儿回收（cleanup）
 
@@ -142,14 +194,17 @@ WHERE id = $user AND "storageUsedBytes" + $size <= $quota
 
 | 场景 | 行为 |
 |---|---|
-| S3 上传失败 | 立即释放配额；不产生资源行（无脏数据） |
-| DB 登记失败 | 删除已上传对象 + 释放配额（compensation） |
-| 上传成功后进程崩溃 | 资源停留 UPLOADED → 孤儿回收 |
+| S3 上传失败 | 补偿事务删除 UPLOADING 行并释放配额；补偿失败则行停留 UPLOADING 由 cleanup 恢复 |
+| T1（预留+建行）失败 | 同事务整体回滚：无预留、无行、无对象 |
+| S3 成功后转移失败/崩溃 | 行停留 UPLOADING → cleanup 删除对象并释放配额 |
+| T1 提交后、PUT 前崩溃 | stale UPLOADING（无对象）→ cleanup 释放配额 |
 | 并发冲配额 | 条件 UPDATE 串行化，总量不突破 |
-| 重复删除 | 状态机条件转移（UPLOADED/ATTACHED→PENDING_DELETE→DELETED），幂等 |
+| 重复删除 | 状态机条件转移（→PENDING_DELETE→DELETED），幂等 |
 | cleanup 中途崩溃 | 已删对象的行已转 DELETED；未处理行下轮继续 |
-| 签名 URL 泄漏 | 默认 5 分钟过期 |
+| DELETED 转移与配额减额 | 同一事务提交；并发 worker 条件转移只命中一次，不 double-release |
+| 签名 URL 泄漏 | 默认 5 分钟过期 + 响应 `private, no-store` 禁缓存 |
 | 猜测他人 assetId | 403/404，签名接口做业务授权 |
+| 跨类/跨实体滥用资产 | attach 兼容性校验拒绝（ASSET_CATEGORY_MISMATCH / ASSET_ALREADY_ATTACHED） |
 | 编辑替换/软删除业务实体 | 旧资源标记 PENDING_DELETE，异步物理清理，避免事务回滚后对象已删 |
 
 原则：DB 与对象存储不会因失败形成无法恢复的不一致；

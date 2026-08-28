@@ -34,11 +34,14 @@ export function isStoredImagePath(value: string): boolean {
   return value.startsWith("/uploads/");
 }
 
-/** 表单图片值合法性：http(s) 外链、历史 /uploads/ 路径、asset:<id> 引用 */
+/**
+ * 表单图片值合法性：http(s) 外链、历史 /uploads/ 路径、严格合法的 asset:<id> 引用。
+ * 以 asset: 开头但格式非法的值（asset:..、asset:***、asset:%2f、超长等）一律拒绝，
+ * 不得作为普通 token 透传进数据库。
+ */
 export function isManageableImageValue(value: string): boolean {
-  return (
-    /^https?:\/\//.test(value) ||
-    isStoredImagePath(value) ||
-    isAssetReference(value)
-  );
+  if (value.startsWith(ASSET_REFERENCE_PREFIX)) {
+    return parseAssetReference(value) !== null;
+  }
+  return /^https?:\/\//.test(value) || isStoredImagePath(value);
 }

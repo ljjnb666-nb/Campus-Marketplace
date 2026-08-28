@@ -40,7 +40,9 @@ const createdKeys: Array<{ bucket: string; objectKey: string }> = [];
  * 仅允许访问测试端点主机（本地/回环），路径段做白名单字符校验，
  * 杜绝把任意来源的 URL 直接发给服务端。
  */
-async function httpGetStatusAndBody(url: string): Promise<{ status: number; body: string }> {
+async function httpGetStatusAndBody(
+  url: string,
+): Promise<{ status: number; body: string; cacheControl: string | null }> {
   const parsed = new URL(url);
   const host = parsed.hostname;
   const isLocalHost =
@@ -59,6 +61,7 @@ async function httpGetStatusAndBody(url: string): Promise<{ status: number; body
     let started = false;
     const chunks: Buffer[] = [];
     let statusCode = 0;
+    let cacheControl: string | null = null;
 
     const finish = (error?: Error) => {
       if (settled) return;
@@ -68,12 +71,13 @@ async function httpGetStatusAndBody(url: string): Promise<{ status: number; body
         reject(error);
         return;
       }
-      resolve({ status: statusCode, body: Buffer.concat(chunks).toString() });
+      resolve({ status: statusCode, body: Buffer.concat(chunks).toString(), cacheControl });
     };
 
     const request = http.get(parsed, { headers: { connection: "close" } }, (response) => {
       started = true;
       statusCode = response.statusCode ?? 0;
+      cacheControl = response.headers["cache-control"] ?? null;
       response.on("data", (chunk: Buffer) => chunks.push(chunk));
       response.on("end", () => finish());
       response.on("aborted", () => finish());
@@ -119,9 +123,10 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
     }
   });
 
-  it("公开对象：上传 → head → 匿名 GET 可读", async () => {
+  it("公开对象：上传 → head → 匿名 GET 可读且可长期公开缓存", async () => {
     const { S3Storage } = await import("@/lib/storage/s3-storage");
     const { buildObjectKey } = await import("@/lib/storage/object-key");
+    const { PUBLIC_OBJECT_CACHE_CONTROL } = await import("@/lib/asset-service");
     const storage = new S3Storage(s3!);
 
     const objectKey = buildObjectKey({
@@ -133,20 +138,35 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
     createdKeys.push({ bucket: publicBucket, objectKey });
 
     const body = Buffer.from("public-integration-test");
-    await storage.putObject({ bucket: publicBucket, objectKey, body, contentType: "text/plain" });
+    await storage.putObject({
+      bucket: publicBucket,
+      objectKey,
+      body,
+      contentType: "text/plain",
+      cacheControl: PUBLIC_OBJECT_CACHE_CONTROL,
+    });
 
     const head = await storage.headObject({ bucket: publicBucket, objectKey });
     expect(head?.sizeBytes).toBe(body.byteLength);
+
+    // 对象元数据（HEAD）：公开对象允许长期不可变缓存
+    const { HeadObjectCommand } = await import("@aws-sdk/client-s3");
+    const headMeta = await s3!.send(
+      new HeadObjectCommand({ Bucket: publicBucket, Key: objectKey }),
+    );
+    expect(headMeta.CacheControl).toBe("public, max-age=31536000, immutable");
 
     // bucket 策略允许匿名读（compose/CI 已用 mc 设置 download）
     const response = await httpGetStatusAndBody(`${endpoint}/${publicBucket}/${objectKey}`);
     expect(response.status).toBe(200);
     expect(response.body).toBe("public-integration-test");
+    expect(response.cacheControl).toBe("public, max-age=31536000, immutable");
   });
 
-  it("私有对象：上传 → 匿名 GET 拒绝 → 签名 URL 可读", async () => {
+  it("私有对象：上传 → 匿名 GET 拒绝 → 签名 URL 可读且禁止缓存", async () => {
     const { S3Storage } = await import("@/lib/storage/s3-storage");
     const { buildObjectKey } = await import("@/lib/storage/object-key");
+    const { PRIVATE_OBJECT_CACHE_CONTROL } = await import("@/lib/asset-service");
     const storage = new S3Storage(s3!);
 
     const objectKey = buildObjectKey({
@@ -158,16 +178,35 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
     createdKeys.push({ bucket: privateBucket, objectKey });
 
     const body = Buffer.from("private-integration-test");
-    await storage.putObject({ bucket: privateBucket, objectKey, body, contentType: "text/plain" });
+    await storage.putObject({
+      bucket: privateBucket,
+      objectKey,
+      body,
+      contentType: "text/plain",
+      cacheControl: PRIVATE_OBJECT_CACHE_CONTROL,
+    });
+
+    // 对象元数据（HEAD）：私有对象绝不落入公开缓存策略
+    const { HeadObjectCommand } = await import("@aws-sdk/client-s3");
+    const headMeta = await s3!.send(
+      new HeadObjectCommand({ Bucket: privateBucket, Key: objectKey }),
+    );
+    expect(headMeta.CacheControl).toBe("private, no-store");
 
     // 匿名访问被 bucket 策略拒绝
     const anonymous = await httpGetStatusAndBody(`${endpoint}/${privateBucket}/${objectKey}`);
     expect(anonymous.status).toBe(403);
 
-    // 签名 URL 短期可读
-    const signedUrl = await storage.getSignedReadUrl({ bucket: privateBucket, objectKey }, 60);
+    // 签名 URL 短期可读；响应 Cache-Control 强制 private, no-store
+    // （签名过期 ≠ 缓存自动消失，必须在响应头层面禁止存储）
+    const signedUrl = await storage.getSignedReadUrl(
+      { bucket: privateBucket, objectKey },
+      60,
+      PRIVATE_OBJECT_CACHE_CONTROL,
+    );
     const signed = await httpGetStatusAndBody(signedUrl);
     expect(signed.status).toBe(200);
+    expect(signed.cacheControl).toBe("private, no-store");
     expect(signed.body).toBe("private-integration-test");
   });
 
@@ -188,6 +227,7 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
       objectKey,
       body: Buffer.from("tmp"),
       contentType: "text/plain",
+      cacheControl: "public, max-age=31536000, immutable",
     });
     await storage.deleteObject({ bucket: publicBucket, objectKey });
     await storage.deleteObject({ bucket: publicBucket, objectKey });
