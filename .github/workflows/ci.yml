@@ -81,8 +81,8 @@ jobs:
         run: |
           docker run --rm --network host --entrypoint /bin/sh minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
-            mc mb -p --ignore-existing local/campus-public &&
-            mc mb -p --ignore-existing local/campus-private &&
+            mc mb --ignore-existing local/campus-public &&
+            mc mb --ignore-existing local/campus-private &&
             mc anonymous set download local/campus-public &&
             mc anonymous set none local/campus-private
           "

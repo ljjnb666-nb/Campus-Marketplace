@@ -68,8 +68,8 @@ services:
     entrypoint: >
       /bin/sh -c "
       mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb -p local/campus-public &&
-      mc mb -p local/campus-private &&
+      mc mb --ignore-existing local/campus-public &&
+      mc mb --ignore-existing local/campus-private &&
       mc anonymous set download local/campus-public &&
       mc anonymous set none local/campus-private &&
       echo 'MinIO buckets ready'
