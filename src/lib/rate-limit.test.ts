@@ -1,21 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { evalFn, delFn } = vi.hoisted(() => ({
+const { evalFn, delFn, mockClient } = vi.hoisted(() => ({
   evalFn: vi.fn(),
   delFn: vi.fn(),
+  // 模拟连接状态机：ready/connecting/end 可按用例切换
+  mockClient: {
+    status: "ready" as string,
+    eval: vi.fn(),
+    del: vi.fn(),
+    on: vi.fn(),
+  },
 }));
 
 vi.mock("ioredis", () => ({
-  Redis: vi.fn().mockImplementation(() => ({
-    eval: evalFn,
-    del: delFn,
-    on: vi.fn(),
-  })),
+  Redis: vi.fn().mockImplementation(() => mockClient),
 }));
 
 import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
 
-type RateLimitGlobal = typeof globalThis & { rateLimitRedis?: unknown };
+type RateLimitGlobal = typeof globalThis & {
+  rateLimitRedis?: unknown;
+  rateLimitRedisReady?: Promise<boolean> | undefined;
+};
 
 describe("rate limiter", () => {
   beforeEach(() => {
@@ -24,6 +30,10 @@ describe("rate limiter", () => {
     // 默认走本地计数路径；需要 Redis 路径的用例单独覆盖环境变量
     vi.stubEnv("REDIS_URL", "");
     (globalThis as RateLimitGlobal).rateLimitRedis = undefined;
+    (globalThis as RateLimitGlobal).rateLimitRedisReady = undefined;
+    mockClient.status = "ready";
+    mockClient.eval = evalFn;
+    mockClient.del = delFn;
     evalFn.mockReset();
     delFn.mockReset();
   });
@@ -160,6 +170,36 @@ describe("rate limiter", () => {
       limited: true,
       remaining: 0,
     });
+  });
+
+  it("waits for a connecting client to become ready instead of mis-falling-back", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "connecting";
+    evalFn.mockResolvedValue(1);
+
+    // 50ms 后连接建立
+    setTimeout(() => {
+      mockClient.status = "ready";
+    }, 50);
+
+    const pending = isRateLimited({ key: "cold-start", limit: 2, windowMs: 60000 });
+    // 推进 fake timers：readiness 轮询跨越 50ms 后 client ready
+    await vi.advanceTimersByTimeAsync(75);
+    const result = await pending;
+
+    expect(result).toEqual({ limited: false, remaining: 1 });
+    expect(evalFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back immediately without eval when the client is dead (end)", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "end";
+
+    expect(await isRateLimited({ key: "dead", limit: 2, windowMs: 60000 })).toEqual({
+      limited: false,
+      remaining: 1,
+    });
+    expect(evalFn).not.toHaveBeenCalled();
   });
 
   it("resets the Redis counter on explicit reset", async () => {
