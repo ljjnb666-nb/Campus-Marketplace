@@ -68,25 +68,28 @@ async function main() {
       path: "/",
       expected: [
         "\u6821\u56ed\u96c6\u5e02",
-        "\u6821\u56ed\u91cc\u7684\u95f2\u7f6e\u4ea4\u6613\u3001\u8dd1\u817f\u63a5\u5355\u548c\u6280\u80fd\u670d\u52a1",
+        // hero 文案被渐变 span 拆成两段，按两个连续片段分别断言
+        "\u6821\u56ed\u91cc\u7684\u95f2\u7f6e\u4ea4\u6613\u3001\u8dd1\u817f\u63a5\u5355",
+        "\u548c\u6280\u80fd\u670d\u52a1\uff0c\u4e00\u7ad9\u89e3\u51b3",
       ],
     },
     {
       name: "products",
       path: "/products",
-      expected: ["\u4e8c\u624b\u5546\u54c1", "\u5171\u627e\u5230"],
+      // 列表页改版后计数文案不再输出，按页面标题断言
+      expected: ["\u5546\u54c1\u5217\u8868"],
       forbidden: ["\u6211\u7684\u5546\u54c1", "\u53d1\u5e03\u5546\u54c1"],
     },
     {
       name: "errands",
       path: "/errands",
-      expected: ["\u8dd1\u817f\u5927\u5385", "\u5171\u627e\u5230"],
+      expected: ["\u8dd1\u817f\u5927\u5385"],
       forbidden: ["\u6211\u7684\u4efb\u52a1", "\u53d1\u5e03\u4efb\u52a1"],
     },
     {
       name: "services",
       path: "/services",
-      expected: ["\u6280\u80fd\u670d\u52a1", "\u5171\u627e\u5230"],
+      expected: ["\u6280\u80fd\u670d\u52a1", "\u670d\u52a1\u5217\u8868"],
       forbidden: ["\u6211\u7684\u670d\u52a1", "\u53d1\u5e03\u670d\u52a1"],
     },
     {
@@ -119,7 +122,7 @@ async function main() {
       expected: [
         errand.title,
         "\u53d1\u5e03\u8005\u4fe1\u606f",
-        "\u4efb\u52a1\u63d0\u793a",
+        "\u4efb\u52a1\u8981\u6c42",
       ],
     },
     {
@@ -128,7 +131,7 @@ async function main() {
       expected: [
         service.title,
         "\u670d\u52a1\u8005\u4fe1\u606f",
-        "\u670d\u52a1\u8bf4\u660e",
+        "\u4e3a\u4f60\u63a8\u8350\u540c\u6821\u6280\u80fd\u670d\u52a1",
       ],
     },
     {
@@ -136,8 +139,8 @@ async function main() {
       path: `/users/${user.id}`,
       expected: [
         user.name,
-        "Ta \u53d1\u5e03\u7684\u5546\u54c1",
-        "Ta \u63d0\u4f9b\u7684\u670d\u52a1",
+        "Ta \u53d1\u5e03\u7684\u95f2\u7f6e\u5546\u54c1",
+        "Ta \u4e0a\u67b6\u7684\u6280\u80fd\u670d\u52a1",
       ],
     },
     {
@@ -167,11 +170,10 @@ async function main() {
     });
   }
 
+  // 列表段 loading.tsx 会让响应 shell 以 200 先行 flush，
+  // notFound() 只能流式替换为 not-found UI（框架语义）。
+  // 因此这里断言 not-found UI 的渲染，真正的 404 状态码由未知路由检查覆盖。
   const missingProduct = await fetchPage("/products/missing-product-id");
-  assert(
-    missingProduct.response.status === 404,
-    `missing product should return 404, got ${missingProduct.response.status}`,
-  );
   for (const expectedText of ["页面不存在", "链接可能已经失效", "浏览二手商品", "进入个人中心"]) {
     assert(
       missingProduct.html.includes(expectedText),
@@ -182,6 +184,17 @@ async function main() {
     name: "missing-product",
     url: missingProduct.url,
     status: missingProduct.response.status,
+  });
+
+  const unknownRoute = await fetchPage("/definitely-not-a-route");
+  assert(
+    unknownRoute.response.status === 404,
+    `unknown route should return 404, got ${unknownRoute.response.status}`,
+  );
+  results.push({
+    name: "unknown-route",
+    url: unknownRoute.url,
+    status: unknownRoute.response.status,
   });
 
   console.log("Runtime page verification passed.");

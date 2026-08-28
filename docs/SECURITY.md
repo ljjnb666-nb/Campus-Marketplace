@@ -18,6 +18,16 @@
 - 商品/跑腿下单与接单使用条件 `updateMany` 原子流转，防并发超卖/重复接单
 - 租赁订单创建使用 `SELECT ... FOR UPDATE` 行锁，防止并发重复预订同一时段（2026-08-25 修复）
 - 图片上传文件魔数校验：校验 JPEG/PNG/WebP 文件头字节，防止伪造 MIME 类型上传恶意内容（`src/lib/upload.ts`）
+- 生产级对象存储体系（2026-08-28，Production Phase 1，详见 [STORAGE.md](STORAGE.md)）：
+  - 全部上传改走 S3 兼容对象存储（MinIO / AWS S3 / Cloudflare R2），本地磁盘与 `public/uploads` 不再承接生产上传
+  - 公私 bucket 隔离：avatar/product/rental/service 为公开对象；verification/handover/return/report 为私有对象，无永久公开 URL，仅业务鉴权后签发短时（默认 5 分钟）签名 URL
+  - 私有访问授权：`GET /api/assets/{assetId}/access` 按资源归属校验（本人 / 对应订单参与方 / ADMIN），已删除 404、过期 410、无权 403
+  - 图片内容安全管线（sharp）：魔数 + 真实 decode + 像素上限（12000px / 40MP）+ autoRotate + EXIF/GPS/相机 metadata 完全剥离 + 重编码（WebP，透明通道保留 PNG）
+  - object key 全服务端生成（UUID），白名单校验拒绝路径穿越；用户输入不参与 key 拼接
+  - 并发安全配额：`User.storageUsedBytes` 条件原子 UPDATE 预留/释放，配额默认 500MB/用户；S3/DB 失败路径均完整补偿，不留脏数据与永久占用
+  - 敏感材料生命周期：认证审核后保留 `VERIFICATION_ASSET_RETENTION_DAYS`（默认 30 天）自动删除原图，认证结论保留
+  - 孤儿回收：未绑定业务的临时上传超过 `ASSET_ORPHAN_TTL_HOURS`（默认 24h）由 `npm run storage:cleanup` 幂等清理
+  - 结构化日志只记录 assetId/userId/category/sizeBytes/operation/duration/errorCode，不记录签名 token、objectKey、原始内容或鉴权头
 - 数据库连接池显式配置：`connection_limit=10`、`pool_timeout=10`（2026-08-25 修复）
 - Seed 脚本生产环境保护：`NODE_ENV=production` 时拒绝执行（2026-08-25 修复）
 - API 路由 CORS 白名单：Middleware 对 `/api/*` 收紧为仅允许同源请求（2026-08-25 修复）
@@ -39,7 +49,6 @@
 - 接入更完整的内容审核能力
 - 增加登录风控与异常行为审计
 - 引入更细粒度的后台操作留痕与告警
-- 图片上传重编码（当前已有魔数校验，可进一步用 sharp 等库重编码消除隐写内容）
-- 用户上传总存储配额限制（当前单文件有大小限制但总量无限制）
+- 对象存储高流量场景演进：presigned 直传 + 后端校验回执，减少服务端中转带宽
 - HTTPS 强制跳转依赖反向代理层（Nginx 等）配置
 - next-auth v4 → v5（Auth.js）迁移

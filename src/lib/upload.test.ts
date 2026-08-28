@@ -1,18 +1,31 @@
-import { access, readFile, rm } from "node:fs/promises";
-import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/env", () => ({
-  env: {
-    UPLOAD_DIR: "./.tmp-test-uploads",
-  },
+const { uploadImageAsset } = vi.hoisted(() => ({
+  uploadImageAsset: vi.fn(),
 }));
 
-import { isAcceptedImageFile, isStoredImagePath, saveUploadedImage } from "@/lib/upload";
+// upload.ts 从 asset-service 再导出全部服务函数，mock 必须保留真实模块结构，
+// 仅替换上传入口，避免"未定义导出"的链接错误。
+vi.mock("@/lib/asset-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/asset-service")>();
+  return {
+    ...actual,
+    uploadImageAsset,
+  };
+});
+
+import {
+  isAcceptedImageFile,
+  isManageableImageValue,
+  isStoredImagePath,
+  isUploadCategory,
+  saveUploadedImage,
+  UPLOAD_LIMITS,
+} from "@/lib/upload";
 
 describe("upload helpers", () => {
-  beforeEach(async () => {
-    await rm(path.resolve(process.cwd(), "./.tmp-test-uploads"), { recursive: true, force: true });
+  beforeEach(() => {
+    uploadImageAsset.mockReset();
   });
 
   it("detects stored upload paths", () => {
@@ -25,34 +38,93 @@ describe("upload helpers", () => {
     expect(isAcceptedImageFile(new File([], "empty.png", { type: "image/png" }))).toBe(false);
   });
 
-  it("writes uploaded files into the configured upload directory", async () => {
-    // JPEG 文件头: FF D8 FF E0 + 最小 JFIF 段
-    const jpegHeader = new Uint8Array([
-      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46,
-      0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
-    ]);
-    const file = {
-      name: "avatar.jpg",
-      size: jpegHeader.length,
-      type: "image/jpeg",
-      arrayBuffer: vi.fn().mockResolvedValue(jpegHeader.buffer),
-    } as unknown as File;
+  it("validates categories against an explicit whitelist", () => {
+    expect(isUploadCategory("product")).toBe(true);
+    expect(isUploadCategory("verification")).toBe(true);
+    // 原型链属性不得命中白名单
+    expect(isUploadCategory("constructor")).toBe(false);
+    expect(isUploadCategory("__proto__")).toBe(false);
+    expect(isUploadCategory("unknown")).toBe(false);
+  });
 
-    const result = await saveUploadedImage(file, "avatar");
+  it("keeps size and count limits for all categories", () => {
+    expect(UPLOAD_LIMITS.avatar).toEqual({
+      maxSize: 5 * 1024 * 1024,
+      maxCount: 1,
+      allowedTypes: ["image/jpeg", "image/png", "image/webp"],
+    });
+    expect(UPLOAD_LIMITS.product.maxCount).toBe(9);
+    expect(UPLOAD_LIMITS.rental.maxCount).toBe(9);
+    expect(UPLOAD_LIMITS.service.maxCount).toBe(5);
+    expect(UPLOAD_LIMITS.verification.maxCount).toBe(2);
+    expect(UPLOAD_LIMITS.handover.maxCount).toBe(5);
+    expect(UPLOAD_LIMITS.return.maxCount).toBe(5);
+    expect(UPLOAD_LIMITS.report.maxCount).toBe(5);
+  });
 
-    expect(result).toMatch(/^\/uploads\/avatar\/.+\.jpg$/);
-    expect(result).not.toBeNull();
+  it("accepts http urls, legacy paths and asset references as image values", () => {
+    expect(isManageableImageValue("https://example.com/a.jpg")).toBe(true);
+    expect(isManageableImageValue("/uploads/products/a.jpg")).toBe(true);
+    expect(isManageableImageValue("asset:ckv123abc")).toBe(true);
+    expect(isManageableImageValue("javascript:alert(1)")).toBe(false);
+    expect(isManageableImageValue("data:text/html,<h1>x</h1>")).toBe(false);
+  });
 
-    // 文件名由服务端生成，先断言只含安全字符再用固定目录拼接，防路径拼接误用
-    const fileName = result!.split("/").pop()!;
-    expect(fileName).toMatch(/^[0-9a-f-]+\.jpg$/);
-    const writtenPath = path.join(
-      path.resolve(process.cwd(), "./.tmp-test-uploads"),
-      "avatars",
-      fileName,
+  it("returns null when no file is provided", async () => {
+    await expect(saveUploadedImage(null, "product", "user-1")).resolves.toBeNull();
+    await expect(
+      saveUploadedImage(new File([], "empty.png", { type: "image/png" }), "product", "user-1"),
+    ).resolves.toBeNull();
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("returns the public url for public categories", async () => {
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/products/u1/x.webp",
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+    });
+
+    const result = await saveUploadedImage(
+      new File(["demo"], "a.png", { type: "image/png" }),
+      "product",
+      "user-1",
     );
 
-    await expect(access(writtenPath)).resolves.toBeUndefined();
-    await expect(readFile(writtenPath)).resolves.toEqual(Buffer.from(jpegHeader));
+    expect(result).toBe("http://localhost:9100/campus-public/public/products/u1/x.webp");
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "product",
+      file: expect.any(File),
+    });
+  });
+
+  it("returns an asset reference instead of a url for private categories", async () => {
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-2",
+      access: "PRIVATE",
+      url: null,
+      mimeType: "image/webp",
+      sizeBytes: 2048,
+    });
+
+    const result = await saveUploadedImage(
+      new File(["demo"], "card.png", { type: "image/png" }),
+      "verification",
+      "user-1",
+    );
+
+    // 私有资源禁止返回永久公开 URL，只返回 asset: 引用
+    expect(result).toBe("asset:asset-2");
+  });
+
+  it("propagates upload errors", async () => {
+    uploadImageAsset.mockRejectedValue(new Error("quota exceeded"));
+
+    await expect(
+      saveUploadedImage(new File(["demo"], "a.png", { type: "image/png" }), "product", "user-1"),
+    ).rejects.toThrow("quota exceeded");
   });
 });

@@ -5,12 +5,15 @@ const {
   redirect,
   requireUser,
   containsBannedKeyword,
-  saveUploadedImage,
+  uploadImageAsset,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
   rentalCategoryFindUnique,
   userFindUnique,
   rentalListingFindFirst,
   rentalListingCreate,
   rentalListingUpdate,
+  rentalListingImageFindMany,
   rentalListingImageDeleteMany,
   rentalListingImageCreateMany,
   rentalOrderCount,
@@ -20,12 +23,15 @@ const {
   redirect: vi.fn(),
   requireUser: vi.fn(),
   containsBannedKeyword: vi.fn(),
-  saveUploadedImage: vi.fn(),
+  uploadImageAsset: vi.fn(),
+  resolveImageTokens: vi.fn(),
+  markAssetsForValuesPendingDelete: vi.fn(),
   rentalCategoryFindUnique: vi.fn(),
   userFindUnique: vi.fn(),
   rentalListingFindFirst: vi.fn(),
   rentalListingCreate: vi.fn(),
   rentalListingUpdate: vi.fn(),
+  rentalListingImageFindMany: vi.fn(),
   rentalListingImageDeleteMany: vi.fn(),
   rentalListingImageCreateMany: vi.fn(),
   rentalOrderCount: vi.fn(),
@@ -41,8 +47,10 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/server-auth", () => ({ requireUser }));
 vi.mock("@/lib/moderation", () => ({ containsBannedKeyword }));
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
-  isStoredImagePath: (value: string) => value.startsWith("/uploads/"),
+  buildAssetReference: (assetId: string) => `asset:${assetId}`,
+  uploadImageAsset,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -55,6 +63,7 @@ vi.mock("@/lib/prisma", () => ({
       update: rentalListingUpdate,
     },
     rentalListingImage: {
+      findMany: rentalListingImageFindMany,
       deleteMany: rentalListingImageDeleteMany,
       createMany: rentalListingImageCreateMany,
     },
@@ -107,18 +116,43 @@ describe("rental listing actions", () => {
     vi.clearAllMocks();
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     containsBannedKeyword.mockResolvedValue(null);
-    saveUploadedImage.mockResolvedValue(null);
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/rentals/user-1/new.webp",
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+    });
+    // token 解析 mock：asset 引用 → 公开 URL；其余透传
+    resolveImageTokens.mockImplementation(async ({ tokens }: { tokens: string[] }) =>
+      tokens.map((token) =>
+        token === "asset:asset-1"
+          ? "http://localhost:9100/campus-public/public/rentals/user-1/new.webp"
+          : token,
+      ),
+    );
+    markAssetsForValuesPendingDelete.mockResolvedValue(0);
     rentalCategoryFindUnique.mockResolvedValue({ id: "cat-1", isActive: true });
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     rentalListingCreate.mockResolvedValue({ id: "listing-1" });
     rentalListingUpdate.mockResolvedValue({});
     rentalListingFindFirst.mockResolvedValue({ id: "listing-1", status: "AVAILABLE" });
+    rentalListingImageFindMany.mockResolvedValue([]);
     rentalListingImageDeleteMany.mockResolvedValue({ count: 1 });
     rentalListingImageCreateMany.mockResolvedValue({ count: 1 });
     rentalOrderCount.mockResolvedValue(0);
-    // update 使用数组形式事务，直接顺序执行
-    transactionMock.mockImplementation(async (ops: unknown[]) => {
-      for (const op of ops) await op;
+    // withTransaction 使用回调形式，传入共享的 mock 委托
+    transactionMock.mockImplementation(async (arg: unknown) => {
+      if (typeof arg === "function") {
+        return arg({
+          rentalListing: { create: rentalListingCreate, update: rentalListingUpdate },
+          rentalListingImage: {
+            deleteMany: rentalListingImageDeleteMany,
+            createMany: rentalListingImageCreateMany,
+          },
+        });
+      }
+      for (const op of arg as unknown[]) await op;
     });
   });
 
@@ -135,9 +169,12 @@ describe("rental listing actions", () => {
       expect(data.availableQuantity).toBe(2);
       expect(data.minimumDuration).toBe(1);
       expect(data.maximumDuration).toBe(7);
-      expect(data.images.create).toEqual([
-        { url: "https://example.com/a.jpg", sortOrder: 0 },
-      ]);
+      // 图片 token 在事务内解析为 URL 后单独写入图片表
+      expect(rentalListingImageCreateMany).toHaveBeenCalledWith({
+        data: [
+          { rentalListingId: "listing-1", url: "https://example.com/a.jpg", sortOrder: 0 },
+        ],
+      });
     });
 
     it("returns a validation error for invalid form data", async () => {
@@ -198,20 +235,24 @@ describe("rental listing actions", () => {
     });
 
     it("uploads new image files, replacing the url at the same index", async () => {
-      saveUploadedImage.mockResolvedValue("/uploads/rental/new.webp");
       const formData = buildListingFormData();
       formData.append("imageUrls", "https://example.com/keep.jpg");
       formData.append("imageFiles", new File(["x"], "new.png", { type: "image/png" }));
 
       await createRentalListing(null, formData);
 
-      expect(saveUploadedImage).toHaveBeenCalledTimes(1);
-      const data = rentalListingCreate.mock.calls[0][0].data;
-      // 文件按索引替换原有 url：index 0 被新上传覆盖，index 1 保留
-      expect(data.images.create.map((i: { url: string }) => i.url)).toEqual([
-        "/uploads/rental/new.webp",
-        "https://example.com/keep.jpg",
-      ]);
+      expect(uploadImageAsset).toHaveBeenCalledTimes(1);
+      // 文件按索引替换原有 url：index 0 为新上传（token 解析为 URL），index 1 保留外链
+      expect(rentalListingImageCreateMany).toHaveBeenCalledWith({
+        data: [
+          {
+            rentalListingId: "listing-1",
+            url: "http://localhost:9100/campus-public/public/rentals/user-1/new.webp",
+            sortOrder: 0,
+          },
+          { rentalListingId: "listing-1", url: "https://example.com/keep.jpg", sortOrder: 1 },
+        ],
+      });
     });
   });
 

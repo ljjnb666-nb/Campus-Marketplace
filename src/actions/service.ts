@@ -7,7 +7,12 @@ import { containsBannedKeyword } from "@/lib/moderation";
 import { prisma } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
-import { saveUploadedImage } from "@/lib/upload";
+import {
+  buildAssetReference,
+  markAssetsForValuesPendingDelete,
+  resolveSingleImageToken,
+  uploadImageAsset,
+} from "@/lib/upload";
 import { serviceFormSchema, serviceStatusSchema } from "@/validators/service";
 
 export type ServiceActionState = {
@@ -33,11 +38,12 @@ async function ensureActiveServiceCategory(categoryId: string) {
   });
 }
 
-async function resolveCoverImage(formData: FormData) {
+async function resolveCoverImage(formData: FormData, ownerId: string) {
   const file = formData.get("coverImageFile");
 
   if (file instanceof File && file.size > 0) {
-    return saveUploadedImage(file, "service");
+    const result = await uploadImageAsset({ userId: ownerId, category: "service", file });
+    return buildAssetReference(result.assetId);
   }
 
   return String(formData.get("coverImageUrl") ?? "").trim();
@@ -49,7 +55,7 @@ export async function createService(
 ): Promise<ServiceActionState> {
   try {
     const user = await requireUser();
-    const coverImageUrl = await resolveCoverImage(formData);
+    const coverImageToken = await resolveCoverImage(formData, user.id);
 
     const parsed = serviceFormSchema.safeParse({
       title: formData.get("title"),
@@ -59,7 +65,7 @@ export async function createService(
       pricingUnit: formData.get("pricingUnit"),
       locationText: formData.get("locationText"),
       availableSchedule: formData.get("availableSchedule"),
-      coverImageUrl,
+      coverImageUrl: coverImageToken,
     });
 
     if (!parsed.success) {
@@ -105,11 +111,24 @@ export async function createService(
         pricingUnit: parsed.data.pricingUnit,
         locationText: parsed.data.locationText,
         availableSchedule: parsed.data.availableSchedule || null,
-        coverImageUrl: parsed.data.coverImageUrl || null,
         campusId: provider.campusId,
         providerId: user.id,
       },
     });
+
+    // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源
+    const coverImageUrl = await resolveSingleImageToken({
+      ownerId: user.id,
+      token: parsed.data.coverImageUrl,
+      target: { type: "serviceListing", id: service.id },
+    });
+
+    if (coverImageUrl) {
+      await prisma.serviceListing.update({
+        where: { id: service.id },
+        data: { coverImageUrl },
+      });
+    }
 
     revalidateServiceViews(service.id);
 
@@ -130,7 +149,7 @@ export async function updateService(
   try {
     const user = await requireUser();
     const serviceId = String(formData.get("serviceId") ?? "");
-    const coverImageUrl = await resolveCoverImage(formData);
+    const coverImageToken = await resolveCoverImage(formData, user.id);
 
     const parsed = serviceFormSchema.safeParse({
       title: formData.get("title"),
@@ -140,7 +159,7 @@ export async function updateService(
       pricingUnit: formData.get("pricingUnit"),
       locationText: formData.get("locationText"),
       availableSchedule: formData.get("availableSchedule"),
-      coverImageUrl,
+      coverImageUrl: coverImageToken,
     });
 
     if (!serviceId) {
@@ -172,7 +191,7 @@ export async function updateService(
           providerId: user.id,
           deletedAt: null,
         },
-        select: { id: true },
+        select: { id: true, coverImageUrl: true },
       }),
       ensureActiveServiceCategory(parsed.data.categoryId),
     ]);
@@ -185,6 +204,13 @@ export async function updateService(
       return { ...initialState, message: "服务分类不存在或已停用" };
     }
 
+    // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源
+    const coverImageUrl = await resolveSingleImageToken({
+      ownerId: user.id,
+      token: parsed.data.coverImageUrl,
+      target: { type: "serviceListing", id: serviceId },
+    });
+
     await prisma.serviceListing.update({
       where: { id: serviceId },
       data: {
@@ -195,9 +221,15 @@ export async function updateService(
         pricingUnit: parsed.data.pricingUnit,
         locationText: parsed.data.locationText,
         availableSchedule: parsed.data.availableSchedule || null,
-        coverImageUrl: parsed.data.coverImageUrl || null,
+        coverImageUrl: coverImageUrl || null,
       },
     });
+
+    // 封面被替换时标记旧资源待删除
+    const previousCover = service.coverImageUrl;
+    if (previousCover && previousCover !== coverImageUrl) {
+      await markAssetsForValuesPendingDelete(user.id, [previousCover]).catch(() => undefined);
+    }
 
     revalidateServiceViews(serviceId);
 
@@ -262,7 +294,7 @@ export async function deleteService(formData: FormData) {
       providerId: user.id,
       deletedAt: null,
     },
-    select: { id: true },
+    select: { id: true, coverImageUrl: true },
   });
 
   if (!service) {
@@ -277,6 +309,13 @@ export async function deleteService(formData: FormData) {
         deletedAt: new Date(),
       },
     });
+
+    // 软删除服务时标记封面资源待删除
+    if (service.coverImageUrl) {
+      await markAssetsForValuesPendingDelete(user.id, [service.coverImageUrl]).catch(
+        () => undefined,
+      );
+    }
 
     revalidateServiceViews(serviceId);
   } catch (error) {

@@ -1,12 +1,12 @@
 import { z } from "zod";
-import { isStoredImagePath } from "@/lib/upload";
+import { isManageableImageValue } from "@/lib/asset-ref";
 
 const optionalImage = z
   .string()
   .trim()
   .optional()
   .transform((value) => value ?? "")
-  .refine((value) => value === "" || /^https?:\/\//.test(value) || isStoredImagePath(value), {
+  .refine((value) => value === "" || isManageableImageValue(value), {
     message: "请填写合法的图片地址",
   });
 
@@ -14,7 +14,7 @@ const requiredImage = z
   .string()
   .trim()
   .min(1, "请上传学生证图片或填写图片地址")
-  .refine((value) => /^https?:\/\//.test(value) || isStoredImagePath(value), {
+  .refine((value) => isManageableImageValue(value), {
     message: "请填写合法的学生证图片地址",
   });
 

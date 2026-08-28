@@ -4,7 +4,13 @@ import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
-import { saveUploadedImage, type UploadCategory } from "@/lib/upload";
+import {
+  buildAssetReference,
+  markAssetsForValuesPendingDelete,
+  resolveSingleImageToken,
+  resolveImageTokens,
+  uploadImageAsset,
+} from "@/lib/upload";
 import { createNotification } from "@/repositories/notification-repository";
 import { profileFormSchema, verificationFormSchema } from "@/validators/profile";
 
@@ -36,16 +42,21 @@ function revalidateUserPages() {
   revalidatePath("/", "layout");
 }
 
-async function resolveSingleImage(
+/**
+ * 单图字段 token 化：File 直传 → asset: 引用；否则取既有 URL/引用值。
+ */
+async function buildSingleImageToken(
   formData: FormData,
   urlField: string,
   fileField: string,
-  folder: UploadCategory,
+  category: "avatar" | "verification",
+  ownerId: string,
 ) {
   const file = formData.get(fileField);
 
   if (file instanceof File && file.size > 0) {
-    return saveUploadedImage(file, folder);
+    const result = await uploadImageAsset({ userId: ownerId, category, file });
+    return buildAssetReference(result.assetId);
   }
 
   return String(formData.get(urlField) ?? "").trim();
@@ -57,7 +68,13 @@ export async function updateProfile(
 ): Promise<UserActionState> {
   try {
     const user = await requireUser();
-    const avatarUrl = await resolveSingleImage(formData, "avatarUrl", "avatarFile", "avatar");
+    const avatarToken = await buildSingleImageToken(
+      formData,
+      "avatarUrl",
+      "avatarFile",
+      "avatar",
+      user.id,
+    );
 
     const parsed = profileFormSchema.safeParse({
       name: formData.get("name"),
@@ -65,7 +82,7 @@ export async function updateProfile(
       college: formData.get("college"),
       grade: formData.get("grade"),
       phone: formData.get("phone"),
-      avatarUrl,
+      avatarUrl: avatarToken,
     });
 
     if (!parsed.success) {
@@ -75,6 +92,18 @@ export async function updateProfile(
       };
     }
 
+    const previousUser = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { avatarUrl: true },
+    });
+
+    // 头像 token 规范化并绑定新上传资源（avatar 无独立实体，仅标记 ATTACHED）
+    const avatarUrl = await resolveSingleImageToken({
+      ownerId: user.id,
+      token: parsed.data.avatarUrl,
+      target: { type: "avatar" },
+    });
+
     const updatedUser = await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -83,7 +112,7 @@ export async function updateProfile(
         college: parsed.data.college || null,
         grade: parsed.data.grade || null,
         phone: parsed.data.phone || null,
-        avatarUrl: parsed.data.avatarUrl || null,
+        avatarUrl: avatarUrl || null,
       },
       select: {
         id: true,
@@ -96,6 +125,12 @@ export async function updateProfile(
         phone: true,
       },
     });
+
+    // 头像被替换时标记旧资源待删除
+    const previousAvatar = previousUser?.avatarUrl;
+    if (previousAvatar && previousAvatar !== avatarUrl) {
+      await markAssetsForValuesPendingDelete(user.id, [previousAvatar]).catch(() => undefined);
+    }
 
     revalidateUserPages();
 
@@ -116,18 +151,19 @@ export async function submitVerification(
 ): Promise<UserActionState> {
   try {
     const user = await requireUser();
-    const studentCardImage = await resolveSingleImage(
+    const studentCardToken = await buildSingleImageToken(
       formData,
       "studentCardImage",
       "studentCardImageFile",
       "verification",
+      user.id,
     );
 
     const parsed = verificationFormSchema.safeParse({
       schoolName: formData.get("schoolName"),
       campusName: formData.get("campusName"),
       studentIdLast4: formData.get("studentIdLast4"),
-      studentCardImage,
+      studentCardImage: studentCardToken,
     });
 
     if (!parsed.success) {
@@ -136,6 +172,11 @@ export async function submitVerification(
         message: parsed.error.issues[0]?.message ?? "认证信息不完整",
       };
     }
+
+    const previousVerification = await prisma.userVerification.findUnique({
+      where: { userId: user.id },
+      select: { id: true, studentCardImage: true },
+    });
 
     await withTransaction(async (tx) => {
       await tx.user.update({
@@ -147,13 +188,12 @@ export async function submitVerification(
         },
       });
 
-      await tx.userVerification.upsert({
+      const verification = await tx.userVerification.upsert({
         where: { userId: user.id },
         update: {
           schoolName: parsed.data.schoolName,
           campusName: parsed.data.campusName,
           studentIdLast4: parsed.data.studentIdLast4,
-          studentCardImage: parsed.data.studentCardImage,
           status: "PENDING",
           reviewNote: null,
           reviewedAt: null,
@@ -169,6 +209,19 @@ export async function submitVerification(
         },
       });
 
+      // 学生证图片为私有资源：token 解析为 asset: 引用（禁止永久公开 URL）并绑定认证记录
+      const [studentCardImage] = await resolveImageTokens({
+        ownerId: user.id,
+        tokens: [parsed.data.studentCardImage],
+        target: { type: "verification", id: verification.id },
+        tx,
+      });
+
+      await tx.userVerification.update({
+        where: { id: verification.id },
+        data: { studentCardImage: studentCardImage ?? parsed.data.studentCardImage },
+      });
+
       await createNotification(tx, {
         userId: user.id,
         type: "SYSTEM",
@@ -176,6 +229,13 @@ export async function submitVerification(
         content: "你的校园认证材料已提交，平台会尽快完成审核，请留意后续通知。",
       });
     });
+
+    // 重新提交时旧的学生证材料标记待删除（原 PENDING 审核材料被替换）
+    if (previousVerification?.studentCardImage && previousVerification.studentCardImage !== studentCardToken) {
+      await markAssetsForValuesPendingDelete(user.id, [
+        previousVerification.studentCardImage,
+      ]).catch(() => undefined);
+    }
 
     revalidateUserPages();
 

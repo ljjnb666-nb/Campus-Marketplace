@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { PRODUCT_IMAGE_LIMIT } from "@/constants/product";
-import { isStoredImagePath } from "@/lib/upload";
+import { isManageableImageValue } from "@/lib/asset-ref";
 
 const priceSchema = z
   .string()
@@ -24,7 +24,7 @@ const imageUrlsSchema = z
     z
       .string()
       .trim()
-      .refine((value) => /^https?:\/\//.test(value) || isStoredImagePath(value), {
+      .refine((value) => isManageableImageValue(value), {
         message: "图片地址格式不正确",
       }),
   )

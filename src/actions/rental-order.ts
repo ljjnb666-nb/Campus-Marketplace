@@ -1,6 +1,6 @@
 "use server";
 
-import { withTransaction } from "@/lib/prisma";
+import { withTransaction, prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -24,7 +24,17 @@ import {
   submitDamageClaimTx,
   submitRentalReviewTx,
 } from "@/lib/rental-order-machine";
-import { saveUploadedImage } from "@/lib/upload";
+import {
+  asAssetTx,
+  AssetServiceError,
+  attachAssetsToEntity,
+  buildAssetReference,
+  isImageValidationError,
+  markAssetsForValuesPendingDelete,
+  parseAssetReference,
+  uploadImageAsset,
+  UPLOAD_LIMITS,
+} from "@/lib/upload";
 import {
   rentalCancelSchema,
   rentalDamageClaimRespondSchema,
@@ -46,16 +56,48 @@ export type RentalOrderActionState = {
   redirectTo?: string;
 };
 
-async function saveFormPhotos(files: FormDataEntryValue[], scope: "handover" | "return" | "report") {
-  const photos = await Promise.all(
-    files.map(async (file) => {
-      if (file instanceof File && file.size > 0) {
-        return saveUploadedImage(file, scope);
-      }
-      return null;
-    })
+/**
+ * 上传订单相关私有照片（handover / return / report）。
+ * 服务端强制 maxCount；返回 asset: 引用（禁止永久公开 URL），
+ * 订单事务成功后再 attach 到 RentalOrder，失败则由 orphan cleanup 回收。
+ */
+async function uploadOrderPhotos(
+  files: FormDataEntryValue[],
+  scope: "handover" | "return" | "report",
+  ownerId: string,
+): Promise<string[]> {
+  const limits = UPLOAD_LIMITS[scope];
+  const validFiles = files.filter((file): file is File => file instanceof File && file.size > 0);
+
+  if (validFiles.length > limits.maxCount) {
+    throw new AssetServiceError("TOO_MANY_FILES", `最多上传${limits.maxCount}张图片`);
+  }
+
+  return Promise.all(
+    validFiles.map(async (file) => {
+      const result = await uploadImageAsset({ userId: ownerId, category: scope, file });
+      return buildAssetReference(result.assetId);
+    }),
   );
-  return photos.filter((p): p is string => p !== null);
+}
+
+/** 事务成功后将照片资源绑定到订单（幂等；失败留待 orphan cleanup 回收） */
+async function attachOrderPhotos(ownerId: string, orderId: string, tokens: string[]): Promise<void> {
+  const assetIds = tokens
+    .map((token) => parseAssetReference(token))
+    .filter((id): id is string => id !== null);
+  if (assetIds.length === 0) return;
+  await attachAssetsToEntity(asAssetTx(prisma), {
+    ownerId,
+    assetIds,
+    target: { type: "rentalOrder", id: orderId },
+  });
+}
+
+function photoUploadErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof AssetServiceError) return error.message;
+  if (isImageValidationError(error)) return error.message;
+  return fallback;
 }
 
 export async function createRentalOrder(_prevState: RentalOrderActionState, formData: FormData): Promise<RentalOrderActionState> {
@@ -166,23 +208,41 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
   }
   const { orderId, role, currentCondition, knownIssues } = parsed.data;
 
-  const validPhotos = await saveFormPhotos(formData.getAll("photos"), "handover");
-
   try {
+    const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "handover", user.id);
+
+    const previousRecord = await prisma.rentalHandoverRecord.findUnique({
+      where: { orderId },
+      select: { photos: true },
+    });
+
     const result = await withTransaction((tx) =>
       confirmPickupTx(tx, {
         orderId,
         userId: user.id,
         role,
-        photos: validPhotos,
+        photos: photoTokens,
         currentCondition,
         knownIssues,
       }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
+
+    await attachOrderPhotos(user.id, orderId, photoTokens);
+
+    // 再次确认时被替换的旧照片标记待删除
+    if (previousRecord) {
+      const removed = previousRecord.photos.filter((p) => !photoTokens.includes(p));
+      if (removed.length > 0) {
+        await markAssetsForValuesPendingDelete(user.id, removed).catch(() => undefined);
+      }
+    }
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "confirmPickup", error });
-    return { success: false, message: "操作失败，请稍后重试" };
+    return {
+      success: false,
+      message: photoUploadErrorMessage(error, "操作失败，请稍后重试"),
+    };
   }
 
   revalidateRentalOrderViews(orderId);
@@ -224,15 +284,20 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
   const needsCleaning = formData.get("needsCleaning") === "true";
   const accessoriesComplete = formData.get("accessoriesComplete") === "true";
 
-  const validPhotos = await saveFormPhotos(formData.getAll("photos"), "return");
-
   try {
+    const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "return", user.id);
+
+    const previousRecord = await prisma.rentalReturnRecord.findUnique({
+      where: { orderId },
+      select: { photos: true },
+    });
+
     const result = await withTransaction((tx) =>
       confirmReturnTx(tx, {
         orderId,
         userId: user.id,
         role,
-        photos: validPhotos,
+        photos: photoTokens,
         hasDamage,
         needsCleaning,
         accessoriesComplete,
@@ -240,9 +305,22 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
       }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
+
+    await attachOrderPhotos(user.id, orderId, photoTokens);
+
+    // 再次确认时被替换的旧照片标记待删除
+    if (previousRecord) {
+      const removed = previousRecord.photos.filter((p) => !photoTokens.includes(p));
+      if (removed.length > 0) {
+        await markAssetsForValuesPendingDelete(user.id, removed).catch(() => undefined);
+      }
+    }
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "confirmReturn", error });
-    return { success: false, message: "操作失败，请稍后重试" };
+    return {
+      success: false,
+      message: photoUploadErrorMessage(error, "操作失败，请稍后重试"),
+    };
   }
 
   revalidateRentalOrderViews(orderId);
@@ -360,22 +438,27 @@ export async function submitDamageClaim(formData: FormData): Promise<RentalOrder
 
   const { orderId, damageDescription, requestedDeduction } = parsed.data;
 
-  const validPhotos = await saveFormPhotos(formData.getAll("photos"), "report");
-
   try {
+    const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "report", user.id);
+
     const result = await withTransaction((tx) =>
       submitDamageClaimTx(tx, {
         orderId,
         userId: user.id,
         damageDescription,
         requestedDeduction,
-        photos: validPhotos,
+        photos: photoTokens,
       }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
+
+    await attachOrderPhotos(user.id, orderId, photoTokens);
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "submitDamageClaim", error });
-    return { success: false, message: "提交索赔失败，请稍后重试" };
+    return {
+      success: false,
+      message: photoUploadErrorMessage(error, "提交索赔失败，请稍后重试"),
+    };
   }
 
   revalidateRentalOrderViews(orderId);
@@ -419,16 +502,21 @@ export async function initiateDispute(formData: FormData): Promise<RentalOrderAc
   }
   const { orderId, reason } = parsed.data;
 
-  const evidencePhotos = await saveFormPhotos(formData.getAll("evidencePhotos"), "report");
-
   try {
+    const evidenceTokens = await uploadOrderPhotos(formData.getAll("evidencePhotos"), "report", user.id);
+
     const result = await withTransaction((tx) =>
-      initiateDisputeTx(tx, { orderId, userId: user.id, reason, evidencePhotos }),
+      initiateDisputeTx(tx, { orderId, userId: user.id, reason, evidencePhotos: evidenceTokens }),
     );
     if ('error' in result) return { success: false, message: result.error as string };
+
+    await attachOrderPhotos(user.id, orderId, evidenceTokens);
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "initiateDispute", error });
-    return { success: false, message: "发起纠纷失败，请稍后重试" };
+    return {
+      success: false,
+      message: photoUploadErrorMessage(error, "发起纠纷失败，请稍后重试"),
+    };
   }
 
   revalidateRentalOrderViews(orderId);

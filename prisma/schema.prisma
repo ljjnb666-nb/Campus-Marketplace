@@ -130,65 +130,96 @@ enum ModerationTargetType {
   GLOBAL
 }
 
+// ============================================================
+// 对象存储资源模块枚举
+// ============================================================
+
+enum AssetAccess {
+  PUBLIC
+  PRIVATE
+}
+
+enum AssetCategory {
+  AVATAR
+  PRODUCT
+  RENTAL
+  SERVICE
+  VERIFICATION
+  HANDOVER
+  RETURN
+  REPORT
+}
+
+enum AssetStatus {
+  UPLOADED // 已上传，尚未绑定业务实体（超过 TTL 由 cleanup 回收）
+  ATTACHED // 已绑定业务实体
+  PENDING_DELETE // 已标记待删除（对象清理中/待重试）
+  DELETED // 远端对象已删除，配额已释放（保留审计行）
+}
+
 model User {
-  id                   String                     @id @default(cuid())
-  name                 String
-  email                String                     @unique
-  passwordHash         String
-  avatarUrl            String?
-  bio                  String?
-  schoolName           String
-  college              String?
-  grade                String?
-  studentIdLast4       String?
-  phone                String?
-  role                 UserRole                   @default(STUDENT)
-  status               UserStatus                 @default(ACTIVE)
-  verificationStatus   VerificationStatus         @default(UNVERIFIED)
-  creditScore          Int                        @default(100)
-  completedOrdersCount Int                        @default(0)
-  positiveReviewRate   Float                      @default(0)
+  id                    String                    @id @default(cuid())
+  name                  String
+  email                 String                    @unique
+  passwordHash          String
+  avatarUrl             String?
+  bio                   String?
+  schoolName            String
+  college               String?
+  grade                 String?
+  studentIdLast4        String?
+  phone                 String?
+  role                  UserRole                  @default(STUDENT)
+  status                UserStatus                @default(ACTIVE)
+  verificationStatus    VerificationStatus        @default(UNVERIFIED)
+  creditScore           Int                       @default(100)
+  completedOrdersCount  Int                       @default(0)
+  positiveReviewRate    Float                     @default(0)
   // 租赁统计字段
-  rentalOwnerCount     Int                        @default(0)
-  rentalRenterCount    Int                        @default(0)
-  onTimeReturnRate     Float                      @default(0)
-  rentalPositiveRate   Float                      @default(0)
-  rentalDisputeCount   Int                        @default(0)
-  lastLoginAt          DateTime?
-  campusId             String
-  campus               Campus                     @relation(fields: [campusId], references: [id])
-  accounts             Account[]
-  sessions             Session[]
-  verification         UserVerification?
-  products             Product[]
-  favoriteProducts     Favorite[]
-  errandFavorites      ErrandFavorite[]
-  serviceFavorites     ServiceFavorite[]
-  createdErrandTasks   ErrandTask[]               @relation("ErrandTaskPublisher")
-  acceptedErrandTasks  ErrandTask[]               @relation("ErrandTaskAccepter")
-  serviceListings      ServiceListing[]
-  buyerOrders          Order[]                    @relation("OrderBuyer")
-  sellerOrders         Order[]                    @relation("OrderSeller")
-  sentMessages         Message[]                  @relation("MessageSender")
-  conversationLinks    ConversationParticipant[]
-  writtenReviews       Review[]                   @relation("ReviewAuthor")
-  receivedReviews      Review[]                   @relation("ReviewTarget")
-  reports              Report[]                   @relation("ReportReporter")
-  receivedReports      Report[]                   @relation("ReportTargetUser")
-  notifications        Notification[]
-  blockedUsers         BlockedUser[]              @relation("BlockedByUser")
-  blockedByUsers       BlockedUser[]              @relation("BlockedTargetUser")
-  adminLogs            AdminLog[]                 @relation("AdminActor")
+  rentalOwnerCount      Int                       @default(0)
+  rentalRenterCount     Int                       @default(0)
+  onTimeReturnRate      Float                     @default(0)
+  rentalPositiveRate    Float                     @default(0)
+  rentalDisputeCount    Int                       @default(0)
+  // 上传存储配额：已占用字节数（含 PENDING_DELETE 待回收部分）。
+  // 预留/释放走条件原子 UPDATE，见 src/lib/asset-service.ts
+  storageUsedBytes      Int                       @default(0)
+  lastLoginAt           DateTime?
+  campusId              String
+  campus                Campus                    @relation(fields: [campusId], references: [id])
+  accounts              Account[]
+  sessions              Session[]
+  verification          UserVerification?
+  products              Product[]
+  favoriteProducts      Favorite[]
+  errandFavorites       ErrandFavorite[]
+  serviceFavorites      ServiceFavorite[]
+  createdErrandTasks    ErrandTask[]              @relation("ErrandTaskPublisher")
+  acceptedErrandTasks   ErrandTask[]              @relation("ErrandTaskAccepter")
+  serviceListings       ServiceListing[]
+  buyerOrders           Order[]                   @relation("OrderBuyer")
+  sellerOrders          Order[]                   @relation("OrderSeller")
+  sentMessages          Message[]                 @relation("MessageSender")
+  conversationLinks     ConversationParticipant[]
+  writtenReviews        Review[]                  @relation("ReviewAuthor")
+  receivedReviews       Review[]                  @relation("ReviewTarget")
+  reports               Report[]                  @relation("ReportReporter")
+  receivedReports       Report[]                  @relation("ReportTargetUser")
+  notifications         Notification[]
+  blockedUsers          BlockedUser[]             @relation("BlockedByUser")
+  blockedByUsers        BlockedUser[]             @relation("BlockedTargetUser")
+  adminLogs             AdminLog[]                @relation("AdminActor")
+  uploadedAssets        UploadedAsset[]           @relation("AssetOwner")
   // 租赁关联
-  rentalListings       RentalListing[]            @relation("RentalOwner")
-  rentalOrdersAsOwner  RentalOrder[]              @relation("RentalOrderOwner")
-  rentalOrdersAsRenter RentalOrder[]              @relation("RentalOrderRenter")
-  rentalReviewsGiven   RentalReview[]             @relation("RentalReviewAuthor")
+  rentalListings        RentalListing[]           @relation("RentalOwner")
+  rentalOrdersAsOwner   RentalOrder[]             @relation("RentalOrderOwner")
+  rentalOrdersAsRenter  RentalOrder[]             @relation("RentalOrderRenter")
+  rentalReviewsGiven    RentalReview[]            @relation("RentalReviewAuthor")
   rentalReviewsReceived RentalReview[]            @relation("RentalReviewTarget")
   rentalFavorites       RentalFavorite[]
-  createdAt            DateTime                   @default(now())
-  updatedAt            DateTime                   @updatedAt
-  deletedAt            DateTime?
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  deletedAt             DateTime?
 
   @@index([campusId, role])
   @@index([verificationStatus, status])
@@ -256,6 +287,7 @@ model UserVerification {
   submittedAt      DateTime           @default(now())
   reviewedAt       DateTime?
   user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  uploadedAssets   UploadedAsset[]    @relation("AssetVerification")
 }
 
 model ProductCategory {
@@ -295,30 +327,31 @@ model ServiceCategory {
 }
 
 model Product {
-  id            String           @id @default(cuid())
-  title         String
-  description   String           @db.Text
-  price         Decimal          @db.Decimal(10, 2)
-  originalPrice Decimal?         @db.Decimal(10, 2)
-  locationText  String
-  condition     ProductCondition
-  status        ListingStatus    @default(ACTIVE)
-  viewCount     Int              @default(0)
-  favoriteCount Int              @default(0)
-  sellerId      String
-  seller        User             @relation(fields: [sellerId], references: [id])
-  campusId      String
-  campus        Campus           @relation(fields: [campusId], references: [id])
-  categoryId    String
-  category      ProductCategory  @relation(fields: [categoryId], references: [id])
-  images        ProductImage[]
-  favorites     Favorite[]
-  orders        Order[]
-  conversations Conversation[]
-  reports       Report[]         @relation("ReportTargetProduct")
-  createdAt     DateTime         @default(now())
-  updatedAt     DateTime         @updatedAt
-  deletedAt     DateTime?
+  id             String           @id @default(cuid())
+  title          String
+  description    String           @db.Text
+  price          Decimal          @db.Decimal(10, 2)
+  originalPrice  Decimal?         @db.Decimal(10, 2)
+  locationText   String
+  condition      ProductCondition
+  status         ListingStatus    @default(ACTIVE)
+  viewCount      Int              @default(0)
+  favoriteCount  Int              @default(0)
+  sellerId       String
+  seller         User             @relation(fields: [sellerId], references: [id])
+  campusId       String
+  campus         Campus           @relation(fields: [campusId], references: [id])
+  categoryId     String
+  category       ProductCategory  @relation(fields: [categoryId], references: [id])
+  images         ProductImage[]
+  favorites      Favorite[]
+  orders         Order[]
+  conversations  Conversation[]
+  reports        Report[]         @relation("ReportTargetProduct")
+  uploadedAssets UploadedAsset[]  @relation("AssetProduct")
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  deletedAt      DateTime?
 
   @@index([campusId, status, createdAt])
   @@index([sellerId, status])
@@ -326,11 +359,11 @@ model Product {
 }
 
 model ProductImage {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   productId String
   url       String
-  sortOrder Int      @default(0)
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sortOrder Int     @default(0)
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model Favorite {
@@ -436,6 +469,7 @@ model ServiceListing {
   orders              Order[]
   conversations       Conversation[]
   reports             Report[]           @relation("ReportTargetService")
+  uploadedAssets      UploadedAsset[]    @relation("AssetServiceListing")
   favorites           ServiceFavorite[]
   favoriteCount       Int                @default(0)
   createdAt           DateTime           @default(now())
@@ -502,13 +536,13 @@ model Conversation {
 }
 
 model ConversationParticipant {
-  id             String        @id @default(cuid())
+  id             String       @id @default(cuid())
   conversationId String
   userId         String
-  joinedAt       DateTime      @default(now())
+  joinedAt       DateTime     @default(now())
   lastReadAt     DateTime?
-  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([conversationId, userId])
   @@index([userId, joinedAt])
@@ -627,73 +661,120 @@ model AdminLog {
 }
 
 // ============================================================
+// 对象存储资源模型
+// ============================================================
+
+// 统一资源登记表：所有上传文件（公私）都以此表为可信记录，
+// 业务表中的图片字段只存展示 URL（公开）或 asset:<id> 引用（私有）。
+model UploadedAsset {
+  id               String        @id @default(cuid())
+  ownerId          String
+  category         AssetCategory
+  access           AssetAccess
+  bucket           String // 写入时使用的 bucket 名（冗余存储，防 bucket 配置漂移）
+  objectKey        String        @unique
+  mimeType         String
+  sizeBytes        Int // 重编码后实际存储大小
+  width            Int?
+  height           Int?
+  originalFileName String? // 仅审计用途，绝不参与 object key 生成
+  status           AssetStatus   @default(UPLOADED)
+  // 业务绑定（上传时未知实体，attach 时回填；实体物理删除时置空）
+  productId        String?
+  rentalListingId  String?
+  serviceListingId String?
+  rentalOrderId    String?
+  verificationId   String?
+  attachedAt       DateTime?
+  // 敏感资产保留期截止（如学生证材料），到期由 cleanup 删除对象但保留认证结论
+  expiresAt        DateTime?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  owner          User              @relation("AssetOwner", fields: [ownerId], references: [id])
+  product        Product?          @relation("AssetProduct", fields: [productId], references: [id], onDelete: SetNull)
+  rentalListing  RentalListing?    @relation("AssetRentalListing", fields: [rentalListingId], references: [id], onDelete: SetNull)
+  serviceListing ServiceListing?   @relation("AssetServiceListing", fields: [serviceListingId], references: [id], onDelete: SetNull)
+  rentalOrder    RentalOrder?      @relation("AssetRentalOrder", fields: [rentalOrderId], references: [id], onDelete: SetNull)
+  verification   UserVerification? @relation("AssetVerification", fields: [verificationId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId, status])
+  @@index([status, createdAt])
+  @@index([expiresAt, status])
+  @@index([productId])
+  @@index([rentalListingId])
+  @@index([serviceListingId])
+  @@index([rentalOrderId])
+}
+
+// ============================================================
 // 租赁模块枚举
 // ============================================================
 
 enum RentalListingStatus {
-  AVAILABLE      // 可出租
-  PAUSED         // 暂停出租
-  FULLY_BOOKED   // 已全部租出
-  OFFLINE        // 已下架
+  AVAILABLE // 可出租
+  PAUSED // 暂停出租
+  FULLY_BOOKED // 已全部租出
+  OFFLINE // 已下架
   PENDING_REVIEW // 审核中
-  BANNED         // 已封禁
+  BANNED // 已封禁
 }
 
 enum RentalPricingUnit {
-  PER_HOUR    // 每小时
-  PER_DAY     // 每天
-  PER_WEEK    // 每周
-  PER_MONTH   // 每月
+  PER_HOUR // 每小时
+  PER_DAY // 每天
+  PER_WEEK // 每周
+  PER_MONTH // 每月
   PER_SESSION // 每次
 }
 
 enum RentalOrderStatus {
-  PENDING_APPROVAL   // 待出租者确认
-  PENDING_PAYMENT    // 待租客支付
-  PENDING_PICKUP     // 待取货
-  PICKED_UP          // 已取货
-  IN_RENTAL          // 租赁中
-  PENDING_RETURN     // 待归还
+  PENDING_APPROVAL // 待出租者确认
+  PENDING_PAYMENT // 待租客支付
+  PENDING_PICKUP // 待取货
+  PICKED_UP // 已取货
+  IN_RENTAL // 租赁中
+  PENDING_RETURN // 待归还
   PENDING_INSPECTION // 待出租者验收
-  COMPLETED          // 已完成
-  REJECTED           // 已拒绝
-  CANCELLED          // 已取消
-  OVERDUE            // 已逾期
-  IN_DISPUTE         // 纠纷处理中
-  CLOSED             // 已关闭
+  COMPLETED // 已完成
+  REJECTED // 已拒绝
+  CANCELLED // 已取消
+  OVERDUE // 已逾期
+  IN_DISPUTE // 纠纷处理中
+  CLOSED // 已关闭
 }
 
 enum DepositStatus {
-  NOT_REQUIRED       // 无需押金
-  PENDING_PAYMENT    // 待支付
-  PAID               // 已支付
-  FROZEN             // 已冻结
-  PENDING_REFUND     // 待退回
-  FULLY_REFUNDED     // 已全部退回
+  NOT_REQUIRED // 无需押金
+  PENDING_PAYMENT // 待支付
+  PAID // 已支付
+  FROZEN // 已冻结
+  PENDING_REFUND // 待退回
+  FULLY_REFUNDED // 已全部退回
   PARTIALLY_REFUNDED // 已部分退回
-  FULLY_DEDUCTED     // 已全部扣除
-  IN_DISPUTE         // 纠纷处理中
+  FULLY_DEDUCTED // 已全部扣除
+  IN_DISPUTE // 纠纷处理中
 }
 
 enum RentalCancellationReason {
-  RENTER_CHANGED_PLAN     // 租客改变计划
-  OWNER_CANNOT_PROVIDE    // 出租者无法提供
-  CANNOT_CONTACT          // 双方无法联系
-  ITEM_DAMAGED            // 物品临时损坏
-  TIME_ERROR              // 时间填写错误
-  FAKE_INFO               // 信息不真实
-  OTHER                   // 其他原因
+  RENTER_CHANGED_PLAN // 租客改变计划
+  OWNER_CANNOT_PROVIDE // 出租者无法提供
+  CANNOT_CONTACT // 双方无法联系
+  ITEM_DAMAGED // 物品临时损坏
+  TIME_ERROR // 时间填写错误
+  FAKE_INFO // 信息不真实
+  OTHER // 其他原因
 }
 
 enum RentalDisputeStatus {
-  OPEN       // 待处理
-  IN_REVIEW  // 审核中
-  RESOLVED   // 已解决
-  CLOSED     // 已关闭
+  OPEN // 待处理
+  IN_REVIEW // 审核中
+  RESOLVED // 已解决
+  CLOSED // 已关闭
 }
 
 enum ExtensionRequestStatus {
-  PENDING  // 待审核
+  PENDING // 待审核
   APPROVED // 已同意
   REJECTED // 已拒绝
 }
@@ -715,46 +796,47 @@ model RentalCategory {
 }
 
 model RentalListing {
-  id                String              @id @default(cuid())
-  ownerId           String
-  owner             User                @relation("RentalOwner", fields: [ownerId], references: [id])
-  categoryId        String
-  category          RentalCategory      @relation(fields: [categoryId], references: [id])
-  campusId          String
-  campus            Campus              @relation(fields: [campusId], references: [id])
-  title             String
-  description       String              @db.Text
-  condition         ProductCondition
-  brand             String?
-  model             String?
-  referenceValue    Decimal?            @db.Decimal(10, 2)
-  price             Decimal             @db.Decimal(10, 2)
-  pricingUnit       RentalPricingUnit
-  depositAmount     Decimal             @db.Decimal(10, 2)
-  minimumDuration   Int                 // 最短租期（对应计价单位的数量）
-  maximumDuration   Int                 // 最长租期（对应计价单位的数量）
-  totalQuantity     Int                 @default(1)
-  availableQuantity Int                 @default(1)
-  availableFrom     DateTime?
-  availableUntil    DateTime?
-  pickupLocation    String
-  returnLocation    String
-  usageRules        String?             @db.Text
-  damagePolicy      String?             @db.Text
-  overduePolicy     String?             @db.Text
-  requiresApproval  Boolean             @default(true)
-  status            RentalListingStatus @default(AVAILABLE)
-  viewCount         Int                 @default(0)
-  favoriteCount     Int                 @default(0)
-  images            RentalListingImage[]
+  id                 String                    @id @default(cuid())
+  ownerId            String
+  owner              User                      @relation("RentalOwner", fields: [ownerId], references: [id])
+  categoryId         String
+  category           RentalCategory            @relation(fields: [categoryId], references: [id])
+  campusId           String
+  campus             Campus                    @relation(fields: [campusId], references: [id])
+  title              String
+  description        String                    @db.Text
+  condition          ProductCondition
+  brand              String?
+  model              String?
+  referenceValue     Decimal?                  @db.Decimal(10, 2)
+  price              Decimal                   @db.Decimal(10, 2)
+  pricingUnit        RentalPricingUnit
+  depositAmount      Decimal                   @db.Decimal(10, 2)
+  minimumDuration    Int // 最短租期（对应计价单位的数量）
+  maximumDuration    Int // 最长租期（对应计价单位的数量）
+  totalQuantity      Int                       @default(1)
+  availableQuantity  Int                       @default(1)
+  availableFrom      DateTime?
+  availableUntil     DateTime?
+  pickupLocation     String
+  returnLocation     String
+  usageRules         String?                   @db.Text
+  damagePolicy       String?                   @db.Text
+  overduePolicy      String?                   @db.Text
+  requiresApproval   Boolean                   @default(true)
+  status             RentalListingStatus       @default(AVAILABLE)
+  viewCount          Int                       @default(0)
+  favoriteCount      Int                       @default(0)
+  images             RentalListingImage[]
   unavailablePeriods RentalUnavailablePeriod[]
-  orders            RentalOrder[]
-  reports           Report[]            @relation("ReportTargetRental")
-  favorites         RentalFavorite[]
-  conversations     Conversation[]
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  deletedAt         DateTime?
+  orders             RentalOrder[]
+  reports            Report[]                  @relation("ReportTargetRental")
+  uploadedAssets     UploadedAsset[]           @relation("AssetRentalListing")
+  favorites          RentalFavorite[]
+  conversations      Conversation[]
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  deletedAt          DateTime?
 
   @@index([campusId, status, createdAt])
   @@index([ownerId, status])
@@ -782,50 +864,51 @@ model RentalUnavailablePeriod {
 }
 
 model RentalOrder {
-  id                      String                   @id @default(cuid())
-  orderNumber             String                   @unique
-  rentalListingId         String
-  rentalListing           RentalListing            @relation(fields: [rentalListingId], references: [id])
-  ownerId                 String
-  owner                   User                     @relation("RentalOrderOwner", fields: [ownerId], references: [id])
-  renterId                String
-  renter                  User                     @relation("RentalOrderRenter", fields: [renterId], references: [id])
-  startTime               DateTime
-  endTime                 DateTime
-  actualReturnTime        DateTime?
-  quantity                Int                      @default(1)
+  id                     String                    @id @default(cuid())
+  orderNumber            String                    @unique
+  rentalListingId        String
+  rentalListing          RentalListing             @relation(fields: [rentalListingId], references: [id])
+  ownerId                String
+  owner                  User                      @relation("RentalOrderOwner", fields: [ownerId], references: [id])
+  renterId               String
+  renter                 User                      @relation("RentalOrderRenter", fields: [renterId], references: [id])
+  startTime              DateTime
+  endTime                DateTime
+  actualReturnTime       DateTime?
+  quantity               Int                       @default(1)
   // 价格快照（下单时保存，不受后续修改影响）
-  unitPriceSnapshot       Decimal                  @db.Decimal(10, 2)
-  pricingUnitSnapshot     RentalPricingUnit
-  rentalDuration          Int                      // 租赁时长（计价单位数量）
-  rentalAmount            Decimal                  @db.Decimal(10, 2)
-  depositAmount           Decimal                  @db.Decimal(10, 2)
-  serviceFee              Decimal                  @db.Decimal(10, 2) @default(0)
-  overdueFee              Decimal                  @db.Decimal(10, 2) @default(0)
-  depositDeduction        Decimal                  @db.Decimal(10, 2) @default(0)
-  finalAmount             Decimal                  @db.Decimal(10, 2)
-  cancellationFee         Decimal                  @db.Decimal(10, 2) @default(0)
-  paymentStatus           PaymentStatus            @default(UNPAID)
-  depositStatus           DepositStatus            @default(NOT_REQUIRED)
-  status                  RentalOrderStatus        @default(PENDING_APPROVAL)
-  pickupLocationSnapshot  String
-  returnLocationSnapshot  String
-  renterNote              String?
-  cancellationReason      RentalCancellationReason?
-  cancellationNote        String?
-  cancelledById           String?
-  cancelledAt             DateTime?
-  handoverRecord          RentalHandoverRecord?
-  returnRecord            RentalReturnRecord?
-  extensionRequests       RentalExtensionRequest[]
-  damageClaims            RentalDamageClaim[]
-  disputes                RentalDispute[]
-  statusLogs              RentalOrderStatusLog[]
-  reviews                 RentalReview[]
-  conversations           Conversation[]
-  createdAt               DateTime                 @default(now())
-  updatedAt               DateTime                 @updatedAt
-  completedAt             DateTime?
+  unitPriceSnapshot      Decimal                   @db.Decimal(10, 2)
+  pricingUnitSnapshot    RentalPricingUnit
+  rentalDuration         Int // 租赁时长（计价单位数量）
+  rentalAmount           Decimal                   @db.Decimal(10, 2)
+  depositAmount          Decimal                   @db.Decimal(10, 2)
+  serviceFee             Decimal                   @default(0) @db.Decimal(10, 2)
+  overdueFee             Decimal                   @default(0) @db.Decimal(10, 2)
+  depositDeduction       Decimal                   @default(0) @db.Decimal(10, 2)
+  finalAmount            Decimal                   @db.Decimal(10, 2)
+  cancellationFee        Decimal                   @default(0) @db.Decimal(10, 2)
+  paymentStatus          PaymentStatus             @default(UNPAID)
+  depositStatus          DepositStatus             @default(NOT_REQUIRED)
+  status                 RentalOrderStatus         @default(PENDING_APPROVAL)
+  pickupLocationSnapshot String
+  returnLocationSnapshot String
+  renterNote             String?
+  cancellationReason     RentalCancellationReason?
+  cancellationNote       String?
+  cancelledById          String?
+  cancelledAt            DateTime?
+  handoverRecord         RentalHandoverRecord?
+  returnRecord           RentalReturnRecord?
+  extensionRequests      RentalExtensionRequest[]
+  damageClaims           RentalDamageClaim[]
+  disputes               RentalDispute[]
+  statusLogs             RentalOrderStatusLog[]
+  reviews                RentalReview[]
+  conversations          Conversation[]
+  uploadedAssets         UploadedAsset[]           @relation("AssetRentalOrder")
+  createdAt              DateTime                  @default(now())
+  updatedAt              DateTime                  @updatedAt
+  completedAt            DateTime?
 
   @@index([rentalListingId, status])
   @@index([ownerId, status, createdAt])
@@ -835,129 +918,129 @@ model RentalOrder {
 }
 
 model RentalOrderStatusLog {
-  id          String            @id @default(cuid())
-  orderId     String
-  order       RentalOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  fromStatus  RentalOrderStatus?
-  toStatus    RentalOrderStatus
-  operatorId  String?
-  note        String?
-  createdAt   DateTime          @default(now())
+  id         String             @id @default(cuid())
+  orderId    String
+  order      RentalOrder        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus RentalOrderStatus?
+  toStatus   RentalOrderStatus
+  operatorId String?
+  note       String?
+  createdAt  DateTime           @default(now())
 
   @@index([orderId, createdAt])
 }
 
 model RentalHandoverRecord {
-  id              String      @id @default(cuid())
-  orderId         String      @unique
-  order           RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  photos          String[]    // 图片 URL 数组
-  accessories     String?     @db.Text // 配件清单
-  currentCondition String?    @db.Text // 物品当前状态
-  knownIssues     String?     @db.Text // 已知问题
-  renterConfirmed  Boolean    @default(false)
-  ownerConfirmed   Boolean    @default(false)
+  id                String      @id @default(cuid())
+  orderId           String      @unique
+  order             RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  photos            String[] // 图片 URL 数组
+  accessories       String?     @db.Text // 配件清单
+  currentCondition  String?     @db.Text // 物品当前状态
+  knownIssues       String?     @db.Text // 已知问题
+  renterConfirmed   Boolean     @default(false)
+  ownerConfirmed    Boolean     @default(false)
   renterConfirmedAt DateTime?
   ownerConfirmedAt  DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 }
 
 model RentalReturnRecord {
-  id                 String      @id @default(cuid())
-  orderId            String      @unique
-  order              RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  photos             String[]    // 图片 URL 数组
-  accessoriesComplete Boolean    @default(true)
-  hasDamage          Boolean     @default(false)
-  needsCleaning      Boolean     @default(false)
-  isOverdue          Boolean     @default(false)
-  overdueDuration    Int?        // 逾期时长（分钟）
-  inspectionNote     String?     @db.Text
-  renterConfirmed    Boolean     @default(false)
-  ownerConfirmed     Boolean     @default(false)
-  renterConfirmedAt  DateTime?
-  ownerConfirmedAt   DateTime?
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  id                  String      @id @default(cuid())
+  orderId             String      @unique
+  order               RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  photos              String[] // 图片 URL 数组
+  accessoriesComplete Boolean     @default(true)
+  hasDamage           Boolean     @default(false)
+  needsCleaning       Boolean     @default(false)
+  isOverdue           Boolean     @default(false)
+  overdueDuration     Int? // 逾期时长（分钟）
+  inspectionNote      String?     @db.Text
+  renterConfirmed     Boolean     @default(false)
+  ownerConfirmed      Boolean     @default(false)
+  renterConfirmedAt   DateTime?
+  ownerConfirmedAt    DateTime?
+  createdAt           DateTime    @default(now())
+  updatedAt           DateTime    @updatedAt
 }
 
 model RentalExtensionRequest {
-  id             String                 @id @default(cuid())
-  orderId        String
-  order          RentalOrder            @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  requesterId    String
-  newEndTime     DateTime
-  additionalFee  Decimal                @db.Decimal(10, 2)
-  status         ExtensionRequestStatus @default(PENDING)
-  ownerNote      String?
-  createdAt      DateTime               @default(now())
-  updatedAt      DateTime               @updatedAt
+  id            String                 @id @default(cuid())
+  orderId       String
+  order         RentalOrder            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  requesterId   String
+  newEndTime    DateTime
+  additionalFee Decimal                @db.Decimal(10, 2)
+  status        ExtensionRequestStatus @default(PENDING)
+  ownerNote     String?
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
 
   @@index([orderId, createdAt])
 }
 
 model RentalDamageClaim {
-  id                  String      @id @default(cuid())
-  orderId             String
-  order               RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  submittedById       String      // 提交人（通常是出租者）
-  damageDescription   String      @db.Text
-  photos              String[]    // 损坏图片 URL 数组
-  requestedDeduction  Decimal     @db.Decimal(10, 2)
-  approvedDeduction   Decimal?    @db.Decimal(10, 2)
-  renterAgreed        Boolean?
-  renterNote          String?
-  resolvedAt          DateTime?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  id                 String      @id @default(cuid())
+  orderId            String
+  order              RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  submittedById      String // 提交人（通常是出租者）
+  damageDescription  String      @db.Text
+  photos             String[] // 损坏图片 URL 数组
+  requestedDeduction Decimal     @db.Decimal(10, 2)
+  approvedDeduction  Decimal?    @db.Decimal(10, 2)
+  renterAgreed       Boolean?
+  renterNote         String?
+  resolvedAt         DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   @@index([orderId])
 }
 
 model RentalDispute {
-  id              String              @id @default(cuid())
-  orderId         String
-  order           RentalOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  initiatorId     String
-  reason          String              @db.Text
-  evidencePhotos  String[]
-  status          RentalDisputeStatus @default(OPEN)
-  adminNote       String?             @db.Text
-  resolvedBy      String?
-  resolvedAt      DateTime?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  id             String              @id @default(cuid())
+  orderId        String
+  order          RentalOrder         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  initiatorId    String
+  reason         String              @db.Text
+  evidencePhotos String[]
+  status         RentalDisputeStatus @default(OPEN)
+  adminNote      String?             @db.Text
+  resolvedBy     String?
+  resolvedAt     DateTime?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   @@index([orderId])
   @@index([status, createdAt])
 }
 
 model RentalReview {
-  id            String      @id @default(cuid())
-  orderId       String
-  order         RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  authorId      String
-  author        User        @relation("RentalReviewAuthor", fields: [authorId], references: [id])
-  targetUserId  String
-  targetUser    User        @relation("RentalReviewTarget", fields: [targetUserId], references: [id])
+  id                  String      @id @default(cuid())
+  orderId             String
+  order               RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  authorId            String
+  author              User        @relation("RentalReviewAuthor", fields: [authorId], references: [id])
+  targetUserId        String
+  targetUser          User        @relation("RentalReviewTarget", fields: [targetUserId], references: [id])
   // 租客评价维度
-  itemMatchDesc   Int?      // 物品符合描述 1-5
-  itemWorksWell   Int?      // 物品使用正常 1-5
-  ownerResponsive Int?      // 出租者回复及时 1-5
-  pickupEasy      Int?      // 取还方便 1-5
-  attitudeFriendly Int?     // 态度友好 1-5
+  itemMatchDesc       Int? // 物品符合描述 1-5
+  itemWorksWell       Int? // 物品使用正常 1-5
+  ownerResponsive     Int? // 出租者回复及时 1-5
+  pickupEasy          Int? // 取还方便 1-5
+  attitudeFriendly    Int? // 态度友好 1-5
   // 出租者评价维度
-  returnedOnTime  Int?      // 按时归还 1-5
-  itemWellKept    Int?      // 爱护物品 1-5
-  accessoriesComplete Int?  // 配件完整 1-5
-  goodCommunication Int?    // 沟通顺畅 1-5
-  reliable        Int?      // 守约可靠 1-5
+  returnedOnTime      Int? // 按时归还 1-5
+  itemWellKept        Int? // 爱护物品 1-5
+  accessoriesComplete Int? // 配件完整 1-5
+  goodCommunication   Int? // 沟通顺畅 1-5
+  reliable            Int? // 守约可靠 1-5
   // 综合
-  overallRating   Int       // 综合评分 1-5
-  content         String?   @db.Text
-  tags            String[]
-  createdAt       DateTime  @default(now())
+  overallRating       Int // 综合评分 1-5
+  content             String?     @db.Text
+  tags                String[]
+  createdAt           DateTime    @default(now())
 
   @@unique([orderId, authorId])
   @@index([targetUserId, createdAt])

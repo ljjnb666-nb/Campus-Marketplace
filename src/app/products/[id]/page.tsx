@@ -35,7 +35,18 @@ export async function generateMetadata({
     );
 
     return { title, description, openGraph: { title, description } };
-  } catch {
+  } catch (error) {
+    // notFound()/redirect() 等 Next.js 控制流错误必须原样抛出，
+    // 否则 404 语义被兜底 metadata 吞掉，缺失商品会返回 200
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "digest" in error &&
+      typeof error.digest === "string" &&
+      error.digest.startsWith("NEXT_")
+    ) {
+      throw error;
+    }
     return PRODUCT_DETAIL_FALLBACK_METADATA;
   }
 }

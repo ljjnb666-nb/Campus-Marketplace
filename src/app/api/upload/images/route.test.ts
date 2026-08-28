@@ -1,10 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, saveUploadedImage, isRateLimited } = vi.hoisted(() => ({
-  auth: vi.fn(),
-  saveUploadedImage: vi.fn(),
-  isRateLimited: vi.fn(),
-}));
+const { auth, uploadImageAsset, isRateLimited, AssetServiceError, isImageValidationError } =
+  vi.hoisted(() => {
+    class AssetServiceError extends Error {
+      code: string;
+      status: number;
+      constructor(code: string, message: string, status = 400) {
+        super(message);
+        this.name = "AssetServiceError";
+        this.code = code;
+        this.status = status;
+      }
+    }
+    return {
+      auth: vi.fn(),
+      uploadImageAsset: vi.fn(),
+      isRateLimited: vi.fn(),
+      AssetServiceError,
+      isImageValidationError: vi.fn(() => false),
+    };
+  });
 
 vi.mock("@/lib/auth", () => ({
   auth,
@@ -14,10 +29,14 @@ vi.mock("@/lib/rate-limit", () => ({
   isRateLimited,
 }));
 
+vi.mock("@/lib/asset-service", () => ({
+  uploadImageAsset,
+  AssetServiceError,
+  isImageValidationError,
+}));
+
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
-  isUploadCategory: (cat: string) =>
-    ["avatar", "product"].includes(cat),
+  isUploadCategory: (cat: string) => ["avatar", "product", "verification"].includes(cat),
   UPLOAD_LIMITS: {
     avatar: {
       maxSize: 5 * 1024 * 1024,
@@ -27,6 +46,11 @@ vi.mock("@/lib/upload", () => ({
     product: {
       maxSize: 10 * 1024 * 1024,
       maxCount: 9,
+      allowedTypes: ["image/jpeg", "image/png", "image/webp"],
+    },
+    verification: {
+      maxSize: 5 * 1024 * 1024,
+      maxCount: 2,
       allowedTypes: ["image/jpeg", "image/png", "image/webp"],
     },
   },
@@ -54,8 +78,15 @@ function buildUploadRequest(
 describe("POST /api/upload/images", () => {
   beforeEach(() => {
     auth.mockReset().mockResolvedValue({ user: { id: "user-1" } });
-    saveUploadedImage.mockReset().mockResolvedValue("/uploads/products/photo.jpg");
+    uploadImageAsset.mockReset().mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/products/u1/x.webp",
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+    });
     isRateLimited.mockReset().mockReturnValue({ limited: false, remaining: 19 });
+    isImageValidationError.mockReset().mockReturnValue(false);
   });
 
   it("returns 401 when there is no session", async () => {
@@ -66,7 +97,7 @@ describe("POST /api/upload/images", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "未登录，请先登录" });
     expect(isRateLimited).not.toHaveBeenCalled();
-    expect(saveUploadedImage).not.toHaveBeenCalled();
+    expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
   it("rate limits each uploading user to 20 requests per minute", async () => {
@@ -81,23 +112,44 @@ describe("POST /api/upload/images", () => {
     });
     expect(response.status).toBe(429);
     expect(await response.json()).toEqual({ error: "上传过于频繁，请稍后再试" });
-    expect(saveUploadedImage).not.toHaveBeenCalled();
+    expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("uploads the image when the user is within the limit", async () => {
+  it("uploads a public image and returns asset metadata without legacy url-only shape", async () => {
     const response = await POST(buildUploadRequest());
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       success: true,
-      url: "/uploads/products/photo.jpg",
-      size: 3,
-      mimeType: "image/jpeg",
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/products/u1/x.webp",
+      mimeType: "image/webp",
+      sizeBytes: 1024,
     });
-    expect(saveUploadedImage).toHaveBeenCalledWith(
-      expect.any(File),
-      "product",
-    );
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "product",
+      file: expect.any(File),
+    });
+  });
+
+  it("never returns a permanent url for private categories", async () => {
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-2",
+      access: "PRIVATE",
+      url: null,
+      mimeType: "image/webp",
+      sizeBytes: 512,
+    });
+
+    const response = await POST(buildUploadRequest(undefined, "verification"));
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.access).toBe("PRIVATE");
+    expect(body.assetId).toBe("asset-2");
+    expect(body.url).toBeNull();
   });
 
   it("returns 400 when no file is selected", async () => {
@@ -112,6 +164,7 @@ describe("POST /api/upload/images", () => {
 
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "无效的上传分类" });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
   it("returns 400 for unsupported mime types", async () => {
@@ -122,28 +175,42 @@ describe("POST /api/upload/images", () => {
     expect(await response.json()).toEqual({
       error: "不支持的图片格式，仅支持JPG、PNG和WebP",
     });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("returns 400 for files beyond the category size limit", async () => {
+  it("returns 413 for files beyond the category size limit", async () => {
     const big = new File([new Uint8Array([1])], "photo.jpg", { type: "image/jpeg" });
     Object.defineProperty(big, "size", { value: 6 * 1024 * 1024 });
     const response = await POST(buildUploadRequest(big, "avatar"));
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(413);
     expect(await response.json()).toEqual({ error: "图片大小不能超过5MB" });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when saving the file fails", async () => {
-    saveUploadedImage.mockResolvedValue(null);
+  it("maps quota exceeded errors to 413 with a friendly message", async () => {
+    uploadImageAsset.mockRejectedValue(
+      new AssetServiceError("QUOTA_EXCEEDED", "存储空间不足，请删除旧图片后再试", 413),
+    );
 
     const response = await POST(buildUploadRequest());
 
-    expect(response.status).toBe(500);
-    expect(await response.json()).toEqual({ error: "图片上传失败" });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "存储空间不足，请删除旧图片后再试" });
   });
 
-  it("hides internal error details when saving throws", async () => {
-    saveUploadedImage.mockRejectedValue(
+  it("maps image validation errors to 400 without leaking internals", async () => {
+    uploadImageAsset.mockRejectedValue(new Error("文件内容不是有效的图片"));
+    isImageValidationError.mockReturnValue(true);
+
+    const response = await POST(buildUploadRequest());
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "文件内容不是有效的图片" });
+  });
+
+  it("hides internal error details for unexpected failures", async () => {
+    uploadImageAsset.mockRejectedValue(
       new Error("EACCES: permission denied, open '/uploads/products/photo.jpg'"),
     );
 

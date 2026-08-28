@@ -35,6 +35,21 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # S3 兼容对象存储：MinIO 集成测试必须真实执行，不允许静默跳过。
+      # API 端口映射为宿主机 9100（与 docker-compose.yml / .env.example 一致）。
+      minio:
+        image: minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9100:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       # 与 .env.example 的连接串格式保持一致;指向 CI 服务容器中的 PostgreSQL
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
@@ -54,6 +69,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Bootstrap MinIO buckets
+        # 幂等创建 public/private bucket 并设置匿名策略：
+        # public = 允许匿名读（禁止写）；private = 完全禁止匿名访问
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc -c "
+            mc alias set local http://localhost:9100 minioadmin minioadmin &&
+            mc mb -p --ignore-existing local/campus-public &&
+            mc mb -p --ignore-existing local/campus-private &&
+            mc anonymous set download local/campus-public &&
+            mc anonymous set none local/campus-private
+          "
+
       - name: Generate Prisma client
         run: npx prisma generate
 
@@ -63,7 +90,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Deploy database migrations
+      - name: Deploy database migrations (fresh)
+        run: npx prisma migrate deploy
+
+      - name: Deploy database migrations (idempotent re-run)
         run: npx prisma migrate deploy
 
       - name: Test with coverage thresholds
@@ -72,6 +102,8 @@ jobs:
           INTEGRATION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus?schema=public
           # 限流集成测试指向 CI 服务容器中的 Redis（未设置时该测试跳过）
           INTEGRATION_REDIS_URL: redis://localhost:6379
+          # MinIO 集成测试：真实 S3 API 全链路（bucket/上传/签名/匿名策略/清理）
+          INTEGRATION_S3_ENDPOINT: http://localhost:9100
           # 部分测试的导入链会校验 next-auth 环境变量（本地由 .env 提供）
           NEXTAUTH_URL: http://localhost:3000
           NEXTAUTH_SECRET: dummy-secret-for-ci-tests-only
@@ -83,4 +115,3 @@ jobs:
           NEXTAUTH_SECRET: dummy-secret-for-ci-build-only
           APP_NAME: 校园集市
           DEFAULT_CAMPUS_SLUG: main-campus
-          UPLOAD_DIR: ./public/uploads
