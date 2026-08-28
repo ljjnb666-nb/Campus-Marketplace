@@ -1,6 +1,7 @@
 import { reviewVerification } from "@/actions/admin";
 import { requireAdmin } from "@/lib/server-auth";
 import { getVerificationReviewQueue } from "@/repositories/admin-repository";
+import { PrivateAssetViewer } from "@/components/shared/private-asset-viewer";
 
 export const dynamic = "force-dynamic";
 
@@ -42,14 +43,8 @@ export default async function AdminVerificationsPage() {
                   <p>当前用户校区：{item.user.campus.name}</p>
                   <p>学号后四位：{item.studentIdLast4}</p>
                   <p>提交时间：{formatDate(item.submittedAt)}</p>
-                  <a
-                    href={item.studentCardImage}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-block text-slate-950 underline"
-                  >
-                    查看学生证材料
-                  </a>
+                  {/* 学生证材料为私有资源：经签名接口鉴权后短时访问，不再暴露永久 URL */}
+                  <PrivateAssetViewer value={item.studentCardImage} label="查看学生证材料" />
                   {item.reviewNote ? <p>上次备注：{item.reviewNote}</p> : null}
                 </div>
 

@@ -9,7 +9,9 @@ type NotificationPayload = {
   content: string;
 };
 
-type NotificationClient = Prisma.TransactionClient | typeof prisma;
+// 写入入口仅接收事务客户端：扩展客户端与基础客户端的联合类型会在
+// schema 增大后触发 Prisma 扩展的类型深度超限（excessive stack depth）。
+type NotificationClient = Prisma.TransactionClient;
 
 export async function createNotification(client: NotificationClient, payload: NotificationPayload) {
   return client.notification.create({

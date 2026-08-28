@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isStoredImagePath } from "@/lib/upload";
+import { isManageableImageValue } from "@/lib/asset-ref";
 
 const RENTAL_IMAGE_LIMIT = 9;
 
@@ -8,7 +8,7 @@ const imageUrlsSchema = z
     z
       .string()
       .trim()
-      .refine((value) => /^https?:\/\//.test(value) || isStoredImagePath(value), {
+      .refine((value) => isManageableImageValue(value), {
         message: "图片地址格式不正确",
       }),
   )

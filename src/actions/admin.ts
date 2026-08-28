@@ -5,6 +5,7 @@ import { actionErrorMessage } from "@/lib/error-handler";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
+import { applyVerificationAssetRetention } from "@/lib/upload";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -265,6 +266,10 @@ export async function reviewVerification(
                 parsed.data.reviewNote ? `原因：${parsed.data.reviewNote}` : "请完善材料后重新提交。"
               }`,
       });
+
+      // 敏感材料保留期：审核出结果后 VERIFICATION_ASSET_RETENTION_DAYS 天
+      // 由 cleanup 删除学生证原图（认证结论保留，见 docs/STORAGE.md）
+      await applyVerificationAssetRetention(tx, parsed.data.verificationId, reviewedAt);
     });
 
     revalidatePath("/admin");

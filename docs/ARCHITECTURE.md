@@ -19,7 +19,8 @@
 - PostgreSQL 作为主数据库
 - Prisma 负责 Schema、迁移与查询；导出的客户端挂载软删除统一拦截（`src/lib/prisma-soft-delete.ts`）
 - Redis（可选）作为限流计数的外部存储：配置 `REDIS_URL` 启用多实例共享计数，未配置或故障时回退进程内计数
-- 本地通过 Docker Compose 运行数据库与 Redis 容器
+- S3 兼容对象存储（MinIO / AWS S3 / Cloudflare R2）承载全部上传文件：经 `StorageClient` 抽象访问，公私 bucket 隔离，私有资源走短时签名 URL（见 [STORAGE.md](STORAGE.md)）
+- 本地通过 Docker Compose 运行数据库、Redis 与 MinIO 容器
 
 ## 目录职责
 
@@ -27,10 +28,26 @@
 - `src/components`：页面组件与通用 UI
 - `src/actions`：Server Actions（写操作入口）
 - `src/repositories`：读模型查询与数据拼装
-- `src/lib`：认证、上传、审核、限流、订单状态机、软删除拦截、工具函数
+- `src/lib`：认证、上传、审核、限流、订单状态机、软删除拦截、对象存储（`storage/`）、资源服务（`asset-service.ts`）与工具函数
 - `src/constants`：状态、选项、枚举标签
 - `src/validators`：Zod 校验
 - `prisma`：Schema、迁移、种子数据
+
+## 存储分层（Production Phase 1）
+
+上传链路强制经过抽象层，组件与页面不得直接触碰 S3 SDK：
+
+```
+表单/前端组件 → Upload API / Server Action
+  → asset-service（配额 + 登记 + 授权）
+    → StorageClient 接口
+      → S3Storage（AWS SDK v3：MinIO / S3 / R2）
+```
+
+- 公开资源（avatar/product/rental/service）：公开 URL 直接访问
+- 私有资源（verification/handover/return/report）：DB 存 `asset:<id>` 引用，
+  访问经 `GET /api/assets/{id}/access` 业务鉴权后签发短时 URL
+- 详细设计（key 规则、配额并发、孤儿回收、保留期、失败恢复）见 [STORAGE.md](STORAGE.md)
 
 ## 当前设计原则
 

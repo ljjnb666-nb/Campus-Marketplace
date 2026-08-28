@@ -20,6 +20,7 @@ const {
   serviceListingUpdate,
   adminLogCreate,
   createNotification,
+  applyVerificationAssetRetention,
   transactionMock,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
@@ -41,6 +42,7 @@ const {
   serviceListingUpdate: vi.fn(),
   adminLogCreate: vi.fn(),
   createNotification: vi.fn(),
+  applyVerificationAssetRetention: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -54,6 +56,10 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/repositories/notification-repository", () => ({
   createNotification,
+}));
+
+vi.mock("@/lib/upload", () => ({
+  applyVerificationAssetRetention,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -137,6 +143,7 @@ describe("admin actions", () => {
     serviceListingUpdate.mockReset();
     adminLogCreate.mockReset();
     createNotification.mockReset();
+    applyVerificationAssetRetention.mockReset().mockResolvedValue(0);
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
@@ -489,6 +496,12 @@ describe("admin actions", () => {
     expect(createNotification).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: "user-2", title: "校园认证已通过" }),
+    );
+    // 审核出结果后为学生证材料设置保留期（到期由 cleanup 删除原图，认证结论保留）
+    expect(applyVerificationAssetRetention).toHaveBeenCalledWith(
+      expect.anything(),
+      "verification-1",
+      expect.any(Date),
     );
     expect(revalidatePath).toHaveBeenCalledWith("/admin/verifications");
   });

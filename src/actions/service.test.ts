@@ -5,7 +5,9 @@ const {
   revalidatePath,
   requireUser,
   containsBannedKeyword,
-  saveUploadedImage,
+  uploadImageAsset,
+  resolveSingleImageToken,
+  markAssetsForValuesPendingDelete,
   userFindUnique,
   serviceCategoryFindFirst,
   serviceListingFindFirst,
@@ -18,7 +20,9 @@ const {
   revalidatePath: vi.fn(),
   requireUser: vi.fn(),
   containsBannedKeyword: vi.fn(),
-  saveUploadedImage: vi.fn(),
+  uploadImageAsset: vi.fn(),
+  resolveSingleImageToken: vi.fn(),
+  markAssetsForValuesPendingDelete: vi.fn(),
   userFindUnique: vi.fn(),
   serviceCategoryFindFirst: vi.fn(),
   serviceListingFindFirst: vi.fn(),
@@ -43,8 +47,10 @@ vi.mock("@/lib/moderation", () => ({
 }));
 
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
-  isStoredImagePath: (value: string) => value.startsWith("/uploads/"),
+  buildAssetReference: (assetId: string) => `asset:${assetId}`,
+  uploadImageAsset,
+  resolveSingleImageToken,
+  markAssetsForValuesPendingDelete,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -84,7 +90,9 @@ describe("service actions", () => {
     revalidatePath.mockReset();
     requireUser.mockReset();
     containsBannedKeyword.mockReset();
-    saveUploadedImage.mockReset();
+    uploadImageAsset.mockReset();
+    resolveSingleImageToken.mockReset();
+    markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
     userFindUnique.mockReset();
     serviceCategoryFindFirst.mockReset();
     serviceListingFindFirst.mockReset();
@@ -92,7 +100,22 @@ describe("service actions", () => {
     serviceListingUpdate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
-    saveUploadedImage.mockResolvedValue("/uploads/services/cover.jpg");
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/services/user-1/cover.webp",
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+    });
+    // 单 token 解析 mock：asset 引用 → 公开 URL；其余透传；空值 → null
+    resolveSingleImageToken.mockImplementation(async ({ token }: { token: string }) => {
+      const trimmed = token.trim();
+      if (!trimmed) return null;
+      if (trimmed === "asset:asset-1") {
+        return "http://localhost:9100/campus-public/public/services/user-1/cover.webp";
+      }
+      return trimmed;
+    });
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     serviceCategoryFindFirst.mockResolvedValue({ id: "service-category-1" });
     serviceListingCreate.mockResolvedValue({ id: "service-1" });
@@ -132,11 +155,22 @@ describe("service actions", () => {
 
     await createService({ success: false, message: "" }, formData);
 
-    expect(saveUploadedImage).toHaveBeenCalled();
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "service",
+      file: expect.any(File),
+    });
+    // 创建时先落库再写入规范化后的封面 URL
     expect(serviceListingCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        coverImageUrl: "/uploads/services/cover.jpg",
+        title: "高数一对一辅导",
       }),
+    });
+    expect(serviceListingUpdate).toHaveBeenCalledWith({
+      where: { id: "service-1" },
+      data: {
+        coverImageUrl: "http://localhost:9100/campus-public/public/services/user-1/cover.webp",
+      },
     });
   });
 

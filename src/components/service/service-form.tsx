@@ -87,7 +87,7 @@ export function ServiceForm({
           }
 
           const result = await response.json();
-          formData.set("coverImageUrl", result.url);
+          formData.set("coverImageUrl", result.url ?? `asset:${result.assetId}`);
         }
       }
 

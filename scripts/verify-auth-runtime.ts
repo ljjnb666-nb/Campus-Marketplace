@@ -123,7 +123,8 @@ async function main() {
     {
       name: "my-orders",
       path: "/my/orders",
-      expected: ["\u6211\u7684\u8ba2\u5355", "\u6211\u53d1\u8d77\u7684\u8ba2\u5355"],
+      // 订单页改版为统一订单中心，按新标题断言
+      expected: ["\u6211\u7684\u8ba2\u5355", "\u7edf\u4e00\u8ba2\u5355\u4e2d\u5fc3"],
     },
     {
       name: "messages",

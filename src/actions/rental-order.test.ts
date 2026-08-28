@@ -130,6 +130,8 @@ vi.mock("@/repositories/rental-order-repository", () => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: transactionMock,
+    rentalHandoverRecord: { findUnique: prismaHandoverFindUnique },
+    rentalReturnRecord: { findUnique: prismaReturnFindUnique },
   },
   withTransaction: transactionMock,
 }));
@@ -151,12 +153,43 @@ import {
   submitRentalReview,
 } from "@/actions/rental-order";
 
-const { saveUploadedImage } = vi.hoisted(() => ({
-  saveUploadedImage: vi.fn(),
+const {
+  uploadImageAsset,
+  attachAssetsToEntity,
+  markAssetsForValuesPendingDelete,
+  prismaHandoverFindUnique,
+  prismaReturnFindUnique,
+} = vi.hoisted(() => ({
+  uploadImageAsset: vi.fn(),
+  attachAssetsToEntity: vi.fn(),
+  markAssetsForValuesPendingDelete: vi.fn(),
+  prismaHandoverFindUnique: vi.fn(),
+  prismaReturnFindUnique: vi.fn(),
 }));
 
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
+  uploadImageAsset,
+  attachAssetsToEntity,
+  markAssetsForValuesPendingDelete,
+  buildAssetReference: (assetId: string) => `asset:${assetId}`,
+  parseAssetReference: (value: string) =>
+    value.startsWith("asset:") ? value.slice("asset:".length) : null,
+  asAssetTx: (client: unknown) => client,
+  isImageValidationError: () => false,
+  AssetServiceError: class AssetServiceError extends Error {
+    code: string;
+    status: number;
+    constructor(code: string, message: string, status = 400) {
+      super(message);
+      this.code = code;
+      this.status = status;
+    }
+  },
+  UPLOAD_LIMITS: {
+    handover: { maxSize: 10 * 1024 * 1024, maxCount: 5, allowedTypes: ["image/jpeg", "image/png", "image/webp"] },
+    return: { maxSize: 10 * 1024 * 1024, maxCount: 5, allowedTypes: ["image/jpeg", "image/png", "image/webp"] },
+    report: { maxSize: 10 * 1024 * 1024, maxCount: 5, allowedTypes: ["image/jpeg", "image/png", "image/webp"] },
+  },
 }));
 
 function buildCreateFormData(overrides: Record<string, string> = {}) {
@@ -244,8 +277,18 @@ describe("rental-order actions", () => {
     txExtensionRequestUpdate.mockReset();
     txDamageClaimCreate.mockReset();
     txDisputeCreate.mockReset();
-    saveUploadedImage.mockReset();
-    saveUploadedImage.mockResolvedValue("/uploads/handover/photo.webp");
+    uploadImageAsset.mockReset();
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PRIVATE",
+      url: null,
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+    });
+    attachAssetsToEntity.mockReset().mockResolvedValue(1);
+    markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
+    prismaHandoverFindUnique.mockReset().mockResolvedValue(null);
+    prismaReturnFindUnique.mockReset().mockResolvedValue(null);
 
     requireUser.mockResolvedValue({ id: "user-renter" });
     createNotifications.mockResolvedValue(undefined);
@@ -1001,14 +1044,23 @@ describe("rental-order actions", () => {
     const result = await confirmPickup(formData);
 
     expect(result).toEqual({ success: true, message: "已确认取货" });
-    expect(saveUploadedImage).toHaveBeenCalledWith(expect.any(File), "handover");
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-owner",
+      category: "handover",
+      file: expect.any(File),
+    });
+    // 私有照片以 asset: 引用落库，事务成功后绑定订单
     expect(txRentalHandoverUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
-          photos: ["/uploads/handover/photo.webp"],
+          photos: ["asset:asset-1"],
           ownerConfirmed: true,
         }),
       }),
+    );
+    expect(attachAssetsToEntity).toHaveBeenCalledWith(
+      expect.anything(),
+      { ownerId: "user-owner", assetIds: ["asset-1"], target: { type: "rentalOrder", id: "order-1" } },
     );
   });
 

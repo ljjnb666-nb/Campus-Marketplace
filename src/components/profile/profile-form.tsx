@@ -77,7 +77,7 @@ export function ProfileForm({
           }
 
           const result = await response.json();
-          formData.set("avatarUrl", result.url);
+          formData.set("avatarUrl", result.url ?? `asset:${result.assetId}`);
         }
       } else {
         formData.set("avatarUrl", "");

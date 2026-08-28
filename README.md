@@ -45,7 +45,7 @@ Windows PowerShell:
 Copy-Item .env.example .env
 ```
 
-3. 启动本地 PostgreSQL 与 Redis
+3. 启动本地 PostgreSQL、Redis 与 MinIO
 
 ```bash
 docker compose up -d
@@ -53,6 +53,11 @@ docker compose up -d
 
 > Redis 用于限流计数外部化（可选）：在 `.env` 中设置 `REDIS_URL="redis://localhost:6379"` 启用；
 > 不设置时回退进程内计数，仅单实例部署语义。
+>
+> MinIO 为 S3 兼容对象存储（必需）：API 在 http://localhost:9100，Console 在 http://localhost:9101
+> （minioadmin/minioadmin）。`docker compose up -d` 会自动创建 public/private bucket 并设置匿名访问策略；
+> 所有上传文件（含学生证等敏感材料）都存储于此，生产环境替换为 AWS S3 / Cloudflare R2 等，
+> 见 [docs/STORAGE.md](docs/STORAGE.md)。
 
 4. 生成 Prisma Client 并执行迁移
 
@@ -89,6 +94,13 @@ npm run app:smoke
 
 ```bash
 npm run app:smoke:auth
+```
+
+对象存储清理（孤儿上传 / 敏感材料保留期 / 待删除重试，幂等，支持 dry-run）：
+
+```bash
+npm run storage:cleanup
+npm run storage:cleanup -- --dry-run
 ```
 
 可选：检查源码、文档和脚本里是否出现常见中文乱码片段
@@ -131,6 +143,7 @@ npm run text:verify
 - [docs/DATABASE.md](docs/DATABASE.md)
 - [docs/API.md](docs/API.md)
 - [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/STORAGE.md](docs/STORAGE.md)
 - [docs/TODO.md](docs/TODO.md)
 
 ## 验证状态
@@ -149,9 +162,9 @@ npm run text:verify
 
 当前测试基线：
 
-- 全量测试约 `890+` 个用例通过（2026-08-27 实测 182 文件 / 894 通过），覆盖单元、组件与 API 路由层
-- 另有真实数据库 / Redis 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL` 时才运行
-- 近期完成了可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；以及安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
+- 全量测试约 `980+` 个用例通过（2026-08-28 实测 189 文件 / 983 通过），覆盖单元、组件与 API 路由层
+- 另有真实数据库 / Redis / MinIO 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL`、`INTEGRATION_S3_ENDPOINT` 时才运行（CI 中全部真实执行）
+- 生产化存储专项：S3 兼容对象存储 + 公私隔离 + 上传配额 + 敏感文件生命周期（详见 [docs/STORAGE.md](docs/STORAGE.md)）；以及可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
 
 ## 安全加固
 
@@ -169,3 +182,4 @@ npm run text:verify
 | 8 | 限流计数进程内存储，多实例部署失效 | 支持配置 `REDIS_URL` 外部化（原子 Lua 固定窗口），未配置或 Redis 故障自动回退进程内；docker compose/CI 已加 Redis 服务 | `src/lib/rate-limit.ts` |
 | 9 | 生产 CSP script-src 含 `unsafe-inline` | CSP 移至 middleware 按请求生成，script-src 采用每请求 nonce + `strict-dynamic`；style-src 因 React 行内样式保留 | `middleware.ts`、`next.config.ts` |
 | 10 | 软删除过滤逐查询手写，有遗漏风险 | Prisma client extension 统一注入 `deletedAt: null` 过滤并将 delete 映射为软删除，显式声明 `deletedAt` 时豁免 | `src/lib/prisma-soft-delete.ts` |
+| 11 | 上传文件写入本地 public/uploads，敏感材料（学生证等）成为永久公开静态文件 | 全面切换 S3 兼容对象存储（MinIO/R2/S3），公私 bucket 隔离；私有资源仅经鉴权签名 URL 短时访问；sharp 重编码剥离 EXIF/GPS；并发安全配额与生命周期清理 | `src/lib/storage/`、`src/lib/asset-service.ts`、`docs/STORAGE.md` |

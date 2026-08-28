@@ -201,8 +201,9 @@ export function ProductForm({
           onChange={setUploadedImages}
           maxCount={9}
         />
+        {/* ImageUploader 选图后立即上传，url 即服务端 token（公开 URL / asset 引用） */}
         {uploadedImages.map((img, i) => (
-          <input key={i} type="hidden" name="imageUrls" value={img.url || img.preview} />
+          <input key={i} type="hidden" name="imageUrls" value={img.url} />
         ))}
       </div>
 

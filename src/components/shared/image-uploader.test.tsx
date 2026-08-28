@@ -126,7 +126,20 @@ describe("ImageUploader", () => {
     expect(onCoverChange).toHaveBeenCalledWith(1);
   });
 
-  it("accepts valid image selections and appends previews", async () => {
+  it("uploads valid selections immediately and appends server tokens", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        assetId: "asset-1",
+        access: "PUBLIC",
+        url: "http://localhost:9100/campus-public/public/products/u1/x.webp",
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
     const onChange = vi.fn();
     render(<ImageUploader images={[]} onChange={onChange} category="product" />);
 
@@ -136,8 +149,34 @@ describe("ImageUploader", () => {
     await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
     const next = onChange.mock.calls[0][0] as UploadedImage[];
     expect(next).toHaveLength(1);
-    expect(next[0].file).toBeInstanceOf(File);
+    // 选图即上传：url 为服务端 token（公开 URL / asset 引用），成功后才进入列表
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/upload/images",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(next[0].url).toBe("http://localhost:9100/campus-public/public/products/u1/x.webp");
     expect(next[0].preview).toBe("blob:preview");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps failed uploads out of the list and surfaces the error", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({ success: false, error: "存储空间不足，请删除旧图片后再试" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const onChange = vi.fn();
+    render(<ImageUploader images={[]} onChange={onChange} category="product" />);
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [imageFile()] } });
+
+    expect(await screen.findByText("存储空间不足，请删除旧图片后再试")).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
   });
 
   it("rejects selections beyond the remaining slots", async () => {

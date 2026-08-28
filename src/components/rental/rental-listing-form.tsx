@@ -80,6 +80,7 @@ export function RentalListingForm({
     try {
       const formData = new FormData(e.currentTarget);
 
+      // ImageUploader 选图后已即时上传，url 即服务端 token；兜底处理遗留 file
       const uploadedUrls: string[] = [];
       for (const image of images) {
         if (image.url) {
@@ -100,13 +101,14 @@ export function RentalListingForm({
           }
 
           const result = await response.json();
-          uploadedUrls.push(result.url);
+          uploadedUrls.push(result.url ?? `asset:${result.assetId}`);
         }
       }
 
+      // 服务端 action 读取的字段名是 imageUrls（历史版本误用 images[] 导致图片被丢弃）
       formData.delete("images[]");
       uploadedUrls.forEach((url) => {
-        formData.append("images[]", url);
+        formData.append("imageUrls", url);
       });
 
       await formAction(formData);

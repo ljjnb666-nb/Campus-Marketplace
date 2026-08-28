@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isStoredImagePath } from "@/lib/upload";
+import { isManageableImageValue } from "@/lib/asset-ref";
 
 const decimalString = z
   .string()
@@ -14,7 +14,7 @@ const optionalImage = z
   .trim()
   .optional()
   .transform((value) => value ?? "")
-  .refine((value) => value === "" || /^https?:\/\//.test(value) || isStoredImagePath(value), {
+  .refine((value) => value === "" || isManageableImageValue(value), {
     message: "封面图请填写合法的图片地址",
   });
 

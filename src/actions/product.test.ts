@@ -5,12 +5,15 @@ const {
   revalidatePath,
   requireUser,
   containsBannedKeyword,
-  saveUploadedImage,
+  uploadImageAsset,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
   userFindUnique,
   productCategoryFindUnique,
   productFindFirst,
   productCreate,
   productUpdate,
+  productImageFindMany,
   productImageDeleteMany,
   productImageCreateMany,
   favoriteDeleteMany,
@@ -23,12 +26,15 @@ const {
   revalidatePath: vi.fn(),
   requireUser: vi.fn(),
   containsBannedKeyword: vi.fn(),
-  saveUploadedImage: vi.fn(),
+  uploadImageAsset: vi.fn(),
+  resolveImageTokens: vi.fn(),
+  markAssetsForValuesPendingDelete: vi.fn(),
   userFindUnique: vi.fn(),
   productCategoryFindUnique: vi.fn(),
   productFindFirst: vi.fn(),
   productCreate: vi.fn(),
   productUpdate: vi.fn(),
+  productImageFindMany: vi.fn(),
   productImageDeleteMany: vi.fn(),
   productImageCreateMany: vi.fn(),
   favoriteDeleteMany: vi.fn(),
@@ -53,8 +59,10 @@ vi.mock("@/lib/moderation", () => ({
 }));
 
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
-  isStoredImagePath: (value: string) => value.startsWith("/uploads/"),
+  buildAssetReference: (assetId: string) => `asset:${assetId}`,
+  uploadImageAsset,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -71,6 +79,7 @@ vi.mock("@/lib/prisma", () => ({
       findFirst: productFindFirst,
     },
     productImage: {
+      findMany: productImageFindMany,
       deleteMany: productImageDeleteMany,
       createMany: productImageCreateMany,
     },
@@ -111,12 +120,15 @@ describe("product actions", () => {
     revalidatePath.mockReset();
     requireUser.mockReset();
     containsBannedKeyword.mockReset();
-    saveUploadedImage.mockReset();
+    uploadImageAsset.mockReset();
+    resolveImageTokens.mockReset();
+    markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
     userFindUnique.mockReset();
     productCategoryFindUnique.mockReset();
     productFindFirst.mockReset();
     productCreate.mockReset();
     productUpdate.mockReset();
+    productImageFindMany.mockReset().mockResolvedValue([]);
     productImageDeleteMany.mockReset();
     productImageCreateMany.mockReset();
     favoriteDeleteMany.mockReset();
@@ -125,7 +137,21 @@ describe("product actions", () => {
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     containsBannedKeyword.mockResolvedValue(null);
-    saveUploadedImage.mockResolvedValue("/uploads/products/product.jpg");
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/products/user-1/photo.webp",
+      mimeType: "image/webp",
+      sizeBytes: 2048,
+    });
+    // token 解析 mock：asset 引用 → 公开 URL；其余（外链/历史路径）透传
+    resolveImageTokens.mockImplementation(async ({ tokens }: { tokens: string[] }) =>
+      tokens.map((token) =>
+        token === "asset:asset-1"
+          ? "http://localhost:9100/campus-public/public/products/user-1/photo.webp"
+          : token,
+      ),
+    );
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     productCreate.mockResolvedValue({ id: "product-1" });
     favoriteDeleteMany.mockResolvedValue({ count: 0 });
@@ -136,7 +162,11 @@ describe("product actions", () => {
       if (typeof arg === "function") {
         return arg({
           favorite: { deleteMany: favoriteDeleteMany, create: favoriteCreate },
-          product: { update: productUpdate },
+          product: { update: productUpdate, create: productCreate },
+          productImage: {
+            deleteMany: productImageDeleteMany,
+            createMany: productImageCreateMany,
+          },
         });
       }
       return [];
@@ -174,18 +204,26 @@ describe("product actions", () => {
 
     await createProduct({ success: false, message: "" }, formData);
 
-    expect(saveUploadedImage).toHaveBeenCalled();
-    expect(productCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        images: {
-          create: [
-            {
-              url: "/uploads/products/product.jpg",
-              sortOrder: 0,
-            },
-          ],
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "product",
+      file: expect.any(File),
+    });
+    // 上传 token 在事务内解析为公开 URL 后才写入 ProductImage
+    expect(resolveImageTokens).toHaveBeenCalledWith({
+      ownerId: "user-1",
+      tokens: ["asset:asset-1"],
+      target: { type: "product", id: "product-1" },
+      tx: expect.anything(),
+    });
+    expect(productImageCreateMany).toHaveBeenCalledWith({
+      data: [
+        {
+          productId: "product-1",
+          url: "http://localhost:9100/campus-public/public/products/user-1/photo.webp",
+          sortOrder: 0,
         },
-      }),
+      ],
     });
   });
 
@@ -208,8 +246,11 @@ describe("product actions", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  it("soft deletes the owner's product and redirects back to my products", async () => {
+  it("soft deletes the owner's product and marks its images for deletion", async () => {
     productFindFirst.mockResolvedValue({ id: "product-1" });
+    productImageFindMany.mockResolvedValue([
+      { url: "http://localhost:9100/campus-public/public/products/user-1/photo.webp" },
+    ]);
 
     const formData = new FormData();
     formData.set("productId", "product-1");
@@ -223,6 +264,10 @@ describe("product actions", () => {
         deletedAt: expect.any(Date),
       },
     });
+    // 软删除时图片资源标记待删除，由 cleanup 异步物理清理
+    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", [
+      "http://localhost:9100/campus-public/public/products/user-1/photo.webp",
+    ]);
     expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
     expect(revalidatePath).toHaveBeenCalledWith("/my/products");
   });
@@ -332,10 +377,13 @@ describe("product actions", () => {
           campusId: "campus-1",
           sellerId: "user-1",
           originalPrice: expect.anything(),
-          images: {
-            create: [{ url: "https://example.com/textbook.jpg", sortOrder: 0 }],
-          },
         }),
+      });
+      // 图片行在 token 解析后单独写入，保持顺序
+      expect(productImageCreateMany).toHaveBeenCalledWith({
+        data: [
+          { productId: "product-1", url: "https://example.com/textbook.jpg", sortOrder: 0 },
+        ],
       });
       expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
     });
@@ -383,6 +431,10 @@ describe("product actions", () => {
     it("updates an owned product and replaces images in one transaction", async () => {
       productFindFirst.mockResolvedValue({ id: "product-1" });
       productCategoryFindUnique.mockResolvedValue({ id: "category-1", isActive: true });
+      productImageFindMany.mockResolvedValue([
+        { url: "https://example.com/textbook.jpg" },
+        { url: "https://example.com/removed.jpg" },
+      ]);
 
       const formData = buildValidProductFormData();
       formData.set("productId", "product-1");
@@ -405,6 +457,10 @@ describe("product actions", () => {
           { productId: "product-1", url: "https://example.com/textbook.jpg", sortOrder: 0 },
         ],
       });
+      // 被移除的旧图标记待删除
+      expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", [
+        "https://example.com/removed.jpg",
+      ]);
     });
 
     it("rejects updates without a product id", async () => {

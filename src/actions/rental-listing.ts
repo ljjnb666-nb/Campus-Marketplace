@@ -6,9 +6,14 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
-import { saveUploadedImage } from "@/lib/upload";
+import {
+  buildAssetReference,
+  markAssetsForValuesPendingDelete,
+  resolveImageTokens,
+  uploadImageAsset,
+} from "@/lib/upload";
 import { rentalListingFormSchema } from "@/validators/rental";
 
 export type RentalListingActionState = {
@@ -18,7 +23,7 @@ export type RentalListingActionState = {
 };
 const initialState: RentalListingActionState = { success: false, message: "" };
 
-async function extractImageUrls(formData: FormData) {
+async function extractImageTokens(formData: FormData, ownerId: string) {
   const imageUrls = formData.getAll("imageUrls").map((value) => String(value).trim());
   const imageFiles = formData.getAll("imageFiles");
 
@@ -27,7 +32,8 @@ async function extractImageUrls(formData: FormData) {
       const file = imageFiles[index];
 
       if (file instanceof File && file.size > 0) {
-        return saveUploadedImage(file, "rental");
+        const result = await uploadImageAsset({ userId: ownerId, category: "rental", file });
+        return buildAssetReference(result.assetId);
       }
 
       return imageUrls[index] || null;
@@ -43,7 +49,7 @@ export async function createRentalListing(
 ): Promise<RentalListingActionState> {
   try {
     const user = await requireUser();
-    const imageUrls = await extractImageUrls(formData);
+    const imageTokens = await extractImageTokens(formData, user.id);
 
     const parsed = rentalListingFormSchema.safeParse({
       title: formData.get("title"),
@@ -65,7 +71,7 @@ export async function createRentalListing(
       damagePolicy: formData.get("damagePolicy"),
       overduePolicy: formData.get("overduePolicy"),
       requiresApproval: formData.get("requiresApproval"),
-      imageUrls,
+      imageUrls: imageTokens,
     });
 
     if (!parsed.success) {
@@ -102,37 +108,53 @@ export async function createRentalListing(
 
     if (!owner) return { ...initialState, message: "用户不存在" };
 
-    const listing = await prisma.rentalListing.create({
-      data: {
-        title: data.title,
-        description: data.description,
-        categoryId: data.categoryId,
-        campusId: owner.campusId,
+    // 事务内完成：listing 落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库
+    const listing = await withTransaction(async (tx) => {
+      const created = await tx.rentalListing.create({
+        data: {
+          title: data.title,
+          description: data.description,
+          categoryId: data.categoryId,
+          campusId: owner.campusId,
+          ownerId: user.id,
+          condition: data.condition,
+          brand: data.brand || null,
+          model: data.model || null,
+          referenceValue: data.referenceValue ? decimalValue(data.referenceValue) : null,
+          price: decimalValue(data.price),
+          pricingUnit: data.pricingUnit,
+          depositAmount: decimalValue(data.depositAmount),
+          minimumDuration: Number(data.minimumDuration),
+          maximumDuration: Number(data.maximumDuration),
+          totalQuantity: Number(data.totalQuantity),
+          availableQuantity: Number(data.totalQuantity),
+          pickupLocation: data.pickupLocation,
+          returnLocation: data.returnLocation,
+          usageRules: data.usageRules || null,
+          damagePolicy: data.damagePolicy || null,
+          overduePolicy: data.overduePolicy || null,
+          requiresApproval: data.requiresApproval || false,
+        },
+      });
+
+      const imageUrls = await resolveImageTokens({
         ownerId: user.id,
-        condition: data.condition,
-        brand: data.brand || null,
-        model: data.model || null,
-        referenceValue: data.referenceValue ? decimalValue(data.referenceValue) : null,
-        price: decimalValue(data.price),
-        pricingUnit: data.pricingUnit,
-        depositAmount: decimalValue(data.depositAmount),
-        minimumDuration: Number(data.minimumDuration),
-        maximumDuration: Number(data.maximumDuration),
-        totalQuantity: Number(data.totalQuantity),
-        availableQuantity: Number(data.totalQuantity),
-        pickupLocation: data.pickupLocation,
-        returnLocation: data.returnLocation,
-        usageRules: data.usageRules || null,
-        damagePolicy: data.damagePolicy || null,
-        overduePolicy: data.overduePolicy || null,
-        requiresApproval: data.requiresApproval || false,
-        images: {
-          create: data.imageUrls.map((url, index) => ({
+        tokens: data.imageUrls,
+        target: { type: "rentalListing", id: created.id },
+        tx,
+      });
+
+      if (imageUrls.length > 0) {
+        await tx.rentalListingImage.createMany({
+          data: imageUrls.map((url, index) => ({
+            rentalListingId: created.id,
             url,
             sortOrder: index,
           })),
-        },
-      },
+        });
+      }
+
+      return created;
     });
 
     revalidatePath('/rentals');
@@ -152,7 +174,7 @@ export async function updateRentalListing(
   try {
     const user = await requireUser();
     const listingId = String(formData.get("listingId") ?? "");
-    const imageUrls = await extractImageUrls(formData);
+    const imageTokens = await extractImageTokens(formData, user.id);
 
     const parsed = rentalListingFormSchema.safeParse({
       title: formData.get("title"),
@@ -174,7 +196,7 @@ export async function updateRentalListing(
       damagePolicy: formData.get("damagePolicy"),
       overduePolicy: formData.get("overduePolicy"),
       requiresApproval: formData.get("requiresApproval"),
-      imageUrls,
+      imageUrls: imageTokens,
     });
 
     if (!listingId) return { ...initialState, message: "物品不存在" };
@@ -194,7 +216,7 @@ export async function updateRentalListing(
       return { ...initialState, message: `内容命中违规关键词：${bannedKeyword}` };
     }
 
-    const [existingListing, category] = await Promise.all([
+    const [existingListing, category, previousImages] = await Promise.all([
       prisma.rentalListing.findFirst({
         where: { id: listingId, ownerId: user.id, deletedAt: null },
         select: { id: true, status: true },
@@ -203,13 +225,17 @@ export async function updateRentalListing(
         where: { id: data.categoryId },
         select: { id: true, isActive: true },
       }),
+      prisma.rentalListingImage.findMany({
+        where: { rentalListingId: listingId },
+        select: { url: true },
+      }),
     ]);
 
     if (!existingListing) return { ...initialState, message: "无权修改该物品" };
     if (!category || !category.isActive) return { ...initialState, message: "分类不存在或已停用" };
 
-    await prisma.$transaction([
-      prisma.rentalListing.update({
+    const imageUrls = await withTransaction(async (tx) => {
+      await tx.rentalListing.update({
         where: { id: listingId },
         data: {
           title: data.title,
@@ -232,16 +258,33 @@ export async function updateRentalListing(
           overduePolicy: data.overduePolicy || null,
           requiresApproval: data.requiresApproval || false,
         },
-      }),
-      prisma.rentalListingImage.deleteMany({ where: { rentalListingId: listingId } }),
-      prisma.rentalListingImage.createMany({
-        data: data.imageUrls.map((url, index) => ({
-          rentalListingId: listingId,
-          url,
-          sortOrder: index,
-        })),
-      }),
-    ]);
+      });
+      await tx.rentalListingImage.deleteMany({ where: { rentalListingId: listingId } });
+
+      const urls = await resolveImageTokens({
+        ownerId: user.id,
+        tokens: data.imageUrls,
+        target: { type: "rentalListing", id: listingId },
+        tx,
+      });
+
+      if (urls.length > 0) {
+        await tx.rentalListingImage.createMany({
+          data: urls.map((url, index) => ({
+            rentalListingId: listingId,
+            url,
+            sortOrder: index,
+          })),
+        });
+      }
+      return urls;
+    });
+
+    // 被移除的旧图标记待删除（异步由 cleanup 物理清理）
+    const removed = previousImages.map((image) => image.url).filter((url) => !imageUrls.includes(url));
+    if (removed.length > 0) {
+      await markAssetsForValuesPendingDelete(user.id, removed).catch(() => undefined);
+    }
 
     revalidatePath('/rentals');
     revalidatePath(`/rentals/${listingId}`);
@@ -307,6 +350,18 @@ export async function deleteRentalListing(formData: FormData) {
       where: { id: listingId },
       data: { deletedAt: new Date(), status: 'OFFLINE' },
     });
+
+    // 软删除时标记图片资源待删除（对象由 cleanup 异步物理清理）
+    const images = await prisma.rentalListingImage.findMany({
+      where: { rentalListingId: listingId },
+      select: { url: true },
+    });
+    if (images.length > 0) {
+      await markAssetsForValuesPendingDelete(
+        user.id,
+        images.map((image) => image.url),
+      ).catch(() => undefined);
+    }
 
     revalidatePath('/rentals');
     revalidatePath('/my/rental-listings');

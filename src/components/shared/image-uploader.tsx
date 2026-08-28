@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import { X, Upload } from "lucide-react";
+import { buildAssetReference } from "@/lib/asset-ref";
 
 export interface UploadedImage {
+  /** 服务端 token：公开资源为可直接访问的 URL，私有资源为 asset:<id> 引用 */
   url: string;
   file?: File;
   preview: string;
@@ -31,6 +33,35 @@ const CATEGORY_LIMITS = {
   report: { maxCount: 5, maxSize: 10 },
 };
 
+interface UploadResponse {
+  success: boolean;
+  assetId: string;
+  access: "PUBLIC" | "PRIVATE";
+  url: string | null;
+  mimeType: string;
+  sizeBytes: number;
+  error?: string;
+}
+
+/** 立即上传单个文件，返回表单 token（公开 URL / asset 引用） */
+async function uploadImage(file: File, category: string): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("category", category);
+
+  const response = await fetch("/api/upload/images", {
+    method: "POST",
+    body: formData,
+  });
+
+  const result = (await response.json()) as UploadResponse;
+  if (!response.ok || !result.success) {
+    throw new Error(result.error || "上传失败，请稍后重试");
+  }
+  // 私有资源响应 url 为 null，表单保存 asset:<id> 引用（访问走签名接口）
+  return result.url ?? buildAssetReference(result.assetId);
+}
+
 export function ImageUploader({
   images,
   onChange,
@@ -57,6 +88,7 @@ export function ImageUploader({
     const remainingSlots = finalMaxCount - images.length;
     if (files.length > remainingSlots) {
       setError(`最多只能上传${finalMaxCount}张图片`);
+      e.target.value = "";
       return;
     }
 
@@ -64,16 +96,19 @@ export function ImageUploader({
     for (const file of files) {
       if (!file.type.startsWith("image/")) {
         setError("只能上传图片文件");
+        e.target.value = "";
         return;
       }
 
       if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
         setError("仅支持JPG、PNG和WebP格式");
+        e.target.value = "";
         return;
       }
 
       if (file.size > finalMaxSize * 1024 * 1024) {
         setError(`图片大小不能超过${finalMaxSize}MB`);
+        e.target.value = "";
         return;
       }
 
@@ -81,26 +116,31 @@ export function ImageUploader({
     }
 
     setUploading(true);
+    // 逐张上传：失败的文件不进入列表并立即提示，成功的保留 token
+    const newImages: UploadedImage[] = [];
+    let firstError: string | null = null;
 
-    try {
-      const newImages: UploadedImage[] = [];
-
-      for (const file of validFiles) {
-        const preview = URL.createObjectURL(file);
+    for (const file of validFiles) {
+      try {
+        const url = await uploadImage(file, category);
         newImages.push({
-          url: "",
-          file,
-          preview,
+          url,
+          preview: URL.createObjectURL(file),
         });
+      } catch (err) {
+        firstError = err instanceof Error ? err.message : "上传失败";
       }
-
-      onChange([...images, ...newImages]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "上传失败");
-    } finally {
-      setUploading(false);
-      e.target.value = "";
     }
+
+    if (newImages.length > 0) {
+      onChange([...images, ...newImages]);
+    }
+    if (firstError) {
+      setError(firstError);
+    }
+
+    setUploading(false);
+    e.target.value = "";
   };
 
   const handleRemove = (index: number) => {

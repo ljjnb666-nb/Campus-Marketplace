@@ -3,35 +3,49 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   revalidatePath,
   requireUser,
-  saveUploadedImage,
+  uploadImageAsset,
+  resolveSingleImageToken,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
   createNotification,
   userUpdate,
+  userFindUnique,
+  verificationFindUnique,
   transactionMock,
   txUserUpdate,
   txUserVerificationUpsert,
+  txUserVerificationUpdate,
 } = vi.hoisted(() => {
   const txUserUpdate = vi.fn();
   const txUserVerificationUpsert = vi.fn();
+  const txUserVerificationUpdate = vi.fn();
   const transactionClient = {
     user: {
       update: txUserUpdate,
     },
     userVerification: {
       upsert: txUserVerificationUpsert,
+      update: txUserVerificationUpdate,
     },
   };
 
   return {
     revalidatePath: vi.fn(),
     requireUser: vi.fn(),
-    saveUploadedImage: vi.fn(),
+    uploadImageAsset: vi.fn(),
+    resolveSingleImageToken: vi.fn(),
+    resolveImageTokens: vi.fn(),
+    markAssetsForValuesPendingDelete: vi.fn(),
     createNotification: vi.fn(),
     userUpdate: vi.fn(),
+    userFindUnique: vi.fn(),
+    verificationFindUnique: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
     ),
     txUserUpdate,
     txUserVerificationUpsert,
+    txUserVerificationUpdate,
   };
 });
 
@@ -44,8 +58,11 @@ vi.mock("@/lib/server-auth", () => ({
 }));
 
 vi.mock("@/lib/upload", () => ({
-  saveUploadedImage,
-  isStoredImagePath: (value: string) => value.startsWith("/uploads/"),
+  buildAssetReference: (assetId: string) => `asset:${assetId}`,
+  uploadImageAsset,
+  resolveSingleImageToken,
+  resolveImageTokens,
+  markAssetsForValuesPendingDelete,
 }));
 
 vi.mock("@/repositories/notification-repository", () => ({
@@ -56,6 +73,10 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: {
       update: userUpdate,
+      findUnique: userFindUnique,
+    },
+    userVerification: {
+      findUnique: verificationFindUnique,
     },
     $transaction: transactionMock,
   },
@@ -68,15 +89,39 @@ describe("user actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    saveUploadedImage.mockReset();
+    uploadImageAsset.mockReset();
+    resolveSingleImageToken.mockReset();
+    resolveImageTokens.mockReset();
+    markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
     createNotification.mockReset();
     userUpdate.mockReset();
-    transactionMock.mockClear();
+    userFindUnique.mockReset().mockResolvedValue({ avatarUrl: null });
+    verificationFindUnique.mockReset().mockResolvedValue(null);
+    transactionMock.mockReset();
     txUserUpdate.mockReset();
-    txUserVerificationUpsert.mockReset();
+    txUserVerificationUpsert.mockReset().mockResolvedValue({ id: "verification-1" });
+    txUserVerificationUpdate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
-    saveUploadedImage.mockResolvedValue("/uploads/verification/student-card.jpg");
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-9",
+      access: "PRIVATE",
+      url: null,
+      mimeType: "image/webp",
+      sizeBytes: 100,
+    });
+    // 单 token 解析：空值 → null；asset 引用按公开/私有返回规范化值；其余透传
+    resolveSingleImageToken.mockImplementation(async ({ token }: { token: string }) => {
+      const trimmed = token.trim();
+      if (!trimmed) return null;
+      if (trimmed === "asset:asset-1") {
+        return "http://localhost:9100/campus-public/public/avatars/user-1/me.webp";
+      }
+      return trimmed;
+    });
+    resolveImageTokens.mockImplementation(async ({ tokens }: { tokens: string[] }) =>
+      tokens.map((token) => token.trim()).filter(Boolean),
+    );
   });
 
   it("updates profile fields and normalizes empty optional fields to null", async () => {
@@ -141,7 +186,6 @@ describe("user actions", () => {
         schoolName: "示例大学",
         campusName: "主校区",
         studentIdLast4: "1234",
-        studentCardImage: "https://example.com/student-card.jpg",
         status: "PENDING",
         reviewNote: null,
         reviewedAt: null,
@@ -163,7 +207,7 @@ describe("user actions", () => {
     });
   });
 
-  it("supports uploading a local student card image", async () => {
+  it("supports uploading a local student card image as a private asset reference", async () => {
     const formData = new FormData();
     formData.set("schoolName", "示例大学");
     formData.set("campusName", "主校区");
@@ -175,16 +219,40 @@ describe("user actions", () => {
 
     await submitVerification({ success: false, message: "" }, formData);
 
-    expect(saveUploadedImage).toHaveBeenCalled();
-    expect(txUserVerificationUpsert).toHaveBeenCalledWith({
-      where: { userId: "user-1" },
-      update: expect.objectContaining({
-        studentCardImage: "/uploads/verification/student-card.jpg",
-      }),
-      create: expect.objectContaining({
-        studentCardImage: "/uploads/verification/student-card.jpg",
-      }),
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "verification",
+      file: expect.any(File),
     });
+    // 学生证材料以 asset: 引用落库，禁止保存任何永久公开 URL
+    expect(txUserVerificationUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          studentCardImage: "asset:asset-9",
+        }),
+      }),
+    );
+    expect(txUserVerificationUpdate).toHaveBeenCalledWith({
+      where: { id: "verification-1" },
+      data: { studentCardImage: "asset:asset-9" },
+    });
+  });
+
+  it("marks replaced verification materials for deletion when resubmitting", async () => {
+    verificationFindUnique.mockResolvedValue({
+      id: "verification-1",
+      studentCardImage: "asset:asset-old",
+    });
+
+    const formData = new FormData();
+    formData.set("schoolName", "示例大学");
+    formData.set("campusName", "主校区");
+    formData.set("studentIdLast4", "1234");
+    formData.set("studentCardImage", "asset:asset-new");
+
+    await submitVerification({ success: false, message: "" }, formData);
+
+    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", ["asset:asset-old"]);
   });
 
   it("rejects verification submissions with invalid form data", async () => {
@@ -246,7 +314,17 @@ describe("user actions", () => {
   });
 
   it("updates the avatar through an uploaded file", async () => {
-    saveUploadedImage.mockResolvedValue("/uploads/avatar/me.jpg");
+    uploadImageAsset.mockResolvedValue({
+      assetId: "asset-1",
+      access: "PUBLIC",
+      url: "http://localhost:9100/campus-public/public/avatars/user-1/me.webp",
+      mimeType: "image/webp",
+      sizeBytes: 120,
+    });
+    userFindUnique.mockResolvedValue({
+      avatarUrl: "http://localhost:9100/campus-public/public/avatars/user-1/old.webp",
+    });
+
     const formData = new FormData();
     formData.set("name", "李同学");
     formData.set("bio", "");
@@ -261,15 +339,23 @@ describe("user actions", () => {
     const result = await updateProfile({ success: false, message: "" }, formData);
 
     expect(result.success).toBe(true);
-    expect(saveUploadedImage).toHaveBeenCalledWith(expect.any(File), "avatar");
+    expect(uploadImageAsset).toHaveBeenCalledWith({
+      userId: "user-1",
+      category: "avatar",
+      file: expect.any(File),
+    });
     expect(userUpdate).toHaveBeenCalledWith({
       where: { id: "user-1" },
       data: expect.objectContaining({
         name: "李同学",
-        avatarUrl: "/uploads/avatar/me.jpg",
+        avatarUrl: "http://localhost:9100/campus-public/public/avatars/user-1/me.webp",
         bio: null,
       }),
       select: expect.anything(),
     });
+    // 旧头像被替换时标记待删除
+    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", [
+      "http://localhost:9100/campus-public/public/avatars/user-1/old.webp",
+    ]);
   });
 });
