@@ -32,9 +32,26 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
   不发布端口，仅在 compose 内部 `backend` 网络互通（见 `compose.production.yml`）。
 - Redis 数据分类 `EPHEMERAL`：仅限流计数（`ratelimit:*` 键，TTL ≤ 15 分钟），
   不承载任何持久业务数据；清空/重启不影响订单、资产、账户。因此不挂持久卷。
-- 对象存储优先使用外部 S3 提供商（此时**不要**启用 `selfhosted-minio` profile）；
-  自建 MinIO 时 bucket policy 保持 Phase 1 安全模型（public 桶仅匿名下载、
-  private 桶全私有），且 Console(9001)/API(9000) 不发布端口。
+- 对象存储：优先使用外部 S3 提供商（此时**不要**启用 `selfhosted-minio` profile）。
+  自建 MinIO 走 `selfhosted-minio` profile：bucket policy 保持 Phase 1 安全模型
+  （public 桶仅匿名下载、private 桶全私有），应用凭据为专用用户并绑定
+  least-privilege policy（仅两个业务 bucket 的业务读写，无任何 admin 权限），
+  Console(9001)/API(9000) 不发布端口，数据持久卷 `minio_data`。
+
+### env 与 compose 调用约定（唯一方式）
+
+- 生产 env 唯一来源：项目根 `.env.production`。
+- Compose 模型插值（`SITE_ADDRESS`/`POSTGRES_*`/`GIT_SHA` 等）只通过
+  `--env-file` 提供；service 级 `env_file:` 仅负责容器环境，不是插值来源。
+- 所有脚本统一经由 `scripts/ops/lib.sh` 的 `compose_run`
+  （= `docker compose --env-file .env.production -f compose.production.yml`）。
+  手工执行时也必须带同样的 `--env-file`：
+
+  ```bash
+  docker compose --env-file .env.production -f compose.production.yml <命令>
+  ```
+
+- 操作员无需手工 export 任何变量；脚本自行从 `.env.production` 读取。
 
 ## 3. 首次部署
 
@@ -45,13 +62,30 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
    # openssl rand -base64 32 生成
    npx tsx scripts/production-env-check.ts   # preflight，只打印 PASS/FAIL 不输出秘密
    ```
-2. **启动数据层**：`docker compose -f compose.production.yml up -d postgres redis`
-3. **对象存储**：外部提供商直接填 env；自建 MinIO：
-   `docker compose -f compose.production.yml --profile selfhosted-minio up -d minio minio-init`
+2. **启动数据层**：
+   `docker compose --env-file .env.production -f compose.production.yml up -d postgres redis`
+3. **对象存储**：外部提供商直接填 env；自建 MinIO（幂等，可重复运行）：
+   ```bash
+   docker compose --env-file .env.production -f compose.production.yml \
+     --profile selfhosted-minio up -d minio
+   docker compose --env-file .env.production -f compose.production.yml \
+     --profile selfhosted-minio up minio-init
+   ```
+   minio-init 会：建 public/private 桶 → Phase 1 匿名策略（public 仅下载 /
+   private 全私有）→ 创建应用专用用户 → 绑定 least-privilege policy
+   （仅两个业务桶业务读写，无 admin 权限）。
+   轮换 `S3_SECRET_ACCESS_KEY` 后需同步更新 MinIO 用户：
+   `mc admin user add local <S3_ACCESS_KEY_ID> <新secret>`（用 root 凭据执行）。
 4. **迁移**（一次性容器，禁止 `migrate dev` / `db push`）：
-   `GIT_SHA=$(git rev-parse HEAD) docker compose -f compose.production.yml --profile ops run --rm migrate`
+   ```bash
+   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
+     -f compose.production.yml --profile ops run --rm migrate
+   ```
 5. **构建并启动全栈**：
-   `GIT_SHA=$(git rev-parse HEAD) docker compose -f compose.production.yml --profile ops up -d --build`
+   ```bash
+   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
+     -f compose.production.yml --profile ops up -d --build
+   ```
 6. **验证**：`curl https://<域名>/api/health` → `{"status":"ok","release":"<sha>",...}`，
    release 必须等于部署 SHA。
 
@@ -69,7 +103,7 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
 ## 5. 服务管理
 
 ```bash
-COMPOSE="docker compose -f compose.production.yml"
+COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
 $COMPOSE ps                 # status（含 healthcheck）
 $COMPOSE logs -f app        # 应用日志（tailing）
 $COMPOSE restart app        # 重启单个服务

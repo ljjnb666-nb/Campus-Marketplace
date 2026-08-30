@@ -16,21 +16,41 @@
 ### 3-2-1 基线
 
 - 备份目录 `BACKUP_DIR` 必须在数据库磁盘之外的分区/挂载点。
-- **异地副本**：设置 `BACKUP_OFFSITE_TARGET=s3://<bucket>/<prefix>`（需 AWS CLI），
-  脚本会在本地备份后自动复制 dump 与 sha256。没有异地副本时，repo 侧能力完整
-  但正式生产 PASS 必须报告"缺独立 off-host destination"。
+- **异地副本**：设置 `BACKUP_OFFSITE_TARGET=s3://<bucket>/<prefix>`（需 AWS CLI）。
+  错误语义（绝不产生虚假的异地备份安全感）：
+  - 未配置 → 本地备份成功即成功，输出 `OFFSITE_NOT_CONFIGURED`
+    （正式生产 PASS 必须报告"缺独立 off-host destination"）
+  - 已配置但 aws CLI 缺失 / dump 上传失败 / checksum 上传失败 → **整体非 0 退出，
+    本次备份判定 FAILED**，不得宣称备份成功
 - 对象存储备份：使用外部 S3 提供商时优先开启提供商的版本化/跨区复制；
   自建 MinIO 时数据卷与数据库不得同盘且无异地副本就宣称生产就绪。
 
 ## 2. 恢复
 
-脚本：`scripts/ops/restore-postgres.sh <backup.dump> <target_db>`。
+两条独立路径，语义不同：
+
+### 非生产目标（验证/演练）：`scripts/ops/restore-postgres.sh <backup.dump> <target_db>`
 
 - 恢复前校验 `.sha256`
-- **拒绝把 target_db 直接设为当前生产库名**（防误覆盖）；覆盖生产库必须走
-  停写 → 备份现库 → drop → restore → 校验 的完整人工流程
-- 恢复后自动核对核心表（User/Product/ErrandTask/ServiceListing/RentalListing/
-  Order/Campus）与 `_prisma_migrations` 完成记录
+- **拒绝把 target_db 设为当前生产库名**（覆盖生产库必须走下述生产恢复入口）
+- 恢复后自动核对：业务核心表逐一 COUNT（缺失即 FAIL）、
+  `_prisma_migrations` 已完成迁移数（单独验证，> 0）、孤儿引用抽检
+
+### 生产库恢复（唯一入口）：`scripts/ops/restore-production-postgres.sh`
+
+强确认、顺序固定、任何一步失败立即非 0 退出：
+
+```bash
+./scripts/ops/restore-production-postgres.sh \
+  --production-restore \
+  --backup-file <backup.dump> \
+  --target-db <POSTGRES_DB 的字面值>   # 显式确认生产目标
+```
+
+流程：SHA256 强校验（伴随文件必须存在）→ 停止 app 写流量 → 终止现存连接 →
+DROP/CREATE → `pg_restore --exit-on-error` → 完整性检查（核心表 /
+`_prisma_migrations` / 孤儿引用）。恢复失败时**应用保持停止状态**——绝不带
+坏库恢复服务；`rollback.sh --hard` 在此脚本失败时会阻断应用切换。
 
 ## 3. Restore Drill（恢复演练）
 
