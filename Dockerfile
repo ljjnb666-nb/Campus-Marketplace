@@ -43,6 +43,7 @@ COPY . .
 RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
         NEXTAUTH_URL="http://localhost:3000" \
         NEXTAUTH_SECRET="build-placeholder-secret-not-used-at-runtime" \
+        NEXT_OUTPUT_STANDALONE=1 \
     && npx prisma generate \
     && npm run build
 

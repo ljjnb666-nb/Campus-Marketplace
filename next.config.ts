@@ -14,8 +14,11 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(__dirname),
   // 生产容器化部署：build 产出自包含 .next/standalone（含精简 node_modules），
-  // Dockerfile 最终阶段仅复制 standalone + static，`next start`/本地开发不受影响
-  output: "standalone",
+  // Dockerfile 最终阶段仅复制 standalone + static。
+  // 仅在容器构建时启用（Dockerfile 设 NEXT_OUTPUT_STANDALONE=1）：
+  // Next 16 下 standalone 产出与 `next start` 不兼容，而本地/CI 的
+  // Playwright Release Gate 依赖 `next start`，不能无条件开启。
+  output: process.env.NEXT_OUTPUT_STANDALONE === "1" ? "standalone" : undefined,
   async headers() {
     return [
       {
