@@ -159,6 +159,8 @@ jobs:
           --health-retries 5
 
     env:
+      # prisma.config 加载时校验该变量；实际迁移走 e2e-setup（E2E_DATABASE_URL）
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus_e2e?schema=public
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus_e2e?schema=public
       E2E_REDIS_URL: redis://localhost:6379
       E2E_S3_ENDPOINT: http://localhost:9100
