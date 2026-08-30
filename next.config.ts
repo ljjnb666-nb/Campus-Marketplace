@@ -13,6 +13,9 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(__dirname),
+  // 生产容器化部署：build 产出自包含 .next/standalone（含精简 node_modules），
+  // Dockerfile 最终阶段仅复制 standalone + static，`next start`/本地开发不受影响
+  output: "standalone",
   async headers() {
     return [
       {
