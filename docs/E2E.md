@@ -41,6 +41,15 @@ scripts/
 docker exec campus-marketplace-postgres createdb -U postgres campus_e2e
 ```
 
+### destructive reset 安全闸门
+
+`e2e-setup` 会清空目标库全部业务表，受 `scripts/e2e-database-guard.ts` 硬性约束，
+放行条件（全部满足）：`NODE_ENV != production` + 数据库名明确为 E2E 命名
+（`e2e` 作为独立语义段，如 `campus_e2e`）+ host 为 loopback 或显式设置
+`E2E_DESTRUCTIVE_RESET_ALLOWED=1`（仅供 E2E 专用环境；production 下无效）。
+CI 将 `DATABASE_URL` 与 `E2E_DATABASE_URL` 指向同一 localhost E2E 库的形态
+满足上述条件，可正常执行。日志只输出 sanitized URL（隐藏用户名/密码/query）。
+
 ## 常用命令
 
 ```bash

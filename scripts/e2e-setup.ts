@@ -16,7 +16,7 @@ import { PrismaClient, UserRole, VerificationStatus } from "@prisma/client";
 import { hashSync } from "bcryptjs";
 import { Redis } from "ioredis";
 
-import { assertE2EDatabaseIsolation } from "./e2e-database-guard";
+import { assertE2EDatabaseIsolation, sanitizeDatabaseUrl } from "./e2e-database-guard";
 
 const E2E_DATABASE_URL =
   process.env.E2E_DATABASE_URL ??
@@ -60,7 +60,7 @@ async function ensureDatabase(): Promise<void> {
     await probe.$disconnect();
   } catch (error) {
     throw new Error(
-      `无法连接 E2E 数据库（${E2E_DATABASE_URL}）：${error instanceof Error ? error.message : error}\n` +
+      `无法连接 E2E 数据库（${sanitizeDatabaseUrl(E2E_DATABASE_URL)}）：${error instanceof Error ? error.message : error}\n` +
         `本地请先 docker compose up -d postgres redis minio，并手动创建库：\n` +
         `  docker exec campus-marketplace-postgres createdb -U postgres ${name}\n` +
         `（已存在时会报错，可忽略）`,
@@ -296,7 +296,8 @@ async function flushRateLimitKeys(): Promise<void> {
 
 async function main(): Promise<void> {
   assertE2EDatabaseIsolation(E2E_DATABASE_URL, process.env);
-  console.log(`[e2e-setup] E2E_DATABASE_URL=${E2E_DATABASE_URL}`);
+  // 日志禁止输出完整连接串（用户名/密码/query），只输出 sanitized 形式
+  console.log(`[e2e-setup] E2E_DATABASE_URL=${sanitizeDatabaseUrl(E2E_DATABASE_URL)}`);
   await ensureDatabase();
   migrateDeploy();
 
