@@ -16,6 +16,8 @@ import { PrismaClient, UserRole, VerificationStatus } from "@prisma/client";
 import { hashSync } from "bcryptjs";
 import { Redis } from "ioredis";
 
+import { assertE2EDatabaseIsolation } from "./e2e-database-guard";
+
 const E2E_DATABASE_URL =
   process.env.E2E_DATABASE_URL ??
   "postgresql://postgres:postgres@localhost:5432/campus_e2e?schema=public";
@@ -293,6 +295,7 @@ async function flushRateLimitKeys(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  assertE2EDatabaseIsolation(E2E_DATABASE_URL, process.env);
   console.log(`[e2e-setup] E2E_DATABASE_URL=${E2E_DATABASE_URL}`);
   await ensureDatabase();
   migrateDeploy();
