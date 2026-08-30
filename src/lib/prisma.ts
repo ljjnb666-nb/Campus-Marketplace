@@ -56,8 +56,11 @@ export async function withTransaction<T>(
   );
 }
 
-// 生产环境启动时验证数据库连通性
-if (process.env.NODE_ENV === "production") {
+// 生产环境启动时验证数据库连通性。
+// next build 的 page data 收集阶段同为 NODE_ENV=production，但那是构建而非
+// 启动（NEXT_PHASE=phase-production-build），跳过连接失败即退出的行为；
+// 真正的生产运行（next start）没有该 phase，fail-fast 生效。
+if (process.env.NODE_ENV === "production" && process.env.NEXT_PHASE !== "phase-production-build") {
   prisma
     .$connect()
     .then(() => {

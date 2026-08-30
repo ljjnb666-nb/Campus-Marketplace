@@ -17,13 +17,14 @@ const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
 describe.skipIf(!integrationDatabaseUrl)("软删除扩展集成测试 (soft-delete)", () => {
   // 与 db-smoke 同理：独立 PrismaClient 连 INTEGRATION_DATABASE_URL，
   // 再挂载被测扩展，避免 @/lib/prisma 单例的 DATABASE_URL（开发库）干扰。
+  // $extends 的泛型重载导致返回类型无法直接命名，这里以基础 client 类型
+  // 承载（deleteMany 等被改写操作的返回形状与原生一致）。
   type PrismaModule = typeof import("@prisma/client");
-  type SoftDeleteModule = typeof import("@/lib/prisma-soft-delete");
   let basePrisma: InstanceType<PrismaModule["PrismaClient"]>;
-  let prisma: ReturnType<PrismaModule["PrismaClient"]["$extends"]>;
+  let prisma: InstanceType<PrismaModule["PrismaClient"]>;
 
   let campusId: string;
-  let userIds: string[] = [];
+  const userIds: string[] = [];
 
   beforeAll(async () => {
     const { PrismaClient } = await import("@prisma/client");
@@ -32,7 +33,9 @@ describe.skipIf(!integrationDatabaseUrl)("软删除扩展集成测试 (soft-dele
       datasources: { db: { url: integrationDatabaseUrl } },
     });
     await basePrisma.$connect();
-    prisma = basePrisma.$extends(softDeleteExtension);
+    prisma = basePrisma.$extends(softDeleteExtension) as unknown as InstanceType<
+      PrismaModule["PrismaClient"]
+    >;
 
     const campus = await basePrisma.campus.create({
       data: {

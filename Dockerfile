@@ -24,6 +24,10 @@ RUN npm ci
 
 # ---------- builder ----------
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
+# Prisma 引擎依赖 openssl（page data 收集阶段会实例化 client）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # GIT_SHA 只作为 release 标识 bake 进产物（公开信息），非秘密
 ARG GIT_SHA=unknown
@@ -32,11 +36,15 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
     RELEASE_SHA=${GIT_SHA}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# build 不连接真实数据库：占位 URL 仅供 env 校验通过（真实连接在运行时）
-RUN DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
-    NEXTAUTH_URL="http://localhost:3000" \
-    NEXTAUTH_SECRET="build-placeholder-secret-not-used-at-runtime" \
-    npm run build
+# build 不连接真实数据库：占位值仅供 env 校验通过（真实连接在运行时注入）。
+# 用 RUN 内 export：sh 的 VAR=x cmd 前缀只作用于单条命令；
+# 不用 ENV 指令是避免 BuildKit SecretsUsedInArgOrEnv 对 "SECRET" 命名误报
+# （占位值非秘密，且 runner 是独立 stage，任何 builder env 都不会进入最终镜像）
+RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
+        NEXTAUTH_URL="http://localhost:3000" \
+        NEXTAUTH_SECRET="build-placeholder-secret-not-used-at-runtime" \
+    && npx prisma generate \
+    && npm run build
 
 # ---------- runner ----------
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
