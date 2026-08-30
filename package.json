@@ -19,7 +19,13 @@
     "app:smoke": "tsx scripts/verify-runtime.ts",
     "app:smoke:auth": "tsx scripts/verify-auth-runtime.ts",
     "text:verify": "tsx scripts/verify-text.ts",
-    "storage:cleanup": "tsx scripts/storage-cleanup.ts"
+    "storage:cleanup": "tsx scripts/storage-cleanup.ts",
+    "e2e:setup": "tsx scripts/e2e-setup.ts",
+    "e2e:teardown": "tsx scripts/e2e-teardown.ts",
+    "e2e:prepare": "npm run build && npm run e2e:setup",
+    "e2e": "tsx scripts/run-e2e.ts",
+    "e2e:headed": "npx playwright test --headed",
+    "e2e:ui": "npx playwright test --ui"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1119.0",
@@ -45,6 +51,7 @@
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "6.9.1",
     "@testing-library/react": "16.3.0",

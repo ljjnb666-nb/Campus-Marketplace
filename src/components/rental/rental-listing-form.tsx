@@ -112,6 +112,9 @@ export function RentalListingForm({
       });
 
       await formAction(formData);
+      // formAction 完成后必须复位 uploading：成功跳转的条件是
+      // state.success && !uploading，遗漏复位会让页面永远停留在提交中状态
+      setUploading(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "提交失败");
       setUploading(false);

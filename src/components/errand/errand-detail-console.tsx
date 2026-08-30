@@ -12,7 +12,7 @@ import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ErrandStatusActions } from "@/components/errand/errand-status-actions";
 import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { createOrOpenErrandConversation } from "@/actions/conversation";
-import { deleteErrand, updateErrandStatus } from "@/actions/errand";
+import { claimErrand, deleteErrand } from "@/actions/errand";
 import { createReport } from "@/actions/trust";
 import type { ErrandTaskStatus } from "@prisma/client";
 
@@ -289,10 +289,7 @@ export function ErrandDetailConsole({
       <ErrandClaimDialog
         open={claimOpen}
         onOpenChange={setClaimOpen}
-        action={async (formData) => {
-          formData.set("status", "IN_PROGRESS");
-          return updateErrandStatus(formData);
-        }}
+        action={claimErrand}
         errand={{
           id: errand.id,
           title: errand.title,

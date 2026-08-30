@@ -59,6 +59,8 @@ services:
 
   # bucket 引导：幂等创建 public/private bucket 并配置匿名访问策略。
   # public = 允许匿名读、禁止匿名写；private = 完全禁止匿名访问。
+  # 同时创建 E2E 专用账号：production build 的 env 守卫会拒绝 minioadmin
+  # 默认凭据，Playwright Release Gate 用该专用账号连接本机 MinIO。
   minio-init:
     image: minio/mc
     container_name: campus-marketplace-minio-init
@@ -72,6 +74,8 @@ services:
       mc mb --ignore-existing local/campus-private &&
       mc anonymous set download local/campus-public &&
       mc anonymous set none local/campus-private &&
+      mc admin user add local e2e-local E2eLocalSecret2026x &&
+      mc admin policy attach local readwrite --user e2e-local &&
       echo 'MinIO buckets ready'
       "
     restart: "no"

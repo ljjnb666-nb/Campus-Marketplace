@@ -35,6 +35,10 @@ export interface UnifiedOrderData {
   userRole: "buyer" | "seller" | "publisher" | "accepter" | "renter" | "owner";
   detailHref: string;
   hasReviewed?: boolean;
+  /** ERRAND 专用：关联 ErrandTask.status。Order.status 无法表达
+   * "接单者已提交完成、待发布者确认"（该阶段 Order 仍为 IN_PROGRESS），
+   * 判定发布者可确认完成必须以此为准，不能从 Order.status 推断 */
+  errandStatus?: string | null;
 }
 
 export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
@@ -57,10 +61,27 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
     (order.type === "SERVICE" && order.status === "PENDING") ||
     (order.type === "RENTAL" && (order.status === "PENDING_APPROVAL" || order.status === "PENDING_PICKUP"));
 
+  // 卖家侧主流程入口：商品/服务订单待确认时可接受；服务订单接受后可开始履约。
+  // updateOrderStatus 已按角色+当前状态校验这些转换，这里只补齐 UI 入口。
+  const canAccept =
+    (order.type === "PRODUCT" || order.type === "SERVICE") &&
+    order.status === "PENDING" &&
+    order.userRole === "seller";
+
+  const canStartProgress =
+    order.type === "SERVICE" &&
+    order.status === "ACCEPTED" &&
+    order.userRole === "seller";
+
   const canConfirmComplete =
     (order.type === "PRODUCT" && order.status === "ACCEPTED" && order.userRole === "buyer") ||
     (order.type === "SERVICE" && order.status === "IN_PROGRESS" && order.userRole === "buyer") ||
-    (order.type === "ERRAND" && order.status === "PENDING_CONFIRMATION" && order.userRole === "publisher");
+    // ERRAND：必须接单者已提交完成（ErrandTask = PENDING_CONFIRMATION）。
+    // 仅 Order IN_PROGRESS 表示"开始履约"，不构成可确认完成的依据
+    (order.type === "ERRAND" &&
+      order.status === "IN_PROGRESS" &&
+      order.errandStatus === "PENDING_CONFIRMATION" &&
+      order.userRole === "publisher");
 
   const canReview = (order.status === "COMPLETED" || order.status === "COMPLETED") && !order.hasReviewed;
 
@@ -109,7 +130,9 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
 
           <OrderStatusBadgeUnified
             type={order.type}
-            status={order.status}
+            // ERRAND 展示跑腿工作流状态：Order.status 无法表达
+            // "待发布者确认"阶段（该阶段 Order 仍为 IN_PROGRESS）
+            status={order.type === "ERRAND" && order.errandStatus ? order.errandStatus : order.status}
             userRole={order.userRole}
             size="sm"
           />
@@ -179,6 +202,32 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {canAccept && (
+              <form action={updateOrderStatus}>
+                <input type="hidden" name="orderId" value={order.id} />
+                <input type="hidden" name="status" value="ACCEPTED" />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  接受订单
+                </button>
+              </form>
+            )}
+
+            {canStartProgress && (
+              <form action={updateOrderStatus}>
+                <input type="hidden" name="orderId" value={order.id} />
+                <input type="hidden" name="status" value="IN_PROGRESS" />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  开始服务
+                </button>
+              </form>
+            )}
+
             <form action={createOrOpenOrderConversation}>
               <input type="hidden" name="orderId" value={order.id} />
               <input type="hidden" name="orderType" value={order.type} />

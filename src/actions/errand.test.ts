@@ -17,6 +17,7 @@ const {
   txOrderCreate,
   txOrderFindFirst,
   txOrderUpdate,
+  txOrderUpdateMany,
   txUserUpdate,
 } = vi.hoisted(() => {
   const txErrandTaskUpdate = vi.fn();
@@ -24,6 +25,7 @@ const {
   const txOrderCreate = vi.fn();
   const txOrderFindFirst = vi.fn();
   const txOrderUpdate = vi.fn();
+  const txOrderUpdateMany = vi.fn();
   const txUserUpdate = vi.fn();
   const transactionClient = {
     errandTask: {
@@ -34,6 +36,7 @@ const {
       create: txOrderCreate,
       findFirst: txOrderFindFirst,
       update: txOrderUpdate,
+      updateMany: txOrderUpdateMany,
     },
     user: {
       update: txUserUpdate,
@@ -61,6 +64,7 @@ const {
     txOrderCreate,
     txOrderFindFirst,
     txOrderUpdate,
+    txOrderUpdateMany,
     txUserUpdate,
   };
 });
@@ -157,12 +161,14 @@ describe("errand actions", () => {
     txOrderCreate.mockReset();
     txOrderFindFirst.mockReset();
     txOrderUpdate.mockReset();
+    txOrderUpdateMany.mockReset();
     txUserUpdate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     containsBannedKeyword.mockResolvedValue(null);
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     txErrandTaskUpdateMany.mockResolvedValue({ count: 1 });
+    txOrderUpdateMany.mockResolvedValue({ count: 1 });
   });
 
   it("rejects errand creation when the selected category is inactive", async () => {
@@ -488,7 +494,7 @@ describe("errand actions", () => {
     expect(txOrderUpdate).not.toHaveBeenCalled();
   });
 
-  it("completes the errand and bumps both counters", async () => {
+  it("completes the errand via the canonical exactly-once transaction", async () => {
     errandTaskFindFirst.mockResolvedValue({
       id: "errand-1",
       publisherId: "user-1",
@@ -503,10 +509,17 @@ describe("errand actions", () => {
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
-    expect(txOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    // canonical 事务：条件流转 ErrandTask → Order，不做无条件 update
+    expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+      where: { id: "errand-1", status: "PENDING_CONFIRMATION" },
+      data: { status: "COMPLETED" },
+    });
+    expect(txOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", status: "IN_PROGRESS" },
       data: { status: "COMPLETED", completedAt: expect.any(Date) },
     });
+    expect(txOrderUpdate).not.toHaveBeenCalled();
+    // 双方完成计数恰好各 +1
     expect(txUserUpdate).toHaveBeenNthCalledWith(1, {
       where: { id: "user-1" },
       data: { completedOrdersCount: { increment: 1 } },
@@ -515,6 +528,55 @@ describe("errand actions", () => {
       where: { id: "runner-1" },
       data: { completedOrdersCount: { increment: 1 } },
     });
+    // canonical 完成通知：每个接收者恰好一条，无重复
+    const completionCalls = createNotifications.mock.calls.filter((call) =>
+      (call[1] as Array<{ title?: string }>).some((p) => p.title === "跑腿订单已完成"),
+    );
+    expect(completionCalls).toHaveLength(1);
+    const payloads = completionCalls[0][1] as Array<{ userId: string }>;
+    expect(payloads).toHaveLength(2);
+    expect(payloads.map((p) => p.userId).sort()).toEqual(["runner-1", "user-1"]);
+  });
+
+  it("rejects premature completion when ErrandTask is still IN_PROGRESS (forged request)", async () => {
+    // 伪造请求场景：Order 已 IN_PROGRESS 但接单者尚未提交完成
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "user-1",
+      accepterId: "runner-1",
+      status: "PENDING_CONFIRMATION",
+    });
+    txOrderFindFirst.mockResolvedValue({
+      id: "order-1",
+      buyerId: "user-1",
+      sellerId: "runner-1",
+    });
+    // canonical 闸门：ErrandTask 非_PENDING_CONFIRMATION → count=0
+    txErrandTaskUpdateMany.mockResolvedValue({ count: 0 });
+
+    await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
+
+    // Order / 计数 / 通知全部不得变更
+    expect(txOrderUpdateMany).not.toHaveBeenCalled();
+    expect(txUserUpdate).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("is idempotent: re-submitting COMPLETED produces no duplicate side effects", async () => {
+    // 已完成的任务再次提交完成：动作前置校验直接拒绝（no-op）
+    errandTaskFindFirst.mockResolvedValue({
+      id: "errand-1",
+      publisherId: "user-1",
+      accepterId: "runner-1",
+      status: "COMPLETED",
+    });
+
+    await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
+
+    expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
+    expect(txOrderUpdateMany).not.toHaveBeenCalled();
+    expect(txUserUpdate).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
   });
 
   it("ignores status changes that violate the state machine", async () => {

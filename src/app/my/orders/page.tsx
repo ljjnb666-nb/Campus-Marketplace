@@ -101,6 +101,8 @@ export default async function MyOrdersPage({
       userRole,
       detailHref,
       hasReviewed: o.reviews.some((r) => r.authorId === user.id),
+      // ERRAND 需要跑腿工作流状态驱动"确认完成"入口与状态徽标
+      errandStatus: o.type === "ERRAND" ? (o.errandTask?.status ?? null) : null,
     });
   }
 

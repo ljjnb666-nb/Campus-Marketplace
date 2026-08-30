@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
+import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { createOrderNo } from "@/lib/order-no";
 import { prisma, withTransaction } from "@/lib/prisma";
@@ -376,6 +377,36 @@ export async function updateErrandStatus(formData: FormData) {
     }
 
     await withTransaction(async (tx) => {
+      // COMPLETED 走唯一权威实现（completeErrandOrderTx）：硬性要求
+      // Order IN_PROGRESS + ErrandTask PENDING_CONFIRMATION，exactly-once
+      // 副作用与完成通知都在 canonical 事务内，此处不得再叠加完成副作用
+      if (parsed.data.status === "COMPLETED") {
+        const latestOrder = await tx.order.findFirst({
+          where: {
+            errandTaskId: parsed.data.errandId,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, buyerId: true, sellerId: true },
+        });
+
+        if (!latestOrder) {
+          return;
+        }
+
+        const completion = await completeErrandOrderTx(tx, {
+          orderId: latestOrder.id,
+          errandTaskId: parsed.data.errandId,
+          buyerId: latestOrder.buyerId,
+          sellerId: latestOrder.sellerId,
+        });
+
+        if (!completion.completed) {
+          return;
+        }
+
+        return;
+      }
+
       await tx.errandTask.update({
         where: { id: parsed.data.errandId },
         data: {
@@ -410,26 +441,6 @@ export async function updateErrandStatus(formData: FormData) {
         await tx.order.update({
           where: { id: latestOrder.id },
           data: { status: "IN_PROGRESS" },
-        });
-      }
-
-      if (parsed.data.status === "COMPLETED") {
-        await tx.order.update({
-          where: { id: latestOrder.id },
-          data: {
-            status: "COMPLETED",
-            completedAt: new Date(),
-          },
-        });
-
-        await tx.user.update({
-          where: { id: latestOrder.buyerId },
-          data: { completedOrdersCount: { increment: 1 } },
-        });
-
-        await tx.user.update({
-          where: { id: latestOrder.sellerId },
-          data: { completedOrdersCount: { increment: 1 } },
         });
       }
 

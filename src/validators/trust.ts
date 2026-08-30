@@ -38,9 +38,11 @@ export const reportFormSchema = z.object({
     .max(500, "举报说明不能超过 500 个字")
     .optional()
     .transform((value) => value ?? ""),
-  productId: z.string().trim().optional().transform((value) => value ?? ""),
-  errandTaskId: z.string().trim().optional().transform((value) => value ?? ""),
-  serviceListingId: z.string().trim().optional().transform((value) => value ?? ""),
-  targetUserId: z.string().trim().optional().transform((value) => value ?? ""),
-  messageId: z.string().trim().optional().transform((value) => value ?? ""),
+  // 目标 id 字段来自 FormData.get()：字段缺席时返回 null（而非 undefined），
+  // 必须 .nullable() 才能让“单目标举报”通过校验（举报商品时其余 id 为 null）
+  productId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
+  errandTaskId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
+  serviceListingId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
+  targetUserId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
+  messageId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
 });

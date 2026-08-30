@@ -15,13 +15,15 @@ interface ReportDialogProps {
   targetUserId?: string;
 }
 
-const REPORT_REASONS = [
-  "虚假信息 / 夸大宣传",
-  "涉嫌违禁品 / 危险物品",
-  "恶意毁约 / 拒不履约",
-  "言语辱骂 / 骚扰他人",
-  "价格欺诈 / 线下加价",
-  "其他违法违规行为",
+// 展示文案 → 服务端 reportFormSchema 枚举值。
+// select 的 value 若直接用中文标签，createReport 的 zod enum 校验必然失败。
+const REPORT_REASONS: Array<{ label: string; value: string }> = [
+  { label: "虚假信息 / 夸大宣传", value: "FAKE_INFO" },
+  { label: "涉嫌违禁品 / 危险物品", value: "BANNED_ITEM" },
+  { label: "恶意毁约 / 拒不履约", value: "SCAM_RISK" },
+  { label: "言语辱骂 / 骚扰他人", value: "HARASSMENT" },
+  { label: "价格欺诈 / 线下加价", value: "PRICE_FRAUD" },
+  { label: "其他违法违规行为", value: "OTHER" },
 ];
 
 export function ReportDialog({
@@ -36,7 +38,7 @@ export function ReportDialog({
   targetUserId,
 }: ReportDialogProps) {
   const [isPending, startTransition] = useTransition();
-  const [reason, setReason] = useState(REPORT_REASONS[0]);
+  const [reason, setReason] = useState(REPORT_REASONS[0].value);
   const [detail, setDetail] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -118,8 +120,8 @@ export function ReportDialog({
                 className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-900 outline-none focus:border-indigo-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
               >
                 {REPORT_REASONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
+                  <option key={r.value} value={r.value}>
+                    {r.label}
                   </option>
                 ))}
               </select>

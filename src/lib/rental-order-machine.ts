@@ -200,7 +200,6 @@ export async function createRentalOrderTx(
 
   await createNotifications(tx, [{
     userId: listing.ownerId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '收到新的租赁申请',
     content: `"${listing.title}" 收到新的租赁申请，请前往出租订单中心处理。`,
@@ -233,7 +232,6 @@ export async function approveRentalOrderTx(
 
   await createNotifications(tx, [{
     userId: order.renterId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '租赁申请已通过',
     content: `你的租赁申请已被通过，请留意取货信息。`,
@@ -271,7 +269,6 @@ export async function rejectRentalOrderTx(
 
   await createNotifications(tx, [{
     userId: order.renterId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '租赁申请被拒绝',
     content: `你的租赁申请被拒绝。原因：${input.rejectReason}`,
@@ -331,8 +328,8 @@ export async function confirmPickupTx(
       note: '双方均已确认取货',
     });
     await createNotifications(tx, [
-      { userId: order.ownerId, orderId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
-      { userId: order.renterId, orderId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
+      { userId: order.ownerId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
+      { userId: order.renterId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
     ]);
   }
   return { success: true };
@@ -362,7 +359,6 @@ export async function requestReturnTx(
 
   await createNotifications(tx, [{
     userId: order.ownerId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '租客请求归还',
     content: `租客已请求归还物品，请确认。`,
@@ -448,7 +444,6 @@ export async function confirmReturnTx(
 
     await createNotifications(tx, [{
       userId: order.renterId,
-      orderId: order.id,
       type: 'RENTAL',
       title: '归还已确认',
       content: `出租者已确认物品归还。${hasDamage ? '请注意检查损坏索赔。' : ''}`,
@@ -491,7 +486,6 @@ export async function cancelRentalOrderTx(
 
   await createNotifications(tx, [{
     userId: counterpartyId(order, input.userId),
-    orderId: order.id,
     type: 'RENTAL',
     title: '订单已取消',
     content: `对方已取消订单。原因：${input.cancellationReason}`,
@@ -527,7 +521,6 @@ export async function requestExtensionTx(
 
   await createNotifications(tx, [{
     userId: order.ownerId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '收到续租请求',
     content: `租客请求续租物品至 ${input.newEndTime.toLocaleDateString()}。`,
@@ -581,7 +574,6 @@ export async function approveExtensionTx(
 
   await createNotifications(tx, [{
     userId: ext.order.renterId,
-    orderId: ext.orderId,
     type: 'RENTAL',
     title: '续租请求已通过',
     content: `你的续租请求已通过。`,
@@ -603,7 +595,6 @@ export async function rejectExtensionTx(
 
   await createNotifications(tx, [{
     userId: ext.order.renterId,
-    orderId: ext.orderId,
     type: 'RENTAL',
     title: '续租请求被拒绝',
     content: `你的续租请求被拒绝。`,
@@ -639,7 +630,6 @@ export async function submitDamageClaimTx(
 
   await createNotifications(tx, [{
     userId: order.renterId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '收到损坏索赔',
     content: `出租者提交了损坏索赔请求，请尽快处理。`,
@@ -699,7 +689,6 @@ export async function respondDamageClaimTx(
 
   await createNotifications(tx, [{
     userId: claim.order.ownerId,
-    orderId: claim.orderId,
     type: 'RENTAL',
     title: input.agreed ? '索赔已同意' : '索赔被拒绝',
     content: `租客${input.agreed ? '同意' : '拒绝'}了损坏索赔。`,
@@ -743,7 +732,6 @@ export async function initiateDisputeTx(
 
   await createNotifications(tx, [{
     userId: counterpartyId(order, input.userId),
-    orderId: order.id,
     type: 'RENTAL',
     title: '发生订单纠纷',
     content: `对方对订单发起了纠纷。`,
@@ -780,7 +768,6 @@ export async function submitRentalReviewTx(
 
   await createNotifications(tx, [{
     userId: targetUserId,
-    orderId: order.id,
     type: 'RENTAL',
     title: '收到新评价',
     content: `对方已对订单进行了评价。`,
