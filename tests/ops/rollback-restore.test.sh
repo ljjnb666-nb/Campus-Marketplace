@@ -59,22 +59,34 @@ ENV
   sed -i "s|PLACEHOLDER_BACKUP_DIR|${SANDBOX}/backups|" "${SANDBOX}/.env.production"
 
   # ---- docker stub ----
+  # config --images 按 $GIT_SHA 模拟 compose 插值：GIT_SHA 未设置/为空 → :local
+  # （与 compose.production.yml 的 ${GIT_SHA:-local} 行为一致），以此捕捉
+  # "rollback 未显式传递 GIT_SHA" 的 bug；CONFIG_STUB_MODE=broken 强制输出
+  # 错误镜像，验证 resolved-image assert 会阻断回滚。
   cat > "${SANDBOX}/bin/docker" <<STUB
 #!/usr/bin/env bash
 ARGS="\$*"
+echo "docker called:\$ARGS" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
   *"image inspect"*)
     [[ "\$ARGS" == *"EXPECTED_PREV_SHA"* ]] && exit 0 || exit 1 ;;
+  *"config --images"*)
+    if [[ -n "\${CONFIG_STUB_MODE:-}" && "\${CONFIG_STUB_MODE}" == "broken" ]]; then
+      echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "caddy:2-alpine"; echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-migrator:\${GIT_SHA}"; echo "postgres:16-alpine"; echo "redis:7-alpine"
+    else
+      echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
+    fi
+    exit 0 ;;
   *"compose"*"stop app"*)
     echo "app_stop_called" >> "${SANDBOX}/calls.log"; exit 0 ;;
   *"compose"*"ps -q app"*)
-    # 返回非空 = app 容器存在，走 stop 分支
     echo "container-id"; exit 0 ;;
   *"compose"*"ps --status running --services"*)
-    # stop 之后 app 不在运行列表
     exit 0 ;;
   *"compose"*"up -d"*)
-    echo "app_up_called:\$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
+    echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
   *"compose"*"exec -T postgres psql"*)
     echo "psql_called:\$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
   *"compose"*"exec -T postgres pg_dump"*)
@@ -86,10 +98,10 @@ esac
 STUB
   chmod +x "${SANDBOX}/bin/docker"
 
-  # ---- curl stub（health 返回期望的 release）----
+  # ---- curl stub（health 返回的 release 可配置）----
   cat > "${SANDBOX}/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-echo '{"status":"ok","release":"EXPECTED_PREV_SHA","timestamp":"2026-01-01T00:00:00Z"}'
+echo "{\"status\":\"ok\",\"release\":\"${CURL_STUB_RELEASE:-EXPECTED_PREV_SHA}\",\"timestamp\":\"2026-01-01T00:00:00Z\"}"
 exit 0
 STUB
   chmod +x "${SANDBOX}/bin/curl"
@@ -107,20 +119,32 @@ STUB
 }
 
 run_rollback() {
+  local sha="$1"
+  shift
+  local mode=""
+  if [[ "${1:-}" == "--hard" ]]; then
+    mode="--hard"
+    shift
+  elif [[ "${1:-}" == "" ]]; then
+    shift
+  fi
   CALL_LOG=""
   rm -f "${SANDBOX}/calls.log"
-  RESTORE_STUB_MODE="${RESTORE_STUB_MODE:-success}" \
-  OPS_PROJECT_DIR="${SANDBOX}" \
-  OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
-  OPS_SLEEP_SECONDS=0 \
-  PATH="${SANDBOX}/bin:${PATH}" \
-  bash "${REPO_ROOT}/scripts/ops/rollback.sh" EXPECTED_PREV_SHA "${2:-}" > /tmp/rb-out.$$ 2>&1
+  # 一律经 env 命令注入环境：展开形式的 VAR=v 不能作为 assignment 前缀
+  env "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
+    RESTORE_STUB_MODE="${RESTORE_STUB_MODE:-success}" \
+    OPS_PROJECT_DIR="${SANDBOX}" \
+    OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
+    OPS_SLEEP_SECONDS=0 \
+    bash "${REPO_ROOT}/scripts/ops/rollback.sh" "${sha}" "${mode}" > /tmp/rb-out.$$ 2>&1
   local rc=$?
   [[ -f "${SANDBOX}/calls.log" ]] && CALL_LOG="$(cat "${SANDBOX}/calls.log")"
   return "${rc}"
 }
 
-PREV_SHA="$(printf 'a%.0s' {1..40})"
+# docker stub 的 image inspect 只接受该 tag；rollback 的 authoritative SHA 即它
+PREV_SHA="EXPECTED_PREV_SHA"
+EXTRA_ENV=()
 
 echo "== 1. safe rollback 不碰 DB =="
 RESTORE_STUB_MODE=success make_sandbox
@@ -129,6 +153,26 @@ assert_exit 0 "$rc" "safe rollback"
 assert_log_contains "app_up_called"
 assert_log_not_contains "restore_called"
 assert_log_not_contains "app_stop_called"
+
+echo "== 1b. safe rollback 最终选择 EXACT PREVIOUS_SHA（先 resolve 断言再 up）=="
+assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_contains "config --images"
+config_line="$(printf '%s' "$CALL_LOG" | grep -n "config --images" | head -1 | cut -d: -f1)"
+up_line="$(printf '%s' "$CALL_LOG" | grep -n "app_up_called" | head -1 | cut -d: -f1)"
+if [[ -n "$config_line" && -n "$up_line" && "$config_line" -lt "$up_line" ]]; then
+  pass_test
+else
+  fail_test "config --images 必须先于 up 执行（resolved-image assert 前置）"
+fi
+
+echo "== 1c. shell 中残留错误 GIT_SHA 时，rollback 参数必须 authoritative =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(GIT_SHA=WRONG_SHA_IN_SHELL)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 0 "$rc" "safe rollback with poisoned GIT_SHA"
+assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_not_contains "GIT_SHA=WRONG_SHA_IN_SHELL"
 
 echo "== 2. hard restore 失败 → app 回滚不执行 =="
 printf 'DUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
@@ -143,11 +187,12 @@ assert_exit 1 "$rc" "hard rollback with restore failure"
 assert_log_contains "restore_called"
 assert_log_not_contains "app_up_called"
 
-echo "== 3. hard restore 成功 → app 回滚才执行 =="
+echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA =="
 run_rollback "${PREV_SHA}" --hard; rc=$?
 assert_exit 0 "$rc" "hard rollback with restore success"
 assert_log_contains "restore_called"
-assert_log_contains "app_up_called"
+assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_contains "config --images"
 
 echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
 make_sandbox   # 新沙箱，BACKUP_DIR 为空
@@ -187,6 +232,44 @@ OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" \
 assert_exit 1 "$rc" "target-db mismatch"
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_log_not_contains "app_stop_called"
+
+echo "== 8. resolved app image != PREVIOUS_SHA → 在切换应用前 fail =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(CONFIG_STUB_MODE=broken)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "resolved image mismatch must abort rollback"
+assert_log_contains "config --images"
+assert_log_not_contains "app_up_called"
+
+echo "== 9. health release != PREVIOUS_SHA → fail（release 必须等于回滚目标）=="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(CURL_STUB_RELEASE=WRONG_RELEASE_SHA)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "health release mismatch must fail rollback"
+assert_log_contains "app_up_called"
+
+echo "== 10. optional_env_var：retention 遵守统一 env contract =="
+make_sandbox
+source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
+sed -i 's/^BACKUP_RETENTION_DAYS=.*/BACKUP_RETENTION_DAYS=30/' "${SANDBOX}/.env.production"
+# shell unset + env file 30 → 30
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"30\" ]]"; then pass_test; else fail_test "retention: env file 30 应生效"; fi
+# shell explicit 7 → 7（shell 优先）
+if OPS_PROJECT_DIR="${SANDBOX}" BACKUP_RETENTION_DAYS=7 bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"7\" ]]"; then pass_test; else fail_test "retention: shell 显式 7 应优先"; fi
+# 完全未配置 → 14
+sed -i '/^BACKUP_RETENTION_DAYS=/d' "${SANDBOX}/.env.production"
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"14\" ]]"; then pass_test; else fail_test "retention: 未配置应默认 14"; fi
 
 # 清理沙箱
 rm -rf "${SANDBOX}" /tmp/rb-out.$$ /tmp/rb-hard-fail.$$ /tmp/rp-sha.$$ /tmp/rp-noflag.$$ /tmp/rp-mismatch.$$ 2>/dev/null

@@ -37,6 +37,20 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
   （public 桶仅匿名下载、private 桶全私有），应用凭据为专用用户并绑定
   least-privilege policy（仅两个业务 bucket 的业务读写，无任何 admin 权限），
   Console(9001)/API(9000) 不发布端口，数据持久卷 `minio_data`。
+  **Public asset 交付路径**：浏览器通过 `https://<域名>/assets/<objectKey>`
+  （Caddy 只读出口 → `minio:9000/campus-public/*`）访问公开对象；该 route 的
+  bucket 前缀固定，private 桶与 MinIO Console/Admin API 不可达，写操作由
+  bucket policy 拒绝。详见 deploy/Caddyfile 注释。
+
+### 两个对象存储 URL 的区分（不得混用）
+
+| 变量 | 用途 | 自建 MinIO 时 | 外部 S3 时 |
+| --- | --- | --- | --- |
+| `S3_ENDPOINT` | 应用后端（服务器侧）访问对象存储 | `http://minio:9000`（backend 网络内） | 提供商 https endpoint |
+| `PUBLIC_ASSET_BASE_URL` | 浏览器访问 public object 的公网地址 | `https://<域名>/assets`（Caddy 出口） | 提供商/CDN 的 bucket 级公网 URL |
+
+应用生成公开图片 URL 的唯一来源是 `buildPublicObjectUrl()` =
+`PUBLIC_ASSET_BASE_URL/<objectKey>`（src/lib/storage/access-policy.ts）。
 
 ### env 与 compose 调用约定（唯一方式）
 

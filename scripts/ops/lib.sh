@@ -65,6 +65,23 @@ require_env_var() {
   printf '%s' "$value"
 }
 
+# 可选变量：shell 显式 export 优先 → .env.production → 默认值。
+# 供 BACKUP_RETENTION_DAYS 这类"有安全默认值的生产配置"使用，
+# 不得绕过统一 env contract 直接写 ${VAR:-default}。
+optional_env_var() {
+  local name="$1" default_value="$2" value=""
+  if ! value="$(printenv "$name")"; then
+    value=""
+  fi
+  if [[ -z "$value" && -f "$ENV_FILE" ]]; then
+    value="$(parse_env_file "$ENV_FILE" | grep -E "^${name}=" | tail -1 | cut -d= -f2-)"
+  fi
+  if [[ -z "$value" ]]; then
+    value="$default_value"
+  fi
+  printf '%s' "$value"
+}
+
 load_production_env() {
   if [[ ! -f "$ENV_FILE" ]]; then
     echo "[ops] 未找到 ${ENV_FILE}：请先 cp .env.production.example .env.production 并填写" >&2

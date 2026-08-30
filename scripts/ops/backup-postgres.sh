@@ -24,10 +24,11 @@ source "${SCRIPT_DIR}/lib.sh"
 load_production_env
 
 BACKUP_DIR="$(require_env_var BACKUP_DIR)"
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
+# 统一 env contract：shell export > .env.production > 默认 14（不得绕过 lib）
+RETENTION_DAYS="$(optional_env_var BACKUP_RETENTION_DAYS 14)"
 POSTGRES_USER="$(require_env_var POSTGRES_USER)"
 DB_NAME="$(require_env_var POSTGRES_DB)"
-OFFSITE_TARGET="$(parse_env_file "$ENV_FILE" | sed -n 's/^BACKUP_OFFSITE_TARGET=//p' | tail -1)"
+OFFSITE_TARGET="$(optional_env_var BACKUP_OFFSITE_TARGET "")"
 
 mkdir -p "${BACKUP_DIR}"
 

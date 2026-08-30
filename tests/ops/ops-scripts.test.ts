@@ -1,5 +1,5 @@
 import { execFile, execSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -49,10 +49,9 @@ describe("compose production config（--env-file 统一插值来源）", () => {
     async () => {
       const envFile = path.join(repoRoot, ".env.production");
       const syntheticFile = path.join(repoRoot, ".env.production.synthetic");
-      const createdHere = !existsSync(envFile);
-      if (createdHere) {
-        copyFileSync(syntheticFile, envFile);
-      }
+      const existedBefore = existsSync(envFile);
+      const originalContent = existedBefore ? readFileSync(envFile, "utf8") : null;
+      copyFileSync(syntheticFile, envFile);
 
       try {
         // 清空 shell 中可能存在的生产变量：插值必须只来自 --env-file
@@ -110,7 +109,9 @@ describe("compose production config（--env-file 统一插值来源）", () => {
           expect(stdout).toContain(service);
         }
       } finally {
-        if (createdHere) {
+        if (originalContent !== null) {
+          writeFileSync(envFile, originalContent);
+        } else {
           rmSync(envFile);
         }
       }
@@ -132,5 +133,22 @@ describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
       expect(content, `${file} 不得包含 "&& true"`).not.toMatch(/&&\s*true/);
       expect(content, `${file} 不得包含 "|| true"`).not.toMatch(/\|\|\s*true/);
     }
+  });
+
+  it("rollback 必须显式选择目标镜像并在 up 前 hard assert", () => {
+    const content = readFileSync(path.join(repoRoot, "scripts/ops/rollback.sh"), "utf8");
+    // app 切换必须带 GIT_SHA=<target>（不允许 fallback 到 :local/当前 HEAD）
+    expect(content).toMatch(/GIT_SHA="\$\{target_sha\}" compose_run up -d --no-deps --wait app/);
+    // 必须用 compose config --images 做插值后镜像断言
+    expect(content).toMatch(/config --images/);
+    expect(content).toMatch(/campus-marketplace-app:\$\{target_sha\}/);
+  });
+
+  it("Caddy 公共资产只读出口存在且 bucket 前缀固定为 public 桶", () => {
+    const content = readFileSync(path.join(repoRoot, "deploy/Caddyfile"), "utf8");
+    expect(content).toMatch(/handle_path \/assets\/\*/);
+    expect(content).toMatch(/rewrite \* \/campus-public\{uri\}/);
+    // route 只指向 minio，private 桶名不得出现在资产 route 附近
+    expect(content).not.toMatch(/campus-private/);
   });
 });

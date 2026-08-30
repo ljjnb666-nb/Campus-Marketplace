@@ -47,6 +47,38 @@ fi
 
 APP_URL="$(app_url_from_env)"
 
+# -----------------------------------------------------------------------------
+# 应用切换的唯一路径（safe 与 --hard 共用）：显式以目标 SHA 选择镜像。
+#
+# 不允许任何 fallback（:local / :unknown / 当前 HEAD / shell 残留的 GIT_SHA）：
+# 1. 以 GIT_SHA=<target> 调 compose，让 image: campus-marketplace-app:${GIT_SHA:-local}
+#    解析为准确 tag；
+# 2. 在真正 up 之前用 compose config --images 读取插值后的最终镜像并 hard assert
+#    必须等于 campus-marketplace-app:<target>，否则立即非 0 退出、不执行回滚。
+# -----------------------------------------------------------------------------
+switch_app_to() {
+  local target_sha="$1" resolved_images=""
+
+  if ! resolved_images="$(GIT_SHA="${target_sha}" compose_run config --images)"; then
+    echo "[rollback][FAIL] compose config --images 解析失败，拒绝回滚" >&2
+    exit 1
+  fi
+
+  if ! printf '%s\n' "${resolved_images}" | grep -Fxq "campus-marketplace-app:${target_sha}"; then
+    echo "[rollback][FAIL] 解析后的 app 镜像不是 campus-marketplace-app:${target_sha}，拒绝回滚" >&2
+    echo "---- resolved images ----" >&2
+    printf '%s\n' "${resolved_images}" >&2
+    echo "-------------------------" >&2
+    exit 1
+  fi
+  echo "[rollback] resolved app image = campus-marketplace-app:${target_sha}"
+
+  if ! GIT_SHA="${target_sha}" compose_run up -d --no-deps --wait app; then
+    echo "[rollback] 应用启动失败（镜像 ${target_sha}）" >&2
+    exit 1
+  fi
+}
+
 if [[ "${MODE}" == "--hard" ]]; then
   echo "[rollback] --hard：先恢复最近备份到生产库（仅在旧 release 与当前 schema 不兼容时）" >&2
   BACKUP_DIR="$(require_env_var BACKUP_DIR)"
@@ -74,12 +106,10 @@ if [[ "${MODE}" == "--hard" ]]; then
   echo "[rollback] 生产库恢复成功，继续切换应用镜像"
 fi
 
-# 应用切回旧镜像（safe 路径唯一步骤；hard 路径在恢复成功后才到达这里）
+# 应用切回旧镜像（safe 路径唯一步骤；hard 路径在恢复成功后才到达这里），
+# safe 与 hard 共用 switch_app_to 的 exact-image selection
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
-if ! compose_run up -d --no-deps --wait app; then
-  echo "[rollback] 应用启动失败（镜像 ${PREVIOUS_SHA}）" >&2
-  exit 1
-fi
+switch_app_to "${PREVIOUS_SHA}"
 
 # health / release 验证
 echo "[rollback] 验证 ${APP_URL}/api/health"
