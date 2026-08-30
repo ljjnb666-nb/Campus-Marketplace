@@ -121,3 +121,123 @@ jobs:
           NEXTAUTH_SECRET: dummy-secret-for-ci-build-only
           APP_NAME: 校园集市
           DEFAULT_CAMPUS_SLUG: main-campus
+
+  # ==========================================================
+  # Release Gate：真实浏览器关键链路 E2E（Playwright + 真实
+  # PostgreSQL / Redis / MinIO + production build）
+  # 禁止 continue-on-error / || true / allow-failure
+  # ==========================================================
+  e2e:
+    name: e2e (playwright critical paths)
+    runs-on: ubuntu-latest
+    needs: verify
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # E2E 专用库：与 verify job 的 campus 库互不干扰
+          POSTGRES_DB: campus_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d campus_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/campus_e2e?schema=public
+      E2E_REDIS_URL: redis://localhost:6379
+      E2E_S3_ENDPOINT: http://localhost:9100
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: e2e-only-nextauth-secret-not-for-prod
+      ALLOW_LOCAL_S3_IN_PRODUCTION: "true"
+      APP_NAME: 校园集市
+      DEFAULT_CAMPUS_SLUG: main-campus
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Start MinIO (S3 compatible storage)
+        run: |
+          docker run -d --name minio \
+            -p 9100:9000 -p 9101:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data --console-address ":9001"
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
+              echo "MinIO ready after ${i} probe(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MinIO failed to become ready; container logs:"
+          docker logs minio
+          exit 1
+
+      - name: Bootstrap MinIO buckets
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh minio/mc -c "
+            mc alias set local http://localhost:9100 minioadmin minioadmin &&
+            mc mb --ignore-existing local/campus-public &&
+            mc mb --ignore-existing local/campus-private &&
+            mc anonymous set download local/campus-public &&
+            mc anonymous set none local/campus-private &&
+            mc admin user add local e2e-local E2eLocalSecret2026x &&
+            mc admin policy attach local readwrite --user e2e-local
+          "
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Build production bundle
+        run: npm run build
+
+      # E2E deterministic bootstrap：migrate deploy + 全量重置 + 确定性账号 + Redis 限流清理
+      - name: E2E setup (migrate / reset / seed / rate-limit flush)
+        run: npm run e2e:setup
+
+      # webServer 由 playwright.config.ts 拉起（npm run start，指向 campus_e2e）
+      - name: Run Playwright critical-path suite
+        run: npx playwright test
+
+      - name: E2E teardown (MinIO / Redis cleanup)
+        if: always()
+        run: npm run e2e:teardown
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-e2e-artifacts
+          path: |
+            tests/e2e/.report
+            tests/e2e/.artifacts
+          retention-days: 7

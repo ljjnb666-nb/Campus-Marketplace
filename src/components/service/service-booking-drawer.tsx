@@ -97,7 +97,8 @@ export function ServiceBookingDrawer({
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-            <input type="hidden" name="serviceListingId" value={service.id} />
+            {/* 字段名与 serviceOrderFormSchema（serviceId）一致，否则 server action 读不到 */}
+            <input type="hidden" name="serviceId" value={service.id} />
 
             <div className="flex items-center gap-3.5 rounded-2xl bg-slate-50 p-3 border border-slate-100 dark:bg-slate-950/40 dark:border-slate-800">
               <div className="size-14 shrink-0 overflow-hidden rounded-xl bg-slate-200 dark:bg-slate-800">

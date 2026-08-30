@@ -27,11 +27,20 @@
 - [x] 任务分类模型、后台维护和前台筛选联动
 - [ ] 测试补齐与体验优化（单元 / 组件 / API 层已完成补齐，端到端流程测试仍开放）
 
+## Production Phase 2（E2E Release Gate，2026-08-30 完成）
+
+- [x] Playwright 基础设施：production build webServer + E2E 专用库 + 确定性账号 + storageState 运行时生成
+- [x] 8 条 Golden Flow：认证/商品/订单状态机/跑腿/服务/租赁/消息/举报后台
+- [x] 私有资产浏览器边界：`/api/assets/{id}/access` 四角色（双方/ADMIN/无关 403/匿名 401）
+- [x] 安全负例：管理员越权、跨用户编辑 404、无关用户不可见他单、并发重复下单仅 1 有效订单
+- [x] CI 拆分 verify + e2e 双 job（e2e 失败即失败，失败上传 report/trace/video artifacts）
+- [x] 本地连续三轮 17/17 全绿；顺手修复 7 个 E2E 暴露的真实缺陷（见"最近进展"）
+
 ## 当前待补
 
-- [ ] 沉淀 Playwright 端到端关键主链路（登录 → 发品 → 下单 → 收藏）并纳入 CI
+- [ ] GitHub branch protection 将 verify / e2e 设为 required checks（需仓库管理员操作）
+- [ ] Production Phase 3：真实服务器部署、域名、HTTPS、支付、监控
 - [ ] 继续做少量低频页面文案与体验收尾
-- [ ] 增加更稳定的浏览器侧回归检查
 
 ## Production Phase 1（对象存储，2026-08-28 完成）
 
@@ -46,6 +55,12 @@
 - [x] 移除生产本地磁盘上传依赖（`UPLOAD_DIR` 废弃），前端表单切换即时上传 token 模式
 
 ## 最近进展
+
+- [x] Production Phase 2 E2E Release Gate（见上节）；E2E 暴露并修复 7 个真实缺陷：
+  服务预约抽屉 hidden 字段名与 schema 不一致（预约完全无法提交）、举报弹窗原因下拉提交中文标签而非枚举、
+  举报 schema 可选目标字段不接 FormData null（所有单目标举报必失败）、跑腿接单弹窗误绑 updateErrandStatus（接单静默失败）、
+  跑腿"提交完成"后 Order 表状态不同步导致发布者无确认入口、Order 完成时不回写 ErrandTask 状态、
+  租赁发布表单 uploading 状态不复位导致成功后页面卡死 + 租赁通知 payload 带非法 Order 外键（租赁申请必失败）
 
 - [x] Production Phase 1 对象存储与私有资源安全体系（见 [STORAGE.md](STORAGE.md)）
 - [x] 修复商品表单新图以 blob: 预览提交导致发品无法附图的问题（ImageUploader 改为选图即上传）

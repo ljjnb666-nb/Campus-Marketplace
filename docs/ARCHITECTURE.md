@@ -49,6 +49,21 @@
   访问经 `GET /api/assets/{id}/access` 业务鉴权后签发短时 URL
 - 详细设计（key 规则、配额并发、孤儿回收、保留期、失败恢复）见 [STORAGE.md](STORAGE.md)
 
+## E2E 测试分层（Production Phase 2）
+
+浏览器 Release Gate 独立于 vitest 单测体系，验证真实用户关键链路：
+
+```
+Playwright (Chromium)
+  → Next.js production build (webServer)
+    → Server Action / API
+      → PostgreSQL (campus_e2e) / Redis / MinIO
+```
+
+- Browser drives action, DB verifies invariant：浏览器执行真实操作，
+  helpers/db.ts 直连 E2E 库断言最终业务状态（订单唯一性、状态机终态、私有资产可见性）
+- 详细架构、账号策略、清理策略与 CI gate 见 [E2E.md](E2E.md)
+
 ## 当前设计原则
 
 - 读写分层，列表与详情由 repository 聚合查询

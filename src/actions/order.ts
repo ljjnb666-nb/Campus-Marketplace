@@ -355,6 +355,16 @@ export async function updateOrderStatus(formData: FormData) {
         await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
       }
 
+      // ERRAND：Order 完成时回写跑腿任务状态，两侧状态机保持一致
+      if (order.type === "ERRAND" && order.errandTaskId && parsed.data.status === "COMPLETED") {
+        await tx.errandTask.update({
+          where: { id: order.errandTaskId },
+          data: { status: "COMPLETED" },
+        });
+
+        await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
+      }
+
       const actorLabel = isBuyer ? "买家" : "卖家";
       const statusLabel = getStatusLabel(parsed.data.status);
 

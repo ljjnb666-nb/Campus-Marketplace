@@ -57,10 +57,25 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
     (order.type === "SERVICE" && order.status === "PENDING") ||
     (order.type === "RENTAL" && (order.status === "PENDING_APPROVAL" || order.status === "PENDING_PICKUP"));
 
+  // 卖家侧主流程入口：商品/服务订单待确认时可接受；服务订单接受后可开始履约。
+  // updateOrderStatus 已按角色+当前状态校验这些转换，这里只补齐 UI 入口。
+  const canAccept =
+    (order.type === "PRODUCT" || order.type === "SERVICE") &&
+    order.status === "PENDING" &&
+    order.userRole === "seller";
+
+  const canStartProgress =
+    order.type === "SERVICE" &&
+    order.status === "ACCEPTED" &&
+    order.userRole === "seller";
+
   const canConfirmComplete =
     (order.type === "PRODUCT" && order.status === "ACCEPTED" && order.userRole === "buyer") ||
     (order.type === "SERVICE" && order.status === "IN_PROGRESS" && order.userRole === "buyer") ||
-    (order.type === "ERRAND" && order.status === "PENDING_CONFIRMATION" && order.userRole === "publisher");
+    // ERRAND 的"接单者提交完成"只推进 ErrandTask 状态，Order 表停留在
+    // IN_PROGRESS；发布者（buyer）在此状态下确认完成，与 updateOrderStatus
+    // 的 ERRAND 完成校验（buyer + IN_PROGRESS）一致
+    (order.type === "ERRAND" && order.status === "IN_PROGRESS" && order.userRole === "publisher");
 
   const canReview = (order.status === "COMPLETED" || order.status === "COMPLETED") && !order.hasReviewed;
 
@@ -179,6 +194,32 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {canAccept && (
+              <form action={updateOrderStatus}>
+                <input type="hidden" name="orderId" value={order.id} />
+                <input type="hidden" name="status" value="ACCEPTED" />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  接受订单
+                </button>
+              </form>
+            )}
+
+            {canStartProgress && (
+              <form action={updateOrderStatus}>
+                <input type="hidden" name="orderId" value={order.id} />
+                <input type="hidden" name="status" value="IN_PROGRESS" />
+                <button
+                  type="submit"
+                  className="rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-xs hover:bg-indigo-700"
+                >
+                  开始服务
+                </button>
+              </form>
+            )}
+
             <form action={createOrOpenOrderConversation}>
               <input type="hidden" name="orderId" value={order.id} />
               <input type="hidden" name="orderType" value={order.type} />

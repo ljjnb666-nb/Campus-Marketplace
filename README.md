@@ -107,6 +107,7 @@ npm run storage:cleanup -- --dry-run
 
 ```bash
 npm run text:verify
+npm run e2e            # Playwright Release Gate（需先 docker compose up -d postgres redis minio）
 ```
 
 7. 启动开发服务
@@ -144,6 +145,7 @@ npm run text:verify
 - [docs/API.md](docs/API.md)
 - [docs/SECURITY.md](docs/SECURITY.md)
 - [docs/STORAGE.md](docs/STORAGE.md)
+- [docs/E2E.md](docs/E2E.md)
 - [docs/TODO.md](docs/TODO.md)
 
 ## 验证状态
@@ -154,6 +156,7 @@ npm run text:verify
 - `npm run typecheck`
 - `npx vitest run`（全量测试）
 - `npm run test:coverage`（覆盖率门槛全局 80%：lines / branches / functions / statements）
+- `npm run e2e`（Playwright 关键链路 Release Gate：真实 PostgreSQL / Redis / MinIO + production build，详见 [docs/E2E.md](docs/E2E.md)）
 
 依赖与 lock 文件注意事项：
 
@@ -162,7 +165,8 @@ npm run text:verify
 
 当前测试基线：
 
-- 全量测试约 `980+` 个用例通过（2026-08-28 实测 189 文件 / 983 通过），覆盖单元、组件与 API 路由层
+- 全量测试 `1021` 个用例通过（2026-08-30 实测 193 文件 / 1000 通过 + 21 跳过的条件集成用例），覆盖单元、组件与 API 路由层
+- E2E 基线：Playwright 17 个关键链路测试（8 条 Golden Flow + 权限/并发负例）连续三轮全绿（2026-08-30 本地实测）
 - 另有真实数据库 / Redis / MinIO 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL`、`INTEGRATION_S3_ENDPOINT` 时才运行（CI 中全部真实执行）
 - 生产化存储专项：S3 兼容对象存储 + 公私隔离 + 上传配额 + 敏感文件生命周期（详见 [docs/STORAGE.md](docs/STORAGE.md)）；以及可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
 
