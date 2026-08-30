@@ -35,6 +35,10 @@ export interface UnifiedOrderData {
   userRole: "buyer" | "seller" | "publisher" | "accepter" | "renter" | "owner";
   detailHref: string;
   hasReviewed?: boolean;
+  /** ERRAND 专用：关联 ErrandTask.status。Order.status 无法表达
+   * "接单者已提交完成、待发布者确认"（该阶段 Order 仍为 IN_PROGRESS），
+   * 判定发布者可确认完成必须以此为准，不能从 Order.status 推断 */
+  errandStatus?: string | null;
 }
 
 export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
@@ -72,10 +76,12 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
   const canConfirmComplete =
     (order.type === "PRODUCT" && order.status === "ACCEPTED" && order.userRole === "buyer") ||
     (order.type === "SERVICE" && order.status === "IN_PROGRESS" && order.userRole === "buyer") ||
-    // ERRAND 的"接单者提交完成"只推进 ErrandTask 状态，Order 表停留在
-    // IN_PROGRESS；发布者（buyer）在此状态下确认完成，与 updateOrderStatus
-    // 的 ERRAND 完成校验（buyer + IN_PROGRESS）一致
-    (order.type === "ERRAND" && order.status === "IN_PROGRESS" && order.userRole === "publisher");
+    // ERRAND：必须接单者已提交完成（ErrandTask = PENDING_CONFIRMATION）。
+    // 仅 Order IN_PROGRESS 表示"开始履约"，不构成可确认完成的依据
+    (order.type === "ERRAND" &&
+      order.status === "IN_PROGRESS" &&
+      order.errandStatus === "PENDING_CONFIRMATION" &&
+      order.userRole === "publisher");
 
   const canReview = (order.status === "COMPLETED" || order.status === "COMPLETED") && !order.hasReviewed;
 
@@ -124,7 +130,9 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
 
           <OrderStatusBadgeUnified
             type={order.type}
-            status={order.status}
+            // ERRAND 展示跑腿工作流状态：Order.status 无法表达
+            // "待发布者确认"阶段（该阶段 Order 仍为 IN_PROGRESS）
+            status={order.type === "ERRAND" && order.errandStatus ? order.errandStatus : order.status}
             userRole={order.userRole}
             size="sm"
           />

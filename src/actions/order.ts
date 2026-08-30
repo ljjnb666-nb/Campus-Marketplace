@@ -3,6 +3,7 @@
 import { Prisma } from "@prisma/client";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
+import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { createOrderNo } from "@/lib/order-no";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateOrderViews } from "@/lib/revalidate";
@@ -313,6 +314,25 @@ export async function updateOrderStatus(formData: FormData) {
     }
 
     await withTransaction(async (tx) => {
+      // ERRAND 最终完成走唯一权威实现（completeErrandOrderTx）：
+      // 硬性要求 ErrandTask === PENDING_CONFIRMATION，exactly-once 副作用
+      // 与完成通知都在 canonical 事务内，此处不得再叠加任何完成副作用
+      if (order.type === "ERRAND" && order.errandTaskId && parsed.data.status === "COMPLETED") {
+        const completion = await completeErrandOrderTx(tx, {
+          orderId: order.id,
+          errandTaskId: order.errandTaskId,
+          buyerId: order.buyerId,
+          sellerId: order.sellerId,
+        });
+
+        if (!completion.completed) {
+          return;
+        }
+
+        revalidateOrderViews({ errandId: order.errandTaskId ?? undefined });
+        return;
+      }
+
       // 条件更新充当乐观锁：仅当状态仍是读取时的状态才允许流转，
       // 防止并发请求重复触发完成/取消的副作用（计数与通知被重复执行）
       const transitionResult = await tx.order.updateMany({
@@ -350,16 +370,6 @@ export async function updateOrderStatus(formData: FormData) {
         await tx.serviceListing.update({
           where: { id: order.serviceListingId },
           data: { completedOrderCount: { increment: 1 } },
-        });
-
-        await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
-      }
-
-      // ERRAND：Order 完成时回写跑腿任务状态，两侧状态机保持一致
-      if (order.type === "ERRAND" && order.errandTaskId && parsed.data.status === "COMPLETED") {
-        await tx.errandTask.update({
-          where: { id: order.errandTaskId },
-          data: { status: "COMPLETED" },
         });
 
         await incrementCompletedUsers(tx, order.buyerId, order.sellerId);

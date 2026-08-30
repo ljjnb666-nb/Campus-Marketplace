@@ -87,7 +87,7 @@ describe("order repository", () => {
         buyer: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
         seller: { select: { id: true, name: true, avatarUrl: true, schoolName: true } },
         product: { select: { id: true, title: true, images: { take: 1 } } },
-        errandTask: { select: { id: true, title: true } },
+        errandTask: { select: { id: true, title: true, status: true } },
         serviceListing: { select: { id: true, title: true, coverImageUrl: true } },
         reviews: { select: { authorId: true } },
       },

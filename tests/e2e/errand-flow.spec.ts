@@ -68,6 +68,20 @@ test("跑腿：发布 → 接单 → 开始任务 → 提交完成 → 发布者
     .poll(async () => (await e2eDb().errandTask.findUnique({ where: { id: errandId } }))?.status)
     .toBe("IN_PROGRESS");
 
+  // ---------- 负例（premature completion gate）：接单者仅"开始任务"后， ----------
+  // 发布者订单中心不得出现"确认完成"入口；服务端同样拒绝提前完成
+  await publisher.goto("/my/orders?type=errand");
+  const prematureCard = publisher.locator("article", { hasText: title }).first();
+  await expect(prematureCard).toBeVisible();
+  // 此时 Order = IN_PROGRESS，但 ErrandTask 未到 PENDING_CONFIRMATION
+  await expect(prematureCard.getByRole("button", { name: "确认完成" })).toHaveCount(0);
+  await expect(prematureCard.getByText("接单者履约中").first()).toBeVisible();
+
+  const prematureTask = await e2eDb().errandTask.findUnique({ where: { id: errandId } });
+  const prematureOrder = await e2eDb().order.findFirst({ where: { errandTaskId: errandId } });
+  expect(prematureTask?.status).toBe("IN_PROGRESS");
+  expect(prematureOrder?.status).toBe("IN_PROGRESS");
+
   // ---------- 接单者提交完成 ----------
   await accepter.goto(`/errands/${errandId}`);
   await accepter.getByRole("button", { name: "提交完成" }).first().click();
@@ -75,10 +89,11 @@ test("跑腿：发布 → 接单 → 开始任务 → 提交完成 → 发布者
     .poll(async () => (await e2eDb().errandTask.findUnique({ where: { id: errandId } }))?.status)
     .toBe("PENDING_CONFIRMATION");
 
-  // ---------- 发布者确认完成（订单中心确认弹窗） ----------
+  // ---------- 发布者确认完成（订单中心确认弹窗）：提交完成后入口才出现 ----------
   await publisher.goto("/my/orders?type=errand");
   const publisherCard = publisher.locator("article", { hasText: title }).first();
   await expect(publisherCard).toBeVisible();
+  await expect(publisherCard.getByRole("button", { name: "确认完成" })).toBeVisible();
   await publisherCard.getByRole("button", { name: "确认完成" }).click();
   await publisher.getByRole("button", { name: "确认收货/完成" }).click();
   await expect(
@@ -88,6 +103,10 @@ test("跑腿：发布 → 接单 → 开始任务 → 提交完成 → 发布者
   await expect
     .poll(async () => (await e2eDb().errandTask.findUnique({ where: { id: errandId } }))?.status)
     .toBe("COMPLETED");
+
+  // Order 与 ErrandTask 状态机收敛一致
+  const finalOrder = await e2eDb().order.findFirst({ where: { errandTaskId: errandId } });
+  expect(finalOrder?.status).toBe("COMPLETED");
 
   // 双方订单页状态一致
   await accepter.goto("/my/orders?type=errand");

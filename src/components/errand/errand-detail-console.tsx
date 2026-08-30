@@ -12,7 +12,7 @@ import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ErrandStatusActions } from "@/components/errand/errand-status-actions";
 import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { createOrOpenErrandConversation } from "@/actions/conversation";
-import { claimErrand, deleteErrand, updateErrandStatus } from "@/actions/errand";
+import { claimErrand, deleteErrand } from "@/actions/errand";
 import { createReport } from "@/actions/trust";
 import type { ErrandTaskStatus } from "@prisma/client";
 

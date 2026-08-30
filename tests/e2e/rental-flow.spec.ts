@@ -60,11 +60,14 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await renter.getByRole("link", { name: new RegExp(title) }).first().click();
   await expect(renter.getByRole("heading", { level: 1, name: title })).toBeVisible({ timeout: 20_000 });
 
-  await renter.getByRole("button", { name: "立即租用" }).first().click();
-  // 等预约抽屉真正打开再填时间（规避打开动画竞态）
-  await expect(renter.getByRole("heading", { name: "确认提交物品租赁订单" })).toBeVisible({
-    timeout: 15_000,
-  });
+  // 点击与 React hydration 存在竞态（点击可能落在未绑定事件的 SSR DOM 上）：
+  // 用 toPass 重试"点击→抽屉出现"，不做固定 sleep
+  await expect(async () => {
+    await renter.getByRole("button", { name: "立即租用" }).first().click();
+    await expect(renter.getByRole("heading", { name: "确认提交物品租赁订单" })).toBeVisible({
+      timeout: 5_000,
+    });
+  }).toPass({ timeout: 30_000 });
   await renter.locator('input[name="startTime"]').fill(localDateTime(2));
   await renter.locator('input[name="endTime"]').fill(localDateTime(26));
   await renter.getByRole("button", { name: "提交租赁订单" }).click();
