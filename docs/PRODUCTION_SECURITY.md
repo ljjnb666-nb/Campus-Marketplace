@@ -27,9 +27,14 @@
 
 - 双桶分离：`S3_BUCKET_PUBLIC`（头像/商品图，匿名可下载、匿名写拒绝）与
   `S3_BUCKET_PRIVATE`（认证材料/交接凭证，匿名 GET/LIST 全拒绝，无永久公开 URL）
-- 私有对象唯一出口：`GET /api/assets/:assetId/access`（需登录）→ 授权校验
-  （owner/订单参与者/ADMIN，无关用户 403、匿名 401）→ 短时签名 URL
-  （默认 300s，`private, no-store`）
+- **私有对象唯一出口：同源代理端点** `GET /api/assets/:assetId/content`
+  （需登录，每次请求重新执行服务端授权：owner/订单参与者/ADMIN，无关用户 403、
+  匿名 401、过期 410）→ server 用内部凭据经 `S3_ENDPOINT` 读取后转发，
+  响应 `Cache-Control: private, no-store` + `X-Content-Type-Options: nosniff`。
+  浏览器侧 URL 永远不含对象存储端点/桶名/objectKey
+- 公开对象经 Caddy `/assets/*` 只读出口交付（self-hosted MinIO 时 bucket 前缀
+  硬编码为 `campus-public`，与 minio-init/env-check 的固定契约一致——
+  self-hosted 部署使用非默认桶名会被 production-env-check 直接拒绝）
 - 公开对象 Cache-Control `public, max-age=31536000, immutable`；
   对象 key 全部服务端生成（用户文件名只作审计元数据）
 - 生产冒烟必须验证的矩阵见 docs/SECURITY.md 与 tests/e2e/security.spec.ts

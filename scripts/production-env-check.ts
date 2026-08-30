@@ -161,6 +161,31 @@ function main(): void {
   );
   check(results, "S3_BUCKET_PUBLIC", (vars.S3_BUCKET_PUBLIC ?? "") !== "", "必须设置");
   check(results, "S3_BUCKET_PRIVATE", (vars.S3_BUCKET_PRIVATE ?? "") !== "", "必须设置");
+
+  // ---- self-hosted MinIO 固定 bucket 契约 ----
+  // compose 的 Caddy /assets/* 只读出口硬编码转发到 campus-public（deploy/Caddyfile），
+  // minio-init 也按该名字建桶；端点指向容器内 minio 服务时必须与之一致，
+  // 否则出现"app 写入 A 桶 / Caddy 读 B 桶"的静默配置漂移。
+  let selfHostedMinio = false;
+  if (s3Endpoint) {
+    try {
+      selfHostedMinio = new URL(s3Endpoint).hostname === "minio";
+    } catch {
+      selfHostedMinio = false;
+    }
+  }
+  check(
+    results,
+    "S3_BUCKET_PUBLIC.selfhosted-contract",
+    !selfHostedMinio || vars.S3_BUCKET_PUBLIC === "campus-public",
+    "self-hosted MinIO 固定使用 campus-public（Caddy /assets 出口与 minio-init 的硬契约）",
+  );
+  check(
+    results,
+    "S3_BUCKET_PRIVATE.selfhosted-contract",
+    !selfHostedMinio || vars.S3_BUCKET_PRIVATE === "campus-private",
+    "self-hosted MinIO 固定使用 campus-private（minio-init/policy 硬契约）",
+  );
   check(
     results,
     "PUBLIC_ASSET_BASE_URL",

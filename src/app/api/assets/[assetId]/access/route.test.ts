@@ -1,24 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, resolvePrivateAssetAccess, createPrivateAssetSignedUrl, resolvePublicAssetUrl } =
-  vi.hoisted(() => ({
-    auth: vi.fn(),
-    resolvePrivateAssetAccess: vi.fn(),
-    createPrivateAssetSignedUrl: vi.fn(),
-    resolvePublicAssetUrl: vi.fn(),
-  }));
+const { auth, resolvePrivateAssetAccess, resolvePublicAssetUrl } = vi.hoisted(() => ({
+  auth: vi.fn(),
+  resolvePrivateAssetAccess: vi.fn(),
+  resolvePublicAssetUrl: vi.fn(),
+}));
 
 vi.mock("@/lib/auth", () => ({ auth }));
 
 vi.mock("@/lib/asset-service", () => ({
   resolvePrivateAssetAccess,
-  createPrivateAssetSignedUrl,
   resolvePublicAssetUrl,
-}));
-
-vi.mock("@/lib/storage", () => ({
-  buildPublicObjectUrl: (objectKey: string) =>
-    `http://localhost:9100/campus-public/${objectKey}`,
 }));
 
 import { GET } from "@/app/api/assets/[assetId]/access/route";
@@ -39,7 +31,6 @@ describe("GET /api/assets/[assetId]/access", () => {
   beforeEach(() => {
     auth.mockReset().mockResolvedValue({ user: { id: "user-1", role: "STUDENT" } });
     resolvePrivateAssetAccess.mockReset();
-    createPrivateAssetSignedUrl.mockReset();
     resolvePublicAssetUrl.mockReset();
   });
 
@@ -52,34 +43,43 @@ describe("GET /api/assets/[assetId]/access", () => {
     expect(resolvePrivateAssetAccess).not.toHaveBeenCalled();
   });
 
-  it("returns a short-lived signed url for the asset owner", async () => {
+  it("returns a same-origin content proxy url for the asset owner (no internal endpoint leak)", async () => {
     resolvePrivateAssetAccess.mockResolvedValue({
       ok: true,
-      asset: { bucket: "campus-private", objectKey: "private/verification/u1/x.webp", category: "VERIFICATION" },
+      asset: {
+        bucket: "campus-private",
+        objectKey: "private/verification/u1/x.webp",
+        category: "VERIFICATION",
+      },
     });
-    createPrivateAssetSignedUrl.mockResolvedValue({ url: "http://signed.example/x", expiresIn: 300 });
 
     const response = await callGet();
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      url: "http://signed.example/x",
-      expiresIn: 300,
-      access: "PRIVATE",
-    });
+    const body = await response.json();
+    expect(body.url).toBe("/api/assets/asset-1/content");
+    expect(body.access).toBe("PRIVATE");
+    // 不得再返回对象存储签名 URL / 内部端点 / 桶名（self-hosted 下浏览器不可达）
+    expect(body.url).not.toContain("minio");
+    expect(body.url).not.toContain("campus-private");
+    expect(body.url).not.toContain(":9000");
+    expect(body).not.toHaveProperty("expiresIn");
   });
 
-  it("allows admins to sign private urls", async () => {
+  it("keeps the same-origin proxy contract for admins", async () => {
     auth.mockResolvedValue({ user: { id: "admin-1", role: "ADMIN" } });
     resolvePrivateAssetAccess.mockResolvedValue({
       ok: true,
       asset: { bucket: "campus-private", objectKey: "private/report/u2/y.webp", category: "REPORT" },
     });
-    createPrivateAssetSignedUrl.mockResolvedValue({ url: "http://signed.example/y", expiresIn: 300 });
 
     const response = await callGet();
 
     expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      url: "/api/assets/asset-1/content",
+      access: "PRIVATE",
+    });
   });
 
   it("hides existence with 404 for missing or deleted assets", async () => {
@@ -88,7 +88,6 @@ describe("GET /api/assets/[assetId]/access", () => {
     const response = await callGet();
 
     expect(response.status).toBe(404);
-    expect(createPrivateAssetSignedUrl).not.toHaveBeenCalled();
   });
 
   it("returns 403 for strangers", async () => {
@@ -109,7 +108,9 @@ describe("GET /api/assets/[assetId]/access", () => {
 
   it("returns the public url for public assets", async () => {
     resolvePrivateAssetAccess.mockResolvedValue({ ok: false, reason: "not_private" });
-    resolvePublicAssetUrl.mockResolvedValue("http://localhost:9100/campus-public/public/products/u/a.webp");
+    resolvePublicAssetUrl.mockResolvedValue(
+      "http://localhost:9100/campus-public/public/products/u/a.webp",
+    );
 
     const response = await callGet();
 

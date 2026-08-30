@@ -10,6 +10,7 @@ import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { isWellFormedObjectKey } from "@/lib/storage/object-key";
 import type {
+  GetObjectResult,
   ObjectMetadata,
   ObjectRef,
   PutObjectInput,
@@ -87,6 +88,26 @@ export class S3Storage implements StorageClient {
       return {
         sizeBytes: result.ContentLength ?? 0,
         contentType: result.ContentType ?? null,
+      };
+    } catch (error) {
+      if (isNoSuchKeyError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async getObject(ref: ObjectRef): Promise<GetObjectResult | null> {
+    this.assertRef(ref);
+    try {
+      const result = await this.client.send(
+        new GetObjectCommand({ Bucket: ref.bucket, Key: ref.objectKey }),
+      );
+      const bytes = await result.Body!.transformToByteArray();
+      return {
+        body: Buffer.from(bytes),
+        contentType: result.ContentType ?? null,
+        sizeBytes: result.ContentLength ?? bytes.byteLength,
       };
     } catch (error) {
       if (isNoSuchKeyError(error)) {
