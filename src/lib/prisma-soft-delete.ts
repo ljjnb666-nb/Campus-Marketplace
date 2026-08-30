@@ -126,7 +126,7 @@ function readDeletedAt(row: unknown): Date | null | undefined {
 }
 
 /**
- * 解析模型的委托（delete→update 改写与原生 delete 回退共用）。
+ * 解析模型的委托（delete→update、deleteMany→updateMany 改写与原生硬删回退共用）。
  * 模型名来自 Prisma 查询组件的 PascalCase（如 "Product"），
  * 而客户端委托属性为 camelCase（client.product），此处完成转换。
  */
@@ -136,12 +136,16 @@ function resolveDelegates(
 ): {
   update?: (args: unknown) => Promise<unknown>;
   delete?: (args: unknown) => Promise<unknown>;
+  updateMany?: (args: unknown) => Promise<unknown>;
+  deleteMany?: (args: unknown) => Promise<unknown>;
 } {
   const delegateKey = `${model[0]?.toLowerCase() ?? ""}${model.slice(1)}`;
 
   return ((client as Record<string, unknown>)[delegateKey] ?? {}) as {
     update?: (args: unknown) => Promise<unknown>;
     delete?: (args: unknown) => Promise<unknown>;
+    updateMany?: (args: unknown) => Promise<unknown>;
+    deleteMany?: (args: unknown) => Promise<unknown>;
   };
 }
 
@@ -218,11 +222,26 @@ export const softDeleteExtension = Prisma.defineExtension((client) =>
           return row;
         },
 
-        // 删除一律降级为软删除；显式以 deletedAt 为条件时豁免（物理清理）
-        deleteMany: ({ model, args, query }) => {
+        // 删除一律降级为软删除；显式以 deletedAt 为条件时豁免（物理清理）。
+        // query 组件无法改写操作类型（deleteMany 钩子下 query 仍执行 deleteMany，
+        // 传入带 data 的 updateMany 形状参数会 PrismaClientValidationError），
+        // 因此改写路径与 delete 一致：走 base client 的 updateMany 委托；
+        // 豁免/非软删除模型保持 query(args) 原生硬删除透传。
+        deleteMany: async ({ model, args, query }) => {
           const softArgs = buildSoftDeleteUpdateArgs(model, args);
 
-          return softArgs ? query(softArgs) : query(args);
+          if (!softArgs) {
+            return query(args);
+          }
+
+          const modelName = model ?? "";
+          const delegates = resolveDelegates(client, modelName);
+
+          return (await requireDelegateOperation(
+            delegates.updateMany,
+            modelName,
+            "updateMany",
+          )(softArgs)) as never;
         },
         delete: async ({ model, args }) => {
           const modelName = model ?? "";
