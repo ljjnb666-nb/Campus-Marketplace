@@ -23,10 +23,11 @@ test("商品发布到下单：卖家上传图片发布 → 买家搜索 → 收�
   await seller.locator('textarea[name="description"]').first().fill(`E2E 测试商品描述 ${tag}`);
 
   // ImageUploader：选图后立即经 /api/upload/images 上传到 MinIO public bucket
-  await seller.locator('form input[type="file"]').setInputFiles(FIXTURE_IMAGES.product);
-  await expect(seller.getByAltText("预览 1")).toBeVisible({ timeout: 20_000 });
+  // （页面双渲染，file input 同样存在两份）
+  await seller.locator('form input[type="file"]').first().setInputFiles(FIXTURE_IMAGES.product);
+  await expect(seller.getByAltText("预览 1").first()).toBeVisible({ timeout: 20_000 });
 
-  await seller.getByRole("button", { name: "确认发布商品" }).click();
+  await seller.getByRole("button", { name: "确认发布商品" }).first().click();
   await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productPath = new URL(seller.url()).pathname;
   const productId = productPath.split("/").pop() ?? "";

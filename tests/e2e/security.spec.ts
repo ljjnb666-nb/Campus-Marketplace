@@ -37,7 +37,7 @@ test("权限回归：其他用户打开商品编辑页得到 404", async ({ brow
   await seller.locator('input[name="price"]').first().fill("9.9");
   await seller.locator('input[name="locationText"]').first().fill("E2E 权限测试点");
   await seller.locator('textarea[name="description"]').first().fill(`E2E 越权编辑测试 ${tag}`);
-  await seller.getByRole("button", { name: "确认发布商品" }).click();
+  await seller.getByRole("button", { name: "确认发布商品" }).first().click();
   await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productId = new URL(seller.url()).pathname.split("/").pop() ?? "";
   await sellerContext.close();
@@ -64,7 +64,7 @@ test("并发回归：两个会话同时下单同一商品只生成一个有效�
   await seller.locator('input[name="price"]').first().fill("199");
   await seller.locator('input[name="locationText"]').first().fill("E2E 北门");
   await seller.locator('textarea[name="description"]').first().fill(`E2E 并发下单测试 ${tag}`);
-  await seller.getByRole("button", { name: "确认发布商品" }).click();
+  await seller.getByRole("button", { name: "确认发布商品" }).first().click();
   await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productId = new URL(seller.url()).pathname.split("/").pop() ?? "";
   await sellerContext.close();

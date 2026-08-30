@@ -21,7 +21,7 @@ test("商品订单：买家下单 → 卖家接受 → 买家确认完成 → �
   await seller.locator('input[name="price"]').first().fill("88");
   await seller.locator('input[name="locationText"]').first().fill("E2E 教学楼 B");
   await seller.locator('textarea[name="description"]').first().fill(`E2E 状态机测试 ${tag}`);
-  await seller.getByRole("button", { name: "确认发布商品" }).click();
+  await seller.getByRole("button", { name: "确认发布商品" }).first().click();
   await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productId = new URL(seller.url()).pathname.split("/").pop() ?? "";
 

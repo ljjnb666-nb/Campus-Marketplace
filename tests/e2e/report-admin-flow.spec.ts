@@ -21,7 +21,7 @@ test("举报与 moderation：买家举报商品 → 管理员处理完成", asyn
   await seller.locator('input[name="price"]').first().fill("19.9");
   await seller.locator('input[name="locationText"]').first().fill("E2E 宿舍楼下");
   await seller.locator('textarea[name="description"]').first().fill(`E2E 举报链路 ${tag}`);
-  await seller.getByRole("button", { name: "确认发布商品" }).click();
+  await seller.getByRole("button", { name: "确认发布商品" }).first().click();
   await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productId = new URL(seller.url()).pathname.split("/").pop() ?? "";
   await sellerContext.close();

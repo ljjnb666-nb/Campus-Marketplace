@@ -35,7 +35,7 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await owner.locator('input[name="returnLocation"]').first().fill("E2E 快递驿站");
   await owner.locator('textarea[name="description"]').first().fill(`E2E 租赁物品描述 ${tag}`);
   // requiresApproval 默认勾选：申请需要出租者确认
-  await owner.getByRole("button", { name: "发布租赁" }).click();
+  await owner.getByRole("button", { name: "发布租赁" }).first().click();
   // 发布成功后跳转 /my/rental-listings（管理页）；从那里确认新 listing 可见，
   // 并读取详情链接供后续订单流程使用
   await expect(owner.getByRole("heading", { level: 1, name: "出租物品管理" })).toBeVisible({
@@ -92,7 +92,7 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await renter.goto(`/rental-orders/${orderId}`);
   await renter.getByRole("link", { name: "确认取货" }).click();
   await renter.waitForURL(/\/handover$/, { timeout: 15_000, waitUntil: "commit" });
-  await renter.locator('input[name="photos"]').setInputFiles(FIXTURE_IMAGES.handover);
+  await renter.locator('input[name="photos"]').first().setInputFiles(FIXTURE_IMAGES.handover);
   await renter.getByRole("button", { name: "确认已交接" }).click();
   await expect
     .poll(
@@ -113,7 +113,7 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await owner.goto(`/rental-orders/${orderId}`);
   await owner.getByRole("link", { name: "前往取货验收" }).click();
   await owner.waitForURL(/\/handover$/, { timeout: 15_000, waitUntil: "commit" });
-  await owner.locator('input[name="photos"]').setInputFiles(FIXTURE_IMAGES.handover);
+  await owner.locator('input[name="photos"]').first().setInputFiles(FIXTURE_IMAGES.handover);
   await owner.getByRole("button", { name: "确认已交接" }).click();
   await expect
     .poll(async () => (await e2eDb().rentalOrder.findUnique({ where: { id: orderId } }))?.status)
@@ -132,7 +132,7 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await owner.goto(`/rental-orders/${orderId}`);
   await owner.getByRole("link", { name: "前往验收归还" }).click();
   await owner.waitForURL(/\/return$/, { timeout: 15_000, waitUntil: "commit" });
-  await owner.locator('input[name="photos"]').setInputFiles(FIXTURE_IMAGES.return);
+  await owner.locator('input[name="photos"]').first().setInputFiles(FIXTURE_IMAGES.return);
   await owner.getByRole("button", { name: "确认完好归还" }).click();
   await expect
     .poll(async () => (await e2eDb().rentalOrder.findUnique({ where: { id: orderId } }))?.status)
