@@ -232,20 +232,26 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
     ).rejects.toMatchObject({ code: "P2025" });
   });
 
-  it("deleteMany rewrites to soft deletion while explicit deletedAt stays hard", async () => {
-    const handlers = captureHandlers()();
+  it("deleteMany rewrites to soft deletion via the model delegate while explicit deletedAt stays hard", async () => {
+    const delegateUpdateMany = vi.fn().mockResolvedValue({ count: 3 });
+    const delegateDeleteMany = vi.fn().mockResolvedValue({ count: 9 });
+    const handlers = captureHandlers({
+      errandTask: { updateMany: delegateUpdateMany, deleteMany: delegateDeleteMany },
+    })();
 
-    const softQuery = makeQuery({ count: 3 });
+    // 软删除模型：改写为 base client 的 updateMany 打标记（query 组件无法改操作类型，
+    // 直接在 deleteMany 钩子里传 data 会 PrismaClientValidationError）
     await handlers.deleteMany({
       model: "ErrandTask",
       args: { where: { publisherId: "u1" } },
-      query: softQuery,
+      query: makeQuery({ count: 0 }),
     });
-    expect(softQuery).toHaveBeenCalledWith({
+    expect(delegateUpdateMany).toHaveBeenCalledWith({
       where: { publisherId: "u1", deletedAt: null },
       data: { deletedAt: expect.any(Date) },
     });
 
+    // 显式以 deletedAt 为条件：豁免改写，query(args) 原生硬删除透传
     const hardQuery = makeQuery({ count: 9 });
     await handlers.deleteMany({
       model: "ErrandTask",
@@ -253,6 +259,27 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
       query: hardQuery,
     });
     expect(hardQuery).toHaveBeenCalledWith({ where: { deletedAt: { not: null } } });
+    expect(delegateDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it("deleteMany fails fast when a soft-delete model delegate cannot be resolved; non soft-delete models pass through", async () => {
+    const handlers = captureHandlers()();
+
+    await expect(
+      handlers.deleteMany({
+        model: "NonexistentModel",
+        args: { where: { id: "x" } },
+        query: makeQuery({ count: 0 }),
+      }),
+    ).resolves.toEqual({ count: 0 });
+
+    await expect(
+      handlers.deleteMany({
+        model: "Product",
+        args: { where: { id: "x" } },
+        query: makeQuery({ count: 0 }),
+      }),
+    ).rejects.toThrow("软删除映射失败");
   });
 
   it("single delete maps onto a soft-delete update through the model delegate", async () => {

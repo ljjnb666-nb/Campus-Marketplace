@@ -210,6 +210,37 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
     expect(signed.body).toBe("private-integration-test");
   });
 
+  it("getObject：同源代理式私有资产读取（内容/类型/大小一致；缺失返回 null）", async () => {
+    const { S3Storage } = await import("@/lib/storage/s3-storage");
+    const { buildObjectKey } = await import("@/lib/storage/object-key");
+    const storage = new S3Storage(s3!);
+
+    const objectKey = buildObjectKey({
+      access: "PRIVATE",
+      categoryDirectory: "verification",
+      userId: "it-user-1",
+      fileExtension: ".jpg",
+    });
+    const payload = Buffer.from("integration-get-object-bytes");
+
+    await storage.putObject({
+      bucket: privateBucket,
+      objectKey,
+      body: payload,
+      contentType: "image/jpeg",
+      cacheControl: "private, no-store",
+    });
+
+    const result = await storage.getObject({ bucket: privateBucket, objectKey });
+    expect(result).not.toBeNull();
+    expect(Buffer.compare(result!.body, payload)).toBe(0);
+    expect(result!.contentType).toBe("image/jpeg");
+    expect(result!.sizeBytes).toBe(payload.byteLength);
+
+    await storage.deleteObject({ bucket: privateBucket, objectKey });
+    await expect(storage.getObject({ bucket: privateBucket, objectKey })).resolves.toBeNull();
+  });
+
   it("删除幂等：删除后 head 返回 null，重复删除不抛错", async () => {
     const { S3Storage } = await import("@/lib/storage/s3-storage");
     const { buildObjectKey } = await import("@/lib/storage/object-key");

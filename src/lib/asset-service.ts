@@ -785,7 +785,10 @@ export async function resolvePrivateAssetAccess(
 }
 
 /** 生成私有资源短时签名读 URL（TTL 来自 env，默认 5 分钟）。
- * 响应 Cache-Control 强制 private, no-store：签名过期不等于缓存自动消失。 */
+ * 响应 Cache-Control 强制 private, no-store：签名过期不等于缓存自动消失。
+ * 注意：URL 指向对象存储端点本身，仅供服务端/受信环境使用——
+ * 浏览器交付一律走 readPrivateAssetObject 的同源代理（见 /api/assets/[id]/content），
+ * 否则 self-hosted 部署下会把不可达的内部 endpoint 泄漏给客户端。 */
 export async function createPrivateAssetSignedUrl(asset: {
   bucket: string;
   objectKey: string;
@@ -797,6 +800,42 @@ export async function createPrivateAssetSignedUrl(asset: {
     PRIVATE_OBJECT_CACHE_CONTROL,
   );
   return { url, expiresIn };
+}
+
+/**
+ * 同源代理式私有资产读取：重新执行服务端鉴权（独立于 access API 的任何前置
+ * 授权），由 server 使用内部凭据经 S3_ENDPOINT 读取对象内容。
+ * self-hosted 生产部署下浏览器无法解析内部 endpoint（如 http://minio:9000），
+ * 私有对象必须经由本函数由应用读取后转发。错误路径不泄露 bucket/objectKey/端点。
+ */
+export async function readPrivateAssetObject(
+  assetId: string,
+  user: { id: string; role: string },
+  now = new Date(),
+): Promise<
+  | { ok: true; body: Buffer; contentType: string | null; sizeBytes: number }
+  | { ok: false; reason: "not_found" | "forbidden" | "expired" }
+> {
+  const access = await resolvePrivateAssetAccess(assetId, user, now);
+  if (!access.ok) {
+    // PUBLIC 资产不走私有内容端点（有公开 URL）；统一按不存在处理
+    return { ok: false, reason: access.reason === "not_private" ? "not_found" : access.reason };
+  }
+
+  const object = await getStorage().getObject({
+    bucket: access.asset.bucket,
+    objectKey: access.asset.objectKey,
+  });
+  if (!object) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  return {
+    ok: true,
+    body: object.body,
+    contentType: object.contentType,
+    sizeBytes: object.sizeBytes,
+  };
 }
 
 /**

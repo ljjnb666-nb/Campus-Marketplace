@@ -126,7 +126,7 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
 提交时服务端 `resolveImageTokens` 校验归属并把 UPLOADED 资源转成 ATTACHED（绑定业务实体）。
 订单类照片（handover/return/claim/dispute）由 action 上传，maxCount 在服务端强制执行。
 
-## 6. 私有资源签名访问
+## 6. 私有资源访问（同源代理式交付）
 
 `GET /api/assets/{assetId}/access`（登录必需）：
 
@@ -137,9 +137,21 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
    - VERIFICATION：资源本人、ADMIN
    - HANDOVER / RETURN / REPORT：资源本人、对应 RentalOrder 的 renter/owner、ADMIN
    - 其他 → 403
-5. 签发短时签名 URL（默认 5 分钟），响应不泄露 objectKey
+5. 返回**同源代理 URL**：`/api/assets/{assetId}/content`（不泄露 objectKey）
 
-管理端 `admin/verifications` 通过 `PrivateAssetViewer` 客户端组件调本接口查看学生证材料。
+`GET /api/assets/{assetId}/content`（同源内容端点，每次请求独立鉴权）：
+
+- 重新执行与 access 相同的服务端授权后，由 server 使用内部凭据经
+  `S3_ENDPOINT` 读取对象并转发（`StorageClient.getObject`）
+- **浏览器永远不接触对象存储端点**：self-hosted 部署下 `http://minio:9000`
+  仅存在于 backend 网络，签名 URL 对浏览器不可达且会泄露内部基础设施，
+  因此私有交付一律走本端点（`PRIVATE_SIGNED_URL_TTL_SECONDS` 仅保留给
+  服务端间/受信环境的签名 URL 场景）
+- 响应头：`Cache-Control: private, no-store`、`X-Content-Type-Options: nosniff`、
+  Content-Type 来自上传时服务端写入的可信对象 metadata
+- 错误响应不泄露 bucket/objectKey/端点；401/403/404/410 与 access 一致
+
+管理端 `admin/verifications` 通过 `PrivateAssetViewer` 客户端组件调本组接口查看学生证材料。
 
 ## 7. 配额（并发安全 + 崩溃可恢复）
 

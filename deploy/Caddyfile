@@ -1,0 +1,59 @@
+# Campus Marketplace — 反向代理配置（Caddy）
+#
+# SITE_ADDRESS 由 compose 从 .env.production 注入：
+#   - 正式域名（如 campus.example.edu.cn）：ACME 自动签发/续期 Let's Encrypt 证书
+#   - 无域名阶段：可用 ":443" 配合手动证书（见 docs/PRODUCTION_DEPLOYMENT.md TLS 一节）
+#
+# Caddy 默认行为已满足的要求：
+#   - HTTP(80) → HTTPS 301 自动重定向
+#   - TLS 1.2+（tls 协议默认 min tls1.2）
+#   - 证书自动续期（ACME 自动管理，存于 caddy_data 卷）
+#   - X-Forwarded-For/Proto/Host 默认传给上游（应用限流依赖第一跳为真实客户端 IP）
+
+{$SITE_ADDRESS} {
+	# 上传上限 10MB（UPLOAD_LIMITS 最大单文件），留出 multipart 余量
+	request_body {
+		max_size 12MB
+	}
+
+	encode gzip zstd
+
+	header {
+		# 隐藏代理与上游指纹
+		-Server
+		-XPowered-By
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# ------------------------------------------------------------------
+	# 公共资产只读出口（self-hosted MinIO，PUBLIC_ASSET_BASE_URL 路径）：
+	#   https://<域名>/assets/<objectKey>  →  minio:9000/campus-public/<objectKey>
+	#
+	# 安全模型：
+	#   - bucket 前缀在本 route 内固定为 campus-public，private 桶无法通过
+	#     任何路径到达（编码路径切换只会变成对象 key 的一部分 → 404）
+	#   - 写操作由 MinIO bucket policy 拒绝（public 桶仅匿名 download）
+	#   - Console(9001)/Admin API(/minio/...) 不在该 route 的可达路径内
+	#   - 应用写入仍走 backend 网络的 S3_ENDPOINT（http://minio:9000），
+	#     与浏览器侧 PUBLIC_ASSET_BASE_URL 严格区分
+	# ------------------------------------------------------------------
+	handle_path /assets/* {
+		rewrite * /campus-public{uri}
+		reverse_proxy minio:9000
+	}
+
+	handle {
+		reverse_proxy app:3000 {
+			# 真实客户端 IP（限流登录键依赖第一跳，非默认头）
+			header_up X-Real-IP {remote_host}
+			# 流式响应（SSE/长连接）不被代理截断
+			flush_interval -1
+		}
+	}
+
+	# 健康检查端点不允许缓存
+	header /api/health Cache-Control "no-store"
+}

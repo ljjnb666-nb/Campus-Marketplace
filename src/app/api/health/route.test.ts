@@ -42,6 +42,22 @@ describe("GET /api/health", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it("reports release identity from RELEASE_SHA, falling back to dev", async () => {
+    queryRawMock.mockResolvedValue([{ 1: 1 }]);
+
+    const previous = process.env.RELEASE_SHA;
+    try {
+      delete process.env.RELEASE_SHA;
+      expect((await (await GET()).json()).release).toBe("dev");
+
+      process.env.RELEASE_SHA = "abc123";
+      expect((await (await GET()).json()).release).toBe("abc123");
+    } finally {
+      if (previous === undefined) delete process.env.RELEASE_SHA;
+      else process.env.RELEASE_SHA = previous;
+    }
+  });
+
   it("returns 503 and logs when the database is unreachable", async () => {
     queryRawMock.mockRejectedValue(new Error("connection refused"));
 

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import {
-  createPrivateAssetSignedUrl,
   resolvePrivateAssetAccess,
   resolvePublicAssetUrl,
 } from "@/lib/asset-service";
@@ -11,7 +10,10 @@ export const dynamic = "force-dynamic";
 
 /**
  * 资源访问入口：
- * - PRIVATE 资源：鉴权后返回短时签名 URL（默认 5 分钟，env 可配）
+ * - PRIVATE 资源：鉴权后返回同源代理 URL（/api/assets/<id>/content）。
+ *   每次对该 URL 的访问都会在 content 端点重新执行服务端鉴权；
+ *   绝不返回对象存储端点的签名 URL（self-hosted 部署下浏览器无法解析
+ *   内部 endpoint，且该 URL 会泄露内部基础设施信息）。
  * - PUBLIC 资源：直接返回公开 URL（无需签名）
  *
  * 状态码约定：401 未登录 / 403 无权 / 404 不存在（含已删除）/ 410 已过保留期
@@ -62,22 +64,21 @@ export async function GET(
       return NextResponse.json({ message: "资源不存在" }, { status: 404 });
     }
 
-    const { url, expiresIn } = await createPrivateAssetSignedUrl({
-      bucket: result.asset.bucket,
-      objectKey: result.asset.objectKey,
-    });
-
-    logger.info("私有资源签名访问签发", "GET /api/assets/[assetId]/access", {
+    logger.info("私有资源同源访问许可签发", "GET /api/assets/[assetId]/access", {
       operation: "asset-access",
       assetId,
       userId,
       category: result.asset.category,
-      expiresIn,
       durationMs: Date.now() - startedAt,
     });
 
-    // 只回传签名 URL 与有效期，不泄露 objectKey
-    return NextResponse.json({ url, expiresIn, access: "PRIVATE" });
+    // 同源代理 URL：每次访问都会在 content 端点重新鉴权（会话级授权语义），
+    // 不伪造"5 分钟过期"——返回体中不再包含 presigned expiresIn。
+    // 只回传相对路径，不泄露 objectKey/bucket/对象存储端点。
+    return NextResponse.json({
+      url: `/api/assets/${encodeURIComponent(assetId)}/content`,
+      access: "PRIVATE",
+    });
   } catch (error) {
     logger.error("资源访问接口失败", "GET /api/assets/[assetId]/access", {
       operation: "asset-access",

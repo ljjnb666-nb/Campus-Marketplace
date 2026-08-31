@@ -147,27 +147,44 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   const assetId = handoverAssets[0].id;
   const accessUrl = `/api/assets/${assetId}/access`;
 
-  // 参与双方（OWNER / RENTER）可获取签名 URL
+  // 参与双方（OWNER / RENTER）可获取同源代理 URL
   const ownerResponse = await owner.request.get(accessUrl);
   expect(ownerResponse.status()).toBe(200);
   const ownerBody = await ownerResponse.json();
   expect(ownerBody.access).toBe("PRIVATE");
-  expect(ownerBody.url).toContain("campus-private");
+  // 私有资产必须返回 same-origin 代理 URL（每次访问在 content 端点重新鉴权），
+  // 绝不能是对象存储内部签名 URL（self-hosted 下浏览器不可达且泄露内部端点）
+  expect(ownerBody.url).toBe(`/api/assets/${assetId}/content`);
+  expect(ownerBody.url).not.toContain("minio");
+  expect(ownerBody.url).not.toContain(":9000");
+  expect(ownerBody.url).not.toContain("campus-private");
+
+  // 真实走完 access API → returned URL → 浏览器侧内容读取（交接照片必须可见）
+  const contentResponse = await owner.request.get(ownerBody.url);
+  expect(contentResponse.status()).toBe(200);
+  expect(contentResponse.headers()["content-type"]).toContain("image/");
+  expect(contentResponse.headers()["cache-control"]).toBe("private, no-store");
+  expect((await contentResponse.body()).byteLength).toBeGreaterThan(0);
 
   const renterResponse = await renter.request.get(accessUrl);
   expect(renterResponse.status()).toBe(200);
+  // 参与者沿同一路径也能取到内容
+  expect((await renter.request.get((await renterResponse.json()).url)).status()).toBe(200);
 
   // ADMIN 可访问
   const adminContext = await browser.newContext({ storageState: storageStatePath("admin") });
   const admin = await adminContext.newPage();
   const adminResponse = await admin.request.get(accessUrl);
   expect(adminResponse.status()).toBe(200);
+  expect((await admin.request.get((await adminResponse.json()).url)).status()).toBe(200);
 
   // 无关用户 403
   const outsiderContext = await browser.newContext({ storageState: storageStatePath("outsider") });
   const outsider = await outsiderContext.newPage();
   const outsiderResponse = await outsider.request.get(accessUrl);
   expect(outsiderResponse.status()).toBe(403);
+  // content 端点独立鉴权：即使知道 URL 形状，无关用户也被 403
+  expect((await outsider.request.get(`/api/assets/${assetId}/content`)).status()).toBe(403);
 
   // 无关用户直接打开租赁订单详情 → notFound（streaming 下可能以 200 交付 404 页，
   // 以"拿不到订单数据"为准：详情页应由参与者才能看到租赁物品标题）
@@ -176,11 +193,12 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   ).text();
   expect(outsiderDetailBody).not.toContain("租赁订单详情");
 
-  // 匿名 401
+  // 匿名 401（access 与 content 端点均独立要求会话）
   const anonContext = await browser.newContext();
   const anon = await anonContext.newPage();
   const anonResponse = await anon.request.get(accessUrl);
   expect(anonResponse.status()).toBe(401);
+  expect((await anon.request.get(`/api/assets/${assetId}/content`)).status()).toBe(401);
 
   await ownerContext.close();
   await renterContext.close();

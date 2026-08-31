@@ -32,6 +32,8 @@ tests/e2e/.run-state.json
 .env
 .env.*
 !.env.example
+!.env.production.example
+!.env.production.synthetic
 
 # Logs
 *.log

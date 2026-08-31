@@ -1,0 +1,195 @@
+# =============================================================================
+# Campus Marketplace — production topology
+#
+#   Internet ──80/443──▶ caddy ──▶ app (Next.js standalone)
+#                                   ├─▶ postgres (backend, 无端口发布)
+#                                   ├─▶ redis    (backend, 无端口发布)
+#                                   └─▶ minio    (可选 profile，backend，无端口发布)
+#
+# 原则：
+# - 只有 caddy 发布 80/443；5432/6379/9000/9001/3000 一律不进公网
+# - app 镜像以 GIT_SHA build arg 构建出不可变 tag，/api/health 可回报 release
+# - 迁移不随 app 启动自动执行：由 scripts/ops/deploy.sh 先跑一次 migrate（见下）
+# - secrets 全部来自 .env.production（不入 Git），镜像内不含任何秘密
+#
+# 常用命令（在服务器上；插值只来自 --env-file 的 .env.production）：
+#   docker compose --env-file .env.production -f compose.production.yml ...
+# 常用命令（封装脚本统一走 scripts/ops/lib.sh 的 compose_run）：
+#   构建并启动：  --profile ops up -d --build
+#   一次性迁移：  --profile ops run --rm migrate
+#   备份/恢复：   scripts/ops/backup-postgres.sh / restore-postgres.sh
+# =============================================================================
+name: campus-marketplace-production
+
+x-default-restart: &default-restart
+  restart: unless-stopped
+
+services:
+  # ---- 边缘：唯一公网入口（80 只做 HTTPS 重定向，Caddy 自动处理）----
+  caddy:
+    image: caddy:2-alpine
+    <<: *default-restart
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      # 正式域名（ACME 自动签发/续期）；无域名阶段可用 IP:443 + 手动证书模板
+      SITE_ADDRESS: ${SITE_ADDRESS:?请在 .env.production 中设置 SITE_ADDRESS}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - edge
+      - backend
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ---- 应用 ----
+  app:
+    build:
+      context: .
+      target: runner
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: campus-marketplace-app:${GIT_SHA:-local}
+    <<: *default-restart
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      # 容器内对象存储走 backend 网络的服务名（自建 MinIO 时）
+      # 使用外部 S3 提供商时由 .env.production 的 S3_ENDPOINT 决定
+    expose:
+      - "3000"
+    networks:
+      - edge
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ---- 一次性迁移（绝不随 app 启动自动并发执行）----
+  migrate:
+    build:
+      context: .
+      target: migrator
+    image: campus-marketplace-migrator:${GIT_SHA:-local}
+    profiles: ["ops"]
+    env_file: .env.production
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---- 数据层（仅 backend 网络，无任何端口发布）----
+  postgres:
+    image: postgres:16-alpine
+    <<: *default-restart
+    env_file: .env.production
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?请在 .env.production 中设置 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env.production 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?请在 .env.production 中设置 POSTGRES_DB}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      TZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - timezone=Asia/Shanghai
+      - -c
+      - max_connections=100
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    <<: *default-restart
+    env_file: .env.production
+    # 数据分类 EPHEMERAL（仅限流计数，见 docs/PRODUCTION_DEPLOYMENT.md）：
+    # 不挂持久卷；清空/重启不损伤订单、资产、账户等持久数据
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --requirepass "$${REDIS_PASSWORD}" --maxmemory 128mb --maxmemory-policy allkeys-lru --appendonly no
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  # ---- 自建 MinIO（可选；使用外部 S3 提供商时不要启动本组）----
+  minio:
+    image: minio/minio:latest
+    <<: *default-restart
+    profiles: ["selfhosted-minio"]
+    env_file: .env.production
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["selfhosted-minio"]
+    env_file: .env.production
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./deploy/minio-app-policy.template.json:/app/policy.template.json:ro
+    # 幂等初始化（可重复运行）：
+    #   1. 建 public/private bucket（Phase 1 policy：public 仅匿名下载，private 全私有）
+    #   2. 创建应用专用用户（S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY，非 root 凭据）
+    #   3. least-privilege policy：仅两个业务 bucket 的业务读写，无任何 admin 权限
+    #   4. 绑定 policy 到应用用户
+    # 轮换 S3_SECRET_ACCESS_KEY 时需同步更新 MinIO 用户（见 docs/PRODUCTION_DEPLOYMENT.md）
+    entrypoint: >
+      /bin/bash -c "
+      set -e &&
+      mc alias set local \"$$MINIO_ENDPOINT\" \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
+      mc mb --ignore-existing local/$$S3_BUCKET_PUBLIC &&
+      mc mb --ignore-existing local/$$S3_BUCKET_PRIVATE &&
+      mc anonymous set download local/$$S3_BUCKET_PUBLIC &&
+      mc anonymous set none local/$$S3_BUCKET_PRIVATE &&
+      if ! mc admin user info local \"$$S3_ACCESS_KEY_ID\" >/dev/null 2>&1; then mc admin user add local \"$$S3_ACCESS_KEY_ID\" \"$$S3_SECRET_ACCESS_KEY\"; fi &&
+      if mc admin policy info local campus-app-policy >/dev/null 2>&1; then mc admin policy detach local campus-app-policy --user \"$$S3_ACCESS_KEY_ID\" && mc admin policy remove local campus-app-policy; fi &&
+      POLICY_JSON=\"$$(< /app/policy.template.json)\" &&
+      POLICY_JSON=\"$${POLICY_JSON//__PUBLIC_BUCKET__/$$S3_BUCKET_PUBLIC}\" &&
+      POLICY_JSON=\"$${POLICY_JSON//__PRIVATE_BUCKET__/$$S3_BUCKET_PRIVATE}\" &&
+      printf '%s' \"$$POLICY_JSON\" > /tmp/app-policy.json &&
+      mc admin policy create local campus-app-policy /tmp/app-policy.json &&
+      mc admin policy attach local campus-app-policy --user \"$$S3_ACCESS_KEY_ID\" &&
+      echo 'minio-init 完成：bucket/匿名策略/应用用户 least-privilege policy 已就绪'"
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+  minio_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+  backend:

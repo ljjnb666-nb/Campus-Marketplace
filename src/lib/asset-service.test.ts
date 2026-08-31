@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   putObject,
   deleteObject,
+  getObject,
   getSignedReadUrl,
   executeRaw,
   assetCreate,
@@ -14,6 +15,7 @@ const {
 } = vi.hoisted(() => ({
   putObject: vi.fn(),
   deleteObject: vi.fn(),
+  getObject: vi.fn(),
   getSignedReadUrl: vi.fn(),
   executeRaw: vi.fn(),
   assetCreate: vi.fn(),
@@ -32,6 +34,7 @@ vi.mock("@/lib/storage", async (importOriginal) => {
       putObject,
       deleteObject,
       getSignedReadUrl,
+      getObject,
     }),
   };
 });
@@ -71,13 +74,13 @@ import {
   ATTACH_COMPATIBILITY,
   AssetServiceError,
   attachAssetsToEntity,
-  createPrivateAssetSignedUrl,
   isAssetCompatibleWithTarget,
   isSameAttachment,
   markAssetPendingDelete,
   markAssetsForValuesPendingDelete,
   purgePendingDeleteAsset,
   quotaBytes,
+  readPrivateAssetObject,
   resolveImageTokens,
   resolvePrivateAssetAccess,
   uploadImageAsset,
@@ -700,21 +703,52 @@ describe("resolvePrivateAssetAccess", () => {
     ).toEqual({ ok: false, reason: "forbidden" });
   });
 
-  it("signs a short-lived read url with private no-store response policy", async () => {
-    getSignedReadUrl.mockResolvedValue("http://localhost:9100/campus-private/signed?token=x");
-
-    const result = await createPrivateAssetSignedUrl({
-      bucket: "campus-private",
-      objectKey: baseAsset.objectKey,
+  it("readPrivateAssetObject：owner 授权后由 server 经内部凭据读取对象内容", async () => {
+    const body = Buffer.from("private-evidence");
+    getObject.mockResolvedValue({
+      body,
+      contentType: "image/jpeg",
+      sizeBytes: body.byteLength,
     });
 
-    expect(result.url).toContain("token=x");
-    expect(result.expiresIn).toBe(300);
-    expect(getSignedReadUrl).toHaveBeenCalledWith(
-      { bucket: "campus-private", objectKey: baseAsset.objectKey },
-      300,
-      "private, no-store",
-    );
+    const result = await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" });
+
+    expect(result).toEqual({
+      ok: true,
+      body,
+      contentType: "image/jpeg",
+      sizeBytes: body.byteLength,
+    });
+    expect(getObject).toHaveBeenCalledWith({
+      bucket: baseAsset.bucket,
+      objectKey: baseAsset.objectKey,
+    });
+  });
+
+  it("readPrivateAssetObject：对象缺失按 not_found 处理（不泄露存储细节）", async () => {
+    getObject.mockResolvedValue(null);
+
+    expect(
+      await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" }),
+    ).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  it("readPrivateAssetObject：未授权与过期不触发对象读取", async () => {
+    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
+
+    expect(
+      await readPrivateAssetObject("asset-1", { id: "user-2", role: "STUDENT" }),
+    ).toEqual({ ok: false, reason: "forbidden" });
+    expect(getObject).not.toHaveBeenCalled();
+
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      expiresAt: new Date("2026-01-01T00:00:00Z"),
+    });
+    expect(
+      await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" }),
+    ).toEqual({ ok: false, reason: "expired" });
+    expect(getObject).not.toHaveBeenCalled();
   });
 });
 

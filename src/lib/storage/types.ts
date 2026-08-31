@@ -24,6 +24,13 @@ export interface ObjectMetadata {
   contentType: string | null;
 }
 
+/** getObject 结果：内容 + 可信对象元数据（由上传方写入的对象 metadata） */
+export interface GetObjectResult {
+  body: Buffer;
+  contentType: string | null;
+  sizeBytes: number;
+}
+
 export interface StorageClient {
   /** 上传对象（服务端凭据，浏览器不持有任何 S3 密钥） */
   putObject(input: PutObjectInput): Promise<void>;
@@ -33,6 +40,12 @@ export interface StorageClient {
 
   /** 查询对象元数据；对象不存在返回 null */
   headObject(ref: ObjectRef): Promise<ObjectMetadata | null>;
+
+  /**
+   * 读取对象内容（服务端凭据）。对象不存在返回 null。
+   * 用于同源代理式私有资产交付：浏览器永远不接触对象存储端点。
+   */
+  getObject(ref: ObjectRef): Promise<GetObjectResult | null>;
 
   /**
    * 生成短时签名读 URL。
