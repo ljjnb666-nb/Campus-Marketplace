@@ -1,6 +1,6 @@
 # 备份与恢复（Backup & Restore）
 
-> 备份是 Phase 3 硬门禁：**只有实际执行过 restore drill 才允许标记 BACKUP_RESTORE PASS**。
+> 备份是 Production Phase 3A 硬门禁：**只有实际执行过 restore drill 才允许标记 BACKUP_RESTORE PASS**。
 > 部署流程见 [PRODUCTION_DEPLOYMENT.md](./PRODUCTION_DEPLOYMENT.md)。
 
 ## 1. 备份

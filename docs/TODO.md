@@ -1,5 +1,81 @@
 # 开发计划
 
+## Production 阶段总览（formal phase map，2026-08-30 定稿）
+
+| 阶段 | 名称 | 状态 |
+| --- | --- | --- |
+| Production Phase 1 | Object Storage + Sensitive File Separation | **DONE**（2026-08-28） |
+| Production Phase 2 | Playwright Critical-path E2E + Release Gate | **DONE**（2026-08-30） |
+| Production Phase 3A | Production Deployment Foundation（仓库侧） | **DONE / REPO_SIDE_ACCEPTED**（2026-08-30） |
+| Production Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（真实外部基础设施暂不提供） |
+| Production Phase 4 | Observability / Monitoring / Recovery Foundation | **NEXT** |
+| Production Phase 5 | Agreements / Privacy / Platform Rules / Data Governance | 未开始 |
+| Production Phase 6 | Payment Domain Model | 未开始 |
+| Production Phase 7 | Licensed Payment Provider Integration | 未开始 |
+| Production Phase 8 | Refund / Split / Platform Fee / Ledger / Reconciliation | 未开始 |
+| Production Phase 9 | Operations Dashboard / Funnel Analytics | 未开始 |
+| Production Phase 10 | Controlled Single-campus Pilot | 未开始 |
+
+> **PRODUCTION_LAUNCH_BLOCKED = TRUE**
+>
+> 原因：`PHASE_3B_REAL_DEPLOYMENT = DEFERRED`（非代码质量失败）。
+> Phase 4 及其后的仓库开发可以继续，但**不得因后续 Phase 完成而认为产品可以正式公网发布**；
+> 正式上线前必须重新打开并完成 Phase 3B（真实服务器、域名、DNS、生产 TLS、异地备份目标、
+> 生产冒烟与 rollback drill 等全部硬门禁，见下节）。
+
+## Production Phase 3A — Production Deployment Foundation（2026-08-30 完成）
+
+`PHASE_3A_REPO_SIDE_ACCEPTED = YES`。范围限定为**仓库侧**生产部署基础，不包含真实公网部署。
+权威文档：[PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)、[BACKUP_RESTORE.md](BACKUP_RESTORE.md)、
+[ROLLBACK.md](ROLLBACK.md)、[PRODUCTION_SECURITY.md](PRODUCTION_SECURITY.md)。
+
+- [x] production Docker packaging：多阶段 Dockerfile（deps/builder/runner/migrator）、standalone 输出（仅容器构建启用）、非 root、HEALTHCHECK、GIT_SHA → `/api/health` release identity
+- [x] production Compose topology：caddy（唯一 80/443）+ app + postgres + redis 全内网；数据端口零发布
+- [x] Caddy/reverse proxy：ACME 自动 HTTPS 模板、HTTP→HTTPS 308、`/assets/*` 公共资产只读出口（bucket 前缀固定）
+- [x] production env/secrets validation：`.env.production.example` + `production-env-check`（含 self-hosted bucket 固定契约）
+- [x] PostgreSQL migration deployment：`migrate deploy` 一次性容器 + no-pending 验证；禁止 dev/db push
+- [x] backup/restore tooling：`pg_dump -Fc` + SHA256 + retention + offsite 失败即整体 FAIL；restore 拒绝覆盖生产库名
+- [x] restore drill tooling：`restore-drill.sh`（真实执行通过）
+- [x] safe/hard rollback foundation：不可变 SHA 镜像、`switch_app_to` exact-image hard assert、`restore-production-postgres.sh` fail-closed
+- [x] Redis production baseline：requirepass + EPHEMERAL 数据分类（仅限流）
+- [x] S3/object-storage production foundation：fail-fast env 断言
+- [x] self-hosted MinIO public/private delivery：least-privilege policy、public 匿名读/写拒、private 经同源代理端点 `/api/assets/[id]/content`（浏览器永不接触 minio:9000）
+- [x] E2E production safety guard：destructive reset 显式 allow policy（NODE_ENV/库名/loopback/override）
+- [x] CI release gates：verify（lint/typecheck/test/coverage/build）+ e2e（Playwright critical paths）双 job
+- [x] master branch protection：PR before merge + verify/e2e required checks + enforce admins + 禁 force push/删除
+
+## Production Phase 3B — Real Production Deployment（DEFERRED）
+
+`PHASE_3B_REAL_DEPLOYMENT = DEFERRED`。原因：真实外部基础设施（服务器/域名/DNS 等）当前暂不提供——
+这是外部资源缺口，不是代码质量失败。Phase 3A 的全部仓库侧能力已就绪，3B 启动时按以下硬门禁逐项执行：
+
+1. Authorized Linux production server
+2. Docker >= 24
+3. Docker Compose v2
+4. SSH management access
+5. Real production domain
+6. DNS A/AAAA
+7. Real ACME HTTPS certificate
+8. HTTP → HTTPS verification
+9. Production PostgreSQL deployment
+10. Production Redis verification
+11. Real S3 or self-hosted MinIO production deployment
+12. Off-site backup destination
+13. Actual production backup
+14. Actual restore drill
+15. Actual restart/reboot verification
+16. Actual exact-image rollback drill
+17. External production-origin smoke
+18. Authenticated production smoke
+19. Public asset production verification
+20. Private asset production verification
+21. Network exposure verification（仅 80/443 公开；3000/5432/6379/9000/9001/22 约束见 PRODUCTION_SECURITY.md）
+22. Real release SHA verification（`/api/health` release == 部署 SHA）
+
+> **EXTERNAL_COMPLIANCE_PREREQUISITE**（若部署于中国大陆）：上线前必须实际确认
+> ICP 备案/许可、公安联网备案、域名实名、云厂商接入要求等外部合规事项；
+> 未取得真实凭证前不得声称已完成。法务细节属 Production Phase 5 范畴，此处仅标记前置条件。
+
 ## Phase 1
 
 - [x] 初始化 Next.js + Tailwind + Prisma
@@ -38,8 +114,10 @@
 
 ## 当前待补
 
-- [ ] GitHub branch protection 将 verify / e2e 设为 required checks（需仓库管理员操作）
-- [ ] Production Phase 3：真实服务器部署、域名、HTTPS、支付、监控
+- [x] GitHub branch protection：verify / e2e 已设为 required checks（PR before merge + enforce admins + 禁 force push/删除）
+- [x] Production Phase 3A：仓库侧生产部署基础（见上节，REPO_SIDE_ACCEPTED）
+- [ ] Production Phase 4：Observability / Monitoring / Recovery Foundation（NEXT）
+- [ ] Production Phase 3B：真实服务器部署（DEFERRED——待真实服务器/域名/DNS 等外部资源就绪后重开）
 - [ ] 继续做少量低频页面文案与体验收尾
 
 ## Production Phase 1（对象存储，2026-08-28 完成）

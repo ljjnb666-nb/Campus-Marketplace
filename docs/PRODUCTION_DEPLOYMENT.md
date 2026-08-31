@@ -1,5 +1,10 @@
 # 生产部署（Production Deployment）
 
+> **阶段状态**：本文档描述的能力属于 **Production Phase 3A — Production Deployment Foundation**
+> （`REPO_SIDE_ACCEPTED = YES`）。真实服务器/域名/DNS/生产 TLS 等外部执行项属于
+> **Production Phase 3B — Real Production Deployment**（`DEFERRED`，硬门禁清单见
+> docs/TODO.md）。正式公网上线前必须完成 3B：`PRODUCTION_LAUNCH_BLOCKED = TRUE`。
+>
 > 运行拓扑、部署流程与日常运维的权威文档。备份/恢复见 [BACKUP_RESTORE.md](./BACKUP_RESTORE.md)，
 > 回滚见 [ROLLBACK.md](./ROLLBACK.md)，安全基线见 [PRODUCTION_SECURITY.md](./PRODUCTION_SECURITY.md)。
 
