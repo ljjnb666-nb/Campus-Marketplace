@@ -60,7 +60,9 @@
 
 `PHASE_3B_REAL_DEPLOYMENT = DEFERRED`。原因：真实外部基础设施（服务器/域名/DNS 等）当前暂不提供——
 这是外部资源缺口，不是代码质量失败。**重开时机：GATE B（Pilot Ready）通过之后**
-（见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.8）；Phase 5–14 完成不改变 3B 的 DEFERRED 状态。
+（见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.8）。Phase 5–11 的完成不会自动把 3B
+标记为 DONE；GATE B PASS 后 3B 必须被显式重开并执行真实 external gates；
+**Phase 12 Alpha 不得在 3B 仍处于 DEFERRED 状态时开始**。
 Phase 3A 的全部仓库侧能力已就绪，3B 重开时按以下硬门禁逐项执行：
 
 1. Authorized Linux production server
@@ -157,8 +159,8 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [ ] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**NEXT**——Master Roadmap v1.0 docs closure 落库后正式启动）
-- [ ] Production Phase 3B：真实服务器部署（DEFERRED——待真实服务器/域名/DNS 等外部资源就绪后重开；后续 Phase 完成不改变其 DEFERRED 状态）
-- [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §10 管理）
+- [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
+- [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
 ## Production Phase 1（对象存储，2026-08-28 完成）
 

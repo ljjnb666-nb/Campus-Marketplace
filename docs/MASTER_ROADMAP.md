@@ -56,7 +56,7 @@
 - `PRODUCTION_LAUNCH_BLOCKED = TRUE`
 
 **绝不声称 `PRODUCTION_READY = TRUE`。** 本仓库当前状态是"具备可部署的仓库侧能力"，
-不是"已具备公开生产运营资格"（见 §8）。
+不是"已具备公开生产运营资格"（见 §9）。
 
 当前测试基线（来自冻结基线对应的成功 master CI，非本地估算）：
 215 个测试文件 / 1216 个测试全部通过，覆盖率 lines 88.23% / branches 81.84% /
@@ -76,7 +76,7 @@ Phase 4 合并收口后，**仓库侧工程基础视为已验收**（GATE A PASS
 
 Phase 3B 保持 DEFERRED，原因不变：真实外部生产基础设施（服务器/域名/DNS 等）
 当前不提供——这是外部资源缺口，不是代码质量失败。
-**3B 的重开时机在 GATE B 之后**（见 §5、§6），且 GATE A 不改变
+**3B 的重开时机在 GATE B 之后**（见 §5.8），且 GATE A 不改变
 `PRODUCTION_LAUNCH_BLOCKED = TRUE`。
 
 ---
@@ -118,9 +118,13 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 22. external compliance prerequisites where applicable
     （ICP 备案/公安联网备案/域名实名等，以真实凭证为准）
 
-> **重要**：**Phase 5–11 完成，也不能自动把 3B 视为完成**；后续 Phase 12–24
-> 完成同样不能。3B 只能在 **GATE B（Pilot Ready）通过之后重开**，
-> 且只能通过实际执行上述 external gates 并留证来关闭。
+> **重要（Phase 3B 顺序硬约束）**：
+> - Phase 5–11 完成不会自动把 3B 标记为 DONE。
+> - **GATE B PASS 是重开 3B 的前置**（见 §5.8）；重开后必须实际执行上述
+>   external gates 并通过验收，3B 才算完成/关闭。
+> - **Phase 12 Alpha 的硬前置是 Phase 3B 已完成/关闭**——3B 仍处 DEFERRED 时
+>   Phase 12 不得开始。
+> - Phase 12–24 不能作为 3B external deployment completion 的替代证据。
 
 ---
 
@@ -251,11 +255,13 @@ pilot operational readiness。
 - mobile critical-path usability（Phase 11）
 - cold-start plan（Phase 11）
 
-**只有 GATE B 通过之后，才允许重开 Phase 3B（真实部署）。**
+**只有 GATE B 通过之后，才允许重开 Phase 3B（真实部署）。重开必须显式进行；
+重开后必须实际完成 §4 的全部 external gates 并通过验收，之后才允许进入 Phase 12。**
 
 ### 5.9 Phase 12–14 — 受控分阶段上线
 
-- **Phase 12 — Controlled Single-Campus Alpha**：约 10–20 名真实用户；
+- **Phase 12 — Controlled Single-Campus Alpha**（硬前置：Phase 3B 已完成/关闭；
+  3B 仍 DEFERRED 时本阶段不得开始）：约 10–20 名真实用户；
   使用线下/面对面支付语义；目标是发现严重的产品与运营失败。
 - **Phase 13 — Closed Campus Beta**：约 50–100 名用户；
   度量 activation、retention、listing liquidity、conversations、orders、
@@ -399,7 +405,8 @@ Ordinary merchant collection QR is **NOT** marketplace settlement infrastructure
 - `DEFERRED != DONE`（推迟不等于完成）
 - `REPO_SIDE_ACCEPTED != EXTERNAL_DEPLOYMENT_COMPLETED`（仓库侧验收不等于外部部署完成）
 
-executor report 不是验收依据；状态跃迁的唯一依据是 §10 的独立验收流程产生的客观证据。
+executor report 不是验收依据；状态跃迁的唯一依据是 §8 Review / Merge Contract
+的独立验收流程产生的客观证据。
 
 ---
 

@@ -35,8 +35,10 @@ E2E / Release Gate）、Phase 3A（仓库侧部署基础）、Phase 4（可观�
    **GATE A（Engineering Reliability）= PASS**：仓库侧工程基础验收完毕。
 2. **Phase 3B 保持 DEFERRED**：真实外部生产部署未完成；
    `PHASE_3B_REAL_DEPLOYMENT = DEFERRED`、`PRODUCTION_LAUNCH_BLOCKED = TRUE`。
-   3B 只能在 **GATE B（Pilot Ready）通过后重开**；Phase 5–11 乃至 12–24
-   完成也不能自动把 3B 视为完成。
+   Phase 5–11 完成不会自动把 3B 标记为 DONE；**GATE B（Pilot Ready）PASS
+   是重开 3B 的前置**，重开后必须实际完成 external gates 并通过验收；
+   **Phase 12 Alpha 的硬前置是 Phase 3B 已完成/关闭**，Phase 12–24 不能作为
+   3B external deployment completion 的替代证据。
 3. **Phase 5–24 顺序冻结（含 Gate A–D）**：
    - Phase 5 隐私/协议/平台规则/数据治理（NEXT）
    - Phase 6 身份/信任/安全/RBAC/审计（Campus 一等实体、CampusMembership、
