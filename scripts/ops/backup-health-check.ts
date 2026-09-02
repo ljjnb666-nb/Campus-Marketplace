@@ -24,6 +24,8 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 
+import { extractModeArg, OPERATION_MODES, parseOperationMode } from "./operation-mode";
+
 interface BackupStatus {
   status?: unknown;
   completedAt?: unknown;
@@ -228,7 +230,22 @@ async function main(): Promise<void> {
 
   const backupDir = args.dir ?? process.env.BACKUP_DIR ?? "";
   const maxAgeHours = Number(args["max-age-hours"] ?? process.env.BACKUP_MAX_AGE_HOURS ?? 26);
-  const mode = args.mode ?? (process.env.NODE_ENV === "production" ? "production" : "development");
+
+  // BLOCKER（修复轮 3，fail-closed）：与 ops-check 共用同一 mode 契约。
+  // 显式 --mode 非法（拼写错误/空值/缺值）→ INVALID_BACKUP_HEALTH_MODE +
+  // exit 1，绝不静默落入 development 的宽松（exit 0）语义。
+  const parsedMode = parseOperationMode(extractModeArg(process.argv));
+  if (!parsedMode.ok) {
+    console.log(
+      JSON.stringify({
+        result: "FAIL",
+        reason: "INVALID_BACKUP_HEALTH_MODE",
+        allowedModes: OPERATION_MODES,
+      }),
+    );
+    process.exit(1);
+  }
+  const mode = parsedMode.mode;
 
   if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0) {
     console.error("backup-health-check: --max-age-hours 必须为正数");

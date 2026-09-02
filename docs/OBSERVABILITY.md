@@ -93,7 +93,9 @@ NOT_FOUND / CONFLICT / RATE_LIMIT / DEPENDENCY / DATABASE / CACHE / STORAGE / IN
 > BLOCKER 2 修正：`/api/health` 是**真 liveness**——不访问 PostgreSQL/Redis/S3，
 > 无副作用。DB outage 不再导致 app 容器被 Docker HEALTHCHECK 误判 unhealthy
 > （HEALTHCHECK 只证明 app 进程存活）；依赖级健康完全由 `/api/ready` 表达。
-> 故障演练（observability-drill）以黑盒方式证明：PostgreSQL 停机时
+> 故障演练（observability-drill）以**真实依赖故障注入**证明（real dependency
+> failure drill：真实停/启容器 + 真实生产 readiness 实现 + 直接调用真实
+> /api/health route handler）：PostgreSQL 停机时
 > `/api/health` 仍 200、`/api/ready` 变 503 not_ready、恢复后回到 ready。
 
 Readiness 探测方式（无副作用）：
@@ -178,6 +180,8 @@ unexpected_server_errors_total          {category}
 - trap 在 BACKUP_DIR 可用后立即注册（BLOCKER 4B）：其后任何前置配置失败
   （如 POSTGRES_USER 缺失）都会留下 `status=failed` 状态产物（stage 明确）
 - 检查器 `npm run ops:backup-health`（`scripts/ops/backup-health-check.ts`）：
+  - mode 契约与 ops-check 一致（production/development/ci 白名单；
+    非法显式 mode → `INVALID_BACKUP_HEALTH_MODE` fail-closed）
   - 阈值 `BACKUP_MAX_AGE_HOURS` 可配置（默认 26）
   - **不盲信状态布尔**：真实验证 dump 文件与 `.sha256` 仍存在，且流式重算
     dump 的 SHA256 与 checksum 一致（发现"备份后损坏/篡改"）
@@ -209,6 +213,13 @@ Production 无 bypass（BLOCKER 1/1B）：
 | development | skipped | 已配置则检查 | 报告事实，不阻断 | 可选 |
 | ci | skipped | 同 development | 同上 | 可选 |
 | production | 强制 | 强制（不可 skip） | 强制（productionBackupReady 必须 true） | 必须 |
+
+Mode 契约（修复轮 3，fail-closed）：mode 白名单为 `production`/`development`/`ci`
+（`scripts/ops/operation-mode.ts` 单一裁决点，ops-check 与 backup-health-check 共用）。
+**未知/拼写错误的显式 mode（如 `--mode prodcution`、`--mode ""`、`--mode` 缺值）一律
+fail-closed**：`reason=INVALID_OPS_MODE` / `INVALID_BACKUP_HEALTH_MODE` + exit 1——
+绝不猜测最近似值、绝不降级为 development。只有**完全未提供** `--mode` 时才按
+NODE_ENV 取默认（production → production，其它 → development）。
 
 ## 8. Error UI / boundary
 

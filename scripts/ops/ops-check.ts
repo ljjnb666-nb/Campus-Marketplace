@@ -25,6 +25,7 @@ import { PrismaClient } from "@prisma/client";
 import { Redis } from "ioredis";
 
 import { collectEnvChecks } from "../production-env-check";
+import { parseOperationMode, extractModeArg, OPERATION_MODES } from "./operation-mode";
 import { evaluateBackupHealth } from "./backup-health-check";
 
 type CheckStatus = "pass" | "fail" | "skipped";
@@ -247,7 +248,24 @@ async function checkBackup(mode: string): Promise<OpsCheckResult> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const mode = args.mode ?? (process.env.NODE_ENV === "production" ? "production" : "development");
+
+  // BLOCKER（修复轮 3，fail-closed）：显式 --mode 必须严格属于允许集合。
+  // 拼写错误/空值/缺值（如 --mode prodcution / prod / ""）一律
+  // INVALID_OPS_MODE + exit 1——绝不静默降级为 development（否则会绕过
+  // production connectivity/backup gate）。只有"完全未提供 --mode"才走
+  // NODE_ENV 默认（production → production，其它 → development）。
+  const parsedMode = parseOperationMode(extractModeArg(process.argv));
+  if (!parsedMode.ok) {
+    const rejected = {
+      result: "FAIL",
+      reason: "INVALID_OPS_MODE",
+      allowedModes: OPERATION_MODES,
+    };
+    console.log(JSON.stringify(rejected));
+    process.exit(1);
+  }
+  const mode = parsedMode.mode;
+
   loadEnvOverlay(args["env-file"] ?? ".env.production");
 
   const results: OpsCheckResult[] = [];

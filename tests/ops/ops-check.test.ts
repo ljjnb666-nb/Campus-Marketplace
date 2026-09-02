@@ -295,4 +295,167 @@ describe("ops-check（npm run ops:check）", () => {
       cleanupBackup();
     }
   }, 150_000);
+
+  // ---- 修复轮 3：CLI mode fail-closed（INVALID_OPS_MODE）----
+
+  it("INVALID_OPS_MODE_FAIL_CLOSED：--mode prodcution（typo）+ --skip-connectivity → exit!=0 + reason=INVALID_OPS_MODE，绝不能 PASS", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      // 即使 typo mode 会被误判为"宽松 development"从而整个 gate 通过，
+      // 正确行为是 fail-closed——本用例专门证明 typo 无法绕过生产 gate
+      const failure = await execFileAsync(
+        process.execPath,
+        [
+          path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+          script,
+          "--mode",
+          "prodcution",
+          "--skip-connectivity",
+        ],
+        {
+          cwd,
+          timeout: 120_000,
+          env: syntheticProductionEnv(mkdtempSync(path.join(tmpdir(), "campus-mode-typo-"))),
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      const stdout = (failure as { stdout?: string }).stdout ?? "";
+      expect((failure as { code?: number }).code).not.toBe(0);
+      const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
+      expect(summary.result).toBe("FAIL");
+      expect(summary.reason).toBe("INVALID_OPS_MODE");
+      expect(summary.allowedModes).toEqual(["production", "development", "ci"]);
+      // 绝不进入任何检查流程（无 PASS、无检查结果行）
+      expect(stdout).not.toContain('"result":"PASS"');
+      expect(stdout).not.toContain("environment_contract");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
+
+  it.each([
+    ["prod", "拼写缩写"],
+    ["staging", "未知环境名"],
+    ["", "显式空值"],
+  ])("INVALID_OPS_MODE：--mode %s（%s）→ exit!=0 + reason=INVALID_OPS_MODE", async (badMode) => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      const argv = [
+        path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+        script,
+        "--mode",
+      ];
+      // 空串也必须显式传（模拟 shell 里 --mode ""）
+      if (badMode === "") {
+        argv.push("");
+      } else {
+        argv.push(badMode);
+      }
+
+      const failure = await execFileAsync(process.execPath, argv, {
+        cwd,
+        timeout: 120_000,
+        env: { ...process.env, NODE_ENV: "test" },
+        maxBuffer: 10 * 1024 * 1024,
+      }).catch((error: { stdout?: string; code?: number }) => error);
+
+      expect((failure as { code?: number }).code).not.toBe(0);
+      const summary = JSON.parse(((failure as { stdout?: string }).stdout ?? "").trim().split("\n").at(-1)!);
+      expect(summary.reason).toBe("INVALID_OPS_MODE");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
+
+  it("INVALID_OPS_MODE：--mode 后没有值（flag 末尾）→ exit!=0", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      const failure = await execFileAsync(
+        process.execPath,
+        [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), script, "--mode"],
+        {
+          cwd,
+          timeout: 120_000,
+          env: { ...process.env, NODE_ENV: "test" },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      expect((failure as { code?: number }).code).not.toBe(0);
+      const summary = JSON.parse(((failure as { stdout?: string }).stdout ?? "").trim().split("\n").at(-1)!);
+      expect(summary.reason).toBe("INVALID_OPS_MODE");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
+
+  it("--mode ci 是合法模式：与 development 同契约（skip-connectivity + 无配置 → PASS）", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [
+          path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+          script,
+          "--mode",
+          "ci",
+          "--skip-connectivity",
+        ],
+        {
+          cwd,
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            NODE_ENV: "test",
+            DATABASE_URL: "",
+            REDIS_URL: "",
+            S3_ENDPOINT: "",
+            BACKUP_DIR: "",
+            RELEASE_SHA: "",
+          },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+
+      const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
+      expect(summary.result).toBe("PASS");
+      expect(summary.mode).toBe("ci");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
+
+  it("无 --mode + NODE_ENV=production → 解析为 production（严格语义，env 缺失即 FAIL）", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      const failure = await execFileAsync(
+        process.execPath,
+        [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), script, "--skip-connectivity"],
+        {
+          cwd,
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            NODE_ENV: "production",
+            DATABASE_URL: "",
+            REDIS_URL: "",
+            S3_ENDPOINT: "",
+            BACKUP_DIR: "",
+            RELEASE_SHA: "",
+          },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      // NODE_ENV=production 默认进入严格模式：--skip-connectivity 被拒
+      //（development 下同一调用会 PASS）——mode 解析来自 NODE_ENV 默认
+      expect((failure as { code?: number }).code).not.toBe(0);
+      const summary = JSON.parse(((failure as { stdout?: string }).stdout ?? "").trim().split("\n").at(-1)!);
+      expect(summary.mode).toBe("production");
+      expect(summary.reason).toBe("PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
 });
