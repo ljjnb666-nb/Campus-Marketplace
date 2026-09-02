@@ -8,6 +8,10 @@
  */
 import { readFileSync } from "node:fs";
 
+// scripts/ 由 tsx CLI 直接执行：不能用 @/ alias（不经过 Next/vitest 的
+// 路径解析），必须相对路径引用 src
+import { metricsTokenEnvChecks } from "../src/lib/metrics-token";
+
 const UNSAFE_DEFAULTS = [
   "minioadmin",
   "postgres:postgres",
@@ -55,12 +59,14 @@ function check(
   results.push({ name, ok, message });
 }
 
-function main(): void {
-  const fileArg = process.argv.indexOf("--file");
-  const file = fileArg !== -1 ? process.argv[fileArg + 1] : ".env.production";
-  const vars = { ...loadEnvFile(file), ...process.env };
+export type EnvCheckResult = CheckResult;
 
-  const results: CheckResult[] = [];
+/**
+ * 环境契约检查（纯函数，供 CLI 与 ops-check 复用）。
+ * 只验证变量存在、格式合理、危险默认值不存在；绝不返回/输出秘密值。
+ */
+export function collectEnvChecks(vars: Record<string, string | undefined>): EnvCheckResult[] {
+  const results: EnvCheckResult[] = [];
 
   // ---- 数据库 ----
   const databaseUrl = vars.DATABASE_URL ?? "";
@@ -209,6 +215,22 @@ function main(): void {
   // ---- 备份 ----
   check(results, "BACKUP_DIR", (vars.BACKUP_DIR ?? "") !== "", "必须设置（备份目录）");
 
+  // ---- 可观测性：metrics token 安全契约（BLOCKER 3，单一 contract 强制）----
+  // 未设置 = 端点关闭（允许）；设置则必须 >=24 字符、非危险默认值、不复用 NEXTAUTH_SECRET
+  for (const tokenCheck of metricsTokenEnvChecks(vars)) {
+    check(results, tokenCheck.name, tokenCheck.ok, tokenCheck.message);
+  }
+
+  return results;
+}
+
+function main(): void {
+  const fileArg = process.argv.indexOf("--file");
+  const file = fileArg !== -1 ? process.argv[fileArg + 1] : ".env.production";
+  const vars = { ...loadEnvFile(file), ...process.env };
+
+  const results = collectEnvChecks(vars);
+
   // ---- 汇总（只打印变量名，不打印值）----
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {
@@ -224,4 +246,6 @@ function main(): void {
   console.log(`\nproduction-env-check: 全部 ${results.length} 项通过（未输出任何秘密值）`);
 }
 
-main();
+if (process.argv[1] && process.argv[1].endsWith("production-env-check.ts")) {
+  main();
+}

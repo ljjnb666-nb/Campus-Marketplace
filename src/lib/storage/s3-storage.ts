@@ -1,6 +1,7 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -54,6 +55,19 @@ export class S3Storage implements StorageClient {
     }
     if (!isWellFormedObjectKey(ref.objectKey)) {
       throw new Error("非法的 object key");
+    }
+  }
+
+  async headBucket(bucket: string): Promise<boolean> {
+    if (!bucket || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) {
+      return false;
+    }
+    try {
+      await this.client.send(new HeadBucketCommand({ Bucket: bucket }));
+      return true;
+    } catch {
+      // readiness 只关心可达与否：凭据/网络/权限/桶缺失统一视为不可达
+      return false;
     }
   }
 

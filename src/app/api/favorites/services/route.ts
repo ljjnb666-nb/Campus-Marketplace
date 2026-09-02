@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { handleError } from "@/lib/error-handler";
 import { getMyServiceFavorites } from "@/actions/service-favorite";
+import { withHttpMetrics } from "@/lib/http-metrics";
 
-export async function GET() {
+async function getHandler() {
   try {
     const session = await auth();
 
@@ -25,3 +26,5 @@ export async function GET() {
     );
   }
 }
+
+export const GET = withHttpMetrics("favorites/services", getHandler);

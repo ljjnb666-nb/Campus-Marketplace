@@ -34,7 +34,7 @@ describe("GET /api/user/live-summary", () => {
   it("returns 401 with zero counts when the user is not logged in", async () => {
     auth.mockResolvedValue(null);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/user/live-summary"));
     const body = await response.json();
 
     expect(response.status).toBe(401);
@@ -51,7 +51,7 @@ describe("GET /api/user/live-summary", () => {
     getUnreadNotificationCount.mockResolvedValue(3);
     getUnreadConversationCount.mockResolvedValue(5);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/user/live-summary"));
     const body = await response.json();
 
     expect(response.status).toBe(200);

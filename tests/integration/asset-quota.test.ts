@@ -57,6 +57,7 @@ vi.mock("@/lib/storage", async (importOriginal) => {
       }),
       getSignedReadUrl: vi.fn(async () => "http://signed.local/x"),
       headObject: vi.fn(async () => null),
+      headBucket: vi.fn(async () => true),
     }),
   };
 });

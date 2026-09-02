@@ -18,7 +18,7 @@ describe("GET /api/favorites/errands", () => {
   it("returns 401 without a session", async () => {
     auth.mockResolvedValue(null);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/errands"));
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
@@ -29,7 +29,7 @@ describe("GET /api/favorites/errands", () => {
     auth.mockResolvedValue({ user: { id: "user-1" } });
     getMyErrandFavorites.mockResolvedValue([{ id: "fav-1" }]);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/errands"));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ favorites: [{ id: "fav-1" }] });
@@ -40,7 +40,7 @@ describe("GET /api/favorites/errands", () => {
     auth.mockResolvedValue({ user: { id: "user-1" } });
     getMyErrandFavorites.mockRejectedValue(new Error("db down"));
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/errands"));
 
     expect(response.status).toBe(500);
     const body = await response.json();

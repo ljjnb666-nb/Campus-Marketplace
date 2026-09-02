@@ -50,6 +50,10 @@ const webServerEnv = {
   // E2E 是"production build + 本机 MinIO"的冒烟场景：显式打开 env.ts 的
   // 生产守卫逃生阀（真实生产部署绝不允许设置该变量）
   ALLOW_LOCAL_S3_IN_PRODUCTION: "true",
+  // HTTP metrics 黑盒测试（http-metrics.spec.ts）：合法专用 token
+  //（>=24 字符，非 NEXTAUTH_SECRET，非危险默认值——与运行时安全契约一致）
+  METRICS_BEARER_TOKEN:
+    process.env.E2E_METRICS_TOKEN ?? ["e2e-dedicated-metrics-token-", "qwertyuiopasdfgh"].join(""),
 };
 
 export default defineConfig({

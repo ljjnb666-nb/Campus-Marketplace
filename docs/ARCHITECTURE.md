@@ -12,7 +12,7 @@
 - Next.js Route Handlers 提供少量读取接口
 - Server Actions 承担主要写操作
 - Auth.js Credentials 处理登录与会话
-- `middleware.ts` 承担请求计时（Server-Timing）、CSP nonce 生成（script-src 每请求 nonce + strict-dynamic，见 SECURITY.md）与 API 同源收紧
+- `src/proxy.ts`（Next 16 proxy 约定，原 middleware.ts）承担请求计时（Server-Timing）、CSP nonce 生成（script-src 每请求 nonce + strict-dynamic，见 SECURITY.md）与 API 同源收紧
 
 ## 数据层
 

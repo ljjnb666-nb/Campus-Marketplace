@@ -8,7 +8,7 @@
 | Production Phase 2 | Playwright Critical-path E2E + Release Gate | **DONE**（2026-08-30） |
 | Production Phase 3A | Production Deployment Foundation（仓库侧） | **DONE / REPO_SIDE_ACCEPTED**（2026-08-30） |
 | Production Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（真实外部基础设施暂不提供） |
-| Production Phase 4 | Observability / Monitoring / Recovery Foundation | **NEXT** |
+| Production Phase 4 | Observability / Monitoring / Recovery Foundation | **IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（2026-09-01） |
 | Production Phase 5 | Agreements / Privacy / Platform Rules / Data Governance | 未开始 |
 | Production Phase 6 | Payment Domain Model | 未开始 |
 | Production Phase 7 | Licensed Payment Provider Integration | 未开始 |
@@ -112,11 +112,33 @@
 - [x] CI 拆分 verify + e2e 双 job（e2e 失败即失败，失败上传 report/trace/video artifacts）
 - [x] 本地连续三轮 17/17 全绿；顺手修复 7 个 E2E 暴露的真实缺陷（见"最近进展"）
 
+## Production Phase 4（Observability / Monitoring / Recovery Foundation，2026-09-01 实现）
+
+状态：**IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（未经独立验收，不得标记 REPO_SIDE_ACCEPTED）。
+权威契约文档：[OBSERVABILITY.md](OBSERVABILITY.md)、[ALERTING.md](ALERTING.md)、
+[INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md)、[LOG_PRIVACY.md](LOG_PRIVACY.md)。
+
+- [x] Request/Correlation ID：middleware 校验/生成 `X-Request-ID`（响应头 + 日志经 AsyncLocalStorage 关联）
+- [x] 结构化日志契约增强：service/environment/release/requestId 标准字段 + LOG_LEVEL 覆盖
+- [x] 出口统一 redaction（password/token/secret/authorization/cookie/connection string/presigned 全形态，测试锁定）
+- [x] 运维错误分类（error-taxonomy：category/logLevel/isServerFault，4xx 业务错误不触发 error 告警语义）
+- [x] `/api/ready` readiness：PostgreSQL/Redis/Storage 并行独立超时探测；REDIS_READINESS_POLICY=degraded 仍接流量
+- [x] 依赖失败结构化事件（dependency_health_failed，正常探测零日志）+ readiness 失败指标
+- [x] Metrics foundation：进程内 registry + Prometheus 文本渲染；label 白名单 + route family 折叠（无高基数/用户数据）；`/api/internal/metrics`（专用 bearer token，未配置即关闭）
+- [x] 备份机器可读状态产物 `backup-status.json`（成败均写，不吞退出码）+ 新鲜度检查 `npm run ops:backup-health`
+- [x] 统一运维检查 `npm run ops:check`（env 契约/连通性/备份/release identity，fail-closed，development/CI/production mode 契约）
+- [x] `global-error.tsx` 补齐 + error UI digest 参考编号（无内部泄漏）
+- [x] 故障注入测试：DB/Redis/Storage 失败与超时 → readiness 503/degraded；备份 stale/failed → ops:check fail
+- [x] OBSERVABILITY_FAILURE_DRILL（`npm run ops:observability-drill`：真实停起 PostgreSQL/Redis，自动清理）
+- [x] ALERTING.md（P0/P1/P2 规则：signal/threshold/severity/action/runbook，窗口化防误报）+ INCIDENT_RESPONSE.md（13 场景）+ LOG_PRIVACY.md
+- [x] 独立验收反馈修复（2026-09-02，PR #4 第二轮）：production ops-check 无 skip bypass（`PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED`）；production 下 `productionBackupReady=false` 阻断 overall PASS；`/api/health` 改为真 liveness（不访问 DB，drill 黑盒证明 DB 停机时 health 仍 200）；METRICS_BEARER_TOKEN 安全契约代码强制（`metrics-token.ts`：≥24 字符/非默认值/不复用 NEXTAUTH_SECRET，违反即端点关闭 404）；HTTP metrics runtime-fed（`withHttpMetrics` 接入全部自营 API route + 黑盒 Playwright 证明）；backup checksum 真验证（`sha256sum --check` 通过才置 verified）+ health 流式重验（可发现备份后损坏）；backup 前置失败尽早写 failed 状态产物（trap 提前）
+- [ ] 独立验收（PENDING_INDEPENDENT_REVIEW → REPO_SIDE_ACCEPTED 仅在验收后可标）
+
 ## 当前待补
 
 - [x] GitHub branch protection：verify / e2e 已设为 required checks（PR before merge + enforce admins + 禁 force push/删除）
 - [x] Production Phase 3A：仓库侧生产部署基础（见上节，REPO_SIDE_ACCEPTED）
-- [ ] Production Phase 4：Observability / Monitoring / Recovery Foundation（NEXT）
+- [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（IMPLEMENTED，待独立验收）
 - [ ] Production Phase 3B：真实服务器部署（DEFERRED——待真实服务器/域名/DNS 等外部资源就绪后重开）
 - [ ] 继续做少量低频页面文案与体验收尾
 
