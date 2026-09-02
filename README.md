@@ -139,6 +139,7 @@ npm run text:verify
 
 ## 文档
 
+- [docs/MASTER_ROADMAP.md](docs/MASTER_ROADMAP.md)（产品工程路线权威来源，Master Roadmap v1.0）
 - [docs/PRD.md](docs/PRD.md)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/DATABASE.md](docs/DATABASE.md)
@@ -163,10 +164,12 @@ npm run text:verify
 - `package-lock.json` 在 Linux 容器中生成（`docker run --rm -v "%cd%:/app" -w /app node:24 npm install`，Git Bash 下加 `MSYS_NO_PATHCONV=1`）。Windows 上的 npm 会按当前平台裁剪 lock 的可选依赖条目（如 `@tailwindcss/oxide-linux-*`），提交后会导致 CI（Linux）的 `npm ci` 报 Missing。
 - 本地开发用 `npm install`（宽松）即可，无需 `npm ci`；重装 node_modules 后记得 `npx prisma generate`。
 
-当前测试基线：
+当前测试基线（来源：master 最近一次成功的 GitHub Actions verify + e2e run，
+2026-09-02 @ `be0fd94c`，不以本地估算为准）：
 
-- 全量测试 `1021` 个用例通过（2026-08-30 实测 193 文件 / 1000 通过 + 21 跳过的条件集成用例），覆盖单元、组件与 API 路由层
-- E2E 基线：Playwright 17 个关键链路测试（8 条 Golden Flow + 权限/并发负例）连续三轮全绿（2026-08-30 本地实测）
+- 全量测试 `215` 个测试文件 / `1216` 个用例通过（CI 中真实数据库 / Redis / MinIO 集成测试全部真实执行），覆盖单元、组件与 API 路由层
+- 覆盖率门槛 lines / branches / functions / statements ≥ 80%（本轮 CI 实测 88.23 / 81.84 / 84.06 / 88.23）
+- E2E 基线：Playwright `24` 条关键链路测试（8 条 Golden Flow + 权限/并发/可观测性负例）CI 全绿
 - 另有真实数据库 / Redis / MinIO 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL`、`INTEGRATION_S3_ENDPOINT` 时才运行（CI 中全部真实执行）
 - 生产化存储专项：S3 兼容对象存储 + 公私隔离 + 上传配额 + 敏感文件生命周期（详见 [docs/STORAGE.md](docs/STORAGE.md)）；以及可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
 

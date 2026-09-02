@@ -1,7 +1,8 @@
 # 事件响应手册（Incident Response Runbook）
 
 > Phase 4 repo-side runbook。真实公网告警渠道尚未接入（Phase 3B DEFERRED），
-> 检测信号以本文所列探针/日志/指标为准。状态：`IMPLEMENTATED / PENDING_INDEPENDENT_REVIEW`。
+> 检测信号以本文所列探针/日志/指标为准。状态：`DONE / MERGED / MASTER-GREEN / CLOSED`
+> （2026-09-02，权威路线见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)）。
 > 权威操作流程以既有文档为准，本文只做**调度与引用**，不复制第二套
 > restore/rollback 步骤：
 >

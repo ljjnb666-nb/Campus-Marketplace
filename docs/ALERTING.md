@@ -4,7 +4,8 @@
 > DEFERRED：无生产服务器/域名，未配置 PagerDuty/钉钉/飞书/Slack 等）。
 > 本文档是将来接入任何通知渠道时的规则契约（signal → threshold →
 > severity → initial action → runbook），不声称真实 alerts 已经发送。
-> 状态：`IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`。
+> 状态：`DONE / MERGED / MASTER-GREEN / CLOSED`（2026-09-02，规则契约随 Phase 4
+> 合并收口；权威路线见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)）。
 
 信号来源：`/api/health`、`/api/ready`、`/api/internal/metrics`（需
 METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志采集器）、

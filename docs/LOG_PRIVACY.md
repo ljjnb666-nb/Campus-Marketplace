@@ -2,7 +2,8 @@
 
 > Phase 4 TASK 11。适用范围：应用结构化日志、Docker/Compose 容器日志、
 > Caddy 反代日志、运维脚本输出、备份状态产物、metrics 输出。
-> 状态：`IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`。
+> 状态：`DONE / MERGED / MASTER-GREEN / CLOSED`（2026-09-02，随 Phase 4 合并收口；
+> 权威路线见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)）。
 
 ## 1. 记什么（what gets logged）
 

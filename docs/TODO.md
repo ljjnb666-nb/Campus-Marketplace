@@ -1,20 +1,32 @@
 # 开发计划
 
-## Production 阶段总览（formal phase map，2026-08-30 定稿）
+> Phase 顺序、Phase 状态与 Gate 定义的权威来源是 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)
+> （Master Roadmap v1.0，2026-09-02 冻结）。本文件记录各阶段任务明细与当前测试基线，
+> 与 MASTER_ROADMAP 冲突时以其为准。
+
+## Production 阶段总览（阶段顺序以 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) Master Roadmap v1.0 为准）
 
 | 阶段 | 名称 | 状态 |
 | --- | --- | --- |
-| Production Phase 1 | Object Storage + Sensitive File Separation | **DONE**（2026-08-28） |
-| Production Phase 2 | Playwright Critical-path E2E + Release Gate | **DONE**（2026-08-30） |
-| Production Phase 3A | Production Deployment Foundation（仓库侧） | **DONE / REPO_SIDE_ACCEPTED**（2026-08-30） |
-| Production Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（真实外部基础设施暂不提供） |
-| Production Phase 4 | Observability / Monitoring / Recovery Foundation | **IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（2026-09-01） |
-| Production Phase 5 | Agreements / Privacy / Platform Rules / Data Governance | 未开始 |
-| Production Phase 6 | Payment Domain Model | 未开始 |
-| Production Phase 7 | Licensed Payment Provider Integration | 未开始 |
-| Production Phase 8 | Refund / Split / Platform Fee / Ledger / Reconciliation | 未开始 |
-| Production Phase 9 | Operations Dashboard / Funnel Analytics | 未开始 |
-| Production Phase 10 | Controlled Single-campus Pilot | 未开始 |
+| Phase 1 | Object Storage / Sensitive Asset Security | **DONE / MERGED / MASTER-GREEN**（2026-08-28） |
+| Phase 2 | Critical-path E2E / Release Gate | **DONE / MERGED / MASTER-GREEN**（2026-08-30） |
+| Phase 3A | Production Deployment Foundation（仓库侧） | **DONE / MERGED / MASTER-GREEN / REPO_SIDE_ACCEPTED**（2026-08-30） |
+| Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（GATE B 通过后重开） |
+| Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
+| **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
+| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **NEXT / NOT_STARTED**（Master Roadmap v1.0 docs closure 落库后正式启动，见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
+| Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | NOT_STARTED |
+| Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
+| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
+| Phase 11 | Pilot Readiness | NOT_STARTED |
+| **GATE B** | Pilot Ready（通过后重开 Phase 3B） | NOT_REACHED |
+| Phase 12–14 | Alpha → Closed Beta → Single-Campus Pilot（线下支付语义） | NOT_STARTED |
+| **GATE C** | Product Validation（PASS 才解锁支付） | NOT_REACHED |
+| Phase 15–19 | Payment：Domain Model → Licensed Provider → Refund/Split/Fee/Ledger → Settlement/Reconciliation → Payment Ops Console | NOT_STARTED |
+| **GATE D** | Commercial Ready | NOT_REACHED |
+| Phase 20–24 | Growth / Multi-Campus | NOT_STARTED |
 
 > **PRODUCTION_LAUNCH_BLOCKED = TRUE**
 >
@@ -47,7 +59,9 @@
 ## Production Phase 3B — Real Production Deployment（DEFERRED）
 
 `PHASE_3B_REAL_DEPLOYMENT = DEFERRED`。原因：真实外部基础设施（服务器/域名/DNS 等）当前暂不提供——
-这是外部资源缺口，不是代码质量失败。Phase 3A 的全部仓库侧能力已就绪，3B 启动时按以下硬门禁逐项执行：
+这是外部资源缺口，不是代码质量失败。**重开时机：GATE B（Pilot Ready）通过之后**
+（见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.8）；Phase 5–14 完成不改变 3B 的 DEFERRED 状态。
+Phase 3A 的全部仓库侧能力已就绪，3B 重开时按以下硬门禁逐项执行：
 
 1. Authorized Linux production server
 2. Docker >= 24
@@ -112,9 +126,11 @@
 - [x] CI 拆分 verify + e2e 双 job（e2e 失败即失败，失败上传 report/trace/video artifacts）
 - [x] 本地连续三轮 17/17 全绿；顺手修复 7 个 E2E 暴露的真实缺陷（见"最近进展"）
 
-## Production Phase 4（Observability / Monitoring / Recovery Foundation，2026-09-01 实现）
+## Production Phase 4（Observability / Monitoring / Recovery Foundation，2026-09-01 实现，2026-09-02 合并收口）
 
-状态：**IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（未经独立验收，不得标记 REPO_SIDE_ACCEPTED）。
+状态：**DONE / MERGED / MASTER-GREEN / CLOSED**（经独立验收三轮：实现验收 + production
+correctness 收口 + CLI operation-mode fail-closed 收口；merge commit `be0fd94c`，
+post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 权威契约文档：[OBSERVABILITY.md](OBSERVABILITY.md)、[ALERTING.md](ALERTING.md)、
 [INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md)、[LOG_PRIVACY.md](LOG_PRIVACY.md)。
 
@@ -132,15 +148,17 @@
 - [x] OBSERVABILITY_FAILURE_DRILL（`npm run ops:observability-drill`：真实停起 PostgreSQL/Redis，自动清理）
 - [x] ALERTING.md（P0/P1/P2 规则：signal/threshold/severity/action/runbook，窗口化防误报）+ INCIDENT_RESPONSE.md（13 场景）+ LOG_PRIVACY.md
 - [x] 独立验收反馈修复（2026-09-02，PR #4 第二轮）：production ops-check 无 skip bypass（`PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED`）；production 下 `productionBackupReady=false` 阻断 overall PASS；`/api/health` 改为真 liveness（不访问 DB，drill 黑盒证明 DB 停机时 health 仍 200）；METRICS_BEARER_TOKEN 安全契约代码强制（`metrics-token.ts`：≥24 字符/非默认值/不复用 NEXTAUTH_SECRET，违反即端点关闭 404）；HTTP metrics runtime-fed（`withHttpMetrics` 接入全部自营 API route + 黑盒 Playwright 证明）；backup checksum 真验证（`sha256sum --check` 通过才置 verified）+ health 流式重验（可发现备份后损坏）；backup 前置失败尽早写 failed 状态产物（trap 提前）
-- [ ] 独立验收（PENDING_INDEPENDENT_REVIEW → REPO_SIDE_ACCEPTED 仅在验收后可标）
+- [x] 独立验收（三轮：实现验收 + production correctness 收口 + CLI operation-mode fail-closed 收口，均已修复并入合并提交）
 
 ## 当前待补
 
 - [x] GitHub branch protection：verify / e2e 已设为 required checks（PR before merge + enforce admins + 禁 force push/删除）
 - [x] Production Phase 3A：仓库侧生产部署基础（见上节，REPO_SIDE_ACCEPTED）
-- [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（IMPLEMENTED，待独立验收）
-- [ ] Production Phase 3B：真实服务器部署（DEFERRED——待真实服务器/域名/DNS 等外部资源就绪后重开）
-- [ ] 继续做少量低频页面文案与体验收尾
+- [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
+- [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
+- [ ] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**NEXT**——Master Roadmap v1.0 docs closure 落库后正式启动）
+- [ ] Production Phase 3B：真实服务器部署（DEFERRED——待真实服务器/域名/DNS 等外部资源就绪后重开；后续 Phase 完成不改变其 DEFERRED 状态）
+- [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §10 管理）
 
 ## Production Phase 1（对象存储，2026-08-28 完成）
 
@@ -184,8 +202,15 @@
 
 ## 当前测试基线
 
-以最近一轮验证为准（2026-08-28）：
+以 master `be0fd94c92a751c0dd6acd1f417abdd42b6f5751`（Production Phase 4 合并提交）
+对应的成功 master CI 为准（GitHub Actions run 33637075278，2026-09-02，verify + e2e 双 job 全绿）：
 
-- `189` 个测试文件，`983` 个测试通过（另有门控跳过）
-- 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%（实测 86.98 / 81.04 / 82.36 / 86.98）
-- 另有真实数据库 / Redis / MinIO 集成测试，分别由 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL`、`INTEGRATION_S3_ENDPOINT` 门控；CI 中全部真实执行
+- **215** 个测试文件，**1216** 个测试全部通过（CI 中真实数据库 / Redis / MinIO 集成测试全部真实执行，无门控跳过）
+- 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%（本轮实测 88.23 / 81.84 / 84.06 / 88.23）
+- **E2E 基线：Playwright 24 条关键链路测试**（8 条 Golden Flow + 权限/并发/可观测性负例）CI 全绿
+- 历史说明：Phase 2 合并时基线为 193 文件 / 1021 用例（2026-08-30），Phase 4 三轮验收补齐
+  可观测性与 fail-closed 测试后达到当前数字；后续以最近一次成功的 master CI 为准，
+  不以本文快照为准
+
+> 测试基线来源：master 分支最近一次成功的 GitHub Actions verify + e2e run；
+> 更新本文数字前必须先从 CI 日志取真实值，不得凭记忆填写。

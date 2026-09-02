@@ -1,7 +1,8 @@
 # 可观测性契约（Observability Contract）
 
 > Phase 4（Observability / Monitoring / Recovery Foundation）建立的 repo-side 运维基础。
-> 状态：`IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`（Phase 3B 仍 DEFERRED，
+> 状态：`DONE / MERGED / MASTER-GREEN / CLOSED`（2026-09-02，经独立验收；权威路线见
+> [MASTER_ROADMAP.md](MASTER_ROADMAP.md)）。Phase 3B 仍 DEFERRED，
 > `PRODUCTION_LAUNCH_BLOCKED = TRUE`——本文件描述的是**仓库侧能力**，
 > 不代表真实公网监控已上线）。
 
