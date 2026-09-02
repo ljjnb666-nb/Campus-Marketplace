@@ -43,6 +43,21 @@ describe("rollback / restore shell-level regression（tests/ops/rollback-restore
   );
 });
 
+describe("backup status artifact shell-level regression（tests/ops/backup-status.test.sh）", () => {
+  it.skipIf(!hasBash())(
+    "成功/空 dump/offsite 失败三场景均产出正确 backup-status.json 且退出码语义正确",
+    async () => {
+      const { stdout } = await execFileAsync("bash", ["tests/ops/backup-status.test.sh"], {
+        cwd: repoRoot,
+        timeout: 120_000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      expect(stdout).toMatch(/FAIL=0/);
+    },
+    150_000,
+  );
+});
+
 describe("compose production config（--env-file 统一插值来源）", () => {
   it.skipIf(!hasDocker())(
     "docker compose --env-file <synthetic> -f compose.production.yml config 在 shell 未导出任何生产变量时 PASS",

@@ -55,12 +55,14 @@ function check(
   results.push({ name, ok, message });
 }
 
-function main(): void {
-  const fileArg = process.argv.indexOf("--file");
-  const file = fileArg !== -1 ? process.argv[fileArg + 1] : ".env.production";
-  const vars = { ...loadEnvFile(file), ...process.env };
+export type EnvCheckResult = CheckResult;
 
-  const results: CheckResult[] = [];
+/**
+ * 环境契约检查（纯函数，供 CLI 与 ops-check 复用）。
+ * 只验证变量存在、格式合理、危险默认值不存在；绝不返回/输出秘密值。
+ */
+export function collectEnvChecks(vars: Record<string, string | undefined>): EnvCheckResult[] {
+  const results: EnvCheckResult[] = [];
 
   // ---- 数据库 ----
   const databaseUrl = vars.DATABASE_URL ?? "";
@@ -209,6 +211,16 @@ function main(): void {
   // ---- 备份 ----
   check(results, "BACKUP_DIR", (vars.BACKUP_DIR ?? "") !== "", "必须设置（备份目录）");
 
+  return results;
+}
+
+function main(): void {
+  const fileArg = process.argv.indexOf("--file");
+  const file = fileArg !== -1 ? process.argv[fileArg + 1] : ".env.production";
+  const vars = { ...loadEnvFile(file), ...process.env };
+
+  const results = collectEnvChecks(vars);
+
   // ---- 汇总（只打印变量名，不打印值）----
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {
@@ -224,4 +236,6 @@ function main(): void {
   console.log(`\nproduction-env-check: 全部 ${results.length} 项通过（未输出任何秘密值）`);
 }
 
-main();
+if (process.argv[1] && process.argv[1].endsWith("production-env-check.ts")) {
+  main();
+}

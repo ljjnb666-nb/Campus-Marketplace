@@ -11,8 +11,8 @@
 - 违禁关键词拦截基础能力
 - 举报与后台审核链路
 - 固定窗口限流（`src/lib/rate-limit.ts`）：登录防爆破 10 次/15 分钟，注册 5 次/小时，上传接口共用同一限流器。配置 `REDIS_URL` 时计数存入 Redis（原子 Lua 脚本，多实例共享）；未配置或 Redis 故障时自动回退进程内计数（仅单实例语义）（2026-08-26 外部化）
-- 6 项安全响应头：nosniff、SAMEORIGIN、Referrer-Policy、Permissions-Policy、HSTS、CSP（CSP 由 middleware 按请求生成）
-- CSP script-src 采用每请求 nonce + `strict-dynamic`，生产环境不再依赖 `unsafe-inline`；style-src 因 React 行内样式保留 `unsafe-inline`（2026-08-26 收紧，`middleware.ts` + `next.config.ts`）
+- 6 项安全响应头：nosniff、SAMEORIGIN、Referrer-Policy、Permissions-Policy、HSTS、CSP（CSP 由 src/proxy.ts 按请求生成）
+- CSP script-src 采用每请求 nonce + `strict-dynamic`，生产环境不再依赖 `unsafe-inline`；style-src 因 React 行内样式保留 `unsafe-inline`（2026-08-26 收紧；2026-09-02 修正文件位置为 `src/proxy.ts`——根目录 middleware.ts 会被 Next 16 静默忽略 + `next.config.ts`）
 - 软删除统一拦截（`src/lib/prisma-soft-delete.ts`）：User/Product/ErrandTask/ServiceListing/RentalListing 的列表查询自动注入 `deletedAt: null` 过滤，`delete/deleteMany` 自动映射为软删除打标记；调用方显式声明 `deletedAt` 条件时豁免（管理端仍可查删、物理清理走显式硬删除）（2026-08-26 统一化）
 - 订单金额一律服务端取库，不信任表单价格
 - 商品/跑腿下单与接单使用条件 `updateMany` 原子流转，防并发超卖/重复接单

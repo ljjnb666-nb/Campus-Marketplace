@@ -24,11 +24,23 @@ name: campus-marketplace-production
 x-default-restart: &default-restart
   restart: unless-stopped
 
+# 日志轮转上限（docs/LOG_PRIVACY.md §3：容器日志自然轮转即用户行为日志保留上限）
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# 长驻服务的统一默认：restart + 日志轮转
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging: *default-logging
+
 services:
   # ---- 边缘：唯一公网入口（80 只做 HTTPS 重定向，Caddy 自动处理）----
   caddy:
     image: caddy:2-alpine
-    <<: *default-restart
+    <<: *service-defaults
     ports:
       - "80:80"
       - "443:443"
@@ -55,7 +67,7 @@ services:
       args:
         GIT_SHA: ${GIT_SHA:-unknown}
     image: campus-marketplace-app:${GIT_SHA:-local}
-    <<: *default-restart
+    <<: *service-defaults
     env_file: .env.production
     environment:
       NODE_ENV: production
@@ -89,7 +101,7 @@ services:
   # ---- 数据层（仅 backend 网络，无任何端口发布）----
   postgres:
     image: postgres:16-alpine
-    <<: *default-restart
+    <<: *service-defaults
     env_file: .env.production
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?请在 .env.production 中设置 POSTGRES_USER}
@@ -116,7 +128,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    <<: *default-restart
+    <<: *service-defaults
     env_file: .env.production
     # 数据分类 EPHEMERAL（仅限流计数，见 docs/PRODUCTION_DEPLOYMENT.md）：
     # 不挂持久卷；清空/重启不损伤订单、资产、账户等持久数据
@@ -135,7 +147,7 @@ services:
   # ---- 自建 MinIO（可选；使用外部 S3 提供商时不要启动本组）----
   minio:
     image: minio/minio:latest
-    <<: *default-restart
+    <<: *service-defaults
     profiles: ["selfhosted-minio"]
     env_file: .env.production
     command: server /data --console-address ":9001"

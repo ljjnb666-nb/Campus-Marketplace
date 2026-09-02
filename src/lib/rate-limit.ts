@@ -47,7 +47,12 @@ declare global {
   var rateLimitRedisReady: Promise<boolean> | undefined;
 }
 
-function getRedisClient(): Redis | null {
+/**
+ * 获取进程内共享的 Redis 客户端（未配置 REDIS_URL 时为 null）。
+ * Phase 4 起同时作为 readiness 探针（/api/ready）的连接来源，
+ * 避免为探活再造第二套客户端/连接池。
+ */
+export function getRedisClient(): Redis | null {
   const url = process.env.REDIS_URL;
 
   if (!url) {

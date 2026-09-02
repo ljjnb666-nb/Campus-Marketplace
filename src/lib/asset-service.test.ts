@@ -5,6 +5,7 @@ const {
   deleteObject,
   getObject,
   getSignedReadUrl,
+  headBucket,
   executeRaw,
   assetCreate,
   assetFindFirst,
@@ -17,6 +18,7 @@ const {
   deleteObject: vi.fn(),
   getObject: vi.fn(),
   getSignedReadUrl: vi.fn(),
+  headBucket: vi.fn(),
   executeRaw: vi.fn(),
   assetCreate: vi.fn(),
   assetFindFirst: vi.fn(),
@@ -35,6 +37,7 @@ vi.mock("@/lib/storage", async (importOriginal) => {
       deleteObject,
       getSignedReadUrl,
       getObject,
+      headBucket,
     }),
   };
 });

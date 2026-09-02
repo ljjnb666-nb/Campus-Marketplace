@@ -31,6 +31,13 @@ export default function RootError({
             页面加载失败，请稍后重试。你可以重新加载当前页面，或回到首页继续浏览校园集市。
           </p>
 
+          {error.digest ? (
+            <p className="mt-4 text-sm text-slate-500">
+              参考编号：<code className="font-mono text-slate-700">{error.digest}</code>
+              （反馈问题时请附上，便于定位；仅是随机标识，不含任何个人数据）
+            </p>
+          ) : null}
+
           <div className="mt-8 flex flex-wrap gap-3">
             <button
               type="button"

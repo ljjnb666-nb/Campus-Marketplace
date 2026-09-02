@@ -23,6 +23,9 @@ vi.mock("@/lib/logger", () => ({
 
 import { GET } from "@/app/api/health/route";
 
+// 路由签名要求 Request（读取请求头做 request-id 关联）；测试统一用最小请求
+const dummyRequest = () => new Request("http://localhost/api/health");
+
 describe("GET /api/health", () => {
   beforeEach(() => {
     queryRawMock.mockReset();
@@ -32,7 +35,7 @@ describe("GET /api/health", () => {
   it("returns ok when the database responds", async () => {
     queryRawMock.mockResolvedValue([{ 1: 1 }]);
 
-    const response = await GET();
+    const response = await GET(dummyRequest());
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -48,10 +51,10 @@ describe("GET /api/health", () => {
     const previous = process.env.RELEASE_SHA;
     try {
       delete process.env.RELEASE_SHA;
-      expect((await (await GET()).json()).release).toBe("dev");
+      expect((await (await GET(dummyRequest())).json()).release).toBe("dev");
 
       process.env.RELEASE_SHA = "abc123";
-      expect((await (await GET()).json()).release).toBe("abc123");
+      expect((await (await GET(dummyRequest())).json()).release).toBe("abc123");
     } finally {
       if (previous === undefined) delete process.env.RELEASE_SHA;
       else process.env.RELEASE_SHA = previous;
@@ -61,7 +64,7 @@ describe("GET /api/health", () => {
   it("returns 503 and logs when the database is unreachable", async () => {
     queryRawMock.mockRejectedValue(new Error("connection refused"));
 
-    const response = await GET();
+    const response = await GET(dummyRequest());
     const body = await response.json();
 
     expect(response.status).toBe(503);
@@ -72,7 +75,7 @@ describe("GET /api/health", () => {
   it("is a dynamic route response (NextResponse instance)", async () => {
     queryRawMock.mockResolvedValue([]);
 
-    const response = await GET();
+    const response = await GET(dummyRequest());
 
     expect(response).toBeInstanceOf(NextResponse);
   });

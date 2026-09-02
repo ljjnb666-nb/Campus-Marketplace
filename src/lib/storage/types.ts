@@ -32,6 +32,13 @@ export interface GetObjectResult {
 }
 
 export interface StorageClient {
+  /**
+   * bucket 可达性探测（readiness 专用，TASK 4）：
+   * 无副作用的元数据操作（S3 HeadBucket），禁止上传测试对象。
+   * true = 凭据/网络/bucket 均可用；false = 任何原因不可达。
+   */
+  headBucket(bucket: string): Promise<boolean>;
+
   /** 上传对象（服务端凭据，浏览器不持有任何 S3 密钥） */
   putObject(input: PutObjectInput): Promise<void>;
 
