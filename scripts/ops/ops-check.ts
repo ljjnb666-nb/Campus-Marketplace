@@ -210,8 +210,8 @@ function checkEnvContract(mode: string): OpsCheckResult {
   };
 }
 
-function checkBackup(mode: string): OpsCheckResult {
-  const { report, exitCode } = evaluateBackupHealth({
+async function checkBackup(mode: string): Promise<OpsCheckResult> {
+  const { report, exitCode } = await evaluateBackupHealth({
     backupDir: process.env.BACKUP_DIR ?? "",
     maxAgeHours: Number(process.env.BACKUP_MAX_AGE_HOURS ?? 26),
     mode,
@@ -219,6 +219,17 @@ function checkBackup(mode: string): OpsCheckResult {
   });
   const required = mode === "production";
   if (exitCode === 0) {
+    // BLOCKER 1B（fail-closed）：production 总检查要求 productionBackupReady=true
+    //（本地新鲜备份 + checksum 验证 + 异地副本成功）。
+    // offsite not_configured 在 development 只报告事实；在 production 必须阻断。
+    if (required && report.productionBackupReady !== true) {
+      return {
+        name: "backup_health",
+        status: "fail",
+        required,
+        detail: `PRODUCTION_BACKUP_NOT_READY: ${report.reasons.join("; ") || "productionBackupReady=false"}`,
+      };
+    }
     return {
       name: "backup_health",
       status: "pass",
@@ -239,7 +250,37 @@ async function main(): Promise<void> {
   const mode = args.mode ?? (process.env.NODE_ENV === "production" ? "production" : "development");
   loadEnvOverlay(args["env-file"] ?? ".env.production");
 
-  const results: OpsCheckResult[] = [checkEnvContract(mode), checkReleaseIdentity(mode)];
+  const results: OpsCheckResult[] = [];
+
+  // BLOCKER 1（fail-closed）：production 模式禁止跳过连通性检查。
+  // 连通性是生产 gate 的核心（DB/Redis/Storage 不可达必须阻断），
+  // --skip-connectivity 仅面向 development/CI 的本地快速检查。
+  if (mode === "production" && args["skip-connectivity"] === "true") {
+    const skipRejection: OpsCheckResult = {
+      name: "connectivity_policy",
+      status: "fail",
+      required: true,
+      detail: "PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED",
+    };
+    results.push(skipRejection, {
+      name: "release_identity",
+      status: "skipped",
+      required: false,
+      detail: "PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED",
+    });
+    console.log(JSON.stringify(skipRejection));
+    const rejected = {
+      result: "FAIL",
+      mode,
+      reason: "PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED",
+      checks: results.length,
+      failed: ["connectivity_policy"],
+    };
+    console.log(JSON.stringify(rejected));
+    process.exit(1);
+  }
+
+  results.push(checkEnvContract(mode), checkReleaseIdentity(mode));
 
   if (args["skip-connectivity"] !== "true") {
     results.push(await checkDatabase(), await checkRedis(), await checkStorage());
@@ -251,7 +292,7 @@ async function main(): Promise<void> {
     );
   }
 
-  results.push(checkBackup(mode));
+  results.push(await checkBackup(mode));
 
   for (const result of results) {
     console.log(JSON.stringify(result));

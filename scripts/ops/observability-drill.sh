@@ -61,6 +61,9 @@ require_docker() {
 
 # 用 tsx 运行探测（与 vitest 同一 Node 环境，支持 @/ alias）
 probe() {
+  local probe_args=()
+  [[ -n "${1:-}" ]] && probe_args+=("$1")
+  [[ -n "${2:-}" ]] && probe_args+=("$2")
   PROBE_OUTPUT="$(
     env \
       DATABASE_URL="postgresql://postgres:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/postgres" \
@@ -73,9 +76,14 @@ probe() {
       S3_BUCKET_PUBLIC="campus-public" \
       S3_BUCKET_PRIVATE="campus-private" \
       NODE_ENV="development" \
-      npx tsx "${SCRIPT_DIR}/drill-probe.ts" 2>&1
+      npx tsx "${SCRIPT_DIR}/drill-probe.ts" ${probe_args[@]+"${probe_args[@]}"} 2>&1
   )"
   return $?
+}
+
+# liveness 探测（--check health）：app handler 能执行即 200
+probe_health() {
+  probe --check health
 }
 
 wait_for() {
@@ -149,38 +157,45 @@ for i in $(seq 1 30); do
 done
 
 # ---- 1. 全依赖健康 → ready ----
-echo "[drill] 1/7 等待全依赖就绪 → 断言 ready"
+echo "[drill] 1/9 等待全依赖就绪 → 断言 ready + health 200"
 if wait_for "初始就绪" 40; then
   assert_status "ready"
 else
   echo "[drill] 初始就绪失败，中止（cleanup 仍会执行）" >&2
   exit 1
 fi
+probe_health && pass || fail "DB 正常时 health 应 200（exit 0）"
 
-# ---- 2. PostgreSQL 停止 → not_ready ----
-echo "[drill] 2/7 停止 PostgreSQL → 断言 not_ready"
+# ---- 2. PostgreSQL 停止 → not_ready（health 保持 200：真 liveness）----
+echo "[drill] 2/9 停止 PostgreSQL → 断言 readiness not_ready"
 docker stop "${PG_CONTAINER}" >/dev/null
 probe; rc=$?
 if [[ ${rc} -ne 0 ]]; then pass; else fail "postgres 停止后 probe 仍 exit 0（not_ready 应 exit 1）"; fi
 assert_status "not_ready"
 
-# ---- 3. 失败被记录（结构化事件） ----
-echo "[drill] 3/7 断言 dependency_health_failed 事件已记录"
+# ---- 3. 失败被记录（结构化事件，readiness probe 输出内） ----
+echo "[drill] 3/9 断言 dependency_health_failed 事件已记录"
 assert_contains "dependency_health_failed"
 assert_contains '"dependency":"database"'
 
+# HEALTH_DB_INDEPENDENCE：liveness 与依赖状态解耦——DB 停机时
+# /api/health handler 照常执行（若误访问 DB，此调用会失败）
+echo "[drill] 3b/9 DB 停机时 health 仍 200（真 liveness）"
+probe_health && pass || fail "BLOCKER 2：DB 停机后 health 必须仍 200（真 liveness 不得访问 DB）"
+
 # ---- 4. 无秘密泄漏 ----
-echo "[drill] 4/7 断言探测输出不含注入的凭据"
+echo "[drill] 4/9 断言探测输出不含注入的凭据"
 assert_not_contains "${PG_PASSWORD}"
 assert_not_contains "${MINIO_PASSWORD}"
 
 # ---- 5. PostgreSQL 恢复 → ready ----
-echo "[drill] 5/7 重启 PostgreSQL → 断言 readiness 回到 ready"
+echo "[drill] 5/9 重启 PostgreSQL → 断言 readiness 回到 ready"
 docker start "${PG_CONTAINER}" >/dev/null
 wait_for "postgres 恢复" 40 && assert_status "ready"
+probe_health && pass || fail "DB 恢复后 health 应 200"
 
 # ---- 6. Redis 停止 → degraded（仍可接流量） ----
-echo "[drill] 6/7 停止 Redis → 断言 degraded（REDIS_READINESS_POLICY）"
+echo "[drill] 6/9 停止 Redis → 断言 degraded（REDIS_READINESS_POLICY）"
 docker stop "${REDIS_CONTAINER}" >/dev/null
 probe; rc=$?
 if [[ ${rc} -eq 0 ]]; then pass; else fail "redis 停止后 probe exit 非 0（degraded 应 exit 0）"; fi
@@ -188,9 +203,14 @@ assert_status "degraded"
 assert_contains '"redis":"degraded"'
 
 # ---- 7. Redis 恢复 → ready ----
-echo "[drill] 7/7 重启 Redis → 断言回到 ready"
+echo "[drill] 7/9 重启 Redis → 断言回到 ready"
 docker start "${REDIS_CONTAINER}" >/dev/null
 wait_for "redis 恢复" 40 && assert_status "ready"
+
+# ---- 8/9. 收尾：liveness 仍稳定 200 ----
+echo "[drill] 8/9 全依赖恢复后 health 仍 200"
+probe_health && pass || fail "全依赖恢复后 health 应 200"
+echo "[drill] 9/9 演练完成"
 
 echo "[drill] PASS=${PASS} FAIL=${FAIL}"
 if [[ ${FAIL} -gt 0 ]]; then

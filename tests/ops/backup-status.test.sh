@@ -115,6 +115,50 @@ assert_eq 1 "$rc" "场景3 offsite 失败应 exit 1"
 json="$(status_json)"
 assert_contains '"offsiteStatus":"failed"' "$json"
 
+# ---- 场景 4（BLOCKER 4B）：POSTGRES_USER 缺失 → 非零退出 + failed 状态产物 ----
+make_sandbox
+grep -v '^POSTGRES_USER=' "${SANDBOX}/.env.production" > "${SANDBOX}/.env.tmp" \
+  && mv "${SANDBOX}/.env.tmp" "${SANDBOX}/.env.production"
+out="$(run_backup)"; rc=$?
+assert_eq 1 "$rc" "场景4 POSTGRES_USER 缺失应 exit 1"
+json="$(status_json)"
+assert_contains '"status":"failed"' "$json"
+assert_contains '"stage":"resolve_postgres_user"' "$json"
+assert_not_contains 'SandboxOnly-Not-For-Real-Deploy' "$json"
+
+# ---- 场景 5（BLOCKER 4B）：POSTGRES_DB 缺失 → 非零退出 + failed/stage=resolve_db ----
+make_sandbox
+grep -v '^POSTGRES_DB=' "${SANDBOX}/.env.production" > "${SANDBOX}/.env.tmp" \
+  && mv "${SANDBOX}/.env.tmp" "${SANDBOX}/.env.production"
+out="$(run_backup)"; rc=$?
+assert_eq 1 "$rc" "场景5 POSTGRES_DB 缺失应 exit 1"
+json="$(status_json)"
+assert_contains '"status":"failed"' "$json"
+assert_contains '"stage":"resolve_db"' "$json"
+
+# ---- 场景 6（BLOCKER 4）：sha256sum --check 验证失败 → exit 1 + failed/stage=checksum ----
+# PATH stub 的 sha256sum：正常调用输出假 hash；--check 模式一律失败，
+# 模拟"dump 与 checksum 不一致"
+make_sandbox
+cat > "${SANDBOX}/bin/sha256sum" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  if [[ "$arg" == "--check" || "$arg" == "-c" ]]; then
+    echo "sha256sum: CHECKSUM MISMATCH (stub)" >&2
+    exit 1
+  fi
+done
+echo "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  fake"
+exit 0
+STUB
+chmod +x "${SANDBOX}/bin/sha256sum"
+out="$(run_backup)"; rc=$?
+assert_eq 1 "$rc" "场景6 checksum 验证失败应 exit 1"
+json="$(status_json)"
+assert_contains '"status":"failed"' "$json"
+assert_contains '"stage":"checksum"' "$json"
+assert_contains '"checksumVerified":false' "$json"
+
 [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
 
 echo "PASS=${PASS} FAIL=${FAIL}"

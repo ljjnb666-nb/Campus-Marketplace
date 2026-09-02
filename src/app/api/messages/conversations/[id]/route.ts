@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { withHttpMetrics } from "@/lib/http-metrics";
 import { handleError } from "@/lib/error-handler";
 import { getConversationDetailPayload } from "@/repositories/conversation-repository";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(
+async function getHandler(
   _request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
@@ -29,3 +30,5 @@ export async function GET(
     return NextResponse.json({ message: handled.message }, { status: handled.statusCode });
   }
 }
+
+export const GET = withHttpMetrics("messages/conversations/:id", getHandler);

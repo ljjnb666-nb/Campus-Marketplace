@@ -3,10 +3,11 @@ import { auth } from "@/lib/auth";
 import { handleError } from "@/lib/error-handler";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
+import { withHttpMetrics } from "@/lib/http-metrics";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+async function getHandler() {
   try {
     const session = await auth();
 
@@ -37,3 +38,5 @@ export async function GET() {
     );
   }
 }
+
+export const GET = withHttpMetrics("user/live-summary", getHandler);

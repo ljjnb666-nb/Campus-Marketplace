@@ -9,9 +9,19 @@
 
 - 格式：`pg_dump -Fc`（custom，支持 pg_restore 选择性/并行恢复）
 - 输出：`$BACKUP_DIR/<db>-<timestamp>.dump` + 同名 `.sha256` 校验文件
-- 失败语义：空文件/命令失败一律退出非 0
+- **checksum 真验证**（Phase 4 BLOCKER 4）：写入 `.sha256` 后立即执行
+  `sha256sum --check` 重新读取 dump 全量校验，通过才置
+  `checksumVerified=true`；验证失败 → 退出非 0、状态产物 `stage=checksum`
+- **失败状态产物**（BLOCKER 4B）：一旦 `BACKUP_DIR` 可用即注册 EXIT trap，
+  其后任何前置配置失败（如 `POSTGRES_USER` 缺失）都会留下
+  `backup-status.json: status=failed`（stage 明确）；BACKUP_DIR 本身
+  不可用时不假造状态（stderr + 非零退出）
+- 失败语义：空文件/命令失败/checksum 验证失败一律退出非 0
 - retention：本地默认 14 天（`BACKUP_RETENTION_DAYS`），过期自动清理
 - 密码：pg_dump 在 postgres 容器内通过容器 env 认证，不落命令行/日志
+- 监控语义：备份健康检查（`npm run ops:backup-health`）不盲信状态布尔——
+  会验证 dump/.sha256 文件仍在并**流式重算 checksum 比对**，
+  能发现"备份成功之后文件被损坏/移除"
 
 ### 3-2-1 基线
 

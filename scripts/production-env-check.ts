@@ -8,6 +8,10 @@
  */
 import { readFileSync } from "node:fs";
 
+// scripts/ 由 tsx CLI 直接执行：不能用 @/ alias（不经过 Next/vitest 的
+// 路径解析），必须相对路径引用 src
+import { metricsTokenEnvChecks } from "../src/lib/metrics-token";
+
 const UNSAFE_DEFAULTS = [
   "minioadmin",
   "postgres:postgres",
@@ -210,6 +214,12 @@ export function collectEnvChecks(vars: Record<string, string | undefined>): EnvC
 
   // ---- 备份 ----
   check(results, "BACKUP_DIR", (vars.BACKUP_DIR ?? "") !== "", "必须设置（备份目录）");
+
+  // ---- 可观测性：metrics token 安全契约（BLOCKER 3，单一 contract 强制）----
+  // 未设置 = 端点关闭（允许）；设置则必须 >=24 字符、非危险默认值、不复用 NEXTAUTH_SECRET
+  for (const tokenCheck of metricsTokenEnvChecks(vars)) {
+    check(results, tokenCheck.name, tokenCheck.ok, tokenCheck.message);
+  }
 
   return results;
 }

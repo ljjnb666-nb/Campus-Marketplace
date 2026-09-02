@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withHttpMetrics } from "@/lib/http-metrics";
 import { auth } from "@/lib/auth";
 import {
   AssetServiceError,
@@ -13,7 +14,7 @@ import { isUploadCategory, UPLOAD_LIMITS } from "@/lib/upload";
 const MAX_REQUESTS_PER_MINUTE = 20;
 const RATE_LIMIT_WINDOW_MS = 60000;
 
-export async function POST(request: NextRequest) {
+async function postHandler(request: NextRequest) {
   const startedAt = Date.now();
   let userId: string | null = null;
   let category = "unknown";
@@ -143,3 +144,5 @@ export async function POST(request: NextRequest) {
     );
   }
 }
+
+export const POST = withHttpMetrics("upload/images", postHandler);

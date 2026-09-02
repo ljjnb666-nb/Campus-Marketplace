@@ -4,6 +4,7 @@ import {
   resolvePrivateAssetAccess,
   resolvePublicAssetUrl,
 } from "@/lib/asset-service";
+import { withHttpMetrics } from "@/lib/http-metrics";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +19,7 @@ export const dynamic = "force-dynamic";
  *
  * 状态码约定：401 未登录 / 403 无权 / 404 不存在（含已删除）/ 410 已过保留期
  */
-export async function GET(
+async function getHandler(
   _request: Request,
   { params }: { params: Promise<{ assetId: string }> },
 ) {
@@ -89,3 +90,5 @@ export async function GET(
     return NextResponse.json({ message: "资源访问失败，请稍后重试" }, { status: 500 });
   }
 }
+
+export const GET = withHttpMetrics("assets/:id/access", getHandler);

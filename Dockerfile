@@ -69,7 +69,10 @@ COPY --from=builder --chown=node:node /app/public ./public
 USER node
 EXPOSE 3000
 
-# 健康检查：/api/health（DB ping）；slim 镜像无 curl/wget，用 Node fetch
+# 健康检查：/api/health = 真 liveness（只证明 app 进程存活 + release 可读），
+# 不访问 PostgreSQL/Redis/S3——DB outage 不会把 app 容器误判为 unhealthy；
+# 依赖级健康由 /api/ready 表达（DB/Storage 失败 → 503 not_ready）。
+# slim 镜像无 curl/wget，用 Node fetch
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 

@@ -65,10 +65,11 @@ test.describe("HTTP observability", () => {
     expect(raw).not.toContain("Error");
   });
 
-  test("/api/internal/metrics is closed without a configured token", async ({ request }) => {
+  test("/api/internal/metrics enforces its bearer token", async ({ request }) => {
+    // E2E 环境已配置专用 METRICS_BEARER_TOKEN（安全契约合法）：
+    // 无凭据访问 → 403（不是 404：端点已开启但拒绝匿名访问）
     const response = await request.get("/api/internal/metrics");
 
-    // E2E 环境未配置 METRICS_BEARER_TOKEN：端点默认关闭（404），无裸露面
-    expect(response.status()).toBe(404);
+    expect(response.status()).toBe(403);
   });
 });

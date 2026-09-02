@@ -131,6 +131,7 @@
 - [x] 故障注入测试：DB/Redis/Storage 失败与超时 → readiness 503/degraded；备份 stale/failed → ops:check fail
 - [x] OBSERVABILITY_FAILURE_DRILL（`npm run ops:observability-drill`：真实停起 PostgreSQL/Redis，自动清理）
 - [x] ALERTING.md（P0/P1/P2 规则：signal/threshold/severity/action/runbook，窗口化防误报）+ INCIDENT_RESPONSE.md（13 场景）+ LOG_PRIVACY.md
+- [x] 独立验收反馈修复（2026-09-02，PR #4 第二轮）：production ops-check 无 skip bypass（`PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED`）；production 下 `productionBackupReady=false` 阻断 overall PASS；`/api/health` 改为真 liveness（不访问 DB，drill 黑盒证明 DB 停机时 health 仍 200）；METRICS_BEARER_TOKEN 安全契约代码强制（`metrics-token.ts`：≥24 字符/非默认值/不复用 NEXTAUTH_SECRET，违反即端点关闭 404）；HTTP metrics runtime-fed（`withHttpMetrics` 接入全部自营 API route + 黑盒 Playwright 证明）；backup checksum 真验证（`sha256sum --check` 通过才置 verified）+ health 流式重验（可发现备份后损坏）；backup 前置失败尽早写 failed 状态产物（trap 提前）
 - [ ] 独立验收（PENDING_INDEPENDENT_REVIEW → REPO_SIDE_ACCEPTED 仅在验收后可标）
 
 ## 当前待补

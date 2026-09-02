@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { withHttpMetrics } from "@/lib/http-metrics";
 import { runReadinessChecks } from "@/lib/dependency-health";
 import { logger } from "@/lib/logger";
 import { withApiRequestContext } from "@/lib/request-context";
@@ -13,8 +14,8 @@ export const dynamic = "force-dynamic";
  * 公开响应只包含高层状态：绝不返回 connection string、异常详情、
  * stack、endpoint 凭据。失败细节只进服务端结构化日志。
  */
-export async function GET(request: Request) {
-  return withApiRequestContext(request.headers, async () => {
+export const GET = withHttpMetrics("ready", (request: Request) =>
+  withApiRequestContext(request.headers, async () => {
     const report = await runReadinessChecks();
     const httpStatus = report.status === "not_ready" ? 503 : 200;
 
@@ -37,5 +38,5 @@ export async function GET(request: Request) {
         headers: { "Cache-Control": "no-store" },
       },
     );
-  });
-}
+  }),
+);

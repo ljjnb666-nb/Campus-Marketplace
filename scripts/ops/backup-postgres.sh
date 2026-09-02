@@ -7,16 +7,19 @@
 #
 # - pg_dump custom 格式（-Fc），支持 pg_restore 并行/选择性恢复
 # - 文件名带 timestamp；退出非 0 表示失败
-# - 同时生成 SHA256 校验文件
+# - 生成 SHA256 校验文件并**真实执行 sha256sum --check 验证**，
+#   验证通过才允许 checksumVerified=true（BLOCKER 4）
 # - retention：清理超过 BACKUP_RETENTION_DAYS（默认 14）天的本地备份
 # - 密码：pg_dump 通过容器内 env 认证，不落命令行/日志
 #
-# 机器可读状态产物（Phase 4 TASK 7）：
-#   ${BACKUP_DIR}/backup-status.json —— 成功与失败都必须可靠写入，
-#   供 backup-health-check / ops:check 判定 LAST_BACKUP_STATUS/
-#   LAST_BACKUP_TIME/CHECKSUM_STATUS/OFFSITE_STATUS。
+# 机器可读状态产物（Phase 4 TASK 7 + BLOCKER 4B）：
+#   ${BACKUP_DIR}/backup-status.json —— 成功与失败都必须可靠写入。
+#   一旦 BACKUP_DIR 已知且可写，立即初始化 pending state 并注册 EXIT trap：
+#   其后任何前置配置失败（如 POSTGRES_USER 缺失）都会留下 status=failed
+#   的状态产物（含明确 stage），而不是静默无产物。
+#   BACKUP_DIR 本身缺失/不可写时没有可靠落点：只 stderr + 非零退出，
+#   绝不假造"状态写成功"。
 #   状态文件只含非敏感 metadata（文件名/时间/布尔状态）。
-#   写状态文件本身失败绝不吞掉备份的真实退出码（best effort + trap 保底）。
 #
 # 异地备份语义（绝不产生虚假的异地备份安全感）：
 #   - BACKUP_OFFSITE_TARGET 为空 → 本地备份成功即成功，显式报告 OFFSITE_NOT_CONFIGURED
@@ -30,15 +33,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
 load_production_env
 
+# ---- 第一个必需配置：备份目录（状态产物落点）----
 BACKUP_DIR="$(require_env_var BACKUP_DIR)"
-# 统一 env contract：shell export > .env.production > 默认 14（不得绕过 lib）
-RETENTION_DAYS="$(optional_env_var BACKUP_RETENTION_DAYS 14)"
-POSTGRES_USER="$(require_env_var POSTGRES_USER)"
-DB_NAME="$(require_env_var POSTGRES_DB)"
-OFFSITE_TARGET="$(optional_env_var BACKUP_OFFSITE_TARGET "")"
 
-mkdir -p "${BACKUP_DIR}"
+if ! mkdir -p "${BACKUP_DIR}" 2>/dev/null; then
+  echo "[backup] FAIL：无法创建备份目录 ${BACKUP_DIR}，无可靠状态落点，退出" >&2
+  exit 1
+fi
+if ! touch "${BACKUP_DIR}/.write-probe" 2>/dev/null; then
+  echo "[backup] FAIL：备份目录不可写 ${BACKUP_DIR}，无可靠状态落点，退出" >&2
+  exit 1
+fi
+rm -f "${BACKUP_DIR}/.write-probe"
 
+# ---- BACKUP_DIR 可用：立即初始化状态并注册 trap（BLOCKER 4B）----
 STATUS_FILE="${BACKUP_DIR}/backup-status.json"
 PENDING_STATUS="failed"      # 任何未走到 success 收尾的退出都按 failed 记录
 PENDING_STAGE="init"
@@ -47,10 +55,6 @@ PENDING_CHECKSUM="false"
 PENDING_OFFSITE="not_configured"
 
 write_backup_status() {
-  # 早期失败（env 契约未过）时 STATUS_FILE 可能未定义：跳过即可
-  if [[ -z "${STATUS_FILE:-}" ]]; then
-    return 0
-  fi
   local completed_at
   completed_at="$(date -Is)"
   # best effort：状态文件写失败只报警，不改变备份流程本身的退出码
@@ -74,9 +78,24 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# ---- 其余必需配置：失败即由 trap 留下 failed 状态（stage 明确）----
+PENDING_STAGE="resolve_retention"
+RETENTION_DAYS="$(optional_env_var BACKUP_RETENTION_DAYS 14)"
+# 统一 env contract：shell export > .env.production > 默认（不得绕过 lib）
+
+PENDING_STAGE="resolve_postgres_user"
+POSTGRES_USER="$(require_env_var POSTGRES_USER)"
+
+PENDING_STAGE="resolve_db"
+DB_NAME="$(require_env_var POSTGRES_DB)"
+
+PENDING_STAGE="resolve_offsite"
+OFFSITE_TARGET="$(optional_env_var BACKUP_OFFSITE_TARGET "")"
+
+# ---- 备份本体 ----
+PENDING_STAGE="dump"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 DUMP_FILE="${BACKUP_DIR}/${DB_NAME}-${TIMESTAMP}.dump"
-PENDING_STAGE="dump"
 
 echo "[backup] 开始备份 ${DB_NAME} → ${DUMP_FILE}"
 # 通过 postgres 容器内执行 pg_dump（凭据只在容器内 env，不落命令行/日志）
@@ -94,14 +113,26 @@ if [[ ! -s "${DUMP_FILE}" ]]; then
 fi
 PENDING_FILENAME="$(basename "${DUMP_FILE}")"
 
+# ---- 校验和：写入 + 真实验证（BLOCKER 4）----
+PENDING_STAGE="checksum"
 SIZE_BYTES="$(wc -c < "${DUMP_FILE}" | tr -d ' ')"
 SHA256="$(sha256sum "${DUMP_FILE}" | awk '{print $1}')"
-echo "${SHA256}  $(basename "${DUMP_FILE}")" > "${DUMP_FILE}.sha256"
+printf '%s  %s\n' "${SHA256}" "$(basename "${DUMP_FILE}")" > "${DUMP_FILE}.sha256"
 
 echo "[backup] 备份完成"
 echo "[backup] 文件:   ${DUMP_FILE}"
 echo "[backup] 大小:   ${SIZE_BYTES} bytes"
 echo "[backup] SHA256: ${SHA256}"
+
+# 真正执行 sha256sum --check：重新读取 dump 全量校验，
+# 通过才允许 checksumVerified=true（绝不给未验证的 dump 打 verified 标记）
+if ! (cd "${BACKUP_DIR}" && printf '%s  %s\n' "${SHA256}" "$(basename "${DUMP_FILE}")" \
+    | sha256sum --check --quiet -); then
+  echo "[backup] FAIL：备份校验和验证失败（dump 与 .sha256 不一致），判定 FAILED" >&2
+  PENDING_STAGE="checksum"
+  exit 1
+fi
+echo "[backup] 校验和验证通过（sha256sum --check）"
 PENDING_CHECKSUM="true"
 
 # ---- 异地备份 ----

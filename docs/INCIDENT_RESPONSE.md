@@ -31,10 +31,14 @@ Severity 定义见 docs/ALERTING.md 分级。所有 P0/P1 记录处置时间线�
 ```bash
 docker compose ps                                # 组件存活
 docker compose logs app --tail 200               # 应用结构化日志（JSON 行）
-curl -fsS https://<域名>/api/health              # liveness + release
-curl -fsS https://<域名>/api/ready               # readiness + 依赖状态
+curl -fsS https://<域名>/api/health              # liveness：进程存活 + release（不探依赖）
+curl -fsS https://<域名>/api/ready               # readiness：依赖状态（DB/Redis/Storage）
 ./scripts/ops/lib.sh 依赖的工具见各场景          # 统一 env contract
 ```
+
+> 语义提醒：`/api/health` 失败 = 进程/容器层故障；依赖故障只反映在
+> `/api/ready`（DB/Storage 失败 → 503 not_ready，Redis 故障 → degraded）。
+> 两者分离意味着 DB outage 时 app 容器 healthcheck 仍正常。
 
 ---
 
@@ -182,9 +186,9 @@ curl -fsS https://<域名>/api/ready               # readiness + 依赖状态
 ## 恢复验证（所有场景收尾必做）
 
 ```bash
-curl -fsS https://<域名>/api/health   # {"status":"ok","release":"<期望 SHA>"}
-curl -fsS https://<域名>/api/ready    # {"status":"ready", dependencies 全 ok}
-npm run ops:check -- --mode production # 全部 PASS（exit 0）
+curl -fsS https://<域名>/api/health   # {"status":"ok","release":"<期望 SHA>"}（进程/发布层）
+curl -fsS https://<域名>/api/ready    # {"status":"ready", dependencies 全 ok}（依赖层）
+npm run ops:check -- --mode production # 全部 PASS（exit 0；生产模式无 skip bypass）
 ```
 
 涉及数据恢复的场景追加：按 docs/BACKUP_RESTORE.md 执行一次 restore drill

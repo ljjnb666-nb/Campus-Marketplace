@@ -85,10 +85,16 @@ NOT_FOUND / CONFLICT / RATE_LIMIT / DEPENDENCY / DATABASE / CACHE / STORAGE / IN
 | | `/api/health`（liveness） | `/api/ready`（readiness） |
 | --- | --- | --- |
 | 问题 | 进程活着吗 | 当前实例能接正常业务流量吗 |
-| 检查 | SELECT 1（部署验证依赖其反映 DB 可达） | PostgreSQL + Redis + Storage 并行探测 |
+| 检查 | **无依赖访问**（handler 能执行即 200） | PostgreSQL + Redis + Storage 并行探测 |
 | 速度 | 快、无副作用 | 每依赖独立 timeout（默认 2s，总预算 ≤5s 量级），bounded |
-| 失败 | 503 `{"status":"error"}` | 503 `{"status":"not_ready", dependencies:{...}}` |
+| 失败 | handler 挂了才会有非 200 | 503 `{"status":"not_ready", dependencies:{...}}` |
 | 响应契约 | `{status, release, timestamp}`（不可变更：deploy.sh/HEALTHCHECK/Playwright 依赖） | `{status: ready|degraded|not_ready, release, dependencies}`，只含高层状态 |
+
+> BLOCKER 2 修正：`/api/health` 是**真 liveness**——不访问 PostgreSQL/Redis/S3，
+> 无副作用。DB outage 不再导致 app 容器被 Docker HEALTHCHECK 误判 unhealthy
+> （HEALTHCHECK 只证明 app 进程存活）；依赖级健康完全由 `/api/ready` 表达。
+> 故障演练（observability-drill）以黑盒方式证明：PostgreSQL 停机时
+> `/api/health` 仍 200、`/api/ready` 变 503 not_ready、恢复后回到 ready。
 
 Readiness 探测方式（无副作用）：
 
@@ -147,9 +153,16 @@ unexpected_server_errors_total          {category}
 端点：`/api/internal/metrics`（Prometheus 文本格式）。
 
 - **默认关闭**：未配置 `METRICS_BEARER_TOKEN` → 404（无裸露默认面）
-- 开启后需 `Authorization: Bearer <METRICS_BEARER_TOKEN>`（专用 token，
-  **禁止**复用 NEXTAUTH_SECRET；常数时间比较；拒绝事件有结构化日志）
-- 生产拓扑建议：采集器走内网/容器网络访问，公网入口（Caddy）不路由该路径
+- **HTTP 指标是 runtime-fed（BLOCKER 3B）**：`withHttpMetrics` wrapper 接入
+  全部自营 API route handlers（Next 16 的 proxy 与 Node runtime 隔离，
+  因此计数点在 Node 侧、与 metrics 读取端同进程——真实请求驱动计数，
+  黑盒 Playwright 测试 `http-metrics.spec.ts` 在 production build 上验证
+  http_requests_total / http_request_duration_ms / http_errors_total 真实增长）
+- **token 安全契约由代码强制（BLOCKER 3）**：`src/lib/metrics-token.ts` 是
+  唯一裁决点，production-env-check（preflight）与端点（运行时 fail-closed）
+  共用同一规则：未设置=关闭（允许）；设置则必须 ≥24 字符、不命中危险
+  默认值/placeholder、**不得复用 NEXTAUTH_SECRET**——违反时端点保持 404
+  并记录结构化配置错误（只记 reason 枚举，绝不记录值）
 
 ## 6. Backup freshness
 
@@ -160,8 +173,14 @@ unexpected_server_errors_total          {category}
 ```
 
 - 只含非敏感 metadata；写状态失败不影响备份真实退出码（trap + best effort）
+- `checksumVerified=true` **确实经过校验**（BLOCKER 4）：脚本写入 `.sha256`
+  后必须执行 `sha256sum --check` 重新读取 dump 全量验证，通过才置 true
+- trap 在 BACKUP_DIR 可用后立即注册（BLOCKER 4B）：其后任何前置配置失败
+  （如 POSTGRES_USER 缺失）都会留下 `status=failed` 状态产物（stage 明确）
 - 检查器 `npm run ops:backup-health`（`scripts/ops/backup-health-check.ts`）：
   - 阈值 `BACKUP_MAX_AGE_HOURS` 可配置（默认 26）
+  - **不盲信状态布尔**：真实验证 dump 文件与 `.sha256` 仍存在，且流式重算
+    dump 的 SHA256 与 checksum 一致（发现"备份后损坏/篡改"）
   - production 模式 fail-closed；development 模式只报告事实（`--strict` 可升级）
   - `offsiteStatus=not_configured` → 本地备份 healthy 但 `productionBackupReady=false`
     （Phase 3B DEFERRED：不宣称生产备份已就绪）
@@ -177,11 +196,19 @@ npm run ops:check        # scripts/ops/ops-check.ts [--mode production|developme
 `{"result":"PASS|FAIL"}`；必需检查失败 → exit 1（fail-closed，绝不
 swallow / 绝不失败后打印 PASS）。
 
+Production 无 bypass（BLOCKER 1/1B）：
+
+- `--mode production --skip-connectivity` → 直接 FAIL
+  （`reason=PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED`，exit 1）；
+  connectivity 只能跳过于 development/CI
+- production 下 `productionBackupReady !== true`（如 offsite not_configured）
+  → `backup_health` FAIL（`PRODUCTION_BACKUP_NOT_READY`）→ 整体 FAIL
+
 | mode | env 契约 | 连通性 | 生产备份 | RELEASE_SHA |
 | --- | --- | --- | --- | --- |
 | development | skipped | 已配置则检查 | 报告事实，不阻断 | 可选 |
 | ci | skipped | 同 development | 同上 | 可选 |
-| production | 强制 | 强制 | 强制（fail-closed） | 必须 |
+| production | 强制 | 强制（不可 skip） | 强制（productionBackupReady 必须 true） | 必须 |
 
 ## 8. Error UI / boundary
 

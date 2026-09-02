@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { readPrivateAssetObject } from "@/lib/asset-service";
+import { withHttpMetrics } from "@/lib/http-metrics";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +20,7 @@ export const dynamic = "force-dynamic";
  *
  * 状态码约定与 access API 一致：401 / 403 / 404（含已删除与 PUBLIC 误入）/ 410
  */
-export async function GET(
+async function getHandler(
   _request: Request,
   { params }: { params: Promise<{ assetId: string }> },
 ) {
@@ -88,3 +89,5 @@ export async function GET(
     return NextResponse.json({ message: "资源访问失败，请稍后重试" }, { status: 500 });
   }
 }
+
+export const GET = withHttpMetrics("assets/:id/content", getHandler);

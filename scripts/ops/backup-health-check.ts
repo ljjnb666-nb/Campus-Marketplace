@@ -20,7 +20,8 @@
  *
  * 本脚本绝不读取/输出备份内容或任何凭据，仅解析 status JSON。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 
 interface BackupStatus {
@@ -83,12 +84,25 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-export function evaluateBackupHealth(options: {
+/**
+ * 流式计算文件 SHA256（BLOCKER 4）：不把整个 dump 读进内存。
+ */
+async function sha256File(file: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file, { highWaterMark: 64 * 1024 });
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+export async function evaluateBackupHealth(options: {
   backupDir: string;
   maxAgeHours: number;
   mode: string;
   strict: boolean;
-}): { report: HealthReport; exitCode: number } {
+}): Promise<{ report: HealthReport; exitCode: number }> {
   const { backupDir, maxAgeHours, mode } = options;
   const production = mode === "production";
   const statusFile = path.join(backupDir, "backup-status.json");
@@ -150,6 +164,40 @@ export function evaluateBackupHealth(options: {
     return fail("最近一次备份未通过 checksum 校验");
   }
 
+  // BLOCKER 4：不盲信状态布尔——备份健康必须验证文件仍在且当前内容
+  // 与 checksum 一致（防"备份成功后 dump 被损坏/移除仍报 healthy"）
+  const filename = asString(parsed.filename);
+  if (!filename) {
+    return fail("状态产物缺少 filename 引用（无法定位备份文件）");
+  }
+  const dumpFile = path.join(backupDir, filename);
+  const checksumFile = `${dumpFile}.sha256`;
+  if (!existsSync(dumpFile)) {
+    return fail("备份 dump 文件缺失（状态产物引用的文件已不存在）");
+  }
+  if (!existsSync(checksumFile)) {
+    return fail("备份 checksum 文件缺失（.sha256 已不存在）");
+  }
+  let recordedChecksum = "";
+  try {
+    const raw = readFileSync(checksumFile, "utf8").trim();
+    recordedChecksum = raw.split(/\s+/)[0] ?? "";
+  } catch {
+    return fail("备份 checksum 文件不可读");
+  }
+  if (!/^[0-9a-f]{64}$/.test(recordedChecksum)) {
+    return fail("备份 checksum 文件内容非法（非 64 位 hex）");
+  }
+  let actualChecksum: string;
+  try {
+    actualChecksum = await sha256File(dumpFile);
+  } catch {
+    return fail("备份 dump 文件不可读（流式校验失败）");
+  }
+  if (actualChecksum !== recordedChecksum) {
+    return fail("备份完整性校验失败：dump 当前内容与 checksum 不一致（可能已损坏或被篡改）");
+  }
+
   report.offsiteStatus = asString(parsed.offsiteStatus);
   if (report.offsiteStatus === "failed") {
     return fail("异地备份失败（offsiteStatus=failed）");
@@ -174,7 +222,7 @@ export function evaluateBackupHealth(options: {
   return { report, exitCode: 0 };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   loadEnvOverlay(".env.production");
 
@@ -187,7 +235,7 @@ function main(): void {
     process.exit(1);
   }
 
-  const { report, exitCode } = evaluateBackupHealth({
+  const { report, exitCode } = await evaluateBackupHealth({
     backupDir,
     maxAgeHours,
     mode,
@@ -200,5 +248,5 @@ function main(): void {
 }
 
 if (process.argv[1] && process.argv[1].endsWith("backup-health-check.ts")) {
-  main();
+  void main();
 }

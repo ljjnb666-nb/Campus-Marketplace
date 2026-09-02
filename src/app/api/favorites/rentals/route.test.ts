@@ -18,7 +18,7 @@ describe("GET /api/favorites/rentals", () => {
   it("returns 401 without a session", async () => {
     auth.mockResolvedValue(null);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/rentals"));
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
@@ -29,7 +29,7 @@ describe("GET /api/favorites/rentals", () => {
     auth.mockResolvedValue({ user: { id: "user-1" } });
     getMyRentalFavorites.mockResolvedValue([{ id: "fav-1" }]);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/rentals"));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ favorites: [{ id: "fav-1" }] });
@@ -40,7 +40,7 @@ describe("GET /api/favorites/rentals", () => {
     auth.mockResolvedValue({ user: { id: "user-1" } });
     getMyRentalFavorites.mockRejectedValue(new Error("db down"));
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/favorites/rentals"));
 
     expect(response.status).toBe(500);
     const body = await response.json();

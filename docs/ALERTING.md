@@ -21,7 +21,9 @@ METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志�
 
 ### P0-1 应用完全不可用
 
-- signal：`/api/health` 连续失败（非 200）
+- signal：`/api/health` 连续失败（非 200）。注意 `/api/health` 是**真 liveness**
+  （不访问任何依赖）：它失败 = app 进程/容器层面故障，而非依赖故障
+  （依赖故障走 P0-2/P1-5 的 readiness 信号）
 - threshold/window：连续 ≥3 次探测失败、间隔 30s（≈90s 完全不可用）
 - severity：P0
 - initial action：`docker compose ps` 确认 app/caddy 状态；查 app 日志最近 ERROR
@@ -84,12 +86,13 @@ METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志�
 - signal：`backup-status.json` status=failed；或 offsiteStatus=failed
 - threshold/window：任一次失败（脚本 exit != 0 本身也是信号）
 - severity：P1（offsite failed = 3-2-1 缺口）
-- initial action：看 stage 字段定位失败阶段；aws CLI 凭据/网络
+- initial action：看 stage 字段定位失败阶段（含 checksum 验证失败）；aws CLI 凭据/网络
 - runbook：INCIDENT_RESPONSE.md §场景 5
 
 ### P1-4 意外错误率激增
 
-- signal：`unexpected_server_errors_total` 增速（按 release 维度人工对比）
+- signal：`http_errors_total` / `unexpected_server_errors_total` 增速
+  （http_errors_total 由 runtime 的 withHttpMetrics 真实计数；按 route 维度人工对比）
 - threshold/window：5 分钟窗口内 rate > 基线 3 倍且绝对值 ≥10 次（无基线时：
   5 分钟 ≥20 次）
 - severity：P1
