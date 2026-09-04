@@ -8,7 +8,7 @@ const publicNavItems = [
   { href: "/errands", label: "跑腿大厅" },
   { href: "/services", label: "技能服务" },
   { href: "/rentals", label: "租赁广场" },
-  { href: "/rules", label: "平台规则" },
+  { href: "/legal/rules", label: "平台规则" },
 ];
 
 const accountNavItems = [
@@ -23,6 +23,7 @@ const accountNavItems = [
   { href: "/reports", label: "举报中心" },
   { href: "/profile", label: "个人中心" },
   { href: "/my/favorites", label: "我的收藏" },
+  { href: "/my/privacy", label: "隐私与数据" },
 ];
 
 type SiteHeaderProps = {

@@ -1,10 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { requireAdmin, requireUser } from "@/lib/server-auth";
+import {
+  getVerifiedSession,
+  requireAdmin,
+  requireUser,
+} from "@/lib/server-auth";
 
-const { mockAuth, mockRedirect, mockFindUnique } = vi.hoisted(() => ({
+const {
+  mockAuth,
+  mockRedirect,
+  mockFindUnique,
+  mockGetUserAcceptanceStatus,
+} = vi.hoisted(() => ({
   mockAuth: vi.fn(),
   mockRedirect: vi.fn(),
   mockFindUnique: vi.fn(),
+  mockGetUserAcceptanceStatus: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -23,13 +33,38 @@ vi.mock("next/navigation", () => ({
   redirect: mockRedirect,
 }));
 
+vi.mock("@/lib/legal/policy-service", () => ({
+  getUserAcceptanceStatus: mockGetUserAcceptanceStatus,
+}));
+
+const ACTIVE_USER = {
+  id: "user-1",
+  role: "STUDENT" as const,
+  name: "小林",
+  email: "lin@example.com",
+  avatarUrl: null,
+  verificationStatus: "VERIFIED",
+  status: "ACTIVE" as const,
+  deletedAt: null,
+  erasedAt: null,
+};
+
+const COMPLIANT = {
+  compliant: true,
+  required: [],
+  pending: [],
+};
+
 beforeEach(() => {
   mockAuth.mockReset();
   mockRedirect.mockReset();
   mockFindUnique.mockReset();
+  mockGetUserAcceptanceStatus.mockReset();
   mockRedirect.mockImplementation((target: string) => {
     throw new Error(`REDIRECT:${target}`);
   });
+  // 默认满足同意要求（consent gate 放行）
+  mockGetUserAcceptanceStatus.mockResolvedValue(COMPLIANT);
 });
 
 describe("requireUser", () => {
@@ -54,40 +89,16 @@ describe("requireUser", () => {
     mockAuth.mockResolvedValue({
       user: { id: "user-1", role: "STUDENT", name: "小林" },
     });
-    mockFindUnique.mockResolvedValue({
-      id: "user-1",
-      role: "STUDENT",
-      name: "小林",
-      email: "lin@example.com",
-      avatarUrl: null,
-      verificationStatus: "VERIFIED",
-      status: "ACTIVE",
-      deletedAt: null,
-    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
 
-    await expect(requireUser()).resolves.toEqual({
-      id: "user-1",
-      role: "STUDENT",
-      name: "小林",
-      email: "lin@example.com",
-      avatarUrl: null,
-      verificationStatus: "VERIFIED",
-      status: "ACTIVE",
-      deletedAt: null,
-    });
+    await expect(requireUser()).resolves.toEqual({ ...ACTIVE_USER });
   });
 
   it("rejects the session when the account has been suspended", async () => {
     mockAuth.mockResolvedValue({
       user: { id: "user-1", role: "STUDENT", name: "小林" },
     });
-    mockFindUnique.mockResolvedValue({
-      id: "user-1",
-      role: "STUDENT",
-      name: "小林",
-      status: "SUSPENDED",
-      deletedAt: null,
-    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, status: "SUSPENDED" });
 
     await expect(requireUser()).rejects.toThrow("REDIRECT:/login");
     expect(mockRedirect).toHaveBeenCalledWith("/login");
@@ -98,15 +109,37 @@ describe("requireUser", () => {
       user: { id: "user-1", role: "STUDENT", name: "小林" },
     });
     mockFindUnique.mockResolvedValue({
-      id: "user-1",
-      role: "STUDENT",
-      name: "小林",
-      status: "ACTIVE",
+      ...ACTIVE_USER,
       deletedAt: new Date("2026-01-01T00:00:00Z"),
     });
 
     await expect(requireUser()).rejects.toThrow("REDIRECT:/login");
     expect(mockRedirect).toHaveBeenCalledWith("/login");
+  });
+
+  it("redirects to the consent page when required policies are missing (consent gate)", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "user-1", role: "STUDENT", name: "小林" },
+    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
+    mockGetUserAcceptanceStatus.mockResolvedValue({
+      compliant: false,
+      required: [{ id: "doc-2", type: "TERMS_OF_SERVICE", version: 2 }],
+      pending: [{ id: "doc-2", type: "TERMS_OF_SERVICE", version: 2, state: "OUTDATED" }],
+    });
+
+    await expect(requireUser()).rejects.toThrow("REDIRECT:/legal/accept");
+    expect(mockRedirect).toHaveBeenCalledWith("/legal/accept");
+  });
+
+  it("does not reach the consent check when the account is inactive", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "user-1", role: "STUDENT", name: "小林" },
+    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, erasedAt: new Date() });
+
+    await expect(requireUser()).rejects.toThrow("REDIRECT:/login");
+    expect(mockGetUserAcceptanceStatus).not.toHaveBeenCalled();
   });
 });
 
@@ -115,13 +148,7 @@ describe("requireAdmin", () => {
     mockAuth.mockResolvedValue({
       user: { id: "user-1", role: "STUDENT" },
     });
-    mockFindUnique.mockResolvedValue({
-      id: "user-1",
-      role: "STUDENT",
-      name: "普通学生",
-      status: "ACTIVE",
-      deletedAt: null,
-    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, name: "普通学生" });
 
     await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");
     expect(mockRedirect).toHaveBeenCalledWith("/");
@@ -131,20 +158,50 @@ describe("requireAdmin", () => {
     mockAuth.mockResolvedValue({
       user: { id: "admin-1", role: "ADMIN", name: "管理员" },
     });
-    mockFindUnique.mockResolvedValue({
-      id: "admin-1",
-      role: "ADMIN",
-      name: "管理员",
-      status: "ACTIVE",
-      deletedAt: null,
-    });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, id: "admin-1", role: "ADMIN", name: "管理员" });
 
     await expect(requireAdmin()).resolves.toEqual({
+      ...ACTIVE_USER,
       id: "admin-1",
       role: "ADMIN",
       name: "管理员",
-      status: "ACTIVE",
-      deletedAt: null,
+    });
+  });
+});
+
+describe("getVerifiedSession（API 路由会话校验）", () => {
+  it("returns UNAUTHENTICATED without session", async () => {
+    mockAuth.mockResolvedValue(null);
+
+    await expect(getVerifiedSession({ requireConsent: true })).resolves.toEqual({
+      ok: false,
+      reason: "UNAUTHENTICATED",
+    });
+  });
+
+  it("returns ACCOUNT_INACTIVE for erased accounts", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, erasedAt: new Date() });
+
+    await expect(getVerifiedSession({ requireConsent: false })).resolves.toEqual({
+      ok: false,
+      reason: "ACCOUNT_INACTIVE",
+    });
+  });
+
+  it("returns LEGAL_ACCEPTANCE_REQUIRED for gated mutations when policies are pending", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
+    mockGetUserAcceptanceStatus.mockResolvedValue({ compliant: false, required: [], pending: [] });
+
+    const gated = await getVerifiedSession({ requireConsent: true });
+    expect(gated).toEqual({ ok: false, reason: "LEGAL_ACCEPTANCE_REQUIRED" });
+
+    // 隐私自助操作不要求 consent（退出权优先）
+    const ungated = await getVerifiedSession({ requireConsent: false });
+    expect(ungated).toEqual({
+      ok: true,
+      user: { id: "user-1", email: "lin@example.com", name: "小林", role: "STUDENT" },
     });
   });
 });

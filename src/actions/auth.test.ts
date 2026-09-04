@@ -1,10 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { hash, campusFindUnique, userCreate, mockHeaders } = vi.hoisted(() => ({
+const {
+  hash,
+  campusFindUnique,
+  userCreate,
+  mockHeaders,
+  transactionMock,
+  recordSignupAcceptances,
+} = vi.hoisted(() => ({
   hash: vi.fn(),
   campusFindUnique: vi.fn(),
   userCreate: vi.fn(),
   mockHeaders: vi.fn(),
+  transactionMock: vi.fn(),
+  recordSignupAcceptances: vi.fn(),
 }));
 
 vi.mock("bcryptjs", () => ({
@@ -20,10 +29,12 @@ vi.mock("@/lib/prisma", () => ({
     campus: {
       findUnique: campusFindUnique,
     },
-    user: {
-      create: userCreate,
-    },
   },
+  withTransaction: transactionMock,
+}));
+
+vi.mock("@/lib/legal/policy-service", () => ({
+  recordSignupAcceptances,
 }));
 
 import { Prisma } from "@prisma/client";
@@ -32,7 +43,9 @@ import { registerUser } from "@/actions/auth";
 // 合成测试凭据（拼接生成，非真实账号）
 const TEST_PASSWORD = ["Student", "123456"].join("");
 
-function buildRegisterFormData() {
+const CURRENT_POLICY_IDS = ["doc-terms-1", "doc-privacy-1", "doc-rules-1", "doc-prohibited-1"];
+
+function buildRegisterFormData(overrides?: { agreeLegal?: string; documentIds?: string[] }) {
   const formData = new FormData();
   formData.set("name", "张同学");
   formData.set("email", "student1@campus.local");
@@ -40,6 +53,14 @@ function buildRegisterFormData() {
   formData.set("confirmPassword", TEST_PASSWORD);
   formData.set("schoolName", "示例大学");
   formData.set("campusId", "campus-1");
+  if (overrides?.agreeLegal !== undefined) {
+    formData.set("agreeLegal", overrides.agreeLegal);
+  } else {
+    formData.set("agreeLegal", "on");
+  }
+  for (const documentId of overrides?.documentIds ?? CURRENT_POLICY_IDS) {
+    formData.append("acceptedDocumentIds", documentId);
+  }
   return formData;
 }
 
@@ -49,9 +70,29 @@ describe("auth actions", () => {
     campusFindUnique.mockReset();
     userCreate.mockReset();
     mockHeaders.mockReset();
+    transactionMock.mockReset();
+    recordSignupAcceptances.mockReset();
     mockHeaders.mockImplementation(async () => ({
       get: () => null,
     }));
+    userCreate.mockResolvedValue({ id: "user-1" });
+    recordSignupAcceptances.mockResolvedValue({ created: 4, skipped: 0 });
+    transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback({ user: { create: userCreate } }),
+    );
+  });
+
+  it("rejects registration without the explicit legal consent checkbox", async () => {
+    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+
+    const result = await registerUser(
+      { success: false, message: "" },
+      buildRegisterFormData({ agreeLegal: "" }),
+    );
+
+    expect(result.success).toBe(false);
+    expect(userCreate).not.toHaveBeenCalled();
+    expect(recordSignupAcceptances).not.toHaveBeenCalled();
   });
 
   it("rejects registration when the selected campus does not exist", async () => {
@@ -84,10 +125,9 @@ describe("auth actions", () => {
     });
   });
 
-  it("creates the user with a hashed password when registration succeeds", async () => {
+  it("creates the user and bound acceptance evidence in the same transaction", async () => {
     campusFindUnique.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
-    userCreate.mockResolvedValue({ id: "user-1" });
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
@@ -101,10 +141,31 @@ describe("auth actions", () => {
         campusId: "campus-1",
       },
     });
+    // 同意证据与用户创建同事务，绑定实际提交的当前 required 文档集合
+    expect(recordSignupAcceptances).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      CURRENT_POLICY_IDS,
+    );
     expect(result).toEqual({
       success: true,
       message: "注册成功，请登录",
     });
+  });
+
+  it("surfaces policy version conflicts as registration failures (fail closed)", async () => {
+    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    hash.mockResolvedValue("hashed-password");
+    // 提交期间 required 集合变化：同意记录失败 → 整体失败（事务回滚，不留无同意的账号）
+    recordSignupAcceptances.mockRejectedValue(
+      Object.assign(new Error("协议版本已更新，请重新查看并确认"), {
+        code: "LEGAL_DOCUMENT_VERSION_CHANGED",
+      }),
+    );
+
+    const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
+
+    expect(result.success).toBe(false);
   });
 
   it("rate limits repeated registrations from the same ip", async () => {
@@ -113,7 +174,6 @@ describe("auth actions", () => {
     }));
     campusFindUnique.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
-    userCreate.mockResolvedValue({ id: "user-x" });
 
     let result = { success: true, message: "" };
     for (let attempt = 0; attempt < 5; attempt += 1) {

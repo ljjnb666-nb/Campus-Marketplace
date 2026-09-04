@@ -28,6 +28,13 @@ export const E2E_ACCOUNTS = {
     password: `${E2E_PASSWORD_PREFIX}Outsider#2026`,
     name: "E2E无关用户",
   },
+  // Phase 5：legacy 用户——setup 不为其插入同意记录，
+  // 登录后会被 consent gate 引导到 /legal/accept
+  legacy: {
+    email: "e2e-legacy@e2e.test",
+    password: `${E2E_PASSWORD_PREFIX}Legacy#2026`,
+    name: "E2E老用户",
+  },
 } as const;
 
 /** storageState 文件（auth-setup 运行时生成，gitignore，禁止提交） */

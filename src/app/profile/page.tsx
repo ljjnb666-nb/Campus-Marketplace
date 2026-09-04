@@ -97,6 +97,15 @@ export default async function ProfilePage() {
                 <p className="mt-3 text-3xl font-semibold text-slate-950">{item.value}</p>
               </Link>
             ))}
+            <Link
+              href="/my/privacy"
+              className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300"
+            >
+              <p className="text-sm text-slate-500">隐私与数据</p>
+              <p className="mt-3 text-sm font-medium text-sky-700">
+                协议同意记录 · 导出数据 · 注销账号
+              </p>
+            </Link>
           </section>
 
           <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">

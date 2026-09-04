@@ -42,6 +42,14 @@
   - 并发重复下单浏览器回归：双会话同时提交购买，DB 不变量有效订单 = 1（RESERVED 乐观锁）
   - E2E 专用账号仅存在于 E2E 库；storageState 运行时生成并 gitignore，产物不含生产凭据
 
+- 治理域安全基线（2026-09-03，Production Phase 5，详见 [LEGAL_GOVERNANCE.md](LEGAL_GOVERNANCE.md) / [DATA_GOVERNANCE.md](DATA_GOVERNANCE.md)）：
+  - Consent gate 服务端强制：`requireUser()` 中央卡点（页面 + 全部 Server Action）+ API mutation `getVerifiedSession({requireConsent:true})` 403；隐私自助（导出/注销）显式豁免（退出权优先）
+  - 注销/匿名化 fail-closed：hold / 进行中交易在破坏性事务内复检（TOCTOU 防护），阻断即整体失败零部分擦除
+  - 匿名 surrogate 不可反查（随机 UUID + `.invalid`，禁止 SHA256(原 PII) 派生）；凭据以随机 bcrypt 哈希失效
+  - 数据导出边界：显式 DTO 白名单 + 运行时禁止键扫描 + `private, no-store` + same-user only + 限流
+  - 数据库级不变量：`(type,version)` 唯一、`(userId,documentId)` 同意幂等唯一、active 注销请求部分唯一索引
+  - 会话/认证吊销：authorize + requireUser 每请求对照 DB（`erasedAt`/`deletedAt`/status）；已知 JWT 公开页残留展示限制记录在案
+
 ## 数据暴露约束
 
 前台公开信息仅包含必要资料，例如昵称、头像、学校、校区、认证状态、订单数、好评率。

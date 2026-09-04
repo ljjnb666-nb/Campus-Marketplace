@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { RegisterForm } from "@/components/auth/register-form";
 import { listActiveCampuses } from "@/repositories/user-repository";
+import { getCurrentLegalDocuments } from "@/repositories/legal-repository";
 
 export const metadata: Metadata = {
   title: "注册 | 校园集市",
@@ -9,7 +10,10 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function RegisterPage() {
-  const campuses = await listActiveCampuses().catch(() => []);
+  const [campuses, requiredDocuments] = await Promise.all([
+    listActiveCampuses().catch(() => []),
+    getCurrentLegalDocuments().catch(() => []),
+  ]);
 
   return (
     <div className="mx-auto flex w-full max-w-5xl px-4 py-16 sm:px-6">
@@ -21,7 +25,15 @@ export default async function RegisterPage() {
             选择你的校区并创建账号，即可开始发布商品、跑腿任务和技能服务。
           </p>
         </div>
-        <RegisterForm campuses={campuses} />
+        <RegisterForm
+          campuses={campuses}
+          requiredDocuments={requiredDocuments.map((document) => ({
+            id: document.id,
+            slug: document.slug,
+            title: document.title,
+            version: document.version,
+          }))}
+        />
       </div>
     </div>
   );

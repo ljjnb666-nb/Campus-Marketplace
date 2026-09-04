@@ -1,14 +1,20 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import PrivacyPage from "@/app/privacy/page";
 
-describe("PrivacyPage", () => {
-  it("renders the privacy commitments", () => {
+// Phase 5：/privacy 迁移为版本化 policy source（/legal/privacy），
+// 旧路由仅保留重定向，不再维护第二份静态文本。
+vi.mock("next/navigation", () => ({
+  redirect: vi.fn(),
+}));
+
+import { redirect } from "next/navigation";
+
+describe("PrivacyPage（旧路由重定向）", () => {
+  it("redirects to the versioned /legal/privacy page", () => {
     render(<PrivacyPage />);
 
-    expect(screen.getByRole("heading", { name: "隐私政策" })).toBeTruthy();
-    expect(screen.getByText(/公开资料仅包含昵称、头像、学校、校区、认证状态/)).toBeTruthy();
-    expect(screen.getByText(/学生证图片仅管理员可见/)).toBeTruthy();
+    expect(redirect).toHaveBeenCalledWith("/legal/privacy");
   });
 });

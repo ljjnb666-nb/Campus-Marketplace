@@ -92,8 +92,18 @@ export default defineConfig({
     },
     {
       name: "chromium",
+      testIgnore: /legal-version-upgrade\.spec\.ts/,
       use: { ...devices["Desktop Chrome"] },
       dependencies: ["setup"],
+    },
+    {
+      // Phase 5 GF-L3：发布全局立即生效的新政策版本，必须等主套件全部
+      // 结束后单独执行（否则并行 worker 中"注册早于发布"的用户会被
+      // 打成 OUTDATED，产生跨测试污染）
+      name: "governance-last",
+      testMatch: /legal-version-upgrade\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+      dependencies: ["chromium"],
     },
   ],
 
