@@ -4,23 +4,25 @@ import { prisma } from "@/lib/prisma";
 import { getUserAcceptanceStatus } from "@/lib/legal/policy-service";
 
 /**
- * 页面/Server Action 的统一身份入口（中央卡点）。
+ * 中央 active-account resolver（Phase 5 REPAIR）。
  *
- * 每次请求都对照数据库最新状态：
- * 1. 账号被停用/删除/注销（erasedAt）→ 立即失效旧会话（跳登录页）
- * 2. required 政策未满足（缺失或过期）→ 跳转 /legal/accept 重新同意。
- *    这是 consent gate 的服务端强制点：所有业务 mutation 都经由
- *    requireUser/requireAdmin 进入，无法通过直接调用绕过。
+ * Auth.js 策略为 JWT（maxAge 7 天）：auth() 只解析令牌，不感知注销/停用。
+ * 账号被注销（erasedAt）或停用后，注销前签发的 JWT 仍然"可解析"——因此
+ * 每一个 authenticated 边界（页面、Server Action、API route）都必须经过
+ * 本 resolver 对照数据库最新状态，旧 JWT 不能继续驱动任何身份操作。
+ *
+ * 合同（永远不可跳过）：
+ *   1. 解析 auth session
+ *   2. DB re-fetch User
+ *   3. 要求 status == ACTIVE && deletedAt == null && erasedAt == null
+ *   4. consent 是否要求由调用方决定（re-consent / 隐私自助允许 requireConsent=false，
+ *      但第 3 步的账号 active 校验任何路径都不可跳过）
  */
-export async function requireUser() {
-  const session = await auth();
 
-  if (!session?.user?.id) {
-    redirect("/login");
-  }
-
-  const dbUser = await prisma.user.findUnique({
-    where: { id: session.user.id },
+/** DB 最新状态校验 + 会话合并。非 active 返回 null（不区分原因，避免向客户端泄漏状态）。 */
+async function loadActiveUser(sessionUserId: string) {
+  return prisma.user.findUnique({
+    where: { id: sessionUserId },
     select: {
       id: true,
       role: true,
@@ -33,8 +35,28 @@ export async function requireUser() {
       erasedAt: true,
     },
   });
+}
 
-  if (!dbUser || dbUser.status !== "ACTIVE" || dbUser.deletedAt || dbUser.erasedAt) {
+function isActiveUser(user: {
+  status: string;
+  deletedAt: Date | null;
+  erasedAt: Date | null;
+}): boolean {
+  return user.status === "ACTIVE" && user.deletedAt === null && user.erasedAt === null;
+}
+
+/** 页面/Server Action 的统一身份入口（中央卡点）。 */
+export async function requireUser() {
+  const session = await auth();
+
+  if (!session?.user?.id) {
+    redirect("/login");
+  }
+
+  const dbUser = await loadActiveUser(session.user.id);
+
+  if (!dbUser || !isActiveUser(dbUser)) {
+    // 账号被停用/删除/注销后立即失效旧会话（含旧 JWT）
     redirect("/login");
   }
 
@@ -74,22 +96,9 @@ export async function requireVerifiedPageUser() {
     redirect("/login");
   }
 
-  const dbUser = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: {
-      id: true,
-      role: true,
-      email: true,
-      name: true,
-      avatarUrl: true,
-      verificationStatus: true,
-      status: true,
-      deletedAt: true,
-      erasedAt: true,
-    },
-  });
+  const dbUser = await loadActiveUser(session.user.id);
 
-  if (!dbUser || dbUser.status !== "ACTIVE" || dbUser.deletedAt || dbUser.erasedAt) {
+  if (!dbUser || !isActiveUser(dbUser)) {
     redirect("/login");
   }
 
@@ -111,13 +120,14 @@ export type VerifiedSession =
   | { ok: false; reason: "UNAUTHENTICATED" | "ACCOUNT_INACTIVE" | "LEGAL_ACCEPTANCE_REQUIRED" };
 
 /**
- * API Route 的会话校验（带数据库复核 + 可选 consent gate）。
+ * Server Action / API Route 的会话校验（带数据库复核 + 可选 consent gate）。
  *
- * 与 requireUser 的差异：route handler 中不能 throw redirect，
+ * 与 requireUser 的差异：action/route handler 中不能 throw redirect，
  * 这里返回可判别联合，由调用方映射为 401/403 JSON。
  *
  * @param requireConsent true 用于业务 mutation：required 政策未满足时
- *        返回 LEGAL_ACCEPTANCE_REQUIRED（403）。公开读接口传 false。
+ *        返回 LEGAL_ACCEPTANCE_REQUIRED（403）。隐私自助与 re-consent
+ *        入口传 false——但账号 active 校验（第 3 步）永远执行。
  */
 export async function getVerifiedSession(
   options: { requireConsent?: boolean } = {},
@@ -128,12 +138,9 @@ export async function getVerifiedSession(
     return { ok: false, reason: "UNAUTHENTICATED" };
   }
 
-  const dbUser = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { id: true, email: true, name: true, role: true, status: true, deletedAt: true, erasedAt: true },
-  });
+  const dbUser = await loadActiveUser(session.user.id);
 
-  if (!dbUser || dbUser.status !== "ACTIVE" || dbUser.deletedAt || dbUser.erasedAt) {
+  if (!dbUser || !isActiveUser(dbUser)) {
     return { ok: false, reason: "ACCOUNT_INACTIVE" };
   }
 

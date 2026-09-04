@@ -77,7 +77,7 @@ test("GF-L2 legacy 用户：登录被引导重新同意，API mutation 无法绕
   // 2. 访问任何受保护业务页 → 被引导到 /legal/accept
   await page.goto("/profile");
   await page.waitForURL((url) => url.pathname === "/legal/accept");
-  await expect(page.getByRole("heading", { name: /请阅读并确认最新协议/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /请阅读并确认最新协议/ }).first()).toBeVisible();
 
   // 3. 直接调用业务 API（上传）试图绕过 → 403 LEGAL_ACCEPTANCE_REQUIRED
   const bypass = await page.request.post("/api/upload/images", {

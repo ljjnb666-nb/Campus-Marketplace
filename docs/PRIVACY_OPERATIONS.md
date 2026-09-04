@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 查看协议 / 历史版本 | `/legal`、`/legal/<type>?version=N` | 公开可访问 |
 | 查看同意历史 / 当前版本状态 | `/my/privacy` | 仅本人 |
-| 导出本人数据 | `/my/privacy` → 导出按钮（`GET /api/privacy/export`） | 同步 JSON 下载；3 次/15 分钟限流；>8MB 显式失败 |
+| 导出本人数据 | `/my/privacy` → 导出按钮（`GET /api/privacy/export`，唯一执行入口） | 同步 JSON 下载；一次点击 = 恰好一条 COMPLETED 请求；3 次/15 分钟限流；>8MB 显式失败（请求记为 REJECTED） |
 | 申请注销 | `/my/privacy` → 输入"注销账号"确认 | 同步执行：成功即匿名化完成 |
 | 取消未执行请求 | `/my/privacy` 请求记录（REQUESTED 态） | 仅用户本人 |
 | 重新同意 | `/legal/accept`（consent gate 自动引导） | 显式操作，绑定当前版本 |
@@ -17,6 +17,11 @@
 用户隐私请求（`PrivacyRequest`）状态：REQUESTED / IN_PROGRESS / BLOCKED /
 COMPLETED / CANCELLED / REJECTED；用户可在 `/my/privacy` 看到全部历史与
 BLOCKED 原因（人类可读）。
+
+**导出生命周期（REPAIR 后）**：同步导出在一次请求内完成
+REQUESTED→IN_PROGRESS→COMPLETED（失败→REJECTED+reasonCode）。
+`POST /api/privacy/requests` 不再接受 DATA_EXPORT（返回 `USE_EXPORT_ENDPOINT`
+指引），不存在永远停在 REQUESTED 的导出记录。
 
 ## 2. 账号注销被 BLOCKED 时的处理
 

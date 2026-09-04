@@ -5,7 +5,6 @@ import { useFormStatus } from "react-dom";
 import {
   cancelPrivacyRequest,
   requestAccountDeletion,
-  recordDataExportRequest,
   type PrivacyActionState,
 } from "@/actions/privacy";
 import { signOut } from "next-auth/react";
@@ -30,27 +29,24 @@ function SubmitButton({ label, danger }: { label: string; danger?: boolean }) {
   );
 }
 
-/** 数据导出：先经 server action 留痕（含限流），再触发下载。 */
+/**
+ * 数据导出：一次点击直接触发唯一执行入口（GET /api/privacy/export）。
+ * 该端点在一次请求内完成 REQUESTED→IN_PROGRESS→构建→COMPLETED 的完整
+ * 生命周期（见 data-export.executeSynchronousDataExport）——点击即一条
+ * COMPLETED 导出记录，不再产生孤儿 REQUESTED。
+ */
 export function ExportDataButton() {
-  const [state, formAction] = useActionState(async () => {
-    return recordDataExportRequest();
-  }, initialState);
-
-  useEffect(() => {
-    if (state.success) {
-      window.open("/api/privacy/export", "_blank");
-    }
-  }, [state.success]);
-
   return (
-    <form action={formAction} className="flex flex-wrap items-center gap-3">
-      <SubmitButton label="导出我的数据（JSON）" />
-      {state.message ? (
-        <span className={`text-sm ${state.success ? "text-emerald-600" : "text-rose-600"}`}>
-          {state.message}
-        </span>
-      ) : null}
-    </form>
+    <div className="flex flex-wrap items-center gap-3">
+      <a
+        href="/api/privacy/export"
+        data-testid="export-data-link"
+        className="rounded-full bg-slate-950 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800"
+      >
+        导出我的数据（JSON）
+      </a>
+      <span className="text-xs text-slate-400">每次导出都会在隐私请求记录中留痕</span>
+    </div>
   );
 }
 

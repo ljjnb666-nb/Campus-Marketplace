@@ -3,6 +3,7 @@ import { hash } from "bcryptjs";
 import type { Prisma } from "@prisma/client";
 
 import { governanceError } from "@/lib/governance/domain-errors";
+import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
 import { assertNoActiveHold } from "@/lib/privacy/data-hold-service";
@@ -19,8 +20,16 @@ import { assertNoActiveHold } from "@/lib/privacy/data-hold-service";
  * 红线：
  * - 绝不 prisma.user.delete()（外键级联会破坏审计与历史完整性）
  * - 匿名 surrogate 不得从原始 PII 派生（如 SHA256(email)）——用随机 id
- * - 所有前置检查在破坏性事务内部执行（TOCTOU 防护）
+ * - 所有前置检查在破坏性事务内部、且在取得 subject 治理锁之后执行
  * - 任何阻断条件命中时整体失败，绝不部分擦除
+ *
+ * Serialization contract（Phase 5 REPAIR）：
+ * eraseAccount / createHold / releaseHold 共享同一把 subject advisory lock
+ * （governance-lock.ts）。READ COMMITTED 下仅靠"事务内再查 hold"不构成
+ * serialization boundary——锁保证 hold 与 erase 严格先后线性化：
+ *   1. erase 先取锁 → check 无 hold → 提交 → hold 创建随后发生；
+ *   2. hold 先取锁 → 提交 → erase 后取锁 → check 见 hold → BLOCK。
+ * 不可能出现"hold 已提交而 erase 未见 hold 即提交"。
  */
 
 /** 仍在履行的订单状态（存在即阻断注销） */
@@ -60,15 +69,22 @@ export type AccountErasureResult = {
   sensitiveAssetsMarkedForDeletion: number;
 };
 
+/** 测试 seam：在"已取锁 + 前置检查全部通过"与"首个破坏性写"之间的受控暂停点。 */
+export type ErasureRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
+
 /**
  * 执行账号匿名化。调用方必须已经建立 PrivacyRequest（REQUESTED→IN_PROGRESS）。
- * 前置检查在事务内进行：active hold / active transactions / 重复注销。
+ * 前置检查在 subject 治理锁保护下的事务内执行；任何阻断命中时零写回滚。
  */
 export async function eraseAccount(
   userId: string,
   tx?: Prisma.TransactionClient,
+  racePoint?: ErasureRacePoint,
 ): Promise<AccountErasureResult> {
   const run = async (client: Prisma.TransactionClient): Promise<AccountErasureResult> => {
+    // ---- serialization boundary：先取 subject 治理锁（TOCTOU 关闭点）----
+    await acquireGovernanceSubjectLock(client, "USER", userId);
+
     const user = await client.user.findUnique({
       where: { id: userId },
       select: { id: true, erasedAt: true, deletedAt: true, status: true },
@@ -112,6 +128,13 @@ export async function eraseAccount(
         reasonCode: "ACTIVE_TRANSACTION_BLOCK",
       });
       throw governanceError("ACTIVE_TRANSACTION_BLOCK");
+    }
+
+    // 测试 seam：锁与全部前置检查之后、首个破坏性写之前（并发 hold 在此
+    // 点发起会被 subject 锁阻塞，直到本事务提交/回滚——用于 lock ordering
+    // 的真实 PG 竞态测试）。生产路径不传该参数。
+    if (racePoint) {
+      await racePoint(client);
     }
 
     // ---- 匿名化（保留行，替换可识别字段） ----

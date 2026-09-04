@@ -78,6 +78,18 @@ export async function releaseDataHold(holdId: string): Promise<void> {
 }
 
 /**
+ * Phase 5 REPAIR fixture seam：将用户标记为"已注销"（erasedAt），
+ * 用于 stale-JWT 回归：登录态 cookie 保留、账号已被注销时，
+ * 任何 authenticated 边界必须拒绝。仅供 E2E 基建使用。
+ */
+export async function eraseUserFixture(email: string): Promise<void> {
+  await e2eDb().user.update({
+    where: { email },
+    data: { erasedAt: new Date() },
+  });
+}
+
+/**
  * Phase 5 fixture seam：【TEST FIXTURE ACCEPTANCE】为指定账号直接插入
  * 对某文档的同意证据（仅在升级测试里用于把版本升级对并行 worker 中
  * 其他 storageState 账号的影响窗口压到毫秒级；不代表生产语义）。

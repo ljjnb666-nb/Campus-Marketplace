@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { dataHoldFindMany, dataHoldCreate, dataHoldUpdate } = vi.hoisted(() => ({
-  dataHoldFindMany: vi.fn(),
-  dataHoldCreate: vi.fn(),
-  dataHoldUpdate: vi.fn(),
-}));
+const { dataHoldFindMany, dataHoldCreate, dataHoldUpdate, dataHoldFindUnique, transactionMock } =
+  vi.hoisted(() => ({
+    dataHoldFindMany: vi.fn(),
+    dataHoldCreate: vi.fn(),
+    dataHoldUpdate: vi.fn(),
+    dataHoldFindUnique: vi.fn(),
+    transactionMock: vi.fn(),
+  }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -12,8 +15,10 @@ vi.mock("@/lib/prisma", () => ({
       findMany: dataHoldFindMany,
       create: dataHoldCreate,
       update: dataHoldUpdate,
+      findUnique: dataHoldFindUnique,
     },
   },
+  withTransaction: transactionMock,
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -31,12 +36,24 @@ import {
   releaseHold,
 } from "@/lib/privacy/data-hold-service";
 
-const txClient = { dataHold: { findMany: dataHoldFindMany } };
+const txClient = {
+  $executeRaw: vi.fn().mockResolvedValue(0),
+  dataHold: { findMany: dataHoldFindMany, update: dataHoldUpdate, create: dataHoldCreate },
+};
 
 beforeEach(() => {
   dataHoldFindMany.mockReset();
   dataHoldCreate.mockReset();
   dataHoldUpdate.mockReset();
+  dataHoldFindUnique.mockReset();
+  transactionMock.mockReset();
+  txClient.$executeRaw.mockClear().mockResolvedValue(0);
+  // createHold/releaseHold 经 withGovernanceSubjectLock → withTransaction(tx)
+  transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+    callback(txClient),
+  );
+  dataHoldCreate.mockResolvedValue({ id: "hold-new", status: "ACTIVE" });
+  dataHoldUpdate.mockResolvedValue({ id: "hold-9", status: "RELEASED", releasedAt: new Date() });
 });
 
 describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => {
@@ -71,10 +88,7 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
     expect(await hasActiveHold("user-1")).toBe(false);
   });
 
-  it("creates and releases holds through the service seam", async () => {
-    dataHoldCreate.mockResolvedValue({ id: "hold-9", status: "ACTIVE" });
-    dataHoldUpdate.mockResolvedValue({ id: "hold-9", status: "RELEASED", releasedAt: new Date() });
-
+  it("creates and releases holds through the subject-locked seam", async () => {
     const hold = await createHold({
       type: "LEGAL",
       subjectId: "user-3",
@@ -82,6 +96,8 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
     });
 
     expect(hold.status).toBe("ACTIVE");
+    // subject advisory 锁在写之前于同一事务内取得
+    expect(txClient.$executeRaw).toHaveBeenCalled();
     expect(dataHoldCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         type: "LEGAL",
@@ -91,7 +107,10 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
       }),
     });
 
+    dataHoldFindUnique.mockResolvedValue({ subjectType: "USER", subjectId: "user-3" });
+
     const released = await releaseHold("hold-9");
     expect(released.status).toBe("RELEASED");
+    expect(txClient.$executeRaw).toHaveBeenCalled();
   });
 });

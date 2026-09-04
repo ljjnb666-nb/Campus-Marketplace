@@ -71,7 +71,7 @@ test("GF-L3 政策版本升级：stale 同意失效 → 提交旧集合 fail clo
 
   await page.goto("/profile");
   await page.waitForURL((url) => url.pathname === "/legal/accept");
-  await expect(page.getByText(/旧版本的同意不会自动延续到新版本/)).toBeVisible();
+  await expect(page.getByText(/旧版本的同意不会自动延续到新版本/).first()).toBeVisible();
 
   // 4. stale 提交（直接提交旧版本文档 id）必须 fail closed
   const staleResponse = await page.request.post("/api/legal/acceptances", {

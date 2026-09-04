@@ -336,6 +336,39 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(() => assertNoForbiddenExportFields(payload)).not.toThrow();
   });
 
+  it("SYNC_EXPORT_REQUEST_COMPLETES_TEST：一次同步导出恰好形成一条 COMPLETED 请求", async () => {
+    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+
+    const target = await createFixtureUser("同步导出");
+    const orderNo = `${RUN_TAG}-SYNC1`;
+    createdOrderNos.push(orderNo);
+    await rawClient!.order.create({
+      data: {
+        orderNo,
+        type: "PRODUCT",
+        status: "COMPLETED",
+        amount: "1.00",
+        buyerId: target.id,
+        sellerId: otherUserId,
+      },
+    });
+
+    const result = await executeSynchronousDataExport(target.id);
+
+    // 恰好一条 DATA_EXPORT 请求且 COMPLETED + completedAt
+    const requests = await rawClient!.privacyRequest.findMany({
+      where: { userId: target.id, type: "DATA_EXPORT" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.id).toBe(result.request.id);
+    expect(requests[0]!.status).toBe("COMPLETED");
+    expect(requests[0]!.completedAt).toBeTruthy();
+
+    // 载荷 + 请求元数据一起返回
+    expect(result.payload.account.id).toBe(target.id);
+    expect(result.payload.orders.some((order) => order.orderNo === orderNo)).toBe(true);
+  });
+
   it("hold 阻断注销（BLOCKED + 零部分擦除 + 重复请求 ALREADY_ACTIVE）", async () => {
     const { createHold } = await import("@/lib/privacy/data-hold-service");
     const { createAccountDeletionRequest } = await import(
@@ -445,11 +478,15 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(request!.status).toBe("COMPLETED");
   });
 
-  it("TOCTOU 防护：破坏性事务内可见并发创建的 hold（READ COMMITTED 语义）", async () => {
+  it("对照说明：无锁时 READ COMMITTED 仅能看见已提交的 hold（这不是 serialization boundary）", async () => {
+    // 本用例保留为对照证据：无锁事务内的 hold 检查只能检测"检查时点已提交"
+    // 的 hold，check→commit 窗口内的并发 hold 创建不被拦截。
+    // 真正的 serialization boundary 由下方 HOLD_ERASURE_POST_CHECK_RACE_TEST
+    // 在 subject advisory 锁下证明。
     const { assertNoActiveHold } = await import("@/lib/privacy/data-hold-service");
     const { withTransaction } = await import("@/lib/prisma");
 
-    const target = await createFixtureUser("竞态目标");
+    const target = await createFixtureUser("对照目标");
 
     await expect(
       withTransaction(async (tx) => {
@@ -461,6 +498,293 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         return assertNoActiveHold(target.id, tx as never);
       }),
     ).rejects.toMatchObject({ code: "ACTIVE_DATA_HOLD" });
+  });
+
+  // ============================================================
+  // BLOCKER 1 REPAIR — HOLD / ERASURE 真实 TOCTOU（subject advisory lock）
+  // ============================================================
+
+  /**
+   * 线性化证明（对每个 hold 类型各测一次）：
+   * erase 在 barrier seam（已取 subject 锁 + 前置检查全过、尚未写）处
+   * 并发发起 createHold —— 该 createHold 必须阻塞在 subject 锁上直到
+   * erase 事务提交；因此"hold 已提交而 erase 未见 hold 即提交"不可能。
+   * 唯一合法序列：erase 先完成 → hold 创建随后发生（结果 1）。
+   */
+  async function runHoldErasureRaceTest(holdType: "LEGAL" | "DISPUTE"): Promise<void> {
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { createHold } = await import("@/lib/privacy/data-hold-service");
+
+    const target = await createFixtureUser(`锁竞态${holdType}`);
+    let racePointEntered = false;
+    let holdSettled = false;
+    let holdPromise: Promise<void> = Promise.resolve();
+
+    const racePoint = async () => {
+      racePointEntered = true;
+
+      // 并发 createHold：需要同一把 subject 锁 → 阻塞到 erase 事务结束
+      holdPromise = createHold({
+        type: holdType,
+        subjectId: target.id,
+        reasonCode: `RACE_${holdType}_HOLD`,
+      }).then(
+        (hold) => {
+          holdSettled = true;
+          holdIds.push(hold.id);
+        },
+        () => {
+          holdSettled = true;
+        },
+      );
+
+      // 给并发 hold 充分时间到达锁等待点
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      // 关键断言：erase 持锁期间并发 hold 不可能完成创建（未被 erase 看到）
+      expect(holdSettled).toBe(false);
+
+      // 不在事务内 await holdPromise（会死锁）；返回后 erase 继续提交
+    };
+
+    const result = await eraseAccount(target.id, undefined, racePoint);
+
+    expect(racePointEntered).toBe(true);
+    expect(result.erasedAt).toBeTruthy();
+
+    // erase 提交（锁释放）之后，被阻塞的 hold 才完成创建
+    await holdPromise;
+    expect(holdSettled).toBe(true);
+
+    const hold = await rawClient!.dataHold.findFirst({
+      where: { subjectId: target.id, type: holdType, reasonCode: `RACE_${holdType}_HOLD` },
+    });
+    expect(hold).toBeTruthy();
+    expect(hold!.status).toBe("ACTIVE");
+    // 线性化顺序：hold 创建时间不早于 erase 完成时间
+    expect(hold!.createdAt.getTime()).toBeGreaterThanOrEqual(result.erasedAt.getTime());
+  }
+
+  it("HOLD_ERASURE_POST_CHECK_RACE_TEST（LEGAL）：erase 持锁期间并发 createHold 被阻塞到 erase 提交之后", async () => {
+    await runHoldErasureRaceTest("LEGAL");
+  });
+
+  it("HOLD_ERASURE_POST_CHECK_RACE_TEST（DISPUTE）：同一线性化契约对 DISPUTE hold 成立", async () => {
+    await runHoldErasureRaceTest("DISPUTE");
+  });
+
+  it("releaseHold 与 erase 共享 subject 锁：release 线性化在 erase 之前 → erase 放行并完成", async () => {
+    const { createHold, releaseHold } = await import("@/lib/privacy/data-hold-service");
+    const { createAccountDeletionRequest } = await import(
+      "@/lib/privacy/privacy-request-service"
+    );
+
+    const target = await createFixtureUser("release锁序");
+    const hold = await createHold({
+      type: "DISPUTE",
+      subjectId: target.id,
+      reasonCode: "RELEASE_ORDER_HOLD",
+    });
+    holdIds.push(hold.id);
+
+    // release 经同一把 subject 锁提交：之后 erase 必然看到 hold 已 RELEASED
+    const released = await releaseHold(hold.id);
+    expect(released.status).toBe("RELEASED");
+
+    const outcome = await createAccountDeletionRequest(target.id);
+
+    // release 线性化在 erase 之前 → 删除路径放行且完成
+    expect(outcome.status).toBe("COMPLETED");
+  });
+
+  // ============================================================
+  // BLOCKER 4 REPAIR — POLICY PUBLISH / ACCEPTANCE 真实竞态
+  // ============================================================
+
+  it("POLICY_PUBLISH_ACCEPTANCE_RACE_TEST：acceptance 持锁期间并发 publish 被阻塞到其提交之后（线性化 A）", async () => {
+    const { createLegalDocument, publishLegalDocument } = await import(
+      "@/lib/legal/legal-document-service"
+    );
+    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+      "@/lib/legal/policy-service"
+    );
+
+    const user = await createFixtureUser("政策竞态A");
+    const rulesBase = await nextVersion("PLATFORM_RULES");
+
+    const v1 = await publishLegalDocument(
+      (
+        await createLegalDocument({
+          type: "PLATFORM_RULES",
+          version: rulesBase,
+          title: `竞态规则 v1 ${RUN_TAG}`,
+          content: `竞态规则 v1 ${RUN_TAG}`,
+        })
+      ).id,
+    );
+    createdDocumentIds.push(v1.id);
+
+    // v2 草稿（尚未发布）
+    const v2 = await createLegalDocument({
+      type: "PLATFORM_RULES",
+      version: rulesBase + 1,
+      title: `竞态规则 v2 ${RUN_TAG}`,
+      content: `竞态规则 v2 ${RUN_TAG}`,
+    });
+    createdDocumentIds.push(v2.id);
+
+    let publishSettled = false;
+    let acceptanceInRace = false;
+
+    // barrier：acceptance 在锁内（resolve/validate 完成、未写）时暂停；
+    // 并发 publish 需要 PLATFORM_RULES 的 policy 锁 → 必须阻塞
+    const racePoint = async () => {
+      acceptanceInRace = true;
+
+      void publishLegalDocument(v2.id).then(() => {
+        publishSettled = true;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      // acceptance 持 policy 锁期间，publish 不可能完成
+      expect(publishSettled).toBe(false);
+    };
+
+    // 只提交唯一的 pending（TERMS v1 仍在 required、rules v1 是当前）——
+    // 全集提交
+    const submittedIds = (await getRequiredPolicies()).map((entry) => entry.id);
+    const result = await recordAcceptances({
+      userId: user.id,
+      documentIds: submittedIds,
+      source: "RECONSENT",
+      racePoint,
+    });
+
+    expect(acceptanceInRace).toBe(true);
+    expect(result.created).toBeGreaterThan(0);
+
+    // acceptance 提交（锁释放）后，被阻塞的 publish 才完成（线性化 A：
+    // v1 同意成功在先，publish v2 随后发生）
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await expect
+      .poll(() => publishSettled, { timeout: 5_000 })
+      .toBe(true);
+
+    const published2 = await rawClient!.legalDocument.findUnique({ where: { id: v2.id } });
+    expect(published2!.status).toBe("PUBLISHED");
+    expect(published2!.publishedAt!.getTime()).toBeGreaterThanOrEqual(
+      (await rawClient!.policyAcceptance.findFirstOrThrow({
+        where: { userId: user.id, documentId: v1.id },
+      })).acceptedAt.getTime(),
+    );
+
+    // 结果 A 的终态：publish 完成后用户对该新版本 OUTDATED（不是"已同意最新"）
+    const status = await getUserAcceptanceStatus(user.id);
+    expect(status.compliant).toBe(false);
+    expect(status.pending.find((entry) => entry.id === v2.id)?.state).toBe("OUTDATED");
+  });
+
+  it("POLICY_PUBLISH_ACCEPTANCE_RACE_TEST（反向）：publish 先完成 → stale acceptance 被拒绝（线性化 B）", async () => {
+    const { createLegalDocument, publishLegalDocument } = await import(
+      "@/lib/legal/legal-document-service"
+    );
+    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+      "@/lib/legal/policy-service"
+    );
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const user = await createFixtureUser("政策竞态B");
+    const base = await nextVersion("TERMS_OF_SERVICE");
+
+    const v1 = await publishLegalDocument(
+      (
+        await createLegalDocument({
+          type: "TERMS_OF_SERVICE",
+          version: base,
+          title: `竞态条款 v1 ${RUN_TAG}B`,
+          content: `竞态条款 v1 ${RUN_TAG}B`,
+        })
+      ).id,
+    );
+    createdDocumentIds.push(v1.id);
+
+    await recordAcceptances({
+      userId: user.id,
+      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
+      source: "SIGNUP",
+    });
+
+    // publish v2 先完成（线性化在 acceptance 之前）
+    const v2 = await publishLegalDocument(
+      (
+        await createLegalDocument({
+          type: "TERMS_OF_SERVICE",
+          version: base + 1,
+          title: `竞态条款 v2 ${RUN_TAG}B`,
+          content: `竞态条款 v2 ${RUN_TAG}B`,
+        })
+      ).id,
+    );
+    createdDocumentIds.push(v2.id);
+
+    // stale 提交（v1）必须被拒
+    await expect(
+      recordAcceptances({ userId: user.id, documentIds: [v1.id], source: "RECONSENT" }),
+    ).rejects.toBeInstanceOf(GovernanceError);
+
+    const status = await getUserAcceptanceStatus(user.id);
+    expect(status.compliant).toBe(false);
+    expect(status.pending.find((entry) => entry.id === v2.id)?.state).toBe("OUTDATED");
+  });
+
+  it("CONCURRENT_POLICY_PUBLISH_SERIALIZATION_TEST：并发发布同 type vN/vN+1 不破坏版本顺序不变量", async () => {
+    const { createLegalDocument, publishLegalDocument, getCurrentPublishedDocument } = await import(
+      "@/lib/legal/legal-document-service"
+    );
+
+    const base = await nextVersion("PRIVACY_POLICY");
+    const vN = await createLegalDocument({
+      type: "PRIVACY_POLICY",
+      version: base,
+      title: `并发隐私 vN ${RUN_TAG}`,
+      content: `并发隐私 vN ${RUN_TAG}`,
+    });
+    const vN1 = await createLegalDocument({
+      type: "PRIVACY_POLICY",
+      version: base + 1,
+      title: `并发隐私 vN+1 ${RUN_TAG}`,
+      content: `并发隐私 vN+1 ${RUN_TAG}`,
+    });
+    createdDocumentIds.push(vN.id, vN1.id);
+
+    // 同一 type 的 vN / vN+1 并发发布（policy 锁串行化）
+    const outcomes = await Promise.allSettled([
+      publishLegalDocument(vN.id),
+      publishLegalDocument(vN1.id),
+    ]);
+
+    const finalN = await rawClient!.legalDocument.findUnique({ where: { id: vN.id } });
+    const finalN1 = await rawClient!.legalDocument.findUnique({ where: { id: vN1.id } });
+
+    // vN+1 必然发布成功（无论锁序先后：先发则 vN 随后通过；后发则 vN 被拒）
+    expect(finalN1!.status).toBe("PUBLISHED");
+    expect(outcomes.some((outcome) => outcome.status === "fulfilled")).toBe(true);
+
+    if (finalN!.status === "PUBLISHED") {
+      // vN 也成功 → 它一定先于 vN+1（版本顺序契约）
+      expect(finalN!.publishedAt!.getTime()).toBeLessThanOrEqual(
+        finalN1!.publishedAt!.getTime(),
+      );
+    } else {
+      // vN 被版本顺序 invariant 拒绝（vN+1 已先发布）
+      expect(finalN!.status).toBe("DRAFT");
+    }
+
+    // 最终 current 唯一且确定：vN+1
+    const current = await getCurrentPublishedDocument("PRIVACY_POLICY", new Date());
+    expect(current!.id).toBe(vN1.id);
+    expect(current!.version).toBe(base + 1);
   });
 
   // ============================================================

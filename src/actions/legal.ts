@@ -3,8 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { logger } from "@/lib/logger";
+import { getVerifiedSession } from "@/lib/server-auth";
 import { recordAcceptances } from "@/lib/legal/policy-service";
-import { auth } from "@/lib/auth";
 
 export type LegalAcceptanceState = {
   success: boolean;
@@ -16,16 +16,21 @@ export type LegalAcceptanceState = {
 /**
  * 重新同意当前 required 政策集合（consent gate 的解除入口）。
  *
+ * 身份校验：getVerifiedSession（requireConsent=false——re-consent 本身
+ * 不能被 consent gate 阻断），但账号 active 校验永远执行：注销/停用
+ * 账号的残留旧 JWT 无法提交同意。
+ *
  * fail-closed：提交的集合与服务器解析的当前 required 集合不一致
  * （例如页面打开期间发布了新版本）时拒绝并要求重新加载。
+ * 解析/校验/写入在同一持 policy 锁事务内完成（见 policy-service）。
  */
 export async function acceptRequiredPolicies(
   _prevState: LegalAcceptanceState,
   formData: FormData,
 ): Promise<LegalAcceptanceState> {
-  const session = await auth();
+  const verified = await getVerifiedSession({ requireConsent: false });
 
-  if (!session?.user?.id) {
+  if (!verified.ok) {
     return { success: false, message: "请先登录" };
   }
 
@@ -41,7 +46,7 @@ export async function acceptRequiredPolicies(
 
   try {
     await recordAcceptances({
-      userId: session.user.id,
+      userId: verified.user.id,
       documentIds,
       source: "RECONSENT",
     });
@@ -61,7 +66,7 @@ export async function acceptRequiredPolicies(
   }
 
   logger.info("policy_acceptance_created", "legal", {
-    userId: session.user.id,
+    userId: verified.user.id,
     source: "RECONSENT",
     documentCount: documentIds.length,
   });

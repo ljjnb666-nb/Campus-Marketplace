@@ -1,9 +1,19 @@
-import type { LegalDocument, LegalDocumentType, PolicyAcceptance, PolicyAcceptanceSource, Prisma } from "@prisma/client";
+import type {
+  LegalDocument,
+  LegalDocumentType,
+  PolicyAcceptance,
+  PolicyAcceptanceSource,
+  Prisma,
+} from "@prisma/client";
 
 import { governanceError } from "@/lib/governance/domain-errors";
+import { acquirePolicyLocks } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
-import { LEGAL_DOCUMENT_TYPES, getCurrentDocument } from "@/lib/legal/legal-document-service";
+import {
+  getCurrentRequiredDocument,
+  LEGAL_DOCUMENT_TYPES,
+} from "@/lib/legal/legal-document-service";
 
 export type RequiredPolicySummary = {
   id: string;
@@ -28,10 +38,16 @@ export type UserAcceptanceStatusResult = {
 /**
  * 当前 required 政策集合：四个逻辑类型逐一做确定性 current 解析。
  * 某类型没有已发布且生效的文档时，不进入 required 集合（该类型暂无约束）。
+ *
+ * @param tx 可选事务客户端：在受 policy 锁保护的事务内做线性化解析时传入
+ *         （与写路径同一事务 = 同一 serialization window）。
  */
-export async function getRequiredPolicies(now: Date = new Date()): Promise<RequiredPolicySummary[]> {
+export async function getRequiredPolicies(
+  now: Date = new Date(),
+  tx?: Prisma.TransactionClient,
+): Promise<RequiredPolicySummary[]> {
   const resolved = await Promise.all(
-    LEGAL_DOCUMENT_TYPES.map((type) => getCurrentDocument(type, now)),
+    LEGAL_DOCUMENT_TYPES.map((type) => getCurrentRequiredDocument(type, now, tx)),
   );
 
   return resolved
@@ -51,29 +67,46 @@ export async function getRequiredPolicies(now: Date = new Date()): Promise<Requi
     );
 }
 
+/** 供锁序文档引用的类型清单（canonical 定义在 legal-document-service）。 */
+export { LEGAL_DOCUMENT_TYPES };
+
 /**
  * 用户对当前 required 集合的接受状态。
  *
  * 判定按 documentType 语义匹配：用户在该类型上最近一次接受的版本
  * - 不存在 → MISSING（legacy/从未同意）
- * - 是当前版本（documentId + version 双确认）→ ACCEPTED_CURRENT
+ * - 是当前版本（documentId 确认）→ ACCEPTED_CURRENT
  * - 是旧版本 → OUTDATED（旧同意不延续到新版本，必须重新确认）
  */
 export async function getUserAcceptanceStatus(
   userId: string,
   now: Date = new Date(),
+  tx?: Prisma.TransactionClient,
 ): Promise<UserAcceptanceStatusResult> {
-  const required = await getRequiredPolicies(now);
+  const required = await getRequiredPolicies(now, tx);
 
   if (required.length === 0) {
     return { compliant: true, required: [], pending: [] };
   }
 
-  const acceptances = await prisma.policyAcceptance.findMany({
-    where: { userId, documentType: { in: required.map((document) => document.type) } },
-    orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
-  });
+  const acceptances = tx
+    ? await tx.policyAcceptance.findMany({
+        where: { userId, documentType: { in: required.map((document) => document.type) } },
+        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+      })
+    : await prisma.policyAcceptance.findMany({
+        where: { userId, documentType: { in: required.map((document) => document.type) } },
+        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+      });
 
+  return buildAcceptanceStatus(userId, required, acceptances);
+}
+
+function buildAcceptanceStatus(
+  _userId: string,
+  required: RequiredPolicySummary[],
+  acceptances: Array<Pick<PolicyAcceptance, "documentType" | "documentId" | "documentVersion">>,
+): UserAcceptanceStatusResult {
   const latestByType = new Map<string, (typeof acceptances)[number]>();
   for (const acceptance of acceptances) {
     if (!latestByType.has(acceptance.documentType)) {
@@ -130,20 +163,31 @@ export async function assertRequiredPoliciesAccepted(
   }
 }
 
+/** 测试 seam：在 policy 锁 + 解析 + 校验全部完成后、证据写入前触发的受控暂停点。 */
+export type AcceptanceRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
+
 /**
  * 记录同意证据（幂等）。
  *
+ * Serialization contract（Phase 5 REPAIR）：
+ * "resolve current → resolve user pending → validate → insert" 全部在
+ * 同一个持有 policy advisory 锁的事务内完成（锁按 LEGAL_DOCUMENT_TYPES
+ * 固定顺序获取，publish/retire 用同一锁命名空间）。因此并发
+ * publishLegalDocument 只能线性化在本次 acceptance 之前（stale 提交被
+ * NOT_CURRENT / VERSION_CHANGED 拒绝）或之后（本次为成功的 v1 同意，
+ * publish 随后发生、用户随即 OUTDATED）——不存在"v2 已发布而 v1 同意
+ * 仍以 latest 成功提交"的交错。
+ *
  * fail-closed 契约：
  * - 提交的每个 documentId 都必须是"当前 required 集合"成员（缺、旧版本、
- *   杜撰 id 一律拒绝 → LEGAL_DOCUMENT_NOT_FOUND / LEGAL_DOCUMENT_NOT_CURRENT），
- *   防止"打开 v1 → 发布 v2 → 提交 v1"绕过新版本；
- * - 提交集合必须覆盖用户当前全部 pending 文档（MISSING + OUTDATED）：
- *   只允许补齐缺口，不允许留下未确认项；已接受当前版本的文档可以随集
- *   提交（幂等跳过）——这使"仅某类型 OUTDATED"的用户只需确认缺失项；
+ *   杜撰 id 一律拒绝 → LEGAL_DOCUMENT_NOT_FOUND / LEGAL_DOCUMENT_NOT_CURRENT）；
+ * - 提交集合必须覆盖用户当前全部 pending 文档；已接受当前版本的文档
+ *   可以随集提交（幂等跳过）；
  * - (userId, documentId) 唯一约束 + 事务：并发双击最多产生一条证据。
  * - 证据固化 type/version/hash 三元组快照，审计自足。
  *
- * @param tx 可选事务客户端（注册流程与用户创建同事务时传入）
+ * @param tx 可选事务客户端（注册流程与用户创建同事务时传入；
+ *           注册事务同样先取 policy 锁，遵循同一 consistency contract）
  */
 export async function recordAcceptances(input: {
   userId: string;
@@ -151,42 +195,61 @@ export async function recordAcceptances(input: {
   source: PolicyAcceptanceSource;
   tx?: Prisma.TransactionClient;
   now?: Date;
+  racePoint?: AcceptanceRacePoint;
 }): Promise<{ created: number; skipped: number }> {
   const now = input.now ?? new Date();
 
-  const required = await getRequiredPolicies(now);
-  const requiredById = new Map(required.map((document) => [document.id, document]));
+  const run = async (tx: Prisma.TransactionClient): Promise<{ created: number; skipped: number }> => {
+    // ---- serialization boundary：按固定顺序锁全部 policy types ----
+    await acquirePolicyLocks(tx, LEGAL_DOCUMENT_TYPES);
 
-  const requestedIds = [...new Set(input.documentIds)];
+    // ---- resolve + validate + write 全部在锁内同一事务 ----
+    const required = await getRequiredPolicies(now, tx);
+    const requiredById = new Map(required.map((document) => [document.id, document]));
 
-  for (const documentId of requestedIds) {
-    const document = requiredById.get(documentId);
+    const requestedIds = [...new Set(input.documentIds)];
 
-    if (!document) {
-      // 不在当前 required 集合内：可能是已退役/未发布/未来生效/杜撰的 id
-      const exists = await prisma.legalDocument.findUnique({ where: { id: documentId } });
+    for (const documentId of requestedIds) {
+      const document = requiredById.get(documentId);
 
-      if (!exists || exists.status !== "PUBLISHED") {
-        throw governanceError("LEGAL_DOCUMENT_NOT_FOUND");
+      if (!document) {
+        // 不在当前 required 集合内：可能是已退役/未发布/未来生效/杜撰的 id
+        const exists = await tx.legalDocument.findUnique({ where: { id: documentId } });
+
+        if (!exists || exists.status !== "PUBLISHED") {
+          throw governanceError("LEGAL_DOCUMENT_NOT_FOUND");
+        }
+
+        throw governanceError("LEGAL_DOCUMENT_NOT_CURRENT");
       }
-
-      throw governanceError("LEGAL_DOCUMENT_NOT_CURRENT");
     }
-  }
 
-  // 必须覆盖全部 pending（旧版本同意不能绕过：只补缺口，不留欠账）
-  const acceptanceStatus = await getUserAcceptanceStatus(input.userId, now);
-  const pendingIds = acceptanceStatus.pending.map((document) => document.id);
+    const status = await buildAcceptanceStatus(
+      input.userId,
+      required,
+      await tx.policyAcceptance.findMany({
+        where: {
+          userId: input.userId,
+          documentType: { in: required.map((document) => document.type) },
+        },
+        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+      }),
+    );
 
-  for (const pendingId of pendingIds) {
-    if (!requestedIds.includes(pendingId)) {
-      throw governanceError("LEGAL_DOCUMENT_VERSION_CHANGED");
+    // 必须覆盖全部 pending（旧版本同意不能绕过：只补缺口，不留欠账）
+    for (const pending of status.pending) {
+      if (!requestedIds.includes(pending.id)) {
+        throw governanceError("LEGAL_DOCUMENT_VERSION_CHANGED");
+      }
     }
-  }
 
-  // 写路径统一使用事务客户端（扩展客户端与事务客户端的联合类型会触发
-  // Prisma 的 excessive stack depth，见 notification-repository.ts 同注）
-  const run = async (client: Prisma.TransactionClient): Promise<{ created: number; skipped: number }> => {
+    // 测试 seam：锁 + 解析 + 校验之后、写之前（并发 publish 在此点发起会被
+    // policy 锁阻塞直到本事务结束——用于 publish/acceptance 线性化的真实
+    // PG 竞态测试）。生产路径不传该参数。
+    if (input.racePoint) {
+      await input.racePoint(tx);
+    }
+
     let created = 0;
     let skipped = 0;
 
@@ -197,7 +260,7 @@ export async function recordAcceptances(input: {
         continue;
       }
 
-      const existing = await client.policyAcceptance.findUnique({
+      const existing = await tx.policyAcceptance.findUnique({
         where: { userId_documentId: { userId: input.userId, documentId } },
         select: { id: true, documentVersion: true },
       });
@@ -213,7 +276,7 @@ export async function recordAcceptances(input: {
       }
 
       try {
-        await client.policyAcceptance.create({
+        await tx.policyAcceptance.create({
           data: {
             userId: input.userId,
             documentId,
@@ -255,7 +318,7 @@ export async function recordAcceptances(input: {
   return input.tx ? run(input.tx) : withTransaction(run);
 }
 
-/** 用户的全部接受历史（隐私设置页 / 导出使用，含文档当前状态标注）。 */
+/** 用户的全部接受历史（隐私设置页 / 导出使用）。 */
 export async function listUserAcceptances(userId: string): Promise<AcceptanceRecord[]> {
   return prisma.policyAcceptance.findMany({
     where: { userId },
@@ -264,8 +327,8 @@ export async function listUserAcceptances(userId: string): Promise<AcceptanceRec
 }
 
 /**
- * 注册流程专用：校验提交的同意集合与当前 required 集合一致后，
- * 在给定事务内写入 SIGNUP 来源的同意证据（与用户创建同事务提交）。
+ * 注册流程专用：在给定事务内先取 policy 锁，再校验并写入 SIGNUP 同意证据
+ * （与用户创建同事务提交，且遵循同一 policy consistency contract）。
  */
 export async function recordSignupAcceptances(
   tx: Prisma.TransactionClient,
@@ -280,15 +343,4 @@ export async function recordSignupAcceptances(
     tx,
     now,
   });
-}
-
-/** 供 server-auth / actions 使用的包装：失败抛 GovernanceError。 */
-export async function ensurePoliciesAcceptedOrThrow(userId: string): Promise<void> {
-  await assertRequiredPoliciesAccepted(userId);
-}
-
-export async function withPolicyTransaction<T>(
-  callback: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return withTransaction(callback);
 }

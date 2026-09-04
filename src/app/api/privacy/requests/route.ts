@@ -8,7 +8,6 @@ import {
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import {
   createAccountDeletionRequest,
-  createDataExportRequest,
   listUserPrivacyRequests,
 } from "@/lib/privacy/privacy-request-service";
 import { actionErrorMessage } from "@/lib/error-handler";
@@ -59,7 +58,10 @@ async function listHandler() {
  * POST /api/privacy/requests —— 创建隐私请求。
  *
  * userId 一律来自认证会话，不接受请求体传入（防代他人提交）。
- * 隐私自助操作不受 consent gate 限制（退出权优先）。
+ * 隐私自助操作不受 consent gate 限制（退出权优先），但账号 active 校验永远执行。
+ *
+ * Phase 5 REPAIR 契约：DATA_EXPORT 不再经由 generic POST 创建孤儿请求——
+ * 同步导出的唯一执行入口是 GET /api/privacy/export（POST 会得到明确指引）。
  */
 async function postHandler(request: NextRequest) {
   const verified = await getVerifiedSession({ requireConsent: false });
@@ -91,33 +93,29 @@ async function postHandler(request: NextRequest) {
     );
   }
 
+  if (parsed.data.type === "DATA_EXPORT") {
+    // 单一执行入口：同步导出必须经 GET /api/privacy/export 完成
+    // （REQUESTED→IN_PROGRESS→COMPLETED 生命周期在那里一次形成）
+    return NextResponse.json(
+      {
+        error: "数据导出请直接访问 GET /api/privacy/export（该入口会完整执行并记录导出请求）",
+        code: "USE_EXPORT_ENDPOINT",
+      },
+      { status: 400, headers: privateCache() },
+    );
+  }
+
+  if (parsed.data.confirmation !== DELETION_CONFIRMATION_PHRASE) {
+    return NextResponse.json(
+      {
+        error: `请提供确认短语“${DELETION_CONFIRMATION_PHRASE}”`,
+        code: "CONFIRMATION_REQUIRED",
+      },
+      { status: 400, headers: privateCache() },
+    );
+  }
+
   try {
-    if (parsed.data.type === "DATA_EXPORT") {
-      const created = await createDataExportRequest(verified.user.id);
-
-      return NextResponse.json(
-        {
-          request: {
-            id: created.id,
-            type: created.type,
-            status: created.status,
-            requestedAt: created.requestedAt.toISOString(),
-          },
-        },
-        { status: 201, headers: privateCache() },
-      );
-    }
-
-    if (parsed.data.confirmation !== DELETION_CONFIRMATION_PHRASE) {
-      return NextResponse.json(
-        {
-          error: `请提供确认短语“${DELETION_CONFIRMATION_PHRASE}”`,
-          code: "CONFIRMATION_REQUIRED",
-        },
-        { status: 400, headers: privateCache() },
-      );
-    }
-
     const outcome = await createAccountDeletionRequest(verified.user.id);
 
     return NextResponse.json(

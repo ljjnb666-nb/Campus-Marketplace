@@ -3,11 +3,10 @@
 import { revalidatePath } from "next/cache";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { logger } from "@/lib/logger";
-import { auth } from "@/lib/auth";
+import { getVerifiedSession } from "@/lib/server-auth";
 import {
   cancelOwnPendingRequest,
   createAccountDeletionRequest,
-  createDataExportRequest,
   describeBlockedReason,
 } from "@/lib/privacy/privacy-request-service";
 import { isRateLimited } from "@/lib/rate-limit";
@@ -26,16 +25,20 @@ const DELETION_RATE_LIMIT = 3;
 const DELETION_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 
 /**
- * 申请注销账号（隐私自助操作，不受 consent gate 限制——退出权优先）。
+ * 申请注销账号。
+ *
+ * 隐私自助操作：不受 consent gate 限制（退出权优先），但账号 active
+ * 校验永远执行（getVerifiedSession 内部强制 DB 复核 status/deletedAt/
+ * erasedAt）——注销后残留的旧 JWT 无法调用本 action。
  * 同步执行：成功即匿名化完成；被 hold/交易阻断时请求置 BLOCKED。
  */
 export async function requestAccountDeletion(
   _prevState: PrivacyActionState,
   formData: FormData,
 ): Promise<PrivacyActionState> {
-  const session = await auth();
+  const verified = await getVerifiedSession({ requireConsent: false });
 
-  if (!session?.user?.id) {
+  if (!verified.ok) {
     return { success: false, message: "请先登录" };
   }
 
@@ -46,7 +49,7 @@ export async function requestAccountDeletion(
   }
 
   const { limited } = await isRateLimited({
-    key: `privacy-deletion:${session.user.id}`,
+    key: `privacy-deletion:${verified.user.id}`,
     limit: DELETION_RATE_LIMIT,
     windowMs: DELETION_RATE_LIMIT_WINDOW_MS,
   });
@@ -56,7 +59,7 @@ export async function requestAccountDeletion(
   }
 
   try {
-    const outcome = await createAccountDeletionRequest(session.user.id);
+    const outcome = await createAccountDeletionRequest(verified.user.id);
 
     if (outcome.status === "COMPLETED") {
       // 注意：成功路径不做 revalidatePath —— 此时账号已注销，任何服务端
@@ -85,43 +88,17 @@ export async function requestAccountDeletion(
   }
 }
 
-/** 记录一次数据导出请求（导出内容本身由 GET /api/privacy/export 提供）。 */
-export async function recordDataExportRequest(): Promise<PrivacyActionState> {
-  const session = await auth();
-
-  if (!session?.user?.id) {
-    return { success: false, message: "请先登录" };
-  }
-
-  const { limited } = await isRateLimited({
-    key: `privacy-export:${session.user.id}`,
-    limit: 5,
-    windowMs: 15 * 60 * 1000,
-  });
-
-  if (limited) {
-    return { success: false, message: "导出过于频繁，请稍后再试" };
-  }
-
-  try {
-    await createDataExportRequest(session.user.id);
-    revalidatePath("/my/privacy");
-
-    return { success: true, message: "已记录本次导出请求" };
-  } catch (error) {
-    logger.error("记录导出请求失败", "recordDataExportRequest", { error });
-    return { success: false, message: "操作失败，请稍后重试" };
-  }
-}
-
-/** 取消本人尚未执行的注销请求。 */
+/**
+ * 取消本人尚未执行的注销请求。
+ * 账号 active 校验永远执行（注销后旧 JWT 不能再操作隐私请求）。
+ */
 export async function cancelPrivacyRequest(
   _prevState: PrivacyActionState,
   formData: FormData,
 ): Promise<PrivacyActionState> {
-  const session = await auth();
+  const verified = await getVerifiedSession({ requireConsent: false });
 
-  if (!session?.user?.id) {
+  if (!verified.ok) {
     return { success: false, message: "请先登录" };
   }
 
@@ -132,7 +109,7 @@ export async function cancelPrivacyRequest(
   }
 
   try {
-    await cancelOwnPendingRequest(session.user.id, requestId);
+    await cancelOwnPendingRequest(verified.user.id, requestId);
     revalidatePath("/my/privacy");
 
     return { success: true, message: "已取消该请求" };

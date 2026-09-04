@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { auth } from "@/lib/auth";
+import { requireVerifiedPageUser } from "@/lib/server-auth";
 import {
   getUserPolicyStatus,
   LEGAL_DOCUMENT_SLUGS,
@@ -16,17 +16,14 @@ export const dynamic = "force-dynamic";
 /**
  * 重新同意页（consent gate 的解除入口 UI）。
  *
- * 注意：本页有意不经过 requireUser()（那会形成 gate 循环），
- * 而是直接解析会话并读取同意状态。
+ * 注意：本页有意不经过 requireUser()（那会形成 gate 循环），而是使用
+ * requireVerifiedPageUser：只做账号 active 校验（注销/停用账号的旧 JWT
+ * 会被重定向回登录页），不做 consent 校验——re-consent 自身不能被 gate 拦截。
  */
 export default async function LegalAcceptPage() {
-  const session = await auth();
+  const user = await requireVerifiedPageUser();
 
-  if (!session?.user?.id) {
-    redirect("/login");
-  }
-
-  const status = await getUserPolicyStatus(session.user.id);
+  const status = await getUserPolicyStatus(user.id);
 
   // 已经满足时无需停留
   if (status.compliant) {

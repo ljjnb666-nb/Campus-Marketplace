@@ -5,10 +5,9 @@ import {
   getVerifiedSession,
 } from "@/lib/server-auth";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
-import { buildUserExport } from "@/lib/privacy/data-export";
+import { executeSynchronousDataExport } from "@/lib/privacy/data-export";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { logger } from "@/lib/logger";
-import { createDataExportRequest } from "@/lib/privacy/privacy-request-service";
 import { isRateLimited } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -17,11 +16,13 @@ const EXPORT_RATE_LIMIT = 3;
 const EXPORT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 
 /**
- * GET /api/privacy/export —— 本人数据导出（同步 JSON）。
+ * GET /api/privacy/export —— 本人数据导出（同步 JSON，唯一执行入口）。
  *
- * 安全契约：
+ * 安全与生命周期契约：
  * - authenticated + same-user only（不接受任何 userId 参数）
- * - 隐私自助操作：不做 consent gate（退出权优先），但要求账户状态有效
+ * - 隐私自助操作：不做 consent gate（退出权优先），但账号 active 校验永远执行
+ * - 一次导出 = 恰好一条 PrivacyRequest（REQUESTED→IN_PROGRESS→COMPLETED，
+ *   失败则 REJECTED+reasonCode），由 executeSynchronousDataExport 保证
  * - Cache-Control: private, no-store + nosniff（绝不进入共享缓存）
  * - 载荷经显式 DTO 构建 + 禁止字段扫描 + 体积上限保护
  */
@@ -52,14 +53,9 @@ async function getHandler() {
   }
 
   try {
-    const payload = await buildUserExport(verified.user.id);
+    const { payload, request } = await executeSynchronousDataExport(verified.user.id);
 
-    // 请求留痕（evidence of the export having been served）
-    await createDataExportRequest(verified.user.id);
-
-    logger.info("privacy_export_served", "privacy", { userId: verified.user.id });
-
-    return new NextResponse(JSON.stringify(payload, null, 2), {
+    return new NextResponse(JSON.stringify({ ...payload, request }, null, 2), {
       status: 200,
       headers: {
         "Content-Type": "application/json; charset=utf-8",

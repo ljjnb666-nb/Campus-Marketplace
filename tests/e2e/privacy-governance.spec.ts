@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
-import { e2eDb, seedActiveDataHold } from "./helpers/db";
+import { e2eDb, eraseUserFixture, seedActiveDataHold } from "./helpers/db";
 import { flushRateLimits } from "./helpers/rate-limit";
 import { loginViaUI } from "./helpers/auth";
 
@@ -9,6 +9,9 @@ import { loginViaUI } from "./helpers/auth";
  * GF-P1 PRIVACY_EXPORT：本人导出含自有数据，不含他人私密字段/内部秘密
  * GF-P2 ACCOUNT_DELETION：显式确认 → 匿名化 → listing 下架 → 无法再登录
  * GF-P3 HOLD_BLOCKS_DELETION：active hold 阻断破坏性步骤，零部分擦除
+ * GF-P4 SYNC_EXPORT_LIFECYCLE：一次 UI 点击 = 恰好一条 COMPLETED 导出请求
+ * GF-P5 STALE_JWT（business mutation + pages）：注销后残留 cookie 全部被拒
+ * GF-P6 STALE_JWT（privacy API）：注销后残留 cookie 无法导出/创建隐私请求
  */
 
 test("GF-P1 数据导出：仅本人数据 + 必要公共信息，无跨用户泄漏与秘密", async ({ browser }) => {
@@ -74,7 +77,159 @@ test("GF-P1 数据导出：仅本人数据 + 必要公共信息，无跨用户�
     expect(payload.includes(forbidden)).toBe(false);
   }
 
+  // 6. 导出生命周期：本次导出留下 COMPLETED 记录（completedAt 非空）
+  const completedRequests = await e2eDb().privacyRequest.findMany({
+    where: { userId: buyerUser.id, type: "DATA_EXPORT", status: "COMPLETED" },
+  });
+  expect(completedRequests.length).toBeGreaterThanOrEqual(1);
+  expect(completedRequests.every((request) => request.completedAt !== null)).toBe(true);
+
   await e2eDb().order.delete({ where: { id: order.id } });
+  await context.close();
+});
+
+test("GF-P4 SYNC_EXPORT_LIFECYCLE：一次 UI 点击 = 恰好一条 COMPLETED 导出请求", async ({
+  browser,
+}) => {
+  const tag = uniqueTag("gf-p4");
+  const email = `${tag}@e2e.test`;
+  const nickname = `导出用户${tag.slice(-8)}`;
+
+  await flushRateLimits();
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto("/register");
+  await page.locator('input[name="name"]').first().fill(nickname);
+  await page.locator('input[name="email"]').first().fill(email);
+  await page.locator('input[name="password"]').first().fill("P4Pass#2026");
+  await page.locator('input[name="confirmPassword"]').first().fill("P4Pass#2026");
+  await page.locator('input[name="agreeLegal"]').first().check();
+  await page.getByRole("button", { name: "注册账户" }).click();
+  await expect(page.getByText("注册成功，请登录")).toBeVisible();
+  await loginViaUI(page, email, "P4Pass#2026", nickname);
+
+  const user = await e2eDb().user.findUniqueOrThrow({ where: { email } });
+
+  // 一次 UI 点击触发唯一执行入口（同步完成 REQUESTED→IN_PROGRESS→COMPLETED）
+  const downloadPromise = page.waitForEvent("download", { timeout: 20_000 });
+  await page.goto("/my/privacy");
+  await page.getByTestId("export-data-link").first().click();
+  const download = await downloadPromise;
+
+  // 下载内容是完整导出 JSON
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(chunk as Buffer);
+  }
+  const body = Buffer.concat(chunks).toString("utf-8");
+  expect(body).toContain(email);
+
+  // 恰好一条 DATA_EXPORT 请求：无孤儿 REQUESTED、无重复
+  const requests = await e2eDb().privacyRequest.findMany({
+    where: { userId: user.id, type: "DATA_EXPORT" },
+  });
+  expect(requests).toHaveLength(1);
+  expect(requests[0]!.status).toBe("COMPLETED");
+  expect(requests[0]!.completedAt).toBeTruthy();
+
+  await context.close();
+});
+
+test("GF-P5 STALE_JWT（business mutation + pages）：注销后残留 cookie 全部被拒", async ({
+  browser,
+}) => {
+  const tag = uniqueTag("gf-p5");
+  const email = `${tag}@e2e.test`;
+  const nickname = `残留会话${tag.slice(-8)}`;
+
+  await flushRateLimits();
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  // 1. 真实登录取得 session cookie
+  await page.goto("/register");
+  await page.locator('input[name="name"]').first().fill(nickname);
+  await page.locator('input[name="email"]').first().fill(email);
+  await page.locator('input[name="password"]').first().fill("P5Pass#2026");
+  await page.locator('input[name="confirmPassword"]').first().fill("P5Pass#2026");
+  await page.locator('input[name="agreeLegal"]').first().check();
+  await page.getByRole("button", { name: "注册账户" }).click();
+  await expect(page.getByText("注册成功，请登录")).toBeVisible();
+  await loginViaUI(page, email, "P5Pass#2026", nickname);
+
+  // 2. 账号被注销（fixture seam）——不执行 signOut，旧 JWT 保留在 cookie
+  await eraseUserFixture(email);
+
+  // 3. 受保护页面：旧 cookie 被重定向回登录页
+  await page.goto("/profile");
+  await page.waitForURL((url) => url.pathname === "/login");
+
+  // 4. 业务 mutation API：旧 cookie 得到 401 ACCOUNT_INACTIVE
+  const upload = await page.request.post("/api/upload/images", {
+    multipart: {
+      file: {
+        name: "stale.jpg",
+        mimeType: "image/jpeg",
+        buffer: Buffer.from([
+          0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 1, 1, 0, 0,
+          1, 0, 1, 0, 0, 0xff, 0xd9,
+        ]),
+      },
+      category: "product",
+    },
+  });
+  expect(upload.status()).toBe(401);
+  expect((await upload.json()).code).toBe("ACCOUNT_INACTIVE");
+
+  // 5. 数据库无新 mutation（没有为该用户创建任何 asset）
+  const user = await e2eDb().user.findUniqueOrThrow({ where: { email } });
+  const assets = await e2eDb().uploadedAsset.findMany({ where: { ownerId: user.id } });
+  expect(assets).toHaveLength(0);
+
+  await context.close();
+});
+
+test("GF-P6 STALE_JWT（privacy API）：注销后残留 cookie 无法导出或创建隐私请求", async ({
+  browser,
+}) => {
+  const tag = uniqueTag("gf-p6");
+  const email = `${tag}@e2e.test`;
+  const nickname = `残留隐私${tag.slice(-8)}`;
+
+  await flushRateLimits();
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto("/register");
+  await page.locator('input[name="name"]').first().fill(nickname);
+  await page.locator('input[name="email"]').first().fill(email);
+  await page.locator('input[name="password"]').first().fill("P6Pass#2026");
+  await page.locator('input[name="confirmPassword"]').first().fill("P6Pass#2026");
+  await page.locator('input[name="agreeLegal"]').first().check();
+  await page.getByRole("button", { name: "注册账户" }).click();
+  await expect(page.getByText("注册成功，请登录")).toBeVisible();
+  await loginViaUI(page, email, "P6Pass#2026", nickname);
+
+  await eraseUserFixture(email);
+
+  // 导出端点：401（不允许旧 JWT 触发导出生命周期）
+  const exportResponse = await page.request.get("/api/privacy/export");
+  expect(exportResponse.status()).toBe(401);
+
+  // 隐私请求创建：401（不允许旧 JWT 创建/推进任何请求）
+  const createResponse = await page.request.post("/api/privacy/requests", {
+    data: { type: "DATA_EXPORT" },
+  });
+  expect(createResponse.status()).toBe(401);
+
+  // 数据库零新请求
+  const user = await e2eDb().user.findUniqueOrThrow({ where: { email } });
+  const requests = await e2eDb().privacyRequest.findMany({ where: { userId: user.id } });
+  expect(requests).toHaveLength(0);
+
   await context.close();
 });
 

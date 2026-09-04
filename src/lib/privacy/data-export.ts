@@ -1,6 +1,8 @@
-import { governanceError } from "@/lib/governance/domain-errors";
-import { prisma } from "@/lib/prisma";
+import { governanceError, isGovernanceError } from "@/lib/governance/domain-errors";
+import { logger } from "@/lib/logger";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { ERASED_USER_DISPLAY_NAME } from "@/lib/privacy/account-erasure";
+import { transitionPrivacyRequest } from "@/lib/privacy/privacy-request-service";
 
 /**
  * 用户数据导出（Phase 5 同步实现；Phase 9 异步化）。
@@ -508,4 +510,82 @@ export function assertNoForbiddenExportFields(payload: unknown): void {
   };
 
   visit(payload, "");
+}
+
+export type SynchronousExportResult = {
+  payload: UserExportPayload;
+  request: {
+    id: string;
+    status: "COMPLETED";
+    completedAt: string;
+  };
+};
+
+/**
+ * 同步数据导出的唯一执行入口（Phase 5 REPAIR：coherent lifecycle）。
+ *
+ * 一次真实导出形成且仅形成一条 PrivacyRequest：
+ *   REQUESTED → IN_PROGRESS → build → validate → COMPLETED（completedAt）
+ *
+ * - 创建/推进/构建/校验/完成在同一事务：不存在"两条 REQUESTED 孤儿记录"、
+ *   也不存在"失败仍 COMPLETED"的假完成；
+ * - 构建或校验失败 → 请求置 REJECTED + reasonCode（可解释状态），响应失败；
+ * - Phase 5 为同步导出，不引入 Phase 9 worker；速率限制由调用方（route）完成。
+ */
+export async function executeSynchronousDataExport(
+  userId: string,
+): Promise<SynchronousExportResult> {
+  return withTransaction(async (tx) => {
+    const created = await tx.privacyRequest.create({
+      data: { userId, type: "DATA_EXPORT", status: "REQUESTED" },
+    });
+
+    logger.info("privacy_request_created", "privacy", {
+      requestId: created.id,
+      requestType: created.type,
+    });
+
+    const inProgress = await transitionPrivacyRequest(created.id, "IN_PROGRESS", undefined, tx);
+
+    try {
+      const payload = await buildUserExport(userId);
+
+      const completed = await transitionPrivacyRequest(inProgress.id, "COMPLETED", undefined, tx);
+
+      logger.info("privacy_request_completed", "privacy", {
+        requestId: completed.id,
+        requestType: completed.type,
+      });
+      logger.info("privacy_export_served", "privacy", { userId });
+
+      return {
+        payload,
+        request: {
+          id: completed.id,
+          status: "COMPLETED",
+          completedAt: (completed.completedAt ?? new Date()).toISOString(),
+        },
+      };
+    } catch (error) {
+      // 失败不得留下虚假 COMPLETED：明确 REJECTED + reasonCode（可解释状态）。
+      const tooLarge = isGovernanceError(error) && error.code === "DATA_EXPORT_TOO_LARGE";
+      const reasonCode = tooLarge ? "DATA_EXPORT_TOO_LARGE" : "EXPORT_EXECUTION_FAILED";
+
+      try {
+        await transitionPrivacyRequest(inProgress.id, "REJECTED", { reasonCode }, tx);
+      } catch (transitionError) {
+        // 状态标记失败不吞掉原始错误
+        logger.error("privacy_request_reject_transition_failed", "privacy", {
+          requestId: inProgress.id,
+          error: transitionError,
+        });
+      }
+
+      if (tooLarge) {
+        throw governanceError("DATA_EXPORT_TOO_LARGE");
+      }
+
+      throw error;
+    }
+  });
 }

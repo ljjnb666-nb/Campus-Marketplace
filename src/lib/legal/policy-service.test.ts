@@ -93,6 +93,22 @@ beforeEach(() => {
   policyAcceptanceFindMany.mockResolvedValue([]);
 });
 
+/** recordAcceptances 全程在事务内（含锁查询/解析/校验/写入），统一 tx stub。 */
+function makeTxStub() {
+  return {
+    $executeRaw: vi.fn().mockResolvedValue(0),
+    legalDocument: {
+      findUnique: legalDocumentFindUnique,
+      findMany: legalDocumentFindMany,
+    },
+    policyAcceptance: {
+      findMany: policyAcceptanceFindMany,
+      findUnique: policyAcceptanceFindUnique,
+      create: policyAcceptanceCreate,
+    },
+  };
+}
+
 describe("getRequiredPolicies（current policy resolution）", () => {
   it("resolves the highest effective published version per type deterministically", async () => {
     const termsV2 = documentRow({ id: "doc-terms-2", type: "TERMS_OF_SERVICE", version: 2 });
@@ -217,7 +233,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       },
     );
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({ policyAcceptance: { findUnique: policyAcceptanceFindUnique, create: policyAcceptanceCreate } }),
+      callback(makeTxStub()),
     );
 
     const result = await recordAcceptances({
@@ -240,7 +256,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       Object.assign(new Error("Unique constraint failed"), { code: "P2002" }),
     );
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({ policyAcceptance: { findUnique: policyAcceptanceFindUnique, create: policyAcceptanceCreate } }),
+      callback(makeTxStub()),
     );
 
     const result = await recordAcceptances({
@@ -257,6 +273,9 @@ describe("recordAcceptances（acceptance evidence）", () => {
 
   it("fails closed when the submitted set does not match the current required set (stale v1 submit)", async () => {
     mockTwoRequired();
+    transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(makeTxStub()),
+    );
 
     // 已发布但未进入当前 required 集合的文档（如未来生效的新版本 v3）：
     // 提交它不是"当前同意"→ NOT_CURRENT
@@ -302,7 +321,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
     policyAcceptanceFindUnique.mockResolvedValue(null);
     policyAcceptanceCreate.mockResolvedValue({});
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({ policyAcceptance: { findUnique: policyAcceptanceFindUnique, create: policyAcceptanceCreate } }),
+      callback(makeTxStub()),
     );
 
     await recordAcceptances({
@@ -325,6 +344,30 @@ describe("recordAcceptances（acceptance evidence）", () => {
     });
   });
 
+  it("resolves current policies inside the locked transaction (no pre-tx resolve)", async () => {
+    // REPAIR 契约：resolve/validate/write 必须在同一持锁事务内。
+    // 证据：写入路径使用的 legalDocument.findMany 来自 tx stub 而非外部 prisma。
+    mockTwoRequired();
+    policyAcceptanceFindUnique.mockResolvedValue(null);
+    policyAcceptanceCreate.mockResolvedValue({});
+    const txStub = makeTxStub();
+    transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(txStub),
+    );
+
+    await recordAcceptances({
+      userId: "user-1",
+      documentIds: ["doc-terms-2", "doc-privacy-1"],
+      source: "RECONSENT",
+      now: NOW,
+    });
+
+    // policy 锁（advisory xact lock）在写之前于同一 tx 内取得
+    expect(txStub.$executeRaw).toHaveBeenCalled();
+    // current 解析发生在 tx 上（而不是事务外的 prisma 单例）
+    expect(txStub.legalDocument.findMany).toHaveBeenCalled();
+  });
+
   it("lets a partially-outdated user submit only the pending document (reconsent)", async () => {
     mockTwoRequired();
     // 用户对 PRIVACY 已接受当前版本；TERMS 是旧版本 → pending 仅 TERMS v2
@@ -342,7 +385,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
     );
     policyAcceptanceCreate.mockResolvedValue({});
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({ policyAcceptance: { findUnique: policyAcceptanceFindUnique, create: policyAcceptanceCreate } }),
+      callback(makeTxStub()),
     );
 
     const result = await recordAcceptances({
@@ -362,6 +405,9 @@ describe("recordAcceptances（acceptance evidence）", () => {
 
   it("rejects governance errors as GovernanceError instances", async () => {
     mockCurrentResolution([]);
+    transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback(makeTxStub()),
+    );
 
     await expect(
       recordAcceptances({

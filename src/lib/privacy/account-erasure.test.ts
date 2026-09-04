@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const txStub = {
+  $executeRaw: vi.fn().mockResolvedValue(0),
   user: {
     findUnique: vi.fn(),
     update: vi.fn(),
@@ -60,12 +61,18 @@ const ACTIVE_USER = {
 };
 
 beforeEach(() => {
-  for (const model of Object.values(txStub)) {
+  for (const [key, model] of Object.entries(txStub)) {
+    if (key === "$executeRaw") {
+      continue;
+    }
+
     for (const fn of Object.values(model)) {
       fn.mockReset();
     }
   }
 
+  // subject 治理锁（advisory xact lock）查询
+  txStub.$executeRaw.mockReset().mockResolvedValue(0);
   txStub.user.findUnique.mockResolvedValue({ ...ACTIVE_USER });
   txStub.user.update.mockResolvedValue({});
   txStub.userVerification.updateMany.mockResolvedValue({ count: 1 });

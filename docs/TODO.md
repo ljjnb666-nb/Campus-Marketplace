@@ -203,7 +203,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] 保持 `npm run db:verify`、`npm run app:smoke`、`npm run app:smoke:auth` 可重复通过
 - [x] 新增 `npm run text:verify`，把常见中文乱码片段纳入源码和文档检查
 
-## Production Phase 5（Privacy / Agreements / Platform Rules / Data Governance，2026-09-03 实现）
+## Production Phase 5（Privacy / Agreements / Platform Rules / Data Governance，2026-09-03 实现，2026-09-04 REPAIR 收口）
 
 状态：**IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（Draft PR，未 merge；独立验收 + master CI 完成前不宣布 DONE）。
 权威契约文档：[LEGAL_GOVERNANCE.md](LEGAL_GOVERNANCE.md)、[DATA_GOVERNANCE.md](DATA_GOVERNANCE.md)、
@@ -217,27 +217,35 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] 公开法务页 `/legal`、`/legal/{terms,privacy,rules,prohibited}`、历史版本、`/privacy` `/rules` 重定向；公开 API `GET /api/legal/documents`
 - [x] 数据分类/保留 registry（typed；PENDING_LEGAL_REVIEW 不虚构法定年限；复用 LOG_PRIVACY 真实规则）
 - [x] `PrivacyRequest` 状态机（显式 transition；active 注销请求部分唯一索引；所有权来自 session）
-- [x] 数据导出（显式 DTO 白名单 + 禁止键运行时扫描 + 8MB 上限 + private,no-store + 限流 + 请求留痕）
+- [x] 数据导出（显式 DTO 白名单 + 禁止键运行时扫描 + 8MB 上限 + private,no-store + 限流）
 - [x] 账号注销/匿名化（事务内前置检查 fail-closed；随机 email surrogate；凭据失效；listing 下架；pseudonymous 历史保留；auth revocation）
 - [x] `DataHold`（LEGAL/DISPUTE；事务内复检 TOCTOU 防护；service seam 无生产 debug endpoint）
 - [x] 迁移 `20260902160220_add_legal_privacy_governance`（fresh + second deploy PASS；不写业务数据）
 - [x] 单元测试（policy/document/erasure/export/hold/request-service/classification/server-auth/upload/auth actions）
-- [x] 真实 PostgreSQL 集成测试 + Privacy/Governance Drill（`tests/integration/legal-privacy-governance.test.ts`，12 用例，可重复）
-- [x] E2E：新增 6 golden flows（注册同意/legacy 重新同意/版本升级/导出/注销/hold 阻断）+ 原 24 条 critical flows 适配（fixture acceptance + 注册勾选）
+- [x] 真实 PostgreSQL 集成测试 + Privacy/Governance Drill（`tests/integration/legal-privacy-governance.test.ts`，可重复）
+- [x] E2E：governance golden flows + 原 24 条 critical flows 适配（fixture acceptance + 注册勾选）
 - [x] 文档三件套 + API contract（legal documents / acceptances / privacy requests / export）
 
-## 当前测试基线（Phase 5 实现分支，待独立验收更新）
+### REPAIR 轮（2026-09-04，独立验收 REPAIR_REQUIRED 后四组 blocker 修复）
 
-Phase 5 实现分支本地全量验证（2026-09-03，真实 PostgreSQL / Redis / MinIO 集成全开，
+- [x] **B1 HOLD/ERASURE TOCTOU**：subject advisory lock（`pg_advisory_xact_lock`）——createHold/releaseHold/eraseAccount 同锁线性化；`eraseAccount` 增加 barrier seam；真实 PG 竞态测试 `HOLD_ERASURE_POST_CHECK_RACE_TEST`（LEGAL+DISPUTE，锁序证明）；release 共锁语义锁定；修正"READ COMMITTED 事务内复查=TOCTOU 防护"的错误表述
+- [x] **B2 STALE JWT**：中央 active-account resolver（`requireUser`/`requireVerifiedPageUser`/`getVerifiedSession` 共用 DB 复核：ACTIVE + !deletedAt + !erasedAt）；`actions/legal.ts`、`actions/privacy.ts` 全部脱直连 `auth()`；全仓 raw `auth()` 审计（其余直连点均为只读个性化/读 API，无 mutation 面）；回归：`ERASED_STALE_SESSION_LEGAL/PRIVACY_ACTION_DENIED`（unit）+ `GF-P5`（业务 mutation 401 + 页面 redirect）+ `GF-P6`（privacy API 401，cookie 级真实流程）
+- [x] **B3 EXPORT LIFECYCLE**：`executeSynchronousDataExport` 单一执行入口（同事务 REQUESTED→IN_PROGRESS→COMPLETED；失败 REJECTED+reasonCode）；UI 一次点击=一条 COMPLETED；`POST /api/privacy/requests` 对 DATA_EXPORT 返回 `USE_EXPORT_ENDPOINT`；回归：`SYNC_EXPORT_REQUEST_COMPLETES_TEST`（unit+集成）+ `GF-P4 UI_ONE_CLICK_ONE_REQUEST_TEST`
+- [x] **B4 POLICY RACE**：policy advisory lock（固定类型锁序）；`recordAcceptances` 的 resolve→validate→insert 全事务化（注册事务同契约）；publish/retire 持锁 + 锁内 highestPublished 检查；回归：`POLICY_PUBLISH_ACCEPTANCE_RACE_TEST`（双向线性化）+ `CONCURRENT_POLICY_PUBLISH_SERIALIZATION_TEST`
+- [x] 一致性清理：`getCurrentPublishedDocument`（公开展示，不过滤 requiresAcceptance）与 `getCurrentRequiredDocument`（required 解析）概念拆分
+
+## 当前测试基线（Phase 5 REPAIR 分支，待独立验收更新）
+
+Phase 5 REPAIR 分支本地全量验证（2026-09-04，真实 PostgreSQL / Redis / MinIO 集成全开，
 `INTEGRATION_DATABASE_URL` / `INTEGRATION_REDIS_URL` / `INTEGRATION_S3_ENDPOINT` 均真实执行）：
 
-- **223** 个测试文件，**1286** 个测试全部通过（含 Phase 5 新增治理域单测与
-  12 用例真实库集成测试 + Privacy/Governance Drill）
+- **225** 个测试文件，**1305** 个测试全部通过（含治理域单测、真实库集成测试、
+  3 类真实 PG 并发竞态测试与 Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （本轮实测 82.17 / 81.66 / 81.4 / 82.17）
-- **E2E 基线：30 条**（原 24 条 critical flows 全部保留 + 新增 6 条 Phase 5
-  governance golden flows）；本地连续三轮 30/30 全绿（--workers=2，与 CI 一致，
-  retry=0，全部 first-attempt pass）
+  （本轮实测 82.86 / 81.59 / 81.93 / 82.86）
+- **E2E 基线：33 条**（原 24 条 critical flows 全部保留 + 9 条 Phase 5
+  governance golden flows）；REPAIR 后本地连续三轮 33/33 全绿（--workers=2，
+  与 CI 一致，retry=0，全部 first-attempt pass）
 - 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
   Phase 5 合并后的数字以最近一次成功的 master CI 为准，不以本文快照为准
 

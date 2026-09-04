@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import type { LegalDocument, LegalDocumentStatus, LegalDocumentType } from "@prisma/client";
+import type { LegalDocument, LegalDocumentStatus, LegalDocumentType, Prisma } from "@prisma/client";
 
 import { governanceError } from "@/lib/governance/domain-errors";
+import { acquirePolicyLocks } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
 
@@ -65,7 +66,11 @@ export async function createLegalDocument(input: {
  *
  * 发布即不可变。发布动作只允许改 status/publishedAt；任何对不可变字段的
  * 修改请求都会被拒绝（LEGAL_DOCUMENT_ALREADY_PUBLISHED）。
- * (type, version) 数据库唯一约束 + 事务内重读校验共同防并发发布。
+ *
+ * Serialization：事务内先取该 type 的 policy advisory 锁（与
+ * recordAcceptances 共享同一 serialization boundary）——"highestPublished
+ * 检查 → PUBLISHED"窗口与并发 acceptance / 并发 publish 被互斥关闭，
+ * 并发发布同 type 的 vN / vN+1 不会绕过版本顺序 invariant。
  */
 export async function publishLegalDocument(documentId: string): Promise<LegalDocument> {
   return withTransaction(async (tx) => {
@@ -84,8 +89,10 @@ export async function publishLegalDocument(documentId: string): Promise<LegalDoc
       throw governanceError("LEGAL_DOCUMENT_ALREADY_PUBLISHED", "已退役的文档不能重新发布");
     }
 
-    // 并发防护：唯一约束 (type, version) 已在数据库层兜底；事务内再校验
-    // 待发布版本号确实高于该类型全部已发布版本，避免倒序发布造成 current 漂移。
+    await acquirePolicyLocks(tx, [document.type]);
+
+    // 并发防护（锁内重读）：待发布版本号必须高于该类型全部已发布版本，
+    // 避免倒序发布造成 current 漂移；(type, version) 唯一约束兜底。
     const highestPublished = await tx.legalDocument.findFirst({
       where: { type: document.type, status: { in: ["PUBLISHED", "RETIRED"] } },
       orderBy: { version: "desc" },
@@ -115,11 +122,27 @@ export async function publishLegalDocument(documentId: string): Promise<LegalDoc
   });
 }
 
-/** DRAFT → RETIRED（放弃一个草稿）；PUBLISHED → RETIRED（下线，保留历史可查）。 */
+/**
+ * DRAFT → RETIRED（放弃一个草稿）；PUBLISHED → RETIRED（下线，保留历史可查）。
+ * retire 同样改变 current required 集合，必须持 policy 锁执行。
+ */
 export async function retireLegalDocument(documentId: string): Promise<LegalDocument> {
-  return prisma.legalDocument.update({
-    where: { id: documentId },
-    data: { status: "RETIRED" },
+  return withTransaction(async (tx) => {
+    const document = await tx.legalDocument.findUnique({
+      where: { id: documentId },
+      select: { type: true },
+    });
+
+    if (!document) {
+      throw governanceError("LEGAL_DOCUMENT_NOT_FOUND");
+    }
+
+    await acquirePolicyLocks(tx, [document.type]);
+
+    return tx.legalDocument.update({
+      where: { id: documentId },
+      data: { status: "RETIRED" },
+    });
   });
 }
 
@@ -168,11 +191,11 @@ export async function updateDraftLegalDocument(
   });
 }
 
-/** 公开读取：当前生效版本（PUBLISHED 且 effectiveAt <= now）。 */
+/** 公开读取：当前生效版本（PUBLISHED 且 effectiveAt <= now，不过滤 requiresAcceptance）。 */
 export async function getPublishedDocumentByType(
   type: LegalDocumentType,
 ): Promise<LegalDocumentFull | null> {
-  return getCurrentDocument(type, new Date());
+  return getCurrentPublishedDocument(type, new Date());
 }
 
 /** 指定版本的公开读取；未发布（DRAFT）一律不可见。 */
@@ -216,27 +239,90 @@ export async function listPublicVersions(
 }
 
 /**
- * 当前生效版本解析（与 policy-service 共用的确定性核心）：
- * - 仅 PUBLISHED 且 effectiveAt <= now 参与解析
- * - 同一 type 取 version 最高者；排序显式确定性，绝不依赖数据库返回顺序
- * - 不存在 → null（该类型当前无生效政策）
+ * 【概念拆分 REPAIR】current 解析有两个明确不同的概念：
+ *
+ * 1. getCurrentPublishedDocument —— 该类型"当前公开生效文档"：
+ *    PUBLISHED + effectiveAt <= now + version 最高。不过滤 requiresAcceptance，
+ *    供公开页面/公开 API 展示（未来存在 requiresAcceptance=false 的纯展示
+ *    文档时也必须可见）。
+ * 2. getCurrentRequiredDocument —— 该类型"当前 required 同意政策"：
+ *    在 1 的条件上再过滤 requiresAcceptance = true。仅 policy engine 使用。
+ *
+ * 两者排序显式确定性，绝不依赖数据库返回顺序。tx 变体供 recordAcceptances
+ * 在锁内的事务上一致的解析（READ COMMITTED 下锁 + 同事务读 = 线性化）。
+ */
+export async function getCurrentPublishedDocument(
+  type: LegalDocumentType,
+  now: Date,
+  tx?: Prisma.TransactionClient,
+): Promise<LegalDocumentFull | null> {
+  const where = {
+    type,
+    status: "PUBLISHED" as const,
+    effectiveAt: { lte: now },
+  };
+
+  // 扩展客户端与事务客户端的联合类型会触发 Prisma excessive stack depth
+  // （见 notification-repository.ts 同注），因此 prisma / tx 两条路径显式分开。
+  if (tx) {
+    const rows = await tx.legalDocument.findMany({
+      where,
+      orderBy: [{ version: "desc" }, { id: "asc" }],
+      take: 1,
+    });
+
+    return rows[0] ?? null;
+  }
+
+  const rows = await prisma.legalDocument.findMany({
+    where,
+    orderBy: [{ version: "desc" }, { id: "asc" }],
+    take: 1,
+  });
+
+  return rows[0] ?? null;
+}
+
+export async function getCurrentRequiredDocument(
+  type: LegalDocumentType,
+  now: Date,
+  tx?: Prisma.TransactionClient,
+): Promise<LegalDocumentFull | null> {
+  const where = {
+    type,
+    status: "PUBLISHED" as const,
+    effectiveAt: { lte: now },
+    requiresAcceptance: true,
+  };
+
+  if (tx) {
+    const rows = await tx.legalDocument.findMany({
+      where,
+      orderBy: [{ version: "desc" }, { id: "asc" }],
+      take: 1,
+    });
+
+    return rows[0] ?? null;
+  }
+
+  const rows = await prisma.legalDocument.findMany({
+    where,
+    orderBy: [{ version: "desc" }, { id: "asc" }],
+    take: 1,
+  });
+
+  return rows[0] ?? null;
+}
+
+/**
+ * @deprecated 兼容别名：语义为 required 解析。请改用
+ * getCurrentRequiredDocument（policy engine）或 getCurrentPublishedDocument（公开展示）。
  */
 export async function getCurrentDocument(
   type: LegalDocumentType,
   now: Date,
 ): Promise<LegalDocumentFull | null> {
-  const candidates = await prisma.legalDocument.findMany({
-    where: {
-      type,
-      status: "PUBLISHED",
-      effectiveAt: { lte: now },
-      requiresAcceptance: true,
-    },
-    orderBy: [{ version: "desc" }, { id: "asc" }],
-    take: 1,
-  });
-
-  return candidates[0] ?? null;
+  return getCurrentRequiredDocument(type, now);
 }
 
 export type LegalDocumentStatusValue = LegalDocumentStatus;

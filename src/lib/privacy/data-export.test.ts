@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { userModel, restModels } = vi.hoisted(() => {
+const {
+  userModel,
+  restModels,
+  privacyRequestCreate,
+  privacyRequestUpdate,
+  privacyRequestFindUnique,
+  transactionMock,
+} = vi.hoisted(() => {
   const fn = () => vi.fn();
   return {
     userModel: { findUnique: fn() },
@@ -18,6 +25,10 @@ const { userModel, restModels } = vi.hoisted(() => {
       uploadedAsset: { findMany: fn() },
       privacyRequest: { findMany: fn() },
     },
+    privacyRequestCreate: fn(),
+    privacyRequestUpdate: fn(),
+    privacyRequestFindUnique: fn(),
+    transactionMock: fn(),
   };
 });
 
@@ -25,13 +36,21 @@ vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: userModel,
     ...restModels,
+    privacyRequest: {
+      findMany: restModels.privacyRequest.findMany,
+      create: privacyRequestCreate,
+      update: privacyRequestUpdate,
+      findUnique: privacyRequestFindUnique,
+    },
   },
+  withTransaction: transactionMock,
 }));
 
 import {
   EXPORT_MAX_BYTES,
   assertNoForbiddenExportFields,
   buildUserExport,
+  executeSynchronousDataExport,
   FORBIDDEN_EXPORT_KEYS,
 } from "@/lib/privacy/data-export";
 import { GovernanceError } from "@/lib/governance/domain-errors";
@@ -61,6 +80,39 @@ beforeEach(() => {
       fn.mockReset();
     }
   }
+  privacyRequestCreate.mockReset();
+  privacyRequestUpdate.mockReset();
+  privacyRequestFindUnique.mockReset();
+  transactionMock.mockReset();
+
+  // 同步导出生命周期的事务 mock：REQUESTED → IN_PROGRESS → COMPLETED 状态机
+  // 在单一事务客户端上流转（状态由 findUnique/update mock 按真实顺序演化）
+  let requestStatus: string | null = null;
+  privacyRequestCreate.mockImplementation(
+    async ({ data }: { data: { status: string } }) => {
+      requestStatus = data.status;
+      return { id: "req-export-1", type: "DATA_EXPORT", status: requestStatus, requestedAt: new Date() };
+    },
+  );
+  privacyRequestFindUnique.mockImplementation(async () => ({ id: "req-export-1", status: requestStatus }));
+  privacyRequestUpdate.mockImplementation(async ({ data }: { data: { status: string } }) => {
+    requestStatus = data.status;
+    return {
+      id: "req-export-1",
+      type: "DATA_EXPORT",
+      status: requestStatus,
+      completedAt: requestStatus === "COMPLETED" ? new Date("2026-09-04T00:00:00Z") : null,
+    };
+  });
+  transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+    callback({
+      privacyRequest: {
+        create: privacyRequestCreate,
+        update: privacyRequestUpdate,
+        findUnique: privacyRequestFindUnique,
+      },
+    }),
+  );
 
   userModel.findUnique.mockResolvedValue({
     id: SELF_USER_ID,
@@ -216,5 +268,55 @@ describe("buildUserExport（EXPORT_EXCLUDES_* / NO_CROSS_USER_EXPORT）", () => 
     expect(FORBIDDEN_EXPORT_KEYS).toContain("passwordHash");
     expect(FORBIDDEN_EXPORT_KEYS).toContain("objectKey");
     expect(FORBIDDEN_EXPORT_KEYS).toContain("bucket");
+  });
+});
+
+describe("executeSynchronousDataExport（SYNC_EXPORT_REQUEST_COMPLETES）", () => {
+  it("completes exactly ONE DATA_EXPORT request with COMPLETED + completedAt", async () => {
+    const result = await executeSynchronousDataExport(SELF_USER_ID);
+
+    // 恰好一条请求：create 只发生一次
+    expect(privacyRequestCreate).toHaveBeenCalledTimes(1);
+    expect(privacyRequestCreate).toHaveBeenCalledWith({
+      data: { userId: SELF_USER_ID, type: "DATA_EXPORT", status: "REQUESTED" },
+    });
+
+    // 完整生命周期 REQUESTED → IN_PROGRESS → COMPLETED
+    expect(privacyRequestUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "IN_PROGRESS" }) }),
+    );
+    expect(privacyRequestUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "COMPLETED" }) }),
+    );
+
+    expect(result.request).toMatchObject({
+      id: "req-export-1",
+      status: "COMPLETED",
+    });
+    expect(result.request.completedAt).toBeTruthy();
+    expect(result.payload.account.email).toBe("self@campus.local");
+  });
+
+  it("marks the request REJECTED (never a fake COMPLETED) when the export fails", async () => {
+    // 导出构建阶段抛错（too-large 场景由集成路径覆盖；此处验证通用失败语义）
+    userModel.findUnique.mockResolvedValue(null);
+
+    await expect(executeSynchronousDataExport(SELF_USER_ID)).rejects.toBeInstanceOf(GovernanceError);
+
+    // 进入过 IN_PROGRESS 并被显式置为 REJECTED + reasonCode
+    expect(privacyRequestUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: "IN_PROGRESS" }) }),
+    );
+    expect(privacyRequestUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "REJECTED", reasonCode: "EXPORT_EXECUTION_FAILED" }),
+      }),
+    );
+
+    // 从未出现 COMPLETED
+    const completedCalls = privacyRequestUpdate.mock.calls.filter(
+      (call) => (call[0] as { data: { status: string } }).data.status === "COMPLETED",
+    );
+    expect(completedCalls).toHaveLength(0);
   });
 });

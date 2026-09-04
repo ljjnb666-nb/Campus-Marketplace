@@ -10,15 +10,15 @@ import { eraseAccount, type AccountErasureResult } from "@/lib/privacy/account-e
  *
  *   REQUESTED → IN_PROGRESS → COMPLETED
  *                            → BLOCKED（有 hold/active transaction，等待治理处理）
+ *                            → REJECTED（执行失败/超限，带 reasonCode）
  *   REQUESTED → CANCELLED（用户主动取消，尚未开始执行）
- *   IN_PROGRESS → COMPLETED | BLOCKED
  *   BLOCKED → IN_PROGRESS（hold 解除后重试）| REJECTED（治理最终拒绝）
  *
  * 合法迁移表是唯一事实来源；非法迁移抛 PRIVACY_REQUEST_INVALID_TRANSITION。
  */
 const ALLOWED_TRANSITIONS: Record<PrivacyRequestStatus, PrivacyRequestStatus[]> = {
   REQUESTED: ["IN_PROGRESS", "CANCELLED"],
-  IN_PROGRESS: ["COMPLETED", "BLOCKED"],
+  IN_PROGRESS: ["COMPLETED", "BLOCKED", "REJECTED"],
   BLOCKED: ["IN_PROGRESS", "REJECTED"],
   COMPLETED: [],
   CANCELLED: [],

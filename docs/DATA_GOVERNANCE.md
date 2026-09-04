@@ -144,12 +144,54 @@ DATA_EXPORT 请求记录。
 `reasonCode` / 审计字段（createdById/releasedById/releasedAt）。
 
 - active hold **阻断**破坏性擦除/匿名化与保留期清理（`assertNoActiveHold`）；
-- hold 校验必须在破坏性事务**内部**再次执行（集成测试证明 READ COMMITTED
-  下事务内可见并发创建的 hold）；
+- **Serialization contract（REPAIR）**：`createHold` / `releaseHold` /
+  `eraseAccount` 在各自事务内先取得**同一把 subject advisory lock**
+  （`pg_advisory_xact_lock`，键 = 命名空间 + hashtext(subjectType:subjectId)）。
+  PostgreSQL 默认 READ COMMITTED——"事务内再查一次 hold"只能看见检查时点
+  已提交的行，不构成 serialization boundary；锁把 check→commit 窗口
+  彻底互斥关闭，保证：
+  1. erase 先取锁 → check 无 hold → 提交 → hold 创建随后发生；或
+  2. hold 先取锁 → 提交 → erase 后取锁 → check 见 hold → BLOCK。
+  "hold 已提交而 erase 未见 hold 即提交"不可能出现（真实 PG 竞态测试
+  HOLD_ERASURE_POST_CHECK_RACE_TEST 以 barrier seam 证明 lock ordering）；
 - Phase 5 仅提供 service seam（`createHold`/`releaseHold`，测试与 seed 使用）；
   **不建**生产 debug endpoint；管理界面属 Phase 6 RBAC / Phase 7 运营后台。
 
-## 7. 迁移与并发安全
+## 7. 会话吊销与 active-account resolver（REPAIR）
+
+Auth.js 策略为 JWT（maxAge 7 天）：`auth()` 只解析令牌，不感知注销。
+所有 authenticated 边界（页面、Server Action、API route）一律经过
+`src/lib/server-auth.ts` 的中央 resolver（`requireUser` /
+`requireVerifiedPageUser` / `getVerifiedSession` 共同一份 DB 复核逻辑）：
+
+```
+解析 session → DB re-fetch User → status==ACTIVE && deletedAt==null && erasedAt==null
+```
+
+- 该校验**任何路径都不可跳过**（consent gate 允许豁免，账号 active 校验不允许）；
+- consent 是否要求由调用方决定：re-consent（`/legal/accept`、
+  `POST acceptances`）与隐私自助（导出/注销）使用 `requireConsent=false`；
+- 注销后残留的旧 JWT：页面重定向 /login；API 返回 401 `ACCOUNT_INACTIVE`；
+  E2E（GF-P5/GF-P6）以"保留 cookie → DB 注销 → 旧 cookie 直调边界"的方式回归。
+
+## 8. 数据导出生命周期（REPAIR：单一执行入口）
+
+同步导出的唯一执行入口是 `GET /api/privacy/export`
+（服务层 `executeSynchronousDataExport`），一次请求内完成：
+
+```
+创建 PrivacyRequest(REQUESTED) → IN_PROGRESS → 构建 DTO → 禁止键扫描 + 体积校验
+→ COMPLETED（completedAt 落库）
+失败 → REJECTED + reasonCode（DATA_EXPORT_TOO_LARGE / EXPORT_EXECUTION_FAILED）
+```
+
+- 一次导出 = **恰好一条** PrivacyRequest（同事务创建/推进/完成），
+  不产生孤儿 REQUESTED，失败不留虚假 COMPLETED；
+- `POST /api/privacy/requests` 对 DATA_EXPORT 返回 400 `USE_EXPORT_ENDPOINT`
+  （指引唯一入口），不允许旁路创建永远 REQUESTED 的记录；
+- 速率限制在同一执行入口内完成（3 次/15 分钟）。
+
+## 9. 迁移与并发安全
 
 - migration `20260902160220_add_legal_privacy_governance`：
   新增 4 表 + `User.erasedAt`；**不写业务数据、不改既有行**
@@ -159,10 +201,16 @@ DATA_EXPORT 请求记录。
   - `PolicyAcceptance (userId, documentId)` 唯一（幂等同意）；
   - `PrivacyRequest` 部分唯一索引：`userId WHERE type='ACCOUNT_DELETION'
     AND status IN ('REQUESTED','IN_PROGRESS','BLOCKED')`；
-- 并发场景均有集成测试：并发接受、并发发布（唯一约束）、hold-vs-delete
-  竞态（事务内复检）。
+- serialization boundary（REPAIR）：hold/erasure 走 subject advisory lock；
+  publish/retire/accept 走 policy advisory lock（按类型固定锁序，无死锁环）。
+  recordAcceptances 的 resolve→validate→insert 全部在持锁事务内完成，
+  与 publishLegalDocument 严格线性化——不存在"v2 已发布而 v1 同意仍以
+  latest 成功提交"的交错；
+- 并发场景均有真实 PG 集成测试：HOLD_ERASURE_POST_CHECK_RACE（LEGAL/DISPUTE，
+  barrier seam 证明锁序）、POLICY_PUBLISH_ACCEPTANCE_RACE（双向线性化）、
+  CONCURRENT_POLICY_PUBLISH_SERIALIZATION、并发接受幂等、并发发布唯一约束。
 
-## 8. 日志与可观测边界
+## 10. 日志与可观测边界
 
 沿用 Phase 4 契约（docs/LOG_PRIVACY.md / OBSERVABILITY.md）。新增结构化事件
 （仅 IDs / 安全枚举 / requestId，禁止内容本体）：

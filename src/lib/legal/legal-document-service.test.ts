@@ -81,6 +81,7 @@ describe("publishLegalDocument（PUBLISHED_POLICY_IMMUTABLE）", () => {
     legalDocumentUpdate.mockResolvedValue({ ...draft, status: "PUBLISHED", publishedAt: new Date() });
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
       callback({
+        $executeRaw: vi.fn().mockResolvedValue(0),
         legalDocument: {
           findUnique: legalDocumentFindUnique,
           findFirst: legalDocumentFindFirst,
@@ -108,6 +109,7 @@ describe("publishLegalDocument（PUBLISHED_POLICY_IMMUTABLE）", () => {
     });
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
       callback({
+        $executeRaw: vi.fn().mockResolvedValue(0),
         legalDocument: {
           findUnique: legalDocumentFindUnique,
           findFirst: legalDocumentFindFirst,
@@ -131,6 +133,7 @@ describe("publishLegalDocument（PUBLISHED_POLICY_IMMUTABLE）", () => {
     legalDocumentFindFirst.mockResolvedValue({ version: 3 });
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
       callback({
+        $executeRaw: vi.fn().mockResolvedValue(0),
         legalDocument: {
           findUnique: legalDocumentFindUnique,
           findFirst: legalDocumentFindFirst,
@@ -174,6 +177,7 @@ describe("updateDraftLegalDocument（不可变入口收敛）", () => {
     legalDocumentUpdate.mockResolvedValue({ id: "doc-1" });
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
       callback({
+        $executeRaw: vi.fn().mockResolvedValue(0),
         legalDocument: { findUnique: legalDocumentFindUnique, update: legalDocumentUpdate },
       }),
     );
