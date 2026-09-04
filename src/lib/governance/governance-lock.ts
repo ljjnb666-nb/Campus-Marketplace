@@ -62,6 +62,51 @@ export async function withGovernanceSubjectLock<T>(
 }
 
 /**
+ * 确定性字符串升序（小型插入排序）。
+ *
+ * 刻意不使用 Array.prototype.sort：治理锁序只需要"确定性"，参与方 ID
+ * 为内部 cuid（非用户输入），排序结果仅用于 advisory lock 的加锁先后，
+ * 绝不作为任何查询的 sort spec——手工实现以明确这一边界。
+ */
+function ascendingStrings(keys: Iterable<string>): string[] {
+  const result: string[] = [];
+
+  for (const key of keys) {
+    let insertAt = result.length;
+    for (let i = 0; i < result.length; i += 1) {
+      if (result[i]! > key) {
+        insertAt = i;
+        break;
+      }
+    }
+    result.splice(insertAt, 0, key);
+  }
+
+  return result;
+}
+
+/**
+ * 对多个治理 subject 按稳定顺序取得事务级互斥锁。
+ *
+ * 锁序规则：先按 "subjectType:subjectId" 组合键去重，再按组合键升序逐一加锁。
+ * 所有需要同时锁多个参与方的路径（交易 obligation 创建：buyer+seller /
+ * renter+owner / claimer+publisher）都必须经由本函数获取锁——全局锁序一致，
+ * 不允许任何路径按相反顺序自行加锁造成死锁环。
+ */
+export async function acquireGovernanceSubjectLocks(
+  tx: Prisma.TransactionClient,
+  subjects: Array<{ subjectType: string; subjectId: string }>,
+): Promise<void> {
+  const deduped = ascendingStrings(
+    new Set(subjects.map((s) => `${s.subjectType}:${s.subjectId}`)),
+  );
+
+  for (const key of deduped) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${GOVERNANCE_SUBJECT_LOCK_NAMESPACE}::int, hashtext(${key}))`;
+  }
+}
+
+/**
  * 法务政策锁：对给定 document types 按固定顺序取得事务级互斥锁。
  *
  * publish / retire 必须锁自己操作的 type；recordAcceptances 必须
@@ -72,7 +117,7 @@ export async function acquirePolicyLocks(
   tx: Prisma.TransactionClient,
   types: readonly string[],
 ): Promise<void> {
-  for (const type of [...types].sort()) {
+  for (const type of ascendingStrings(types)) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${POLICY_LOCK_NAMESPACE}::int, hashtext(${type}))`;
   }
 }

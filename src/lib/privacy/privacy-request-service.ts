@@ -74,28 +74,11 @@ export async function listUserPrivacyRequests(userId: string): Promise<PrivacyRe
 
 const ACTIVE_DELETION_STATUSES: PrivacyRequestStatus[] = ["REQUESTED", "IN_PROGRESS", "BLOCKED"];
 
-/**
- * 创建数据导出请求。允许重复请求（产品策略：数据会变化），由调用方限流。
- * 导出请求同步完成（Phase 5 无后台任务；Phase 9 异步化）。
- */
-export async function createDataExportRequest(
-  userId: string,
-  tx?: Prisma.TransactionClient,
-): Promise<PrivacyRequest> {
-  const create = (client: Prisma.TransactionClient) =>
-    client.privacyRequest.create({
-      data: { userId, type: "DATA_EXPORT", status: "REQUESTED" },
-    });
-
-  const request = await (tx ? create(tx) : withTransaction(create));
-
-  logger.info("privacy_request_created", "privacy", {
-    requestId: request.id,
-    requestType: request.type,
-  });
-
-  return request;
-}
+// 注：DATA_EXPORT 没有也不允许有"只创建 REQUESTED 不执行"的低层入口——
+// 同步导出的唯一执行入口是 data-export.executeSynchronousDataExport
+// （REQUESTED→IN_PROGRESS→COMPLETED/REJECTED 单事务闭环）。
+// 此前公开的 createDataExportRequest 已删除（footgun：会制造孤儿 REQUESTED）。
+// ACCOUNT_DELETION flow 不受影响（createAccountDeletionRequest 独立实现）。
 
 export type DeletionOutcome =
   | { status: "COMPLETED"; request: PrivacyRequest; erasure: AccountErasureResult }

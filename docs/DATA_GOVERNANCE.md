@@ -174,22 +174,60 @@ Auth.js 策略为 JWT（maxAge 7 天）：`auth()` 只解析令牌，不感知�
 - 注销后残留的旧 JWT：页面重定向 /login；API 返回 401 `ACCOUNT_INACTIVE`；
   E2E（GF-P5/GF-P6）以"保留 cookie → DB 注销 → 旧 cookie 直调边界"的方式回归。
 
-## 8. 数据导出生命周期（REPAIR：单一执行入口）
+## 8. 数据导出生命周期（REPAIR 2：失败台账持久化）
 
 同步导出的唯一执行入口是 `GET /api/privacy/export`
-（服务层 `executeSynchronousDataExport`），一次请求内完成：
+（服务层 `executeSynchronousDataExport`）：
 
 ```
-创建 PrivacyRequest(REQUESTED) → IN_PROGRESS → 构建 DTO → 禁止键扫描 + 体积校验
-→ COMPLETED（completedAt 落库）
-失败 → REJECTED + reasonCode（DATA_EXPORT_TOO_LARGE / EXPORT_EXECUTION_FAILED）
+成功：REQUESTED → IN_PROGRESS → 构建 DTO → 禁止键扫描/体积校验
+      → COMPLETED（completedAt）→ 事务 COMMIT → 响应载荷
+失败：REQUESTED → IN_PROGRESS → REJECTED(reasonCode) → 事务 COMMIT
+      → 事务外再向调用方抛出安全错误
+      （reasonCode: DATA_EXPORT_TOO_LARGE / EXPORT_EXECUTION_FAILED）
 ```
 
-- 一次导出 = **恰好一条** PrivacyRequest（同事务创建/推进/完成），
-  不产生孤儿 REQUESTED，失败不留虚假 COMPLETED；
+- 一次导出 = **恰好一条** PrivacyRequest；失败路径在事务 callback 内
+  **return** 失败结果，使 REJECTED 台账随事务提交持久化，错误在提交之后
+  才上抛（此前"catch 内 REJECTED 再 throw"会被 interactive transaction
+  整体 rollback 吞掉——真实 PG 测试
+  SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST 以新连接查库锁定该语义）；
+- snapshot 语义（准确表述）：request lifecycle 在单一事务内提交；
+  DTO 构建使用普通 DB 读（独立快照），不声称与 lifecycle 同一快照；
 - `POST /api/privacy/requests` 对 DATA_EXPORT 返回 400 `USE_EXPORT_ENDPOINT`
-  （指引唯一入口），不允许旁路创建永远 REQUESTED 的记录；
+  （指引唯一入口）；"只创建 REQUESTED 不执行"的低层入口
+  （createDataExportRequest）已删除，防止孤儿请求回归；
 - 速率限制在同一执行入口内完成（3 次/15 分钟）。
+
+## 8b. 交易义务创建的 participant guard（REPAIR 2）
+
+任何创建"持续性 active obligation"的写事务——商品订单 / 服务预约 /
+跑腿接单 / 租赁订单——在创建义务前必须：
+
+1. 对全部 USER 参与方按稳定顺序取得 governance subject 锁
+   （`acquireGovernanceSubjectLocks`：去重 + `subjectType:subjectId`
+   组合键升序；禁止任何路径按相反顺序自行加锁造成死锁环）；
+2. 持锁事务内重读参与方（`assertActiveGovernanceSubjects`）：
+   `status==ACTIVE && deletedAt==null && erasedAt==null`；
+3. 通过后才执行 domain 状态检查与义务创建（`withObligationGuard`，
+   含测试 seam）。Policy 锁命名空间与 USER subject 命名空间保持隔离。
+
+与 `eraseAccount` 的同一把 subject 锁配合，线性化保证只有两种结果：
+
+- **A**：obligation 先取锁 → 提交 → erase 后取锁 → active-transaction
+  检查看到义务 → BLOCKED；
+- **B**：erase 先取锁 → 提交匿名化 → obligation 后取锁 → 参与方复核失败
+  → 创建被拒（`GOVERNANCE_SUBJECT_INACTIVE`）。
+
+绝不允许"erase active 计数为零 → 并发新义务提交 → erase 提交 →
+已注销用户持有 active obligation"。真实 PG 竞态测试：
+`ORDER_CREATION_ERASURE_RACE_TEST` / `RENTAL_CREATION_ERASURE_RACE_TEST`
+（各覆盖 A/B 双向，barrier seam 非 sleep 同步）；service/errand 路径以
+erased-participant 拒绝回归锁定 guard 接入。
+
+范围边界：guard 只覆盖"创建新的持续性交易/履约义务"与"注销
+active-transaction invariant"，不演变为全站写路径串行化（profile/listing
+编辑等不取 participant 锁）。
 
 ## 9. 迁移与并发安全
 

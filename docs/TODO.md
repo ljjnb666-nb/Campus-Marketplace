@@ -234,6 +234,11 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] **B4 POLICY RACE**：policy advisory lock（固定类型锁序）；`recordAcceptances` 的 resolve→validate→insert 全事务化（注册事务同契约）；publish/retire 持锁 + 锁内 highestPublished 检查；回归：`POLICY_PUBLISH_ACCEPTANCE_RACE_TEST`（双向线性化）+ `CONCURRENT_POLICY_PUBLISH_SERIALIZATION_TEST`
 - [x] 一致性清理：`getCurrentPublishedDocument`（公开展示，不过滤 requiresAcceptance）与 `getCurrentRequiredDocument`（required 解析）概念拆分
 
+### REPAIR 2 轮（2026-09-04，独立验收第二轮 REPAIR_REQUIRED 后两组 blocker 修复）
+
+- [x] **A EXPORT REJECTED 持久化**：`executeSynchronousDataExport` 失败路径改为 callback 内 return（REJECTED 随事务 COMMIT），事务外再抛安全错误；builder 注入 seam；`createDataExportRequest` 孤儿 footgun 删除；文档 snapshot 表述修正；回归 `SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST`（真实 PG 新连接查库：TOO_LARGE / EXECUTION_FAILED 两 case 各恰一条 REJECTED 台账）+ `SYNC_EXPORT_REQUEST_COMPLETES_TEST` 保留
+- [x] **B OBLIGATION 创建 vs 注销竞态**：`acquireGovernanceSubjectLocks`（去重 + 稳定锁序）+ `assertActiveGovernanceSubjects`/`withObligationGuard`（participant 锁 → 锁内活跃复核 → 写入）；四条 obligation 路径全部接入（product/service/errand 抽出 tx 级入口 + rental 持锁内联）；回归：`ORDER_CREATION_ERASURE_RACE_TEST` / `RENTAL_CREATION_ERASURE_RACE_TEST`（真实 PG barrier seam，A/B 双向线性化）+ service/errand erased-participant 拒绝回归 + obligation-guard 单测（锁去重/次序/复核失败零写入）
+
 ## 当前测试基线（Phase 5 REPAIR 分支，待独立验收更新）
 
 Phase 5 REPAIR 分支本地全量验证（2026-09-04，真实 PostgreSQL / Redis / MinIO 集成全开，

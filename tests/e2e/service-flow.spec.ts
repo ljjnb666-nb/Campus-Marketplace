@@ -40,7 +40,7 @@ test("技能服务：发布 → 预约 → 接受 → 开始服务 → 买家确
   const buyerContext = await browser.newContext({ storageState: storageStatePath("buyer") });
   const buyer = await buyerContext.newPage();
   await buyer.goto("/services");
-  await buyer.locator('input[name="q"]').fill(tag);
+  await buyer.locator('input[name="q"]').first().fill(tag);
   await buyer.keyboard.press("Enter");
   await buyer.getByRole("link", { name: new RegExp(title) }).first().click();
   await buyer.waitForURL(/\/services\/[^/]+$/);

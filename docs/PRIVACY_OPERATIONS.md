@@ -18,10 +18,17 @@
 COMPLETED / CANCELLED / REJECTED；用户可在 `/my/privacy` 看到全部历史与
 BLOCKED 原因（人类可读）。
 
-**导出生命周期（REPAIR 后）**：同步导出在一次请求内完成
-REQUESTED→IN_PROGRESS→COMPLETED（失败→REJECTED+reasonCode）。
-`POST /api/privacy/requests` 不再接受 DATA_EXPORT（返回 `USE_EXPORT_ENDPOINT`
-指引），不存在永远停在 REQUESTED 的导出记录。
+**导出生命周期（REPAIR 2 后）**：同步导出在一次请求内完成
+REQUESTED→IN_PROGRESS→COMPLETED；失败（超限/执行异常）→ REJECTED+reasonCode
+并**随事务提交持久化**（请求台账里真实可见，绝不回滚消失），之后才向调用方
+返回错误。`POST /api/privacy/requests` 不再接受 DATA_EXPORT（返回
+`USE_EXPORT_ENDPOINT` 指引），不存在永远停在 REQUESTED 的导出记录。
+
+**交易参与方保护（REPAIR 2 后）**：任何交易/履约义务（商品订单、服务预约、
+跑腿接单、租赁订单）创建时都会在事务内复核全部参与方账号可用性——
+已注销/停用/软删除账号无法被卷入新的持续交易义务；与之并发发起的账号注销
+要么被进行中交易正确阻断、要么使并发交易创建失败（数据库级线性化，
+无"已注销用户持有 active 义务"的中间态）。
 
 ## 2. 账号注销被 BLOCKED 时的处理
 

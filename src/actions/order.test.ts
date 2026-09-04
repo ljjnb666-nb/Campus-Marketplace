@@ -16,7 +16,11 @@ const {
   txProductUpdateMany,
   txServiceListingUpdate,
   txUserUpdate,
+  txExecuteRaw,
+  txUserFindMany,
 } = vi.hoisted(() => {
+  const txExecuteRaw = vi.fn();
+  const txUserFindMany = vi.fn();
   const txOrderCreate = vi.fn();
   const txOrderUpdate = vi.fn();
   const txOrderUpdateMany = vi.fn();
@@ -39,7 +43,9 @@ const {
     },
     user: {
       update: txUserUpdate,
+      findMany: txUserFindMany,
     },
+    $executeRaw: txExecuteRaw,
   };
 
   return {
@@ -60,6 +66,8 @@ const {
     txProductUpdateMany,
     txServiceListingUpdate,
     txUserUpdate,
+    txExecuteRaw,
+    txUserFindMany,
   };
 });
 
@@ -126,6 +134,12 @@ describe("order actions", () => {
     txOrderUpdateMany.mockResolvedValue({ count: 1 });
     txUserUpdate.mockResolvedValue({});
     txOrderCreate.mockResolvedValue({ id: "order-new" });
+
+    // participant governance guard 默认全绿（锁查询 + 全员 ACTIVE）
+    txExecuteRaw.mockReset().mockResolvedValue(0);
+    txUserFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id: string) => ({ id, status: "ACTIVE", deletedAt: null, erasedAt: null })),
+    );
   });
 
   it("rejects product orders for the current user's own listing", async () => {

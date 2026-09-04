@@ -2,6 +2,7 @@ import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalO
 import { createNotifications } from "@/repositories/notification-repository";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
+import { withObligationGuard, type ObligationRacePoint } from "@/lib/governance/obligation-guard";
 
 /**
  * 租赁订单状态机：从 server action 中抽出的领域逻辑。
@@ -105,6 +106,7 @@ export async function createRentalOrderTx(
     quantity: number;
     renterNote?: string;
   },
+  racePoint?: ObligationRacePoint,
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
@@ -139,73 +141,82 @@ export async function createRentalOrderTx(
   };
 
   if (listing.ownerId === userId) return { error: '不能租用自己的物品' };
-  if (quantity > listing.totalQuantity) return { error: '租赁数量超过可用库存' };
 
-  const duration = calculateRentalDuration(listing.pricingUnit, startTime, endTime);
-  if (duration < listing.minimumDuration) return { error: `最短租期为 ${listing.minimumDuration} 个计价单位` };
-  if (duration > listing.maximumDuration) return { error: `最长租期为 ${listing.maximumDuration} 个计价单位` };
+  // participant governance 锁 + 活跃复核（owner + renter，稳定锁序）：
+  // 与 eraseAccount 线性化，保证不会产生"已注销用户持有的 active 租赁义务"。
+  return withObligationGuard(tx, [userId, listing.ownerId], async () => {
+    if (racePoint) {
+      await racePoint(tx);
+    }
 
-  const unavailable = await tx.rentalUnavailablePeriod.findFirst({
-    where: {
-      rentalListingId: listing.id,
-      AND: [{ startDate: { lt: endTime } }, { endDate: { gt: startTime } }],
-    },
+    if (quantity > listing.totalQuantity) return { error: '租赁数量超过可用库存' };
+
+    const duration = calculateRentalDuration(listing.pricingUnit, startTime, endTime);
+    if (duration < listing.minimumDuration) return { error: `最短租期为 ${listing.minimumDuration} 个计价单位` };
+    if (duration > listing.maximumDuration) return { error: `最长租期为 ${listing.maximumDuration} 个计价单位` };
+
+    const unavailable = await tx.rentalUnavailablePeriod.findFirst({
+      where: {
+        rentalListingId: listing.id,
+        AND: [{ startDate: { lt: endTime } }, { endDate: { gt: startTime } }],
+      },
+    });
+    if (unavailable) return { error: '该时间段已被标记为不可租' };
+
+    const conflict = await checkTimeConflict(tx, listing.id, startTime, endTime, quantity);
+    if (!conflict.available) return { error: '该时间段已被预订，库存不足' };
+
+    const rentalAmount = calculateRentalAmount(listing.price, listing.pricingUnit, startTime, endTime);
+    const depositAmount = listing.depositAmount;
+    const finalAmount = rentalAmount.add(depositAmount);
+
+    const orderStatus = listing.requiresApproval ? 'PENDING_APPROVAL' : 'PENDING_PICKUP';
+    const depositStatus = depositAmount.gt(0) ? 'PENDING_PAYMENT' : 'NOT_REQUIRED';
+
+    const order = await tx.rentalOrder.create({
+      data: {
+        orderNumber: createRentalOrderNo(),
+        rentalListingId: listing.id,
+        ownerId: listing.ownerId,
+        renterId: userId,
+        startTime,
+        endTime,
+        quantity,
+        unitPriceSnapshot: listing.price,
+        pricingUnitSnapshot: listing.pricingUnit as RentalPricingUnit,
+        rentalDuration: duration,
+        rentalAmount,
+        depositAmount,
+        serviceFee: new Prisma.Decimal(0),
+        overdueFee: new Prisma.Decimal(0),
+        depositDeduction: new Prisma.Decimal(0),
+        finalAmount,
+        paymentStatus: 'OFFLINE_PENDING',
+        depositStatus,
+        status: orderStatus,
+        pickupLocationSnapshot: listing.pickupLocation,
+        returnLocationSnapshot: listing.returnLocation,
+        renterNote: input.renterNote || null,
+      },
+    });
+
+    await writeStatusLog(tx, {
+      orderId: order.id,
+      fromStatus: null,
+      toStatus: orderStatus,
+      operatorId: userId,
+      note: '租客提交租赁申请',
+    });
+
+    await createNotifications(tx, [{
+      userId: listing.ownerId,
+      type: 'RENTAL',
+      title: '收到新的租赁申请',
+      content: `"${listing.title}" 收到新的租赁申请，请前往出租订单中心处理。`,
+    }]);
+
+    return { orderId: order.id };
   });
-  if (unavailable) return { error: '该时间段已被标记为不可租' };
-
-  const conflict = await checkTimeConflict(tx, listing.id, startTime, endTime, quantity);
-  if (!conflict.available) return { error: '该时间段已被预订，库存不足' };
-
-  const rentalAmount = calculateRentalAmount(listing.price, listing.pricingUnit, startTime, endTime);
-  const depositAmount = listing.depositAmount;
-  const finalAmount = rentalAmount.add(depositAmount);
-
-  const orderStatus = listing.requiresApproval ? 'PENDING_APPROVAL' : 'PENDING_PICKUP';
-  const depositStatus = depositAmount.gt(0) ? 'PENDING_PAYMENT' : 'NOT_REQUIRED';
-
-  const order = await tx.rentalOrder.create({
-    data: {
-      orderNumber: createRentalOrderNo(),
-      rentalListingId: listing.id,
-      ownerId: listing.ownerId,
-      renterId: userId,
-      startTime,
-      endTime,
-      quantity,
-      unitPriceSnapshot: listing.price,
-      pricingUnitSnapshot: listing.pricingUnit as RentalPricingUnit,
-      rentalDuration: duration,
-      rentalAmount,
-      depositAmount,
-      serviceFee: new Prisma.Decimal(0),
-      overdueFee: new Prisma.Decimal(0),
-      depositDeduction: new Prisma.Decimal(0),
-      finalAmount,
-      paymentStatus: 'OFFLINE_PENDING',
-      depositStatus,
-      status: orderStatus,
-      pickupLocationSnapshot: listing.pickupLocation,
-      returnLocationSnapshot: listing.returnLocation,
-      renterNote: input.renterNote || null,
-    },
-  });
-
-  await writeStatusLog(tx, {
-    orderId: order.id,
-    fromStatus: null,
-    toStatus: orderStatus,
-    operatorId: userId,
-    note: '租客提交租赁申请',
-  });
-
-  await createNotifications(tx, [{
-    userId: listing.ownerId,
-    type: 'RENTAL',
-    title: '收到新的租赁申请',
-    content: `"${listing.title}" 收到新的租赁申请，请前往出租订单中心处理。`,
-  }]);
-
-  return { orderId: order.id };
 }
 
 export async function approveRentalOrderTx(

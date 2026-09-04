@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
  * Phase 5 治理域集成测试 + Privacy/Governance Drill（真实 PostgreSQL）。
@@ -71,6 +71,12 @@ async function createFixtureUser(name: string) {
   return user;
 }
 
+/** 经真实服务层注销账号（integration 用；不经过 PrivacyRequest 流程）。 */
+async function eraseAccountPublic(userId: string): Promise<void> {
+  const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+  await eraseAccount(userId);
+}
+
 describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy Drill（真实 PostgreSQL）", () => {
   let exportOwnerId = "";
   let otherUserId = "";
@@ -96,7 +102,55 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
   afterAll(async () => {
     await rawClient!.dataHold.deleteMany({ where: { id: { in: holdIds } } });
-    await rawClient!.order.deleteMany({ where: { orderNo: { in: createdOrderNos } } });
+    // 订单/义务类（含竞态测试创建、未登记 orderNo 的行）：按参与方清理
+    await rawClient!.order.deleteMany({
+      where: { OR: [{ buyerId: { in: createdUserIds } }, { sellerId: { in: createdUserIds } }] },
+    });
+    await rawClient!.rentalOrder.deleteMany({
+      where: {
+        OR: [
+          { ownerId: { in: createdUserIds } },
+          { renterId: { in: createdUserIds } },
+          { rentalListing: { category: { slug: { startsWith: "rental-race-" } } } },
+        ],
+      },
+    });
+    await rawClient!.errandTask.deleteMany({
+      where: { OR: [{ publisherId: { in: createdUserIds } }, { accepterId: { in: createdUserIds } }] },
+    });
+    // listing 按参与方 + 按 race 专用分类双保险（历史失败运行可能遗留
+    // 不同参与方的孤儿行，若仅按参与方清理会让分类删除持续撞 FK）
+    await rawClient!.product.deleteMany({
+      where: {
+        OR: [
+          { sellerId: { in: createdUserIds } },
+          { category: { slug: { startsWith: "race-" } } },
+        ],
+      },
+    });
+    await rawClient!.serviceListing.deleteMany({
+      where: {
+        OR: [
+          { providerId: { in: createdUserIds } },
+          { category: { slug: { startsWith: "service-race-" } } },
+        ],
+      },
+    });
+    await rawClient!.rentalListing.deleteMany({
+      where: {
+        OR: [
+          { ownerId: { in: createdUserIds } },
+          { category: { slug: { startsWith: "rental-race-" } } },
+        ],
+      },
+    });
+    await rawClient!.errandTask.deleteMany({
+      where: { category: { slug: { startsWith: "errand-race-" } } },
+    });
+    await rawClient!.productCategory.deleteMany({ where: { slug: { startsWith: "race-" } } });
+    await rawClient!.rentalCategory.deleteMany({ where: { slug: { startsWith: "rental-race-" } } });
+    await rawClient!.serviceCategory.deleteMany({ where: { slug: { startsWith: "service-race-" } } });
+    await rawClient!.errandCategory.deleteMany({ where: { slug: { startsWith: "errand-race-" } } });
     await rawClient!.uploadedAsset.deleteMany({ where: { ownerId: { in: createdUserIds } } });
     await rawClient!.policyAcceptance.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: createdUserIds } } });
@@ -788,6 +842,463 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
   });
 
   // ============================================================
+  // ============================================================
+  // BLOCKER A REPAIR 2 — 导出失败台账必须持久化（不被事务回滚吞掉）
+  // ============================================================
+
+  it("SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST CASE1：TOO_LARGE → 恰一条 REJECTED 台账（真实提交）", async () => {
+    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+    const { governanceError, GovernanceError } = await import(
+      "@/lib/governance/domain-errors"
+    );
+
+    const target = await createFixtureUser("导出失败-超限");
+
+    // deterministic seam：注入的 builder 强制抛 TOO_LARGE
+    await expect(
+      executeSynchronousDataExport(target.id, async () => {
+        throw governanceError("DATA_EXPORT_TOO_LARGE");
+      }),
+    ).rejects.toBeInstanceOf(GovernanceError);
+
+    // 新连接查询 DB：REJECTED 台账真实持久化（没有被事务回滚吞掉）
+    const requests = await rawClient!.privacyRequest.findMany({
+      where: { userId: target.id, type: "DATA_EXPORT" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.status).toBe("REJECTED");
+    expect(requests[0]!.reasonCode).toBe("DATA_EXPORT_TOO_LARGE");
+    expect(requests[0]!.completedAt).toBeNull();
+  });
+
+  it("SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST CASE2：执行失败 → 恰一条 REJECTED 台账 + 原错误上抛", async () => {
+    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+
+    const target = await createFixtureUser("导出失败-异常");
+
+    const boom = new Error("boom: controlled export execution failure");
+
+    await expect(
+      executeSynchronousDataExport(target.id, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+
+    const requests = await rawClient!.privacyRequest.findMany({
+      where: { userId: target.id, type: "DATA_EXPORT" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.status).toBe("REJECTED");
+    expect(requests[0]!.reasonCode).toBe("EXPORT_EXECUTION_FAILED");
+    expect(requests[0]!.completedAt).toBeNull();
+  });
+
+  // ============================================================
+  // BLOCKER B REPAIR 2 — obligation 创建 vs 账号注销竞态
+  // ============================================================
+
+  async function createOrderFixtures() {
+    const buyer = await createFixtureUser("下单买家");
+    const seller = await createFixtureUser("卖家");
+    const category = await rawClient!.productCategory.create({
+      data: { name: `竞态分类 ${RUN_TAG}`, slug: `race-${randomUUID().slice(0, 8)}` },
+    });
+    const product = await rawClient!.product.create({
+      data: {
+        title: `竞态商品 ${RUN_TAG}`,
+        description: "participant guard 竞态测试商品",
+        price: "10.00",
+        locationText: "IT 测试点",
+        condition: "NEW",
+        status: "ACTIVE",
+        sellerId: seller.id,
+        campusId: (await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })).id,
+        categoryId: category.id,
+      },
+    });
+
+    return { buyer, seller, product };
+  }
+
+  it("ORDER_CREATION_ERASURE_RACE_TEST 方向A：order 先取锁 → 注销被阻塞 → 订单提交后注销 BLOCKED", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createProductOrderTx } = await import("@/lib/order-creation");
+    const { createAccountDeletionRequest } = await import(
+      "@/lib/privacy/privacy-request-service"
+    );
+
+    const { buyer, product } = await createOrderFixtures();
+    let eraseSettled = false;
+    let eraseOutcome: unknown;
+
+    // order 事务持 participant 锁，在 seam 处暂停；并发注销被锁阻塞
+    const racePoint = async () => {
+      void createAccountDeletionRequest(buyer.id).then(
+        (outcome) => {
+          eraseSettled = true;
+          eraseOutcome = outcome;
+        },
+        (error) => {
+          eraseSettled = true;
+          eraseOutcome = error;
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      // order 持锁期间注销不可能完成（未看到新订单）
+      expect(eraseSettled).toBe(false);
+    };
+
+    const order = await withTransaction((tx) =>
+      createProductOrderTx(
+        tx,
+        {
+          buyerId: buyer.id,
+          product: { id: product.id, price: "10.00", sellerId: product.sellerId },
+          meetingLocation: "IT 测试点",
+          note: null,
+        },
+        racePoint,
+      ),
+    );
+
+    expect(order).toBeTruthy();
+
+    // order 提交后注销才取得锁 → active-transaction 检查看到 PENDING 订单 → BLOCKED
+    await vi.waitFor(() => expect(eraseSettled).toBe(true));
+    expect((eraseOutcome as { status?: string }).status).toBe("BLOCKED");
+    expect((eraseOutcome as { request?: { reasonCode?: string } }).request?.reasonCode).toBe(
+      "ACTIVE_TRANSACTION_BLOCK",
+    );
+
+    // 不变量：买家未注销且持有 active 订单（被正确阻断），不存在"已注销 + active 订单"
+    const buyerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: buyer.id } });
+    expect(buyerRow.erasedAt).toBeNull();
+    const orders = await rawClient!.order.findMany({ where: { buyerId: buyer.id } });
+    expect(orders).toHaveLength(1);
+  });
+
+  it("ORDER_CREATION_ERASURE_RACE_TEST 方向B：erase 先取锁 → 订单等锁醒来 → participant 复核失败 → 零新订单", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createProductOrderTx } = await import("@/lib/order-creation");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const { buyer, product } = await createOrderFixtures();
+
+    // erase 先取得 subject 锁并在 seam 暂停（锁已持有、尚未写）
+    let releaseErase: (() => void) | null = null;
+    const eraseGate = new Promise<void>((resolve) => {
+      releaseErase = resolve;
+    });
+
+    const erasePromise = eraseAccount(buyer.id, undefined, async () => {
+      await eraseGate;
+    });
+
+    // 等 erase 进入 seam（持锁），再启动订单事务
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    let orderSettled = false;
+    const orderPromise = withTransaction((tx) =>
+      createProductOrderTx(tx, {
+        buyerId: buyer.id,
+        product: { id: product.id, price: "10.00", sellerId: product.sellerId },
+        meetingLocation: "IT 测试点",
+        note: null,
+      }),
+    ).then(
+      (order) => {
+        orderSettled = true;
+        return order;
+      },
+      (error) => {
+        orderSettled = true;
+        throw error;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // erase 持锁期间订单事务不可能完成
+    expect(orderSettled).toBe(false);
+
+    releaseErase!();
+    await erasePromise;
+
+    // 订单事务醒来 → participant 复核失败 → 创建被拒
+    await expect(orderPromise).rejects.toBeInstanceOf(GovernanceError);
+
+    // 不变量：账号已注销 + 零 active 订单
+    const buyerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: buyer.id } });
+    expect(buyerRow.erasedAt).toBeTruthy();
+    const orders = await rawClient!.order.findMany({ where: { buyerId: buyer.id } });
+    expect(orders).toHaveLength(0);
+  });
+
+  it("RENTAL_CREATION_ERASURE_RACE_TEST 方向A：rental 先取锁 → 提交后注销 BLOCKED", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
+    const { createAccountDeletionRequest } = await import(
+      "@/lib/privacy/privacy-request-service"
+    );
+
+    const owner = await createFixtureUser("出租者");
+    const renter = await createFixtureUser("租客");
+    const campusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })
+    ).id;
+    const category = await rawClient!.rentalCategory.create({
+      data: { name: `竞态租赁分类 ${RUN_TAG}`, slug: `rental-race-${randomUUID().slice(0, 8)}` },
+    });
+    const listing = await rawClient!.rentalListing.create({
+      data: {
+        title: `竞态租赁 ${RUN_TAG}`,
+        description: "participant guard 竞态测试物品",
+        condition: "NEW",
+        price: "20.00",
+        pricingUnit: "PER_DAY",
+        depositAmount: "50.00",
+        minimumDuration: 1,
+        maximumDuration: 30,
+        totalQuantity: 1,
+        availableQuantity: 1,
+        pickupLocation: "IT 南门",
+        returnLocation: "IT 南门",
+        status: "AVAILABLE",
+        ownerId: owner.id,
+        campusId,
+        categoryId: category.id,
+      },
+    });
+
+    const startTime = new Date(Date.now() + 24 * 3600 * 1000);
+    const endTime = new Date(Date.now() + 48 * 3600 * 1000);
+
+    let eraseSettled = false;
+    let eraseOutcome: unknown;
+
+    const racePoint = async () => {
+      void createAccountDeletionRequest(renter.id).then(
+        (outcome) => {
+          eraseSettled = true;
+          eraseOutcome = outcome;
+        },
+        (error) => {
+          eraseSettled = true;
+          eraseOutcome = error;
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(eraseSettled).toBe(false);
+    };
+
+    const result = await withTransaction((tx) =>
+      createRentalOrderTx(
+        tx,
+        {
+          userId: renter.id,
+          rentalListingId: listing.id,
+          startTime,
+          endTime,
+          quantity: 1,
+        },
+        racePoint,
+      ),
+    );
+
+    expect("orderId" in result && typeof result.orderId === "string").toBe(true);
+
+    // 租赁提交后注销才拿到锁 → PENDING_APPROVAL 租赁订单 → BLOCKED
+    await vi.waitFor(() => expect(eraseSettled).toBe(true));
+    expect((eraseOutcome as { status?: string }).status).toBe("BLOCKED");
+    expect((eraseOutcome as { request?: { reasonCode?: string } }).request?.reasonCode).toBe(
+      "ACTIVE_TRANSACTION_BLOCK",
+    );
+
+    // 不变量：租客未注销且持有 active 租赁义务
+    const renterRow = await rawClient!.user.findUniqueOrThrow({ where: { id: renter.id } });
+    expect(renterRow.erasedAt).toBeNull();
+    const rentalOrders = await rawClient!.rentalOrder.findMany({ where: { renterId: renter.id } });
+    expect(rentalOrders).toHaveLength(1);
+  });
+
+  it("RENTAL_CREATION_ERASURE_RACE_TEST 方向B：erase 先取锁 → 租赁等锁醒来 → 复核失败 → 零新租赁", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const owner = await createFixtureUser("出租者B");
+    const renter = await createFixtureUser("租客B");
+    const campusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })
+    ).id;
+    const category = await rawClient!.rentalCategory.create({
+      data: { name: `竞态租赁分类B ${RUN_TAG}`, slug: `rental-race-b-${randomUUID().slice(0, 8)}` },
+    });
+    const listing = await rawClient!.rentalListing.create({
+      data: {
+        title: `竞态租赁B ${RUN_TAG}`,
+        description: "participant guard 竞态测试物品",
+        condition: "NEW",
+        price: "20.00",
+        pricingUnit: "PER_DAY",
+        depositAmount: "50.00",
+        minimumDuration: 1,
+        maximumDuration: 30,
+        totalQuantity: 1,
+        availableQuantity: 1,
+        pickupLocation: "IT 南门",
+        returnLocation: "IT 南门",
+        status: "AVAILABLE",
+        ownerId: owner.id,
+        campusId,
+        categoryId: category.id,
+      },
+    });
+
+    let releaseErase: (() => void) | null = null;
+    const eraseGate = new Promise<void>((resolve) => {
+      releaseErase = resolve;
+    });
+
+    const erasePromise = eraseAccount(renter.id, undefined, async () => {
+      await eraseGate;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    let rentalSettled = false;
+    const rentalPromise = withTransaction((tx) =>
+      createRentalOrderTx(tx, {
+        userId: renter.id,
+        rentalListingId: listing.id,
+        startTime: new Date(Date.now() + 24 * 3600 * 1000),
+        endTime: new Date(Date.now() + 48 * 3600 * 1000),
+        quantity: 1,
+      }),
+    ).then(
+      (result) => {
+        rentalSettled = true;
+        return result;
+      },
+      (error) => {
+        rentalSettled = true;
+        throw error;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(rentalSettled).toBe(false);
+
+    releaseErase!();
+    await erasePromise;
+
+    await expect(rentalPromise).rejects.toBeInstanceOf(GovernanceError);
+
+    const renterRow = await rawClient!.user.findUniqueOrThrow({ where: { id: renter.id } });
+    expect(renterRow.erasedAt).toBeTruthy();
+    const rentalOrders = await rawClient!.rentalOrder.findMany({ where: { renterId: renter.id } });
+    expect(rentalOrders).toHaveLength(0);
+  });
+
+  it("SERVICE_ORDER_AUDIT：erased participant → 服务预约被拒且零新订单", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createServiceOrderTx } = await import("@/lib/order-creation");
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const buyer = await createFixtureUser("服务买家");
+    const provider = await createFixtureUser("服务提供者");
+    const campusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })
+    ).id;
+    const category = await rawClient!.serviceCategory.create({
+      data: { name: `竞态服务分类 ${RUN_TAG}`, slug: `service-race-${randomUUID().slice(0, 8)}` },
+    });
+    const listing = await rawClient!.serviceListing.create({
+      data: {
+        title: `竞态服务 ${RUN_TAG}`,
+        description: "guard 审计服务",
+        price: "30.00",
+        pricingUnit: "PER_SESSION",
+        locationText: "IT 测试点",
+        status: "ACTIVE",
+        providerId: provider.id,
+        campusId,
+        categoryId: category.id,
+      },
+    });
+
+    // 先注销 provider
+    await eraseAccountPublic(provider.id);
+
+    await expect(
+      withTransaction((tx) =>
+        createServiceOrderTx(tx, {
+          buyerId: buyer.id,
+          service: { id: listing.id, price: "30.00", providerId: provider.id },
+          meetingLocation: "IT",
+          note: null,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(GovernanceError);
+
+    const orders = await rawClient!.order.findMany({ where: { sellerId: provider.id } });
+    expect(orders).toHaveLength(0);
+  });
+
+  it("ERRAND_OBLIGATION_AUDIT：erased participant → 跑腿接单被拒且零新义务", async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { claimErrandTx } = await import("@/lib/order-creation");
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const publisher = await createFixtureUser("跑腿发布者");
+    const runner = await createFixtureUser("跑腿接单者");
+    const campusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })
+    ).id;
+    const category = await rawClient!.errandCategory.create({
+      data: { name: `竞态跑腿分类 ${RUN_TAG}`, slug: `errand-race-${randomUUID().slice(0, 8)}` },
+    });
+    const errand = await rawClient!.errandTask.create({
+      data: {
+        title: `竞态跑腿 ${RUN_TAG}`,
+        description: "guard 审计任务",
+        reward: "15.00",
+        pickupLocation: "IT 取件点",
+        deliveryLocation: "IT 送达点",
+        deadline: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+        status: "OPEN",
+        publisherId: publisher.id,
+        campusId,
+        categoryId: category.id,
+      },
+    });
+
+    // 先注销 runner
+    await eraseAccountPublic(runner.id);
+
+    await expect(
+      withTransaction((tx) =>
+        claimErrandTx(tx, {
+          errandId: errand.id,
+          publisherId: publisher.id,
+          claimerId: runner.id,
+          reward: errand.reward,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(GovernanceError);
+
+    // 零新义务：无 ACCEPTED 订单、任务保持 OPEN、无 accepter
+    const orders = await rawClient!.order.findMany({ where: { sellerId: runner.id } });
+    expect(orders).toHaveLength(0);
+    const errandRow = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
+    expect(errandRow.status).toBe("OPEN");
+    expect(errandRow.accepterId).toBeNull();
+  });
+
   // Privacy / Governance Drill（可重复演练清单）
   // ============================================================
 

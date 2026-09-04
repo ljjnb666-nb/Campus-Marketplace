@@ -521,21 +521,45 @@ export type SynchronousExportResult = {
   };
 };
 
+export type ExportExecutionErrorCode = "DATA_EXPORT_TOO_LARGE" | "EXPORT_EXECUTION_FAILED";
+
+export type ExportExecutionResult =
+  | SynchronousExportResult
+  | {
+      ok: false;
+      request: {
+        id: string;
+        status: "REJECTED";
+        reasonCode: ExportExecutionErrorCode;
+      };
+      errorCode: ExportExecutionErrorCode;
+      /** 原始构建错误（非 too-large 失败向调用方原样上抛，保留日志/分类语义） */
+      originalError: unknown;
+    };
+
 /**
- * 同步数据导出的唯一执行入口（Phase 5 REPAIR：coherent lifecycle）。
+ * 同步数据导出的唯一执行入口（Phase 5 REPAIR 2：失败台账必须持久化）。
  *
  * 一次真实导出形成且仅形成一条 PrivacyRequest：
- *   REQUESTED → IN_PROGRESS → build → validate → COMPLETED（completedAt）
+ *   成功：REQUESTED → IN_PROGRESS → build → validate → COMPLETED → COMMIT → 响应载荷
+ *   失败：REQUESTED → IN_PROGRESS → REJECTED(reasonCode) → COMMIT → 事务外抛错
  *
- * - 创建/推进/构建/校验/完成在同一事务：不存在"两条 REQUESTED 孤儿记录"、
- *   也不存在"失败仍 COMPLETED"的假完成；
- * - 构建或校验失败 → 请求置 REJECTED + reasonCode（可解释状态），响应失败；
- * - Phase 5 为同步导出，不引入 Phase 9 worker；速率限制由调用方（route）完成。
+ * REPAIR 2 关键语义：失败路径在事务 callback 内 **return**（而不是 throw），
+ * 因此 REJECTED 台账随事务 COMMIT 持久化；错误在事务提交之后才向调用方抛出。
+ * （此前"catch 内 REJECTED 再 throw"会被 interactive transaction 的整体
+ * rollback 吞掉，台账从未落库。）
+ *
+ * snapshot 语义（准确表述）：request lifecycle 在单一事务内提交；
+ * DTO 构建使用普通 DB 读（独立快照），不声称与 lifecycle 同一快照。
+ *
+ * @param builder 构建函数注入点：仅测试 seam 使用（真实 PG 失败持久化测试），
+ *                生产路径使用默认 buildUserExport。
  */
 export async function executeSynchronousDataExport(
   userId: string,
+  builder: (userId: string) => Promise<UserExportPayload> = buildUserExport,
 ): Promise<SynchronousExportResult> {
-  return withTransaction(async (tx) => {
+  const result = await withTransaction(async (tx) => {
     const created = await tx.privacyRequest.create({
       data: { userId, type: "DATA_EXPORT", status: "REQUESTED" },
     });
@@ -548,7 +572,7 @@ export async function executeSynchronousDataExport(
     const inProgress = await transitionPrivacyRequest(created.id, "IN_PROGRESS", undefined, tx);
 
     try {
-      const payload = await buildUserExport(userId);
+      const payload = await builder(userId);
 
       const completed = await transitionPrivacyRequest(inProgress.id, "COMPLETED", undefined, tx);
 
@@ -556,36 +580,58 @@ export async function executeSynchronousDataExport(
         requestId: completed.id,
         requestType: completed.type,
       });
-      logger.info("privacy_export_served", "privacy", { userId });
 
       return {
+        ok: true as const,
         payload,
         request: {
           id: completed.id,
-          status: "COMPLETED",
+          status: "COMPLETED" as const,
           completedAt: (completed.completedAt ?? new Date()).toISOString(),
         },
       };
     } catch (error) {
-      // 失败不得留下虚假 COMPLETED：明确 REJECTED + reasonCode（可解释状态）。
+      // 失败不得留下虚假 COMPLETED，也不得让 REJECTED 被 rollback 吞掉：
+      // 在 callback 内 return 失败结果，让事务以 REJECTED 提交。
       const tooLarge = isGovernanceError(error) && error.code === "DATA_EXPORT_TOO_LARGE";
-      const reasonCode = tooLarge ? "DATA_EXPORT_TOO_LARGE" : "EXPORT_EXECUTION_FAILED";
+      const errorCode: ExportExecutionErrorCode = tooLarge
+        ? "DATA_EXPORT_TOO_LARGE"
+        : "EXPORT_EXECUTION_FAILED";
 
-      try {
-        await transitionPrivacyRequest(inProgress.id, "REJECTED", { reasonCode }, tx);
-      } catch (transitionError) {
-        // 状态标记失败不吞掉原始错误
-        logger.error("privacy_request_reject_transition_failed", "privacy", {
-          requestId: inProgress.id,
-          error: transitionError,
+      const rejected = await transitionPrivacyRequest(inProgress.id, "REJECTED", { reasonCode: errorCode }, tx);
+
+      if (!tooLarge) {
+        // 非预期失败保留原始错误证据（日志），事务外再原样上抛
+        logger.error("privacy_export_execution_failed", "privacy", {
+          requestId: rejected.id,
+          userId,
+          error,
         });
       }
 
-      if (tooLarge) {
-        throw governanceError("DATA_EXPORT_TOO_LARGE");
-      }
-
-      throw error;
+      return {
+        ok: false as const,
+        request: {
+          id: rejected.id,
+          status: "REJECTED" as const,
+          reasonCode: errorCode,
+        },
+        errorCode,
+        originalError: error,
+      };
     }
   });
+
+  if (!result.ok) {
+    // 事务已 COMMIT（REJECTED 已持久化），现在才向调用方抛安全错误
+    if (result.errorCode === "DATA_EXPORT_TOO_LARGE") {
+      throw governanceError("DATA_EXPORT_TOO_LARGE");
+    }
+
+    throw result.originalError;
+  }
+
+  logger.info("privacy_export_served", "privacy", { userId });
+
+  return result;
 }

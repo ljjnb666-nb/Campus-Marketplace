@@ -23,6 +23,7 @@ export const GOVERNANCE_ERROR_CODES = [
   "ACTIVE_DATA_HOLD",
   "ACTIVE_TRANSACTION_BLOCK",
   "ACCOUNT_ALREADY_DELETED",
+  "GOVERNANCE_SUBJECT_INACTIVE",
 ] as const;
 
 export type GovernanceErrorCode = (typeof GOVERNANCE_ERROR_CODES)[number];
@@ -42,6 +43,7 @@ const STATUS_BY_CODE: Record<GovernanceErrorCode, number> = {
   ACTIVE_DATA_HOLD: 409,
   ACTIVE_TRANSACTION_BLOCK: 409,
   ACCOUNT_ALREADY_DELETED: 409,
+  GOVERNANCE_SUBJECT_INACTIVE: 409,
 };
 
 export class GovernanceError extends Error {
@@ -80,6 +82,7 @@ export function governanceError(
     ACTIVE_DATA_HOLD: "账号存在有效的法律/纠纷冻结，无法执行破坏性操作",
     ACTIVE_TRANSACTION_BLOCK: "账号存在进行中的交易，无法执行注销",
     ACCOUNT_ALREADY_DELETED: "该账号已注销",
+    GOVERNANCE_SUBJECT_INACTIVE: "对方账号当前不可交易，请稍后再试",
   };
 
   const userMessage =
