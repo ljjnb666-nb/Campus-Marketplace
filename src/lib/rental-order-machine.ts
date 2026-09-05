@@ -110,44 +110,74 @@ export async function createRentalOrderTx(
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
-  // ⚠️ 维护注意：此处使用 $queryRaw + FOR UPDATE 绕过 Prisma 类型化查询以获取行锁。
-  // 代价是字段列表、返回类型需与 prisma/schema.prisma 的 RentalListing 模型手动同步。
-  // 如果 RentalListing 新增/重命名字段且此处遗漏，TypeScript 不会在编译期报错。
-  // 修改 RentalListing schema 时请同步检查此处的 SELECT 列表。
-  const listings = await tx.$queryRaw<Array<{
-    id: string; ownerId: string; totalQuantity: number;
-    minimumDuration: number; maximumDuration: number;
-    price: unknown; pricingUnit: string; depositAmount: unknown;
-    pickupLocation: string; returnLocation: string;
-    requiresApproval: boolean; status: string; title: string;
-  }>>`
-    SELECT id, "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
-           price, "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
-           "requiresApproval", status, title
+  // ⚠️ 锁序契约（Phase 5 REPAIR 3，防死锁）：
+  //   governance subject locks（renter + owner advisory）
+  //   → business/domain row locks（RentalListing FOR UPDATE）
+  //   → writes
+  // eraseAccount(owner) 的顺序是 subject lock → RentalListing updateMany；
+  // 若本函数先 FOR UPDATE 再取 subject lock，出租者注销与租赁创建并发会
+  // 形成 row lock ↔ advisory lock 交叉等待（SQLSTATE 40P01）。
+  // 因此：第一次只做普通只读查询发现 candidate ownerId（不加锁），
+  // 取得 participant locks 后再 FOR UPDATE 并重验证同一行。
+
+  // ---- 步骤 1：普通只读 pre-read（无锁），仅用于发现 candidate ownerId ----
+  const candidates = await tx.$queryRaw<Array<{ id: string; ownerId: string }>>`
+    SELECT id, "ownerId"
     FROM "RentalListing"
     WHERE id = ${input.rentalListingId} AND "deletedAt" IS NULL AND status = 'AVAILABLE'
-    FOR UPDATE
   `;
-  const rawListing = listings[0];
+  const candidate = candidates[0];
 
-  if (!rawListing) return { error: '出租物品不存在或已下架' };
+  if (!candidate) return { error: '出租物品不存在或已下架' };
+  if (candidate.ownerId === userId) return { error: '不能租用自己的物品' };
 
-  // ⚠️ $queryRaw 返回的 Decimal 列是原始类型（string/number），pricingUnit 是 string 而非枚举。
-  // 需手动包装为 Prisma.Decimal 和 as RentalPricingUnit，绕开了 TypeScript 的类型保护。
-  const listing = {
-    ...rawListing,
-    price: new Prisma.Decimal(String(rawListing.price)),
-    depositAmount: new Prisma.Decimal(String(rawListing.depositAmount)),
-  };
+  // ---- 步骤 2/3：participant governance 锁 + 活跃复核（racePoint seam）----
+  return withObligationGuard(
+    tx,
+    [userId, candidate.ownerId],
+    async () => {
+      // ---- 步骤 4：取得 subject locks 后再 FOR UPDATE 同一行 ----
+    // ⚠️ 维护注意：此处使用 $queryRaw + FOR UPDATE 绕过 Prisma 类型化查询以获取行锁。
+    // 代价是字段列表、返回类型需与 prisma/schema.prisma 的 RentalListing 模型手动同步。
+    // 如果 RentalListing 新增/重命名字段且此处遗漏，TypeScript 不会在编译期报错。
+    // 修改 RentalListing schema 时请同步检查此处的 SELECT 列表。
+    const listings = await tx.$queryRaw<Array<{
+      id: string; ownerId: string; totalQuantity: number;
+      minimumDuration: number; maximumDuration: number;
+      price: unknown; pricingUnit: string; depositAmount: unknown;
+      pickupLocation: string; returnLocation: string;
+      requiresApproval: boolean; status: string; title: string; deletedAt: Date | null;
+    }>>`
+      SELECT id, "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
+             price, "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
+             "requiresApproval", status, title, "deletedAt"
+      FROM "RentalListing"
+      WHERE id = ${candidate.id}
+      FOR UPDATE
+    `;
+    const rawListing = listings[0];
 
-  if (listing.ownerId === userId) return { error: '不能租用自己的物品' };
-
-  // participant governance 锁 + 活跃复核（owner + renter，稳定锁序）：
-  // 与 eraseAccount 线性化，保证不会产生"已注销用户持有的 active 租赁义务"。
-  return withObligationGuard(tx, [userId, listing.ownerId], async () => {
-    if (racePoint) {
-      await racePoint(tx);
+    // ---- 步骤 5：行锁下重验证（不信任 pre-read snapshot，fail closed）----
+    if (!rawListing || rawListing.deletedAt !== null) {
+      return { error: '出租物品不存在或已下架' };
     }
+    if (rawListing.status !== 'AVAILABLE') {
+      return { error: '出租物品不存在或已下架' };
+    }
+    // ownerId 不变量断言：schema/domain 无 owner 转移路径，理论上不变；
+    // 若出现 pre-read/locked 不一致，必须 fail closed（绝不能给错误的
+    // owner 创建租赁义务）。
+    if (rawListing.ownerId !== candidate.ownerId) {
+      return { error: '出租物品状态已变化，请重试' };
+    }
+
+    // ⚠️ $queryRaw 返回的 Decimal 列是原始类型（string/number），pricingUnit 是 string 而非枚举。
+    // 需手动包装为 Prisma.Decimal 和 as RentalPricingUnit，绕开了 TypeScript 的类型保护。
+    const listing = {
+      ...rawListing,
+      price: new Prisma.Decimal(String(rawListing.price)),
+      depositAmount: new Prisma.Decimal(String(rawListing.depositAmount)),
+    };
 
     if (quantity > listing.totalQuantity) return { error: '租赁数量超过可用库存' };
 
@@ -216,7 +246,7 @@ export async function createRentalOrderTx(
     }]);
 
     return { orderId: order.id };
-  });
+  }, racePoint);
 }
 
 export async function approveRentalOrderTx(

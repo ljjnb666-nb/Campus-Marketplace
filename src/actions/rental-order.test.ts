@@ -366,6 +366,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
 
     const result = await createRentalOrder(
@@ -393,6 +395,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
 
     const result = await createRentalOrder(
@@ -421,6 +425,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
     txRentalUnavailableFindFirst.mockResolvedValue(null);
     txRentalOrderCreate.mockResolvedValue({ id: "order-1" });

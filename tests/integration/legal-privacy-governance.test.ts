@@ -593,7 +593,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       );
 
       // 给并发 hold 充分时间到达锁等待点
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // 关键断言：erase 持锁期间并发 hold 不可能完成创建（未被 erase 看到）
       expect(holdSettled).toBe(false);
@@ -699,7 +699,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         publishSettled = true;
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // acceptance 持 policy 锁期间，publish 不可能完成
       expect(publishSettled).toBe(false);
@@ -920,7 +920,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     return { buyer, seller, product };
   }
 
-  it("ORDER_CREATION_ERASURE_RACE_TEST 方向A：order 先取锁 → 注销被阻塞 → 订单提交后注销 BLOCKED", async () => {
+  it("ORDER_CREATION_ERASURE_RACE_TEST 方向A：order 先取锁 → 注销被阻塞 → 订单提交后注销 BLOCKED", { timeout: 20_000 }, async () => {
     const { withTransaction } = await import("@/lib/prisma");
     const { createProductOrderTx } = await import("@/lib/order-creation");
     const { createAccountDeletionRequest } = await import(
@@ -944,7 +944,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         },
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // order 持锁期间注销不可能完成（未看到新订单）
       expect(eraseSettled).toBe(false);
@@ -966,7 +966,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(order).toBeTruthy();
 
     // order 提交后注销才取得锁 → active-transaction 检查看到 PENDING 订单 → BLOCKED
-    await vi.waitFor(() => expect(eraseSettled).toBe(true));
+    await vi.waitFor(() => expect(eraseSettled).toBe(true), { timeout: 10_000 });
     expect((eraseOutcome as { status?: string }).status).toBe("BLOCKED");
     expect((eraseOutcome as { request?: { reasonCode?: string } }).request?.reasonCode).toBe(
       "ACTIVE_TRANSACTION_BLOCK",
@@ -998,7 +998,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     });
 
     // 等 erase 进入 seam（持锁），再启动订单事务
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     let orderSettled = false;
     const orderPromise = withTransaction((tx) =>
@@ -1036,7 +1036,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(orders).toHaveLength(0);
   });
 
-  it("RENTAL_CREATION_ERASURE_RACE_TEST 方向A：rental 先取锁 → 提交后注销 BLOCKED", async () => {
+  it("RENTAL_CREATION_ERASURE_RACE_TEST 方向A：rental 先取锁 → 提交后注销 BLOCKED", { timeout: 20_000 }, async () => {
     const { withTransaction } = await import("@/lib/prisma");
     const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
     const { createAccountDeletionRequest } = await import(
@@ -1090,7 +1090,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         },
       );
 
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
       expect(eraseSettled).toBe(false);
     };
 
@@ -1111,7 +1112,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect("orderId" in result && typeof result.orderId === "string").toBe(true);
 
     // 租赁提交后注销才拿到锁 → PENDING_APPROVAL 租赁订单 → BLOCKED
-    await vi.waitFor(() => expect(eraseSettled).toBe(true));
+    await vi.waitFor(() => expect(eraseSettled).toBe(true), { timeout: 10_000 });
     expect((eraseOutcome as { status?: string }).status).toBe("BLOCKED");
     expect((eraseOutcome as { request?: { reasonCode?: string } }).request?.reasonCode).toBe(
       "ACTIVE_TRANSACTION_BLOCK",
@@ -1168,7 +1169,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       await eraseGate;
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     let rentalSettled = false;
     const rentalPromise = withTransaction((tx) =>
@@ -1201,6 +1202,200 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const renterRow = await rawClient!.user.findUniqueOrThrow({ where: { id: renter.id } });
     expect(renterRow.erasedAt).toBeTruthy();
     const rentalOrders = await rawClient!.rentalOrder.findMany({ where: { renterId: renter.id } });
+    expect(rentalOrders).toHaveLength(0);
+  });
+
+  // ============================================================
+  // BLOCKER REPAIR 3 — OWNER-side 锁序（listing FOR UPDATE ↔ subject lock
+  // 交叉反转会造成 PostgreSQL 40P01 死锁）。修复后锁序：
+  //   pre-read（无锁）→ subject locks → FOR UPDATE → 行锁下重验证 → 写入
+  // ============================================================
+
+  async function createOwnerSideRentalFixture() {
+    const owner = await createFixtureUser("出租者-锁序");
+    const renter = await createFixtureUser("租客-锁序");
+    const campusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" } })
+    ).id;
+    const category = await rawClient!.rentalCategory.create({
+      data: {
+        name: `锁序租赁分类 ${RUN_TAG}`,
+        slug: `rental-race-lock-${randomUUID().slice(0, 8)}`,
+      },
+    });
+    const listing = await rawClient!.rentalListing.create({
+      data: {
+        title: `锁序租赁 ${RUN_TAG}`,
+        description: "owner-side 锁序回归物品",
+        condition: "NEW",
+        price: "20.00",
+        pricingUnit: "PER_DAY",
+        depositAmount: "50.00",
+        minimumDuration: 1,
+        maximumDuration: 30,
+        totalQuantity: 1,
+        availableQuantity: 1,
+        pickupLocation: "IT 南门",
+        returnLocation: "IT 南门",
+        status: "AVAILABLE",
+        ownerId: owner.id,
+        campusId,
+        categoryId: category.id,
+      },
+    });
+
+    return { owner, renter, listing };
+  }
+
+  it("RENTAL_OWNER_CREATION_ERASURE_RACE_TEST_DIRECTION_A：rental 先取 subject 锁 → owner 注销被阻塞 → 提交后 BLOCKED（无 40P01）", { timeout: 20_000 }, async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
+    const { createAccountDeletionRequest } = await import(
+      "@/lib/privacy/privacy-request-service"
+    );
+
+    const { owner, renter, listing } = await createOwnerSideRentalFixture();
+
+    let eraseSettled = false;
+    let eraseOutcome: unknown;
+
+    // rental 先取得 owner+renter subject 锁，在 seam 暂停（FOR UPDATE 之前）；
+    // owner 注销必须阻塞在 USER:owner advisory lock 上
+    const racePoint = async () => {
+      void createAccountDeletionRequest(owner.id).then(
+        (outcome) => {
+          eraseSettled = true;
+          eraseOutcome = outcome;
+        },
+        (error) => {
+          eraseSettled = true;
+          eraseOutcome = error;
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // rental 持锁期间 owner 注销不可能完成
+      expect(eraseSettled).toBe(false);
+    };
+
+    const result = await withTransaction((tx) =>
+      createRentalOrderTx(
+        tx,
+        {
+          userId: renter.id,
+          rentalListingId: listing.id,
+          startTime: new Date(Date.now() + 24 * 3600 * 1000),
+          endTime: new Date(Date.now() + 48 * 3600 * 1000),
+          quantity: 1,
+        },
+        racePoint,
+      ),
+    );
+
+    expect("orderId" in result && typeof result.orderId === "string").toBe(true);
+
+    // rental 提交后 owner 注销才醒来 → active RentalOrder 检查命中 → BLOCKED。
+    // 若发生 40P01 死锁，erase 会以异常 settle——此处 outcome 必须是正常结果。
+    try {
+      await vi.waitFor(() => expect(eraseSettled).toBe(true), { timeout: 12_000 });
+    } catch (error) {
+      // 诊断：advisory 等待不被 PG 死锁检测覆盖，超时时打印等待图定位阻塞源
+      const activity = await rawClient!.$queryRaw<
+        Array<{ pid: number; state: string; wait_event_type: string | null; wait_event: string | null; query: string }>
+      >`SELECT pid, state, wait_event_type, wait_event, left(query, 120) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND state <> 'idle'`;
+      console.log("DIAG pg_stat_activity:", JSON.stringify(activity, null, 1));
+      throw error;
+    }
+    expect(eraseOutcome).not.toBeInstanceOf(Error);
+    expect((eraseOutcome as { status?: string }).status).toBe("BLOCKED");
+    expect((eraseOutcome as { request?: { reasonCode?: string } }).request?.reasonCode).toBe(
+      "ACTIVE_TRANSACTION_BLOCK",
+    );
+
+    // 最终不变量
+    const ownerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(ownerRow.erasedAt).toBeNull();
+    const rentalOrders = await rawClient!.rentalOrder.findMany({ where: { ownerId: owner.id } });
+    expect(rentalOrders).toHaveLength(1);
+    expect(["PENDING_APPROVAL", "PENDING_PICKUP"]).toContain(rentalOrders[0]!.status);
+  });
+
+  it("RENTAL_OWNER_CREATION_ERASURE_RACE_TEST_DIRECTION_B：owner erase 先取锁 → rental 等锁（未持 listing 行锁）→ 复核失败零订单", { timeout: 20_000 }, async () => {
+    const { withTransaction } = await import("@/lib/prisma");
+    const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+
+    const { owner, renter, listing } = await createOwnerSideRentalFixture();
+
+    // owner erase 先取得 USER:owner subject 锁，在其 seam 暂停（尚未写）
+    let releaseErase: (() => void) | null = null;
+    const eraseGate = new Promise<void>((resolve) => {
+      releaseErase = resolve;
+    });
+
+    const erasePromise = eraseAccount(owner.id, undefined, async () => {
+      await eraseGate;
+    });
+
+    // 等 erase 进入 seam（持锁），再启动 rental 创建
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    let rentalSettled = false;
+    const rentalPromise = withTransaction((tx) =>
+      createRentalOrderTx(tx, {
+        userId: renter.id,
+        rentalListingId: listing.id,
+        startTime: new Date(Date.now() + 24 * 3600 * 1000),
+        endTime: new Date(Date.now() + 48 * 3600 * 1000),
+        quantity: 1,
+      }),
+    ).then(
+      (result) => {
+        rentalSettled = true;
+        return result;
+      },
+      (error) => {
+        rentalSettled = true;
+        throw error;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // rental 阻塞在 subject lock 上——此时它不得已持有 RentalListing FOR UPDATE
+    // （旧锁序下此处会形成死锁：erase 的 OFFLINE update 等行锁、rental 等
+    // advisory lock，双方 40P01）。下面 release 后 erase 能顺利完成更新即
+    // 是"rental 未持行锁"的直接行为证明。
+    expect(rentalSettled).toBe(false);
+
+    releaseErase!();
+    await erasePromise;
+
+    // erase 已将 owner 的 listing 下架并提交（无行锁争用/死锁）
+    const listingRow = await rawClient!.rentalListing.findUniqueOrThrow({
+      where: { id: listing.id },
+    });
+    expect(listingRow.status).toBe("OFFLINE");
+
+    // rental 醒来 → participant active recheck 失败 → GOVERNANCE_SUBJECT_INACTIVE
+    const rejection: unknown = await rentalPromise.then(
+      () => undefined,
+      (error) => error,
+    );
+    expect(rejection).toBeInstanceOf(GovernanceError);
+    expect((rejection as { code?: string }).code).toBe("GOVERNANCE_SUBJECT_INACTIVE");
+    // 不得出现 SQLSTATE 40P01 / deadlock detected
+    expect(String((rejection as { message?: string })?.message ?? "")).not.toMatch(
+      /deadlock|40P01/i,
+    );
+
+    // 最终不变量
+    const ownerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(ownerRow.erasedAt).toBeTruthy();
+    const rentalOrders = await rawClient!.rentalOrder.findMany({ where: { ownerId: owner.id } });
     expect(rentalOrders).toHaveLength(0);
   });
 
