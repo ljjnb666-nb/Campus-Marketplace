@@ -592,8 +592,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         },
       );
 
-      // 给并发 hold 充分时间到达锁等待点
+      // sleep 仅观察"hold 仍被 subject 锁阻塞"（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
       await new Promise((resolve) => setTimeout(resolve, 200));
+      // sleep 仅观察“另一事务仍被锁阻塞”（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
 
       // 关键断言：erase 持锁期间并发 hold 不可能完成创建（未被 erase 看到）
       expect(holdSettled).toBe(false);
@@ -700,6 +703,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       });
 
       await new Promise((resolve) => setTimeout(resolve, 200));
+      // sleep 仅观察“另一事务仍被锁阻塞”（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
 
       // acceptance 持 policy 锁期间，publish 不可能完成
       expect(publishSettled).toBe(false);
@@ -945,6 +950,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       );
 
       await new Promise((resolve) => setTimeout(resolve, 200));
+      // sleep 仅观察“另一事务仍被锁阻塞”（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
 
       // order 持锁期间注销不可能完成（未看到新订单）
       expect(eraseSettled).toBe(false);
@@ -987,18 +994,29 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     const { buyer, product } = await createOrderFixtures();
 
-    // erase 先取得 subject 锁并在 seam 暂停（锁已持有、尚未写）
-    let releaseErase: (() => void) | null = null;
+    // erase 先取得 subject 锁并在 seam 暂停（锁已持有、尚未写）。
+    // 双 barrier：entered 由 production seam callback 主动 signal——await 后
+    // 100% 确定 erase 已持有 subject lock 并到达 racePoint；gate 由测试控制
+    // 放行。竞态顺序由协议显式建立，不依赖机器速度。
+    let signalEraseEntered!: () => void;
+    let releaseErase!: () => void;
+    const eraseEntered = new Promise<void>((resolve) => {
+      signalEraseEntered = resolve;
+    });
     const eraseGate = new Promise<void>((resolve) => {
       releaseErase = resolve;
     });
+    let eraseRaceEnteredCount = 0;
 
     const erasePromise = eraseAccount(buyer.id, undefined, async () => {
+      eraseRaceEnteredCount += 1;
+      signalEraseEntered();
       await eraseGate;
     });
 
-    // 等 erase 进入 seam（持锁），再启动订单事务
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // barrier：erase 已确定进入 seam（seam entered exactly once 见下方断言）
+    await eraseEntered;
+    expect(eraseRaceEnteredCount).toBe(1);
 
     let orderSettled = false;
     const orderPromise = withTransaction((tx) =>
@@ -1019,8 +1037,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       },
     );
 
+    // sleep 仅观察"订单仍被 advisory 阻塞"这一事实；顺序已由 entered barrier 显式确立
     await new Promise((resolve) => setTimeout(resolve, 300));
-    // erase 持锁期间订单事务不可能完成
     expect(orderSettled).toBe(false);
 
     releaseErase!();
@@ -1091,6 +1109,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       );
 
       await new Promise((resolve) => setTimeout(resolve, 200));
+      // sleep 仅观察“另一事务仍被锁阻塞”（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
 
       expect(eraseSettled).toBe(false);
     };
@@ -1160,16 +1180,28 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       },
     });
 
-    let releaseErase: (() => void) | null = null;
+    // 双 barrier：entered 由 production seam callback 主动 signal——await 后
+    // 100% 确定 erase 已持有 renter subject lock 并到达 racePoint；gate 由
+    // 测试控制放行。竞态顺序由协议显式建立，不依赖机器速度。
+    let signalEraseEntered!: () => void;
+    let releaseErase!: () => void;
+    const eraseEntered = new Promise<void>((resolve) => {
+      signalEraseEntered = resolve;
+    });
     const eraseGate = new Promise<void>((resolve) => {
       releaseErase = resolve;
     });
+    let eraseRaceEnteredCount = 0;
 
     const erasePromise = eraseAccount(renter.id, undefined, async () => {
+      eraseRaceEnteredCount += 1;
+      signalEraseEntered();
       await eraseGate;
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // barrier：erase 已确定进入 seam（seam entered exactly once 见下方断言）
+    await eraseEntered;
+    expect(eraseRaceEnteredCount).toBe(1);
 
     let rentalSettled = false;
     const rentalPromise = withTransaction((tx) =>
@@ -1191,6 +1223,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       },
     );
 
+    // sleep 仅观察"租赁仍被 advisory 阻塞"；顺序已由 entered barrier 显式确立
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(rentalSettled).toBe(false);
 
@@ -1274,6 +1307,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       );
 
       await new Promise((resolve) => setTimeout(resolve, 200));
+      // sleep 仅观察“另一事务仍被锁阻塞”（非 settlement 观察）；
+      // 顺序由本 racePoint callback（seam 内 spawn）显式建立
 
       // rental 持锁期间 owner 注销不可能完成
       expect(eraseSettled).toBe(false);
@@ -1331,18 +1366,30 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     const { owner, renter, listing } = await createOwnerSideRentalFixture();
 
-    // owner erase 先取得 USER:owner subject 锁，在其 seam 暂停（尚未写）
-    let releaseErase: (() => void) | null = null;
+    // owner erase 先取得 USER:owner subject 锁，在其 seam 暂停（尚未写）。
+    // 双 barrier：entered 由 production seam callback 主动 signal——await 后
+    // 100% 确定 owner erase 已持有 subject lock 并到达 racePoint；gate 由
+    // 测试控制放行。这是本轮最关键的一条：rental 必须在 erase 已持锁的
+    // 确定性前提下启动，"rental 未持 listing FOR UPDATE"才可被严格证明。
+    let signalEraseEntered!: () => void;
+    let releaseErase!: () => void;
+    const eraseEntered = new Promise<void>((resolve) => {
+      signalEraseEntered = resolve;
+    });
     const eraseGate = new Promise<void>((resolve) => {
       releaseErase = resolve;
     });
+    let eraseRaceEnteredCount = 0;
 
     const erasePromise = eraseAccount(owner.id, undefined, async () => {
+      eraseRaceEnteredCount += 1;
+      signalEraseEntered();
       await eraseGate;
     });
 
-    // 等 erase 进入 seam（持锁），再启动 rental 创建
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // barrier：erase 已确定进入 seam（seam entered exactly once 见下方断言）
+    await eraseEntered;
+    expect(eraseRaceEnteredCount).toBe(1);
 
     let rentalSettled = false;
     const rentalPromise = withTransaction((tx) =>
