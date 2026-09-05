@@ -15,6 +15,7 @@ const {
   txUserUpdate,
   txUserVerificationUpsert,
   txUserVerificationUpdate,
+  submitMembershipVerification,
 } = vi.hoisted(() => {
   const txUserUpdate = vi.fn();
   const txUserVerificationUpsert = vi.fn();
@@ -40,6 +41,7 @@ const {
     userUpdate: vi.fn(),
     userFindUnique: vi.fn(),
     verificationFindUnique: vi.fn(),
+    submitMembershipVerification: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
     ),
@@ -55,6 +57,10 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
+}));
+
+vi.mock("@/lib/campus/verification-service", () => ({
+  submitMembershipVerification,
 }));
 
 vi.mock("@/lib/upload", () => ({
@@ -97,6 +103,7 @@ describe("user actions", () => {
     userUpdate.mockReset();
     userFindUnique.mockReset().mockResolvedValue({ avatarUrl: null });
     verificationFindUnique.mockReset().mockResolvedValue(null);
+    submitMembershipVerification.mockReset().mockResolvedValue({ id: "verification-1" });
     transactionMock.mockReset();
     txUserUpdate.mockReset();
     txUserVerificationUpsert.mockReset().mockResolvedValue({ id: "verification-1" });
@@ -163,7 +170,7 @@ describe("user actions", () => {
     });
   });
 
-  it("submits verification materials and creates a pending verification record", async () => {
+  it("submits verification materials through the central lifecycle service（Phase 6A）", async () => {
     const formData = new FormData();
     formData.set("schoolName", "示例大学");
     formData.set("campusName", "主校区");
@@ -172,34 +179,13 @@ describe("user actions", () => {
 
     const result = await submitVerification({ success: false, message: "" }, formData);
 
-    expect(txUserUpdate).toHaveBeenCalledWith({
-      where: { id: "user-1" },
-      data: {
-        schoolName: "示例大学",
-        studentIdLast4: "1234",
-        verificationStatus: "PENDING",
-      },
+    expect(submitMembershipVerification).toHaveBeenCalledWith({
+      userId: "user-1",
+      schoolName: "示例大学",
+      campusName: "主校区",
+      studentIdLast4: "1234",
+      studentCardImageToken: "https://example.com/student-card.jpg",
     });
-    expect(txUserVerificationUpsert).toHaveBeenCalledWith({
-      where: { userId: "user-1" },
-      update: expect.objectContaining({
-        schoolName: "示例大学",
-        campusName: "主校区",
-        studentIdLast4: "1234",
-        status: "PENDING",
-        reviewNote: null,
-        reviewedAt: null,
-      }),
-      create: {
-        userId: "user-1",
-        schoolName: "示例大学",
-        campusName: "主校区",
-        studentIdLast4: "1234",
-        studentCardImage: "https://example.com/student-card.jpg",
-        status: "PENDING",
-      },
-    });
-    expect(createNotification).toHaveBeenCalled();
     expect(result).toEqual({
       success: true,
       message: "认证材料已提交，等待审核",
@@ -224,23 +210,16 @@ describe("user actions", () => {
       category: "verification",
       file: expect.any(File),
     });
-    // 学生证材料以 asset: 引用落库，禁止保存任何永久公开 URL
-    expect(txUserVerificationUpsert).toHaveBeenCalledWith(
+    // 学生证材料以 asset: 引用进入认证流程，禁止保存任何永久公开 URL
+    expect(submitMembershipVerification).toHaveBeenCalledWith(
       expect.objectContaining({
-        create: expect.objectContaining({
-          studentCardImage: "asset:asset-9",
-        }),
+        studentCardImageToken: "asset:asset-9",
       }),
     );
-    expect(txUserVerificationUpdate).toHaveBeenCalledWith({
-      where: { id: "verification-1" },
-      data: { studentCardImage: "asset:asset-9" },
-    });
   });
 
   it("marks replaced verification materials for deletion when resubmitting", async () => {
     verificationFindUnique.mockResolvedValue({
-      id: "verification-1",
       studentCardImage: "asset:asset-old",
     });
 
@@ -265,7 +244,7 @@ describe("user actions", () => {
     const result = await submitVerification({ success: false, message: "" }, formData);
 
     expect(result.success).toBe(false);
-    expect(transactionMock).not.toHaveBeenCalled();
+    expect(submitMembershipVerification).not.toHaveBeenCalled();
   });
 
   it("returns a friendly message when verification submission fails", async () => {
@@ -274,7 +253,7 @@ describe("user actions", () => {
     formData.set("campusName", "主校区");
     formData.set("studentIdLast4", "1234");
     formData.set("studentCardImage", "/uploads/verification/card.jpg");
-    transactionMock.mockRejectedValue(new Error("db down"));
+    submitMembershipVerification.mockRejectedValue(new Error("db down"));
 
     const result = await submitVerification({ success: false, message: "" }, formData);
 

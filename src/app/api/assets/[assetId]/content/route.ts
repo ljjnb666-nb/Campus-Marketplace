@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
 import { readPrivateAssetObject } from "@/lib/asset-service";
+import { recordAdminAudit } from "@/lib/governance/admin-audit";
+import {
+  getVerifiedSession,
+  VERIFIED_SESSION_HTTP_STATUS,
+} from "@/lib/server-auth";
 import { withHttpMetrics } from "@/lib/http-metrics";
 import { logger } from "@/lib/logger";
 
@@ -10,13 +14,16 @@ export const dynamic = "force-dynamic";
  * 私有资产内容同源代理端点：
  *
  *   浏览器 → /api/assets/<assetId>/content（会话鉴权）
- *          → 本端点重新执行服务端授权（owner / ADMIN / 订单参与者）
+ *          → 本端点重新执行服务端授权（owner / 订单参与者 /
+ *            asset.sensitive.read permission，Phase 6A 取代 role 判定）
  *          → server 经内部 S3_ENDPOINT 读取对象并转发
  *
  * - 浏览器永远不需要解析对象存储内部端点（self-hosted 下 http://minio:9000
  *   不可达且不得泄露）；对象由 server 使用内部凭据读取。
  * - 每次请求独立鉴权，不依赖 access API 是否曾授权过。
  * - 错误响应不泄露 bucket/objectKey/端点/签名 URL。
+ * - Phase 6A：治理/审核 permission 路径读取 VERIFICATION 材料本身即审计事件
+ *   （VERIFICATION_ASSET_ACCESSED），审计失败则整体失败（fail closed）。
  *
  * 状态码约定与 access API 一致：401 / 403 / 404（含已删除与 PUBLIC 误入）/ 410
  */
@@ -27,15 +34,18 @@ async function getHandler(
   const startedAt = Date.now();
   const { assetId } = await params;
 
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ message: "未登录，请先登录" }, { status: 401 });
+  // 停用/已删除/已注销账号的旧 JWT 在此失效（401），与全站会话语义一致
+  const session = await getVerifiedSession({ requireConsent: false });
+  if (!session.ok) {
+    return NextResponse.json(
+      { message: session.reason === "UNAUTHENTICATED" ? "未登录，请先登录" : "账号当前不可用" },
+      { status: VERIFIED_SESSION_HTTP_STATUS[session.reason] },
+    );
   }
   const userId = session.user.id;
-  const role = session.user.role ?? "STUDENT";
 
   try {
-    const result = await readPrivateAssetObject(assetId, { id: userId, role });
+    const result = await readPrivateAssetObject(assetId, { id: userId });
 
     if (!result.ok) {
       logger.warn("私有资产内容读取被拒绝", "GET /api/assets/[assetId]/content", {
@@ -58,10 +68,26 @@ async function getHandler(
       return NextResponse.json({ message: "资源不存在" }, { status: 404 });
     }
 
+    // 敏感材料治理访问审计：permission 路径读取认证材料本身即审计事件
+    // （owner / 订单参与者的常规访问不产生审计行）
+    if (result.category === "VERIFICATION" && result.grantedBy === "permission") {
+      await recordAdminAudit({
+        actorId: userId,
+        action: "VERIFICATION_ASSET_ACCESSED",
+        targetType: "UPLOADED_ASSET",
+        targetId: assetId,
+        metadata: {
+          assetCategory: result.category,
+          grantedBy: result.grantedBy,
+        },
+      });
+    }
+
     logger.info("私有资产内容同源转发", "GET /api/assets/[assetId]/content", {
       operation: "asset-content",
       assetId,
       userId,
+      grantedBy: result.grantedBy,
       sizeBytes: result.sizeBytes,
       durationMs: Date.now() - startedAt,
     });

@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, readPrivateAssetObject } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getVerifiedSession, readPrivateAssetObject, recordAdminAudit } = vi.hoisted(() => ({
+  getVerifiedSession: vi.fn(),
   readPrivateAssetObject: vi.fn(),
+  recordAdminAudit: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({ auth }));
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
+  VERIFIED_SESSION_HTTP_STATUS: {
+    UNAUTHENTICATED: 401,
+    ACCOUNT_INACTIVE: 401,
+    LEGAL_ACCEPTANCE_REQUIRED: 403,
+  },
+}));
 vi.mock("@/lib/asset-service", () => ({ readPrivateAssetObject }));
+vi.mock("@/lib/governance/admin-audit", () => ({ recordAdminAudit }));
 
 vi.mock("@/lib/logger", () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -24,12 +33,27 @@ function callGet(assetId = "asset-1") {
 
 describe("GET /api/assets/[assetId]/content（私有资产同源代理）", () => {
   beforeEach(() => {
-    auth.mockReset().mockResolvedValue({ user: { id: "user-1", role: "STUDENT" } });
+    getVerifiedSession
+      .mockReset()
+      .mockResolvedValue({
+        ok: true,
+        user: { id: "user-1", email: "u@example.com", name: "用户", role: "STUDENT" },
+      });
     readPrivateAssetObject.mockReset();
+    recordAdminAudit.mockReset().mockResolvedValue(undefined);
   });
 
   it("returns 401 for anonymous requests（独立鉴权，不依赖 access API）", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
+
+    const response = await callGet();
+
+    expect(response.status).toBe(401);
+    expect(readPrivateAssetObject).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for inactive accounts（旧 JWT 失效）", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "ACCOUNT_INACTIVE" });
 
     const response = await callGet();
 
@@ -43,6 +67,8 @@ describe("GET /api/assets/[assetId]/content（私有资产同源代理）", () =
       body: FIXTURE_BODY,
       contentType: "image/jpeg",
       sizeBytes: FIXTURE_BODY.byteLength,
+      grantedBy: "owner",
+      category: "VERIFICATION",
     });
 
     const response = await callGet();
@@ -57,10 +83,68 @@ describe("GET /api/assets/[assetId]/content（私有资产同源代理）", () =
       FIXTURE_BODY.buffer.slice(FIXTURE_BODY.byteOffset, FIXTURE_BODY.byteOffset + FIXTURE_BODY.byteLength),
     );
     // 鉴权必须真实执行（服务端授权在本端点重新进行）
-    expect(readPrivateAssetObject).toHaveBeenCalledWith("asset-1", {
-      id: "user-1",
-      role: "STUDENT",
+    expect(readPrivateAssetObject).toHaveBeenCalledWith("asset-1", { id: "user-1" });
+    // owner 常规访问不产生治理审计
+    expect(recordAdminAudit).not.toHaveBeenCalled();
+  });
+
+  it("audits governance permission reads of verification material（VERIFICATION_ASSET_ACCESSED）", async () => {
+    getVerifiedSession.mockResolvedValue({
+      ok: true,
+      user: { id: "reviewer-1", email: "r@example.com", name: "审核员", role: "ADMIN" },
     });
+    readPrivateAssetObject.mockResolvedValue({
+      ok: true,
+      body: FIXTURE_BODY,
+      contentType: "image/jpeg",
+      sizeBytes: FIXTURE_BODY.byteLength,
+      grantedBy: "permission",
+      category: "VERIFICATION",
+    });
+
+    const response = await callGet();
+
+    expect(response.status).toBe(200);
+    expect(recordAdminAudit).toHaveBeenCalledTimes(1);
+    expect(recordAdminAudit).toHaveBeenCalledWith({
+      actorId: "reviewer-1",
+      action: "VERIFICATION_ASSET_ACCESSED",
+      targetType: "UPLOADED_ASSET",
+      targetId: "asset-1",
+      metadata: { assetCategory: "VERIFICATION", grantedBy: "permission" },
+    });
+  });
+
+  it("does not audit owner reads of verification material", async () => {
+    readPrivateAssetObject.mockResolvedValue({
+      ok: true,
+      body: FIXTURE_BODY,
+      contentType: "image/jpeg",
+      sizeBytes: FIXTURE_BODY.byteLength,
+      grantedBy: "owner",
+      category: "VERIFICATION",
+    });
+
+    await callGet();
+
+    expect(recordAdminAudit).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the audit write fails for a governance read", async () => {
+    readPrivateAssetObject.mockResolvedValue({
+      ok: true,
+      body: FIXTURE_BODY,
+      contentType: "image/jpeg",
+      sizeBytes: FIXTURE_BODY.byteLength,
+      grantedBy: "permission",
+      category: "VERIFICATION",
+    });
+    recordAdminAudit.mockRejectedValue(new Error("audit down"));
+
+    const response = await callGet();
+
+    // 审计失败不返回 200：不允许"未审计的敏感读取"
+    expect(response.status).toBe(500);
   });
 
   it("falls back to application/octet-stream when object metadata is missing", async () => {
@@ -69,6 +153,8 @@ describe("GET /api/assets/[assetId]/content（私有资产同源代理）", () =
       body: FIXTURE_BODY,
       contentType: null,
       sizeBytes: FIXTURE_BODY.byteLength,
+      grantedBy: "owner",
+      category: "AVATAR",
     });
 
     const response = await callGet();

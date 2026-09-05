@@ -2,6 +2,10 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getUserAcceptanceStatus } from "@/lib/legal/policy-service";
+import {
+  hasFullAdminSurfaceAccess,
+  loadAuthorizationContext,
+} from "@/lib/rbac/service";
 
 /**
  * 中央 active-account resolver（Phase 5 REPAIR）。
@@ -72,10 +76,22 @@ export async function requireUser() {
   };
 }
 
+/**
+ * Phase 6A 兼容桥（Repair 1 收紧）：后台入口判定 = 存在一个 GLOBAL grant
+ * 且完整覆盖 legacy admin permission 集（PLATFORM_ADMIN-like full authority）。
+ * 禁止 any-permission 进入旧 admin surface：细粒度 GLOBAL 角色（如仅
+ * report.review）或 campus-scoped 角色一律不得通过本桥。
+ * 6A 中只有 PLATFORM_ADMIN 满足该语义；legacy admin 已由 migration/seed
+ * 同步授予。每个敏感 mutation 的具体 permission 在 action/service 层细化
+ * （如 verification.review / asset.sensitive.read / rbac.role.assign）。
+ * 禁止在任何新代码中恢复 role 字段判权。
+ */
 export async function requireAdmin() {
   const user = await requireUser();
 
-  if (user.role !== "ADMIN") {
+  const context = await loadAuthorizationContext(user.id);
+
+  if (!hasFullAdminSurfaceAccess(context)) {
     redirect("/");
   }
 

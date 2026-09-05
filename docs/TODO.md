@@ -159,7 +159,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
-- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（NOT_STARTED——Phase 5 已 CLOSED；Phase 6 启动属下一独立流程）
+- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A 已实现待独立验收，见 MASTER_ROADMAP.md §5.2）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
@@ -207,7 +207,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 
 状态：**DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05）。
 Merge：PR #8（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/8>），
-merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（当前 master HEAD）。
+merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Phase 5 code merge reference，不随 master 前进改写）。
 Post-merge master CI：run [33943242174](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33943242174)
 —— verify = success、e2e = success、attempt = 1。
 Final independent review：**PASS**（Initial review → Repair 1 → Repair 2 →

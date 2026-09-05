@@ -22,6 +22,7 @@ const {
   createNotification,
   applyVerificationAssetRetention,
   transactionMock,
+  decideMembershipVerification,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireAdmin: vi.fn(),
@@ -44,10 +45,15 @@ const {
   createNotification: vi.fn(),
   applyVerificationAssetRetention: vi.fn(),
   transactionMock: vi.fn(),
+  decideMembershipVerification: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
   revalidatePath,
+}));
+
+vi.mock("@/lib/campus/verification-service", () => ({
+  decideMembershipVerification,
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -144,6 +150,7 @@ describe("admin actions", () => {
     adminLogCreate.mockReset();
     createNotification.mockReset();
     applyVerificationAssetRetention.mockReset().mockResolvedValue(0);
+    decideMembershipVerification.mockReset().mockResolvedValue({});
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
@@ -467,10 +474,7 @@ describe("admin actions", () => {
     });
   });
 
-  it("approves a verification and notifies the user", async () => {
-    userVerificationUpdate.mockResolvedValue({});
-    userUpdate.mockResolvedValue({});
-
+  it("approves a verification via the central lifecycle service（Phase 6A）", async () => {
     const formData = new FormData();
     formData.set("verificationId", "verification-1");
     formData.set("userId", "user-2");
@@ -479,30 +483,13 @@ describe("admin actions", () => {
 
     await reviewVerification(formData);
 
-    expect(userVerificationUpdate).toHaveBeenCalledWith({
-      where: { id: "verification-1" },
-      data: expect.objectContaining({ status: "VERIFIED", reviewNote: "材料齐全" }),
+    // 动作只负责会话 + 参数解析，状态机/锁/审计/通知由 service 承担
+    expect(decideMembershipVerification).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      verificationId: "verification-1",
+      decision: "VERIFIED",
+      reviewNote: "材料齐全",
     });
-    expect(userUpdate).toHaveBeenCalledWith({
-      where: { id: "user-2" },
-      data: { verificationStatus: "VERIFIED" },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        action: "APPROVE_VERIFICATION",
-        targetType: "USER_VERIFICATION",
-      }),
-    });
-    expect(createNotification).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ userId: "user-2", title: "校园认证已通过" }),
-    );
-    // 审核出结果后为学生证材料设置保留期（到期由 cleanup 删除原图，认证结论保留）
-    expect(applyVerificationAssetRetention).toHaveBeenCalledWith(
-      expect.anything(),
-      "verification-1",
-      expect.any(Date),
-    );
     expect(revalidatePath).toHaveBeenCalledWith("/admin/verifications");
   });
 
@@ -515,13 +502,29 @@ describe("admin actions", () => {
 
     await reviewVerification(formData);
 
-    expect(createNotification).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        title: "校园认证未通过",
-        content: expect.stringContaining("学生证照片模糊"),
-      }),
+    expect(decideMembershipVerification).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      verificationId: "verification-1",
+      decision: "REJECTED",
+      reviewNote: "学生证照片模糊",
+    });
+  });
+
+  it("surfaces service denial messages instead of generic 500", async () => {
+    const { rbacError } = await import("@/lib/rbac/errors");
+    decideMembershipVerification.mockRejectedValue(
+      rbacError("VERIFICATION_SELF_REVIEW_DENIED"),
     );
+
+    const formData = new FormData();
+    formData.set("verificationId", "verification-1");
+    formData.set("userId", "admin-1");
+    formData.set("status", "VERIFIED");
+    formData.set("reviewNote", "");
+
+    const result = await reviewVerification(formData);
+
+    expect(result).toEqual({ success: false, error: "不能审核自己提交的认证申请" });
   });
 
   it("returns an error state for invalid verification input", async () => {
@@ -537,7 +540,14 @@ describe("admin actions", () => {
   });
 
   it("suspends a student account and notifies them", async () => {
-    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -567,7 +577,25 @@ describe("admin actions", () => {
     let result = await toggleUserStatus(formData);
     expect(result).toEqual({ success: false, error: "不能停用或恢复自己的账号" });
 
-    userFindUnique.mockResolvedValue({ role: "ADMIN" });
+    // RBAC full-admin 等价目标（含 role=ADMIN 的 legacy 同步账号）受保护
+    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+    userFindUnique.mockResolvedValue({
+      id: "admin-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [
+        {
+          campusId: null,
+          role: {
+            key: "PLATFORM_ADMIN",
+            scope: "GLOBAL",
+            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
+          },
+        },
+      ],
+    });
     formData.set("userId", "admin-2");
     result = await toggleUserStatus(formData);
     expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
@@ -667,7 +695,11 @@ describe("admin actions", () => {
   });
 
   it("returns an error state when review transactions fail", async () => {
+    // Phase 6A：审核决定经 central service（事务失败在 service 内发生）；
+    // report / listing 处置仍走 withTransaction
+    decideMembershipVerification.mockRejectedValue(new Error("db down"));
     transactionMock.mockRejectedValue(new Error("db down"));
+    decideMembershipVerification.mockRejectedValue(new Error("db down"));
 
     const formData = new FormData();
     formData.set("verificationId", "verification-1");
@@ -704,7 +736,14 @@ describe("admin actions", () => {
   });
 
   it("restores a suspended account with a friendly notification", async () => {
-    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -719,6 +758,61 @@ describe("admin actions", () => {
       expect.anything(),
       expect.objectContaining({ userId: "user-2", title: "账号已恢复正常" }),
     );
+  });
+
+  it("protects RBAC full-admin targets regardless of User.role（Repair 1 #27）", async () => {
+    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+    // role=STUDENT 但持有 PLATFORM_ADMIN 等价授权 → 受保护
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [
+        {
+          campusId: null,
+          role: {
+            key: "PLATFORM_ADMIN",
+            scope: "GLOBAL",
+            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
+          },
+        },
+      ],
+    });
+
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it("stops protecting targets whose grants were revoked despite role=ADMIN（Repair 1 #27）", async () => {
+    // role=ADMIN 但无任何 UserRoleAssignment（授权已撤回/未同步）→ 不再受保护
+    userFindUnique.mockResolvedValue({
+      id: "user-3",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
+
+    const formData = new FormData();
+    formData.set("userId", "user-3");
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).not.toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
+    expect(userUpdate).toHaveBeenCalledWith({
+      where: { id: "user-3" },
+      data: { status: "SUSPENDED" },
+    });
   });
 
   it("creates product and service categories with typed admin logs", async () => {

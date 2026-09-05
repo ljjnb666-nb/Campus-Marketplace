@@ -11,6 +11,13 @@ import {
   createTestFixtureAcceptance,
   seedPublishedPolicies,
 } from "./legal-seed-content";
+import { seedPublishedVerificationPolicy } from "./phase6-seed-content";
+// 相对导入 + tsx 兼容：bootstrap 链上全部为相对导入（tsx 无 @/ alias）
+import {
+  ensureCampusMemberships,
+  ensureRbacFoundation,
+  syncLegacyAdminRoles,
+} from "../src/lib/rbac/bootstrap";
 
 if (process.env.NODE_ENV === "production") {
   console.error("❌ 禁止在生产环境运行 seed 脚本！");
@@ -527,6 +534,19 @@ async function main() {
   // Phase 5：发布初始平台政策文档（v1）。
   await seedPublishedPolicies(prisma);
   console.log("✅ 平台政策文档已发布（4 类 v1）");
+
+  // Phase 6A：RBAC foundation（permission/角色/授权收敛）+ legacy admin 同步
+  // + membership 补齐 + 校区认证策略 v1（均幂等）
+  await ensureRbacFoundation(prisma);
+  const legacyAdminCount = await syncLegacyAdminRoles(prisma);
+  const membershipCount = await ensureCampusMemberships(prisma);
+  const policySeed = await seedPublishedVerificationPolicy(prisma, campus.id);
+  console.log(
+    `✅ Phase 6A：RBAC foundation 就绪；legacy admin 新授 ${legacyAdminCount} 个；` +
+      `membership 补齐 ${membershipCount} 条；认证策略 v1 ${
+        policySeed.created ? "已发布" : "已存在"
+      }`,
+  );
 
   // 仅开发环境：为种子用户创建 fixture 同意记录（模拟其在当前版本下注册）。
   // 这不是生产 migration 行为——生产旧用户必须走 /legal/accept 真实重新同意。

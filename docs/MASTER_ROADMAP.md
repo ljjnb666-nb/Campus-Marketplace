@@ -49,9 +49,11 @@
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
 
-当前 master：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Phase 5 合并提交；
+Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
+（PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
+实时 master 以 git 仓库为准）；
 上一记录点：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`，Phase 4 合并提交、
-亦为 Roadmap v1.0 冻结基线——历史冻结事件记录保留于 §1，不随 master 前进改写）。
+亦为 Roadmap v1.0 冻结基线（历史冻结事件记录保留于 §1，不随 master 前进改写）。
 
 同时保持：
 
@@ -145,7 +147,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 4 | Observability / Monitoring / Recovery | DONE / MERGED / MASTER-GREEN / CLOSED |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | IN_PROGRESS |
 | Phase 7 | Operations Admin Foundation | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
@@ -180,7 +182,7 @@ privacy requests、legal hold、dispute hold、sensitive-data governance。
 
 - Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
 - Merge：PR #8（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/8>），
-  merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（当前 master）
+  merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Phase 5 code merge reference）
 - Post-merge master CI：run 33943242174 —— verify = success、e2e = success、attempt = 1
 - Final verification baseline：226 test files / 1322 tests；coverage
   83 / 81.76 / 82.18 / 83；Playwright critical paths = 33
@@ -199,6 +201,16 @@ lifecycle、verification policy/versioning、admin roles、permissions、RBAC、
 sensitive asset access audit、AdminAuditLog、suspension / reinstatement、
 trust profile foundation、risk state、enforcement、appeal foundation、
 admin security foundation。
+
+**Phase 6A 进度（2026-09-05）**：
+
+- `PHASE_6A = IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`（PR：
+  feat/production-phase-6-identity-rbac → master，Draft）
+- `PHASE_6 = IN_PROGRESS`（6A 仅覆盖 foundation：CampusMembership、
+  verification policy versioning + lifecycle、RBAC foundation、中央授权、
+  AdminAuditLog foundation、sensitive asset access audit）
+- 6B/6C 预留：trust profile、risk state、enforcement、appeal、suspension
+  产品化、完整 admin 角色 UI（Phase 7）
 
 ### 5.3 Phase 7 — Operations Admin Foundation
 

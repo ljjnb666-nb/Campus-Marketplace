@@ -8,4 +8,5 @@ export const VERIFICATION_STATUS_LABELS = {
   PENDING: "审核中",
   VERIFIED: "已认证",
   REJECTED: "未通过",
+  REVOKED: "已吊销",
 } as const;

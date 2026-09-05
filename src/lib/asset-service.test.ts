@@ -13,6 +13,8 @@ const {
   assetDeleteMany,
   userFindUnique,
   transactionMock,
+  loadAuthorizationContextMock,
+  campusMembershipFindFirstMock,
 } = vi.hoisted(() => ({
   putObject: vi.fn(),
   deleteObject: vi.fn(),
@@ -26,6 +28,8 @@ const {
   assetDeleteMany: vi.fn(),
   userFindUnique: vi.fn(),
   transactionMock: vi.fn(),
+  loadAuthorizationContextMock: vi.fn(),
+  campusMembershipFindFirstMock: vi.fn(),
 }));
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -69,10 +73,22 @@ vi.mock("@/lib/prisma", () => ({
       deleteMany: assetDeleteMany,
     },
     user: { findUnique: userFindUnique },
+    campusMembership: { findFirst: campusMembershipFindFirstMock },
   },
 }));
 
+// hasPermission 用真实实现（纯函数），只替换 context 加载——权限路径测试基于
+// 真实 DEFAULT_DENY 语义而不是 mock 的结论
+vi.mock("@/lib/rbac/service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
+  return {
+    ...actual,
+    loadAuthorizationContext: loadAuthorizationContextMock,
+  };
+});
+
 import type { UploadedAsset } from "@prisma/client";
+import type { AuthorizationContext } from "@/lib/rbac/service";
 import {
   ATTACH_COMPATIBILITY,
   AssetServiceError,
@@ -619,8 +635,46 @@ describe("delete lifecycle（exactly-once 配额）", () => {
 });
 
 describe("resolvePrivateAssetAccess", () => {
+  const activeNoGrants: AuthorizationContext = {
+    userId: "caller-1",
+    accountActive: true,
+    activeCampusIds: [],
+    grants: [],
+  };
+
+  function ctxWith(
+    grants: AuthorizationContext["grants"],
+    activeCampusIds: string[] = [],
+    active = true,
+  ): AuthorizationContext {
+    return {
+      userId: "caller-1",
+      accountActive: active,
+      activeCampusIds,
+      grants,
+    };
+  }
+
+  const globalSensitiveGrant: AuthorizationContext["grants"][number] = {
+    roleKey: "PLATFORM_ADMIN",
+    scope: "GLOBAL",
+    campusId: null,
+    permissionKeys: ["asset.sensitive.read"],
+  };
+
+  function campusScopedGrant(campusId: string): AuthorizationContext["grants"][number] {
+    return {
+      roleKey: "CAMPUS_REVIEWER",
+      scope: "CAMPUS",
+      campusId,
+      permissionKeys: ["asset.sensitive.read"],
+    };
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
+    loadAuthorizationContextMock.mockResolvedValue(activeNoGrants);
+    campusMembershipFindFirstMock.mockResolvedValue(null);
   });
 
   it("returns not_found for missing, deleted, pending-delete or uploading assets", async () => {
@@ -629,7 +683,7 @@ describe("resolvePrivateAssetAccess", () => {
     assetFindFirst.mockResolvedValueOnce({ ...baseAsset, status: "PENDING_DELETE" });
     assetFindFirst.mockResolvedValueOnce({ ...baseAsset, status: "UPLOADING" });
 
-    const stranger = { id: "user-2", role: "STUDENT" };
+    const stranger = { id: "user-2" };
     for (let i = 0; i < 4; i += 1) {
       expect(await resolvePrivateAssetAccess("asset-1", stranger)).toEqual({
         ok: false,
@@ -641,7 +695,7 @@ describe("resolvePrivateAssetAccess", () => {
   it("returns not_private for public assets", async () => {
     assetFindFirst.mockResolvedValue({ ...baseAsset, access: "PUBLIC" });
 
-    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-2", role: "STUDENT" })).toEqual({
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-2" })).toEqual({
       ok: false,
       reason: "not_private",
     });
@@ -653,44 +707,179 @@ describe("resolvePrivateAssetAccess", () => {
       expiresAt: new Date("2026-01-01T00:00:00Z"),
     });
 
-    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-1", role: "STUDENT" })).toEqual({
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-1" })).toEqual({
       ok: false,
       reason: "expired",
     });
   });
 
-  it("allows the owner and admins regardless of category", async () => {
+  it("allows the owner regardless of category（账号 active）", async () => {
     assetFindFirst.mockResolvedValue(baseAsset);
 
-    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-1", role: "STUDENT" });
+    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-1" });
     expect(owner.ok).toBe(true);
-
-    assetFindFirst.mockResolvedValue(baseAsset);
-    const admin = await resolvePrivateAssetAccess("asset-1", { id: "admin-1", role: "ADMIN" });
-    expect(admin.ok).toBe(true);
+    if (owner.ok) {
+      expect(owner.grantedBy).toBe("owner");
+    }
   });
 
-  it("forbids strangers from verification material", async () => {
+  it("forbids owner access when the account is inactive（fail closed）", async () => {
+    assetFindFirst.mockResolvedValue(baseAsset);
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant], [], false));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("forbids when the authorization context cannot be loaded（账号不存在）", async () => {
+    assetFindFirst.mockResolvedValue(baseAsset);
+    loadAuthorizationContextMock.mockResolvedValue(null);
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "ghost" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("forbids strangers without any permission grant（DEFAULT_DENY）", async () => {
     assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
 
-    expect(
-      await resolvePrivateAssetAccess("asset-1", { id: "user-2", role: "STUDENT" }),
-    ).toEqual({ ok: false, reason: "forbidden" });
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-2" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("grants governance access via global asset.sensitive.read（取代旧 role 判定）", async () => {
+    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
+    expect(granted.ok).toBe(true);
+    if (granted.ok) {
+      expect(granted.grantedBy).toBe("permission");
+    }
+  });
+
+  it("denies users holding unrelated permissions（非 asset.sensitive.read）", async () => {
+    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([
+        {
+          roleKey: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: ["report.review"],
+        },
+      ]),
+    );
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("grants campus-scoped access only within the asset's campus（+ ACTIVE membership）", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "VERIFICATION",
+      verification: { membership: { campusId: "campus-a" } },
+    });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([campusScopedGrant("campus-a")], ["campus-a"]),
+    );
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" });
+    expect(granted.ok).toBe(true);
+  });
+
+  it("denies campus-scoped readers whose membership is inactive（Repair 1：SUSPENDED/LEFT → DENY）", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "VERIFICATION",
+      verification: { membership: { campusId: "campus-a" } },
+    });
+    // membership SUSPENDED/LEFT → 不进入 activeCampusIds
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("denies cross-campus reviewers（关键安全不变量 negative test）", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "VERIFICATION",
+      verification: { membership: { campusId: "campus-b" } },
+    });
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("falls back to the owner's active membership campus when the asset has no binding", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "AVATAR",
+      verification: null,
+      rentalOrder: null,
+      rentalListing: null,
+      product: null,
+      serviceListing: null,
+    });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([campusScopedGrant("campus-a")], ["campus-a"]),
+    );
+    campusMembershipFindFirstMock.mockResolvedValue({ campusId: "campus-a" });
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" });
+    expect(granted.ok).toBe(true);
+
+    // 校区不可解析 + 仅 campus-scoped 授权 → DENY
+    campusMembershipFindFirstMock.mockResolvedValue(null);
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "AVATAR",
+      verification: null,
+      rentalOrder: null,
+      rentalListing: null,
+      product: null,
+      serviceListing: null,
+    });
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
   });
 
   it("allows rental order participants for handover/return/report evidence", async () => {
     const orderAsset = {
       ...baseAsset,
       category: "HANDOVER",
-      rentalOrder: { renterId: "user-renter", ownerId: "user-owner" },
+      rentalOrder: {
+        renterId: "user-renter",
+        ownerId: "user-owner",
+        rentalListing: { campusId: "campus-a" },
+      },
     };
     assetFindFirst.mockResolvedValue(orderAsset);
 
-    const renter = await resolvePrivateAssetAccess("asset-1", { id: "user-renter", role: "STUDENT" });
+    const renter = await resolvePrivateAssetAccess("asset-1", { id: "user-renter" });
     expect(renter.ok).toBe(true);
+    if (renter.ok) {
+      expect(renter.grantedBy).toBe("order_participant");
+    }
 
     assetFindFirst.mockResolvedValue(orderAsset);
-    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-owner", role: "STUDENT" });
+    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-owner" });
     expect(owner.ok).toBe(true);
   });
 
@@ -698,12 +887,17 @@ describe("resolvePrivateAssetAccess", () => {
     assetFindFirst.mockResolvedValue({
       ...baseAsset,
       category: "VERIFICATION",
-      rentalOrder: { renterId: "user-renter", ownerId: "user-owner" },
+      rentalOrder: {
+        renterId: "user-renter",
+        ownerId: "user-owner",
+        rentalListing: { campusId: "campus-a" },
+      },
     });
 
-    expect(
-      await resolvePrivateAssetAccess("asset-1", { id: "user-renter", role: "STUDENT" }),
-    ).toEqual({ ok: false, reason: "forbidden" });
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "user-renter" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
   });
 
   it("readPrivateAssetObject：owner 授权后由 server 经内部凭据读取对象内容", async () => {
@@ -714,13 +908,12 @@ describe("resolvePrivateAssetAccess", () => {
       sizeBytes: body.byteLength,
     });
 
-    const result = await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" });
+    const result = await readPrivateAssetObject("asset-1", { id: "user-1" });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: true,
-      body,
-      contentType: "image/jpeg",
-      sizeBytes: body.byteLength,
+      grantedBy: "owner",
+      category: "VERIFICATION",
     });
     expect(getObject).toHaveBeenCalledWith({
       bucket: baseAsset.bucket,
@@ -731,26 +924,29 @@ describe("resolvePrivateAssetAccess", () => {
   it("readPrivateAssetObject：对象缺失按 not_found 处理（不泄露存储细节）", async () => {
     getObject.mockResolvedValue(null);
 
-    expect(
-      await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" }),
-    ).toEqual({ ok: false, reason: "not_found" });
+    expect(await readPrivateAssetObject("asset-1", { id: "user-1" })).toEqual({
+      ok: false,
+      reason: "not_found",
+    });
   });
 
   it("readPrivateAssetObject：未授权与过期不触发对象读取", async () => {
     assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
 
-    expect(
-      await readPrivateAssetObject("asset-1", { id: "user-2", role: "STUDENT" }),
-    ).toEqual({ ok: false, reason: "forbidden" });
+    expect(await readPrivateAssetObject("asset-1", { id: "user-2" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
     expect(getObject).not.toHaveBeenCalled();
 
     assetFindFirst.mockResolvedValue({
       ...baseAsset,
       expiresAt: new Date("2026-01-01T00:00:00Z"),
     });
-    expect(
-      await readPrivateAssetObject("asset-1", { id: "user-1", role: "STUDENT" }),
-    ).toEqual({ ok: false, reason: "expired" });
+    expect(await readPrivateAssetObject("asset-1", { id: "user-1" })).toEqual({
+      ok: false,
+      reason: "expired",
+    });
     expect(getObject).not.toHaveBeenCalled();
   });
 });
