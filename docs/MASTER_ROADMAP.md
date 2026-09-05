@@ -48,10 +48,13 @@
 | Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（外部资源缺口，非代码质量失败） |
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
+| Phase 6A | Identity / Campus Membership / Verification / RBAC Foundation（Phase 6 第一实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10，经独立验收 Repair 1 + post-merge master CI 收口） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
 实时 master 以 git 仓库为准）；
+Phase 6A master-green reference：`d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`
+（PR #10 合并提交——Phase 6A 代码范围的固定引用点，**不随 master 前进而改写**）；
 上一记录点：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`，Phase 4 合并提交、
 亦为 Roadmap v1.0 冻结基线（历史冻结事件记录保留于 §1，不随 master 前进改写）。
 
@@ -64,8 +67,9 @@ Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 不是"已具备公开生产运营资格"（见 §9）。
 
 当前测试基线（来自最近一次成功的 master CI，非本地估算）：
-226 个测试文件 / 1322 个测试全部通过，覆盖率 lines 83% / branches 81.76% /
-functions 82.18% / statements 83%；Playwright E2E 关键链路 33 条全绿。
+235 个测试文件 / 1452 个测试全部通过（其中 77 个为环境门控 skip，非失败），
+覆盖率 lines 83.01% / branches 82.01% / functions 81.97% / statements 83.01%；
+Playwright E2E 关键链路 34 条全绿；Phase 6A 真实 PostgreSQL 集成测试 17 条。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
 
 ---
@@ -202,15 +206,40 @@ sensitive asset access audit、AdminAuditLog、suspension / reinstatement、
 trust profile foundation、risk state、enforcement、appeal foundation、
 admin security foundation。
 
-**Phase 6A 进度（2026-09-05）**：
+**Phase 6A Closure record（2026-09-05）**：
 
-- `PHASE_6A = IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`（PR：
-  feat/production-phase-6-identity-rbac → master，Draft）
-- `PHASE_6 = IN_PROGRESS`（6A 仅覆盖 foundation：CampusMembership、
-  verification policy versioning + lifecycle、RBAC foundation、中央授权、
-  AdminAuditLog foundation、sensitive asset access audit）
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
+- Merge：PR #10（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/10>），
+  merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`（Phase 6A master-green reference）
+- Final reviewed PR head：`c850acae12f6bec31804f7be3f53355051364b4e`
+  （pre-merge exact-head PR CI run 33965801562：verify = success、e2e = success、attempt = 1）
+- Post-merge master CI：run 33968202720 —— verify = success、e2e = success、attempt = 1
+- Final independent review：Initial review → Repair 1 → Final review PASS →
+  merge → post-merge master CI PASS（`PRODUCTION_PHASE_6A_POST_MERGE_REVIEW = PASS`）
+- Final scope（6A foundation，简洁记录）：Campus first-class foundation、
+  CampusMembership、verification policy/version lifecycle、verification membership
+  integrity、RBAC foundation、membership-bound campus authorization、
+  actor/target subject serialization、legacy admin authorization convergence、
+  sensitive asset authorization + audit、AdminAuditLog foundation
+- Final security invariants：
+  `CAMPUS_ACTIVE_MEMBERSHIP_REQUIRED = PASS`、
+  `VERIFICATION_MEMBERSHIP_INTEGRITY = PASS`、
+  `ACTOR_AUTHORIZATION_SERIALIZATION = PASS`、
+  `DUAL_AUTH_SOURCE_CONVERGENCE = PASS_FOR_PHASE_6A`；
+  `User.role` authorization callsites = 0（字段保留，仅限 display / session
+  compatibility / seed / migration/bootstrap 用途，未被删除）
+- Known non-blocking follow-up（`NON_BLOCKING / NO_FAIL_OPEN / DEFERRED_TO_PHASE_6B_OR_PHASE_7`）：
+  `USER_STATUS_ROLE_ASSIGNMENT_RACE`——`toggleUserStatus` 的 privileged-target
+  检查与 role assignment/revocation 尚未共享同一个 target subject serialization
+  boundary。
+
+**Phase 6A 之后**：
+
+- `PHASE_6A = DONE / MERGED / MASTER-GREEN / CLOSED`
+- `PHASE_6 = IN_PROGRESS`（6B 未开始，不宣称 Phase 6 完成）
 - 6B/6C 预留：trust profile、risk state、enforcement、appeal、suspension
-  产品化、完整 admin 角色 UI（Phase 7）
+  产品化、完整 admin 角色 UI（Phase 7）——`PHASE_6B = NOT_STARTED`，
+  是否启动 6B 属下一独立步骤
 
 ### 5.3 Phase 7 — Operations Admin Foundation
 

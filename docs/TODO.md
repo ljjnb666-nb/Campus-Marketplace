@@ -15,7 +15,7 @@
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8 经多轮独立验收合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | IN_PROGRESS（Phase 6A CLOSED，Phase 6B NOT_STARTED） |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
@@ -159,7 +159,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
-- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A 已实现待独立验收，见 MASTER_ROADMAP.md §5.2）
+- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿，见 MASTER_ROADMAP.md §5.2 与下节）；Phase 6B NOT_STARTED）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
@@ -249,17 +249,23 @@ Repair 3（rental owner-side 锁序死锁）→ Repair 4（竞态测试双 barri
 
 ## 当前测试基线
 
-以 master `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Production Phase 5 合并提交）
-对应的成功 master CI 为准（GitHub Actions run [33943242174](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33943242174)，
-2026-09-05，verify + e2e 双 job 全绿）：
+以 master `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`（Production Phase 6A 合并提交——
+Phase 6A master-green reference，不随 master 前进改写）对应的成功 master CI 为准
+（GitHub Actions run [33968202720](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33968202720)，
+2026-09-05，verify + e2e 双 job 全绿，attempt = 1）：
 
-- **226** 个测试文件，**1322** 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
-  集成测试全部真实执行，无门控跳过；含治理域单测、真实库集成测试、
-  6 个真实 PG 并发竞态回归与 Privacy/Governance Drill）
+- **235** 个测试文件，**1452** 个测试全部通过（其中 **1375** 执行通过 +
+  **77** 个环境门控 skip——本地无对应真实服务时按设计跳过，非失败；
+  CI 中真实 PostgreSQL / Redis / MinIO 集成测试全部真实执行；
+  含 Phase 6A 真实 PG 并发竞态回归与 Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （实测 83 / 81.76 / 82.18 / 83）
-- **E2E 基线：33 条关键链路测试**（原 24 条 critical flows 全部保留 + 9 条
-  Phase 5 governance golden flows）CI 全绿
+  （实测 83.01 / 82.01 / 81.97 / 83.01）
+- **E2E 基线：34 条关键链路测试**（33 条既有 critical flows 全部保留 +
+  1 条 Phase 6A 认证生命周期/RBAC golden flow）CI 全绿
+- **Phase 6A 真实 PostgreSQL 集成测试：17 条**
+  （membership/认证状态机/RBAC/actor 序列化并发竞态/跨校区拒绝/legacy 迁移）
+- 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）；
+  后续以最近一次成功的 master CI 为准，不以本文快照为准
 - 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
   后续以最近一次成功的 master CI 为准，不以本文快照为准
 
