@@ -18,6 +18,7 @@ import {
   approveRentalOrderTx,
   canCancelRentalOrder,
   counterpartyId,
+  createRentalOrderTx,
   depositStatusAfterCompletion,
   incrementRentalCompletionCounters,
   isDisputableStatus,
@@ -276,14 +277,84 @@ describe("rental-order-machine", () => {
   // 手动列举了 RentalListing 的字段。此测试确保这些字段仍存在于 schema 中，
   // 如果 RentalListing 模型重命名/删除了字段，这个测试会失败提醒开发者同步 raw SQL。
   it("raw SQL 查询的 RentalListing 字段与 schema 保持同步", () => {
+    // pre-read（只读 candidate 发现）+ FOR UPDATE（行锁下重验证）两条 raw SQL 的字段合集
     const rawSqlFields = [
       "id", "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
       "price", "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
-      "requiresApproval", "status", "title",
+      "requiresApproval", "status", "title", "deletedAt",
     ];
     const schemaFields = Object.values(Prisma.RentalListingScalarFieldEnum);
     for (const field of rawSqlFields) {
       expect(schemaFields, `字段 "${field}" 在 Prisma schema 中不存在，请同步 rental-order-machine.ts 的 raw SQL`).toContain(field);
     }
+  });
+
+  // ⚠️ Phase 5 REPAIR 3 锁序结构回归：
+  // createRentalOrderTx 的锁序必须是
+  //   governance subject locks（advisory）→ RentalListing FOR UPDATE → 写入
+  // 若未来把 FOR UPDATE 移回 participant guard 之前（旧锁序），会与
+  // eraseAccount(owner) 的 subject lock → RentalListing updateMany 形成
+  // row lock ↔ advisory lock 交叉死锁（SQLSTATE 40P01）。此测试以调用顺序
+  // spy 锁定该结构；真实行为证明见集成 OWNER_CREATION_ERASURE_RACE_TEST 双向。
+  it("锁序回归：pre-read → subject locks → recheck → FOR UPDATE（结构锁定）", async () => {
+    const calls: string[] = [];
+    const listingRow = {
+      id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
+      minimumDuration: 1, maximumDuration: 30,
+      price: "20", pricingUnit: "PER_DAY", depositAmount: "50",
+      pickupLocation: "南门", returnLocation: "南门",
+      requiresApproval: true, status: "AVAILABLE", title: "相机",
+      deletedAt: null,
+    };
+
+    const tx = {
+      $queryRaw: vi.fn(() => {
+        const priorSelects = calls.filter(
+          (entry) => entry === "pre-read" || entry === "for-update",
+        ).length;
+        calls.push(priorSelects === 0 ? "pre-read" : "for-update");
+        return Promise.resolve([listingRow]);
+      }),
+      $executeRaw: vi.fn(() => {
+        calls.push("subject-lock");
+        return Promise.resolve(0);
+      }),
+      user: {
+        findMany: vi.fn(() => {
+          calls.push("recheck");
+          return Promise.resolve([
+            { id: "user-renter", status: "ACTIVE", deletedAt: null, erasedAt: null },
+            { id: "user-owner", status: "ACTIVE", deletedAt: null, erasedAt: null },
+          ]);
+        }),
+      },
+      rentalUnavailablePeriod: { findFirst: vi.fn().mockResolvedValue(null) },
+      rentalOrder: { create: vi.fn().mockResolvedValue({ id: "order-1" }) },
+      rentalOrderStatusLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+
+    createNotifications.mockResolvedValue(undefined);
+    checkTimeConflict.mockResolvedValue({ available: true });
+
+    const result = await createRentalOrderTx(tx as unknown as Prisma.TransactionClient, {
+      userId: "user-renter",
+      rentalListingId: "listing-1",
+      startTime: new Date("2026-10-01T10:00:00.000Z"),
+      endTime: new Date("2026-10-02T10:00:00.000Z"),
+      quantity: 1,
+    });
+
+    expect(result).toEqual({ orderId: "order-1" });
+
+    // 精确调用序列：pre-read（无锁）→ 两把 subject 锁 → 活跃复核 → FOR UPDATE
+    expect(calls).toEqual([
+      "pre-read",
+      "subject-lock",
+      "subject-lock",
+      "recheck",
+      "for-update",
+    ]);
+    // FOR UPDATE 必须是最后一次行锁请求，且严格晚于 governance 锁
+    expect(calls.indexOf("subject-lock")).toBeLessThan(calls.indexOf("for-update"));
   });
 });

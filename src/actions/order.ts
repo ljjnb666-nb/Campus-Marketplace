@@ -1,10 +1,12 @@
 "use server";
 
 import { Prisma } from "@prisma/client";
-import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
-import { createOrderNo } from "@/lib/order-no";
+import {
+  createProductOrderTx,
+  createServiceOrderTx,
+} from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateOrderViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -106,53 +108,18 @@ export async function createProductOrder(
       return { ...initialState, message: "该商品已有进行中的订单" };
     }
 
-    const order = await withTransaction(async (tx) => {
-      const reserveResult = await tx.product.updateMany({
-        where: {
+    const order = await withTransaction(async (tx) =>
+      createProductOrderTx(tx, {
+        buyerId: user.id,
+        product: {
           id: product.id,
-          status: "ACTIVE",
-          deletedAt: null,
-        },
-        data: { status: "RESERVED" },
-      });
-
-      if (reserveResult.count === 0) {
-        return null;
-      }
-
-      const nextOrder = await tx.order.create({
-        data: {
-          orderNo: createOrderNo(),
-          type: "PRODUCT",
-          amount: decimalValue(product.price.toString()),
-          meetingLocation: parsed.data.meetingLocation,
-          note: parsed.data.note || null,
-          paymentStatus: "OFFLINE_PENDING",
-          buyerId: user.id,
+          price: product.price.toString(),
           sellerId: product.sellerId,
-          productId: product.id,
         },
-      });
-
-      await createNotifications(tx, [
-        {
-          userId: user.id,
-          orderId: nextOrder.id,
-          type: "ORDER",
-          title: "购买申请已提交",
-          content: "你的商品购买申请已提交，等待卖家确认。",
-        },
-        {
-          userId: product.sellerId,
-          orderId: nextOrder.id,
-          type: "ORDER",
-          title: "收到新的商品订单",
-          content: "有同学提交了你的商品购买申请，请尽快确认订单状态。",
-        },
-      ]);
-
-      return nextOrder;
-    });
+        meetingLocation: parsed.data.meetingLocation,
+        note: parsed.data.note || null,
+      }),
+    );
 
     if (!order) {
       return { ...initialState, message: "该商品已有进行中的订单" };
@@ -211,38 +178,18 @@ export async function createServiceOrder(
       return { ...initialState, message: "不能预约自己发布的服务" };
     }
 
-    await withTransaction(async (tx) => {
-      const order = await tx.order.create({
-        data: {
-          orderNo: createOrderNo(),
-          type: "SERVICE",
-          amount: decimalValue(service.price.toString()),
-          meetingLocation: parsed.data.meetingLocation,
-          note: parsed.data.note || null,
-          paymentStatus: "OFFLINE_PENDING",
-          buyerId: user.id,
-          sellerId: service.providerId,
-          serviceListingId: service.id,
+    await withTransaction(async (tx) =>
+      createServiceOrderTx(tx, {
+        buyerId: user.id,
+        service: {
+          id: service.id,
+          price: service.price.toString(),
+          providerId: service.providerId,
         },
-      });
-
-      await createNotifications(tx, [
-        {
-          userId: user.id,
-          orderId: order.id,
-          type: "ORDER",
-          title: "服务预约已提交",
-          content: "你的服务预约已提交，等待服务提供者确认。",
-        },
-        {
-          userId: service.providerId,
-          orderId: order.id,
-          type: "ORDER",
-          title: "收到新的服务预约",
-          content: "有同学预约了你的服务，请尽快确认并安排后续沟通。",
-        },
-      ]);
-    });
+        meetingLocation: parsed.data.meetingLocation,
+        note: parsed.data.note || null,
+      }),
+    );
 
     revalidateOrderViews({ serviceId: service.id });
 

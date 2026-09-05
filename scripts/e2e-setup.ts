@@ -17,6 +17,10 @@ import { hashSync } from "bcryptjs";
 import { Redis } from "ioredis";
 
 import { assertE2EDatabaseIsolation, sanitizeDatabaseUrl } from "./e2e-database-guard";
+import {
+  createTestFixtureAcceptance,
+  seedPublishedPolicies,
+} from "../prisma/legal-seed-content";
 
 const E2E_DATABASE_URL =
   process.env.E2E_DATABASE_URL ??
@@ -116,6 +120,12 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.session.deleteMany();
   await prisma.verificationToken.deleteMany();
   await prisma.user.deleteMany();
+
+  // Phase 5 治理表（acceptance 的 FK 指向 legalDocument 为 RESTRICT，先删子表）
+  await prisma.policyAcceptance.deleteMany();
+  await prisma.privacyRequest.deleteMany();
+  await prisma.dataHold.deleteMany();
+  await prisma.legalDocument.deleteMany();
 
   await prisma.productCategory.deleteMany();
   await prisma.errandCategory.deleteMany();
@@ -218,9 +228,14 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
     ),
   );
 
+  // Phase 5：先发布初始平台政策文档（fixture 同意需要文档已存在）
+  await seedPublishedPolicies(prisma);
+  console.log("[e2e-setup] 平台政策文档已发布（4 类 v1）");
+
   // E2E 确定性账号（仅存在于 E2E 库，production seed 保护不受影响）。
   // 密码与 tests/e2e/helpers/e2e.ts 的 E2E_ACCOUNTS 保持一致：
   // 公开的非生产测试凭据，可被 E2E_TEST_PASSWORD_PREFIX 覆盖。
+  // withAcceptance=false 的账号用于 Phase 5 legacy re-consent 流程测试。
   const passwordPrefix = process.env.E2E_TEST_PASSWORD_PREFIX ?? "E2e";
   const accounts = [
     {
@@ -228,29 +243,41 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
       name: "E2E管理员",
       password: `${passwordPrefix}Admin#2026`,
       role: UserRole.ADMIN,
+      withAcceptance: true,
     },
     {
       email: "e2e-buyer@e2e.test",
       name: "E2E买家",
       password: `${passwordPrefix}Buyer#2026`,
       role: UserRole.STUDENT,
+      withAcceptance: true,
     },
     {
       email: "e2e-seller@e2e.test",
       name: "E2E卖家",
       password: `${passwordPrefix}Seller#2026`,
       role: UserRole.STUDENT,
+      withAcceptance: true,
     },
     {
       email: "e2e-outsider@e2e.test",
       name: "E2E无关用户",
       password: `${passwordPrefix}Outsider#2026`,
       role: UserRole.STUDENT,
+      withAcceptance: true,
+    },
+    {
+      // 【无同意记录】legacy 用户：登录后会被 consent gate 引导到 /legal/accept
+      email: "e2e-legacy@e2e.test",
+      name: "E2E老用户",
+      password: `${passwordPrefix}Legacy#2026`,
+      role: UserRole.STUDENT,
+      withAcceptance: false,
     },
   ];
 
   for (const account of accounts) {
-    await prisma.user.create({
+    const user = await prisma.user.create({
       data: {
         email: account.email,
         name: account.name,
@@ -261,7 +288,14 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
         verificationStatus: VerificationStatus.VERIFIED,
       },
     });
+
+    if (account.withAcceptance) {
+      // 【TEST FIXTURE ACCEPTANCE】仅 E2E 基建使用，不代表生产 migration 语义
+      await createTestFixtureAcceptance(prisma, user.id);
+    }
   }
+
+  console.log("[e2e-setup] E2E 账号已创建（5 个，legacy 无同意记录）");
 }
 
 async function flushRateLimitKeys(): Promise<void> {

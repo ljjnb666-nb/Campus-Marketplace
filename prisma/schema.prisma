@@ -218,9 +218,14 @@ model User {
   rentalReviewsGiven    RentalReview[]            @relation("RentalReviewAuthor")
   rentalReviewsReceived RentalReview[]            @relation("RentalReviewTarget")
   rentalFavorites       RentalFavorite[]
+  policyAcceptances     PolicyAcceptance[]
+  privacyRequests       PrivacyRequest[]
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
+  // 账号注销完成时间。与 deletedAt 互斥使用：注销保留行（pseudonymous id
+  // 维持订单/评价/举报等历史引用），仅匿名化个人字段并吊销认证。
+  erasedAt              DateTime?
 
   @@index([campusId, role])
   @@index([verificationStatus, status])
@@ -712,6 +717,55 @@ model UploadedAsset {
 // 租赁模块枚举
 // ============================================================
 
+// ============================================================
+// Phase 5：法务协议 / 隐私治理模块枚举
+// ============================================================
+
+enum LegalDocumentType {
+  TERMS_OF_SERVICE
+  PRIVACY_POLICY
+  PLATFORM_RULES
+  PROHIBITED_TRANSACTIONS
+}
+
+enum LegalDocumentStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+}
+
+// 故意不提供 MIGRATION 来源：旧用户的重新同意必须来自真实用户行为，
+// 不存在"迁移自动补同意"这个合法状态。
+enum PolicyAcceptanceSource {
+  SIGNUP
+  RECONSENT
+  SETTINGS
+}
+
+enum PrivacyRequestType {
+  DATA_EXPORT
+  ACCOUNT_DELETION
+}
+
+enum PrivacyRequestStatus {
+  REQUESTED
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  CANCELLED
+  REJECTED
+}
+
+enum DataHoldType {
+  LEGAL
+  DISPUTE
+}
+
+enum DataHoldStatus {
+  ACTIVE
+  RELEASED
+}
+
 enum RentalListingStatus {
   AVAILABLE // 可出租
   PAUSED // 暂停出租
@@ -1046,4 +1100,98 @@ model RentalReview {
   @@unique([orderId, authorId])
   @@index([targetUserId, createdAt])
   @@index([orderId])
+}
+
+// ============================================================
+// Phase 5：法务协议 / 隐私治理模型
+// ============================================================
+
+// 版本化法务/平台政策文档。核心不变量：PUBLISHED 即不可变——
+// type/version/content/contentHash/effectiveAt/requiresAcceptance 一经发布
+// 不得原地修改，需要变更必须创建新版本（由 LegalDocumentService 强制）。
+model LegalDocument {
+  id                 String              @id @default(cuid())
+  type               LegalDocumentType
+  version            Int
+  status             LegalDocumentStatus @default(DRAFT)
+  title              String
+  content            String              @db.Text
+  // 对 canonical content（UTF-8 原文）的 SHA-256，hex 小写。
+  // acceptance 证据必须能反查到确切 id/version/hash。
+  contentHash        String
+  effectiveAt        DateTime
+  publishedAt        DateTime?
+  requiresAcceptance Boolean             @default(true)
+  createdById        String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  acceptances        PolicyAcceptance[]
+
+  @@unique([type, version])
+  @@index([type, status, effectiveAt])
+}
+
+// 同意证据（审计记录）：创建后不得改写为另一个 version/hash。
+// @@unique([userId, documentId]) 保证幂等：并发双击不会产生重复证据。
+model PolicyAcceptance {
+  id              String                 @id @default(cuid())
+  userId          String
+  documentId      String
+  // 发布文档不可变，这里仍冗余快照三元组：证据自身自足，不依赖联表还原。
+  documentType    LegalDocumentType
+  documentVersion Int
+  documentHash    String
+  source          PolicyAcceptanceSource
+  acceptedAt      DateTime               @default(now())
+  createdAt       DateTime               @default(now())
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  document        LegalDocument          @relation(fields: [documentId], references: [id])
+
+  @@unique([userId, documentId])
+  @@index([userId, acceptedAt])
+  @@index([documentId])
+}
+
+// 隐私请求（数据导出 / 账号注销）。状态只能经显式 transition helper 流转，
+// 禁止任意赋值跳状态。ACCOUNT_DELETION 的"同一用户至多一个 active 请求"
+// 由迁移 SQL 中的部分唯一索引兜底。
+model PrivacyRequest {
+  id          String               @id @default(cuid())
+  userId      String
+  type        PrivacyRequestType
+  status      PrivacyRequestStatus @default(REQUESTED)
+  // BLOCKED/REJECTED 时的机器可读原因（如 ACTIVE_DATA_HOLD / ACTIVE_TRANSACTION_BLOCK）
+  reasonCode  String?
+  handledNote String?
+  requestedAt DateTime             @default(now())
+  completedAt DateTime?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, status])
+  @@index([status, requestedAt])
+}
+
+// 数据保留 / 纠纷冻结（Legal Hold / Dispute Hold）。
+// ACTIVE hold 必须阻断破坏性擦除与保留期清理；hold 校验必须在破坏性事务
+// 内部二次执行（防 TOCTOU）。创建/解除入口在 Phase 5 仅暴露 service seam
+// （测试/seed 使用），管理界面属于 Phase 7。
+model DataHold {
+  id           String         @id @default(cuid())
+  type         DataHoldType
+  status       DataHoldStatus @default(ACTIVE)
+  // 预留作用域（当前仅 USER_ACCOUNT），Phase 6/7 扩展时无需改表
+  scope        String         @default("USER_ACCOUNT")
+  subjectType  String         @default("USER")
+  subjectId    String
+  reasonCode   String
+  note         String?
+  createdById  String?
+  createdAt    DateTime       @default(now())
+  releasedAt   DateTime?
+  releasedById String?
+
+  @@index([subjectType, subjectId, status])
+  @@index([status, type, createdAt])
 }

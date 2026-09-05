@@ -10,6 +10,8 @@ const {
   txRentalListingFindFirst,
   txRentalUnavailableFindFirst,
   txQueryRaw,
+  txExecuteRaw,
+  txUserFindMany,
   txRentalOrderCreate,
   txRentalOrderFindFirst,
   txRentalOrderUpdate,
@@ -28,6 +30,8 @@ const {
   txDamageClaimCreate,
   txDisputeCreate,
 } = vi.hoisted(() => {
+  const txExecuteRaw = vi.fn();
+  const txUserFindMany = vi.fn();
   const txRentalListingFindFirst = vi.fn();
   const txRentalUnavailableFindFirst = vi.fn();
   const txQueryRaw = vi.fn();
@@ -51,6 +55,8 @@ const {
 
   const transactionClient = {
     $queryRaw: txQueryRaw,
+    $executeRaw: txExecuteRaw,
+    user: { findMany: txUserFindMany, update: txUserUpdate },
     rentalListing: { findFirst: txRentalListingFindFirst },
     rentalUnavailablePeriod: { findFirst: txRentalUnavailableFindFirst },
     rentalOrder: {
@@ -77,7 +83,6 @@ const {
       create: txRentalReviewCreate,
       count: txRentalReviewCount,
     },
-    user: { update: txUserUpdate },
   };
 
   return {
@@ -91,6 +96,8 @@ const {
     txRentalListingFindFirst,
     txRentalUnavailableFindFirst,
     txQueryRaw,
+    txExecuteRaw,
+    txUserFindMany,
     txRentalOrderCreate,
     txRentalOrderFindFirst,
     txRentalOrderUpdate,
@@ -301,6 +308,12 @@ describe("rental-order actions", () => {
     txExtensionRequestUpdate.mockResolvedValue({});
     txDamageClaimCreate.mockResolvedValue({});
     txDisputeCreate.mockResolvedValue({});
+
+    // participant governance guard 默认全绿（锁查询 + 全员 ACTIVE）
+    txExecuteRaw.mockReset().mockResolvedValue(0);
+    txUserFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id: string) => ({ id, status: "ACTIVE", deletedAt: null, erasedAt: null })),
+    );
   });
 
   it("rejects create when the time strings cannot be parsed", async () => {
@@ -353,6 +366,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
 
     const result = await createRentalOrder(
@@ -380,6 +395,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
 
     const result = await createRentalOrder(
@@ -408,6 +425,8 @@ describe("rental-order actions", () => {
       pickupLocation: "南门",
       returnLocation: "南门",
       title: "相机",
+      status: "AVAILABLE",
+      deletedAt: null,
     }]);
     txRentalUnavailableFindFirst.mockResolvedValue(null);
     txRentalOrderCreate.mockResolvedValue({ id: "order-1" });

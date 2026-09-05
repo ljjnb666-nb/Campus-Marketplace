@@ -26,8 +26,10 @@ function SubmitButton() {
 
 export function RegisterForm({
   campuses,
+  requiredDocuments,
 }: {
   campuses: { id: string; name: string; schoolName: string }[];
+  requiredDocuments: { id: string; slug: string; title: string; version: number }[];
 }) {
   const [state, formAction] = useActionState(registerUser, initialState);
   const [campusId, setCampusId] = useState(campuses[0]?.id ?? "");
@@ -111,6 +113,41 @@ export function RegisterForm({
           />
         </label>
       </div>
+
+      {requiredDocuments.length > 0 ? (
+        <fieldset className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <legend className="px-2 text-sm font-medium text-slate-900">平台协议</legend>
+          <p className="text-xs leading-6 text-slate-500">
+            请阅读并同意以下当前生效版本的协议（注册后将记录你的同意，与具体版本绑定）：
+          </p>
+          <ul className="mt-2 space-y-1 text-sm">
+            {requiredDocuments.map((document) => (
+              <li key={document.id}>
+                <Link
+                  href={`/legal/${document.slug}`}
+                  target="_blank"
+                  className="text-sky-700 underline-offset-2 transition hover:underline"
+                >
+                  《{document.title}》 v{document.version}
+                </Link>
+              </li>
+            ))}
+          </ul>
+          {requiredDocuments.map((document) => (
+            <input key={document.id} type="hidden" name="acceptedDocumentIds" value={document.id} />
+          ))}
+          <label className="mt-3 flex items-start gap-3 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              name="agreeLegal"
+              value="on"
+              className="mt-1 size-4 rounded border-slate-300"
+              required
+            />
+            <span>我已阅读并同意上述全部协议的当前生效版本</span>
+          </label>
+        </fieldset>
+      ) : null}
 
       {state.message ? (
         <p className={state.success ? "text-sm text-emerald-600" : "text-sm text-rose-600"}>

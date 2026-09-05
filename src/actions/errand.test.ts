@@ -19,7 +19,11 @@ const {
   txOrderUpdate,
   txOrderUpdateMany,
   txUserUpdate,
+  txExecuteRaw,
+  txUserFindMany,
 } = vi.hoisted(() => {
+  const txExecuteRaw = vi.fn();
+  const txUserFindMany = vi.fn();
   const txErrandTaskUpdate = vi.fn();
   const txErrandTaskUpdateMany = vi.fn();
   const txOrderCreate = vi.fn();
@@ -40,7 +44,9 @@ const {
     },
     user: {
       update: txUserUpdate,
+      findMany: txUserFindMany,
     },
+    $executeRaw: txExecuteRaw,
   };
 
   return {
@@ -66,6 +72,8 @@ const {
     txOrderUpdate,
     txOrderUpdateMany,
     txUserUpdate,
+    txExecuteRaw,
+    txUserFindMany,
   };
 });
 
@@ -169,6 +177,12 @@ describe("errand actions", () => {
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     txErrandTaskUpdateMany.mockResolvedValue({ count: 1 });
     txOrderUpdateMany.mockResolvedValue({ count: 1 });
+
+    // participant governance guard 默认全绿（锁查询 + 全员 ACTIVE）
+    txExecuteRaw.mockReset().mockResolvedValue(0);
+    txUserFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id: string) => ({ id, status: "ACTIVE", deletedAt: null, erasedAt: null })),
+    );
   });
 
   it("rejects errand creation when the selected category is inactive", async () => {

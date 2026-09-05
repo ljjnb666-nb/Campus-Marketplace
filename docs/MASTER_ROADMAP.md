@@ -141,7 +141,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 3B | Real Production Deployment | **DEFERRED**（GATE B 后重开） |
 | Phase 4 | Observability / Monitoring / Recovery | DONE / MERGED / MASTER-GREEN / CLOSED |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
-| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **NEXT**（未开始） |
+| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **IMPLEMENTED_PENDING_REVIEW**（feat/production-phase-5-governance Draft PR，等待独立验收；merge + master CI 前不得宣称 DONE） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
 | Phase 7 | Operations Admin Foundation | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |

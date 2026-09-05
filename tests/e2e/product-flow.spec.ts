@@ -57,7 +57,7 @@ test("商品发布到下单：卖家上传图片发布 → 买家搜索 → 收�
   const buyer = await buyerContext.newPage();
 
   await buyer.goto("/products");
-  await buyer.locator('input[name="q"]').fill(tag);
+  await buyer.locator('input[name="q"]').first().fill(tag);
   await buyer.keyboard.press("Enter");
   await buyer.getByRole("link", { name: new RegExp(title) }).first().click();
   await buyer.waitForURL(/\/products\/[^/]+$/);

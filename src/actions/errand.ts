@@ -5,7 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { createOrderNo } from "@/lib/order-no";
+import { claimErrandTx } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateErrandViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -277,53 +277,14 @@ export async function claimErrand(formData: FormData) {
       return;
     }
 
-    await withTransaction(async (tx) => {
-      const claimResult = await tx.errandTask.updateMany({
-        where: {
-          id: errandId,
-          status: "OPEN",
-          accepterId: null,
-        },
-        data: {
-          accepterId: user.id,
-          status: "CLAIMED",
-        },
-      });
-
-      if (claimResult.count === 0) {
-        return;
-      }
-
-      const order = await tx.order.create({
-        data: {
-          orderNo: createOrderNo(),
-          type: "ERRAND",
-          status: "ACCEPTED",
-          amount: errand.reward,
-          paymentStatus: "OFFLINE_PENDING",
-          buyerId: errand.publisherId,
-          sellerId: user.id,
-          errandTaskId: errand.id,
-        },
-      });
-
-      await createNotifications(tx, [
-        {
-          userId: errand.publisherId,
-          orderId: order.id,
-          type: "ORDER",
-          title: "跑腿任务已被接单",
-          content: "你的跑腿任务已有同学接单，可以前往订单中心继续跟进。",
-        },
-        {
-          userId: user.id,
-          orderId: order.id,
-          type: "ORDER",
-          title: "你已接下跑腿任务",
-          content: "接单成功，请尽快与发布者沟通并推进任务。",
-        },
-      ]);
-    });
+    await withTransaction(async (tx) =>
+      claimErrandTx(tx, {
+        errandId,
+        publisherId: errand.publisherId,
+        claimerId: user.id,
+        reward: errand.reward,
+      }),
+    );
 
     revalidateErrandViews(errandId);
   } catch (error) {

@@ -1,28 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, uploadImageAsset, isRateLimited, AssetServiceError, isImageValidationError } =
-  vi.hoisted(() => {
-    class AssetServiceError extends Error {
-      code: string;
-      status: number;
-      constructor(code: string, message: string, status = 400) {
-        super(message);
-        this.name = "AssetServiceError";
-        this.code = code;
-        this.status = status;
-      }
+const {
+  getVerifiedSession,
+  uploadImageAsset,
+  isRateLimited,
+  AssetServiceError,
+  isImageValidationError,
+} = vi.hoisted(() => {
+  class AssetServiceError extends Error {
+    code: string;
+    status: number;
+    constructor(code: string, message: string, status = 400) {
+      super(message);
+      this.name = "AssetServiceError";
+      this.code = code;
+      this.status = status;
     }
-    return {
-      auth: vi.fn(),
-      uploadImageAsset: vi.fn(),
-      isRateLimited: vi.fn(),
-      AssetServiceError,
-      isImageValidationError: vi.fn(() => false),
-    };
-  });
+  }
+  return {
+    getVerifiedSession: vi.fn(),
+    uploadImageAsset: vi.fn(),
+    isRateLimited: vi.fn(),
+    AssetServiceError,
+    isImageValidationError: vi.fn(() => false),
+  };
+});
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
+  VERIFIED_SESSION_HTTP_STATUS: {
+    UNAUTHENTICATED: 401,
+    ACCOUNT_INACTIVE: 401,
+    LEGAL_ACCEPTANCE_REQUIRED: 403,
+  },
 }));
 
 vi.mock("@/lib/rate-limit", () => ({
@@ -77,7 +87,9 @@ function buildUploadRequest(
 
 describe("POST /api/upload/images", () => {
   beforeEach(() => {
-    auth.mockReset().mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession
+      .mockReset()
+      .mockResolvedValue({ ok: true, user: { id: "user-1", role: "STUDENT" } });
     uploadImageAsset.mockReset().mockResolvedValue({
       assetId: "asset-1",
       access: "PUBLIC",
@@ -90,13 +102,28 @@ describe("POST /api/upload/images", () => {
   });
 
   it("returns 401 when there is no session", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await POST(buildUploadRequest());
 
     expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "未登录，请先登录" });
+    expect(await response.json()).toEqual({
+      error: "未登录，请先登录",
+      code: "UNAUTHENTICATED",
+    });
     expect(isRateLimited).not.toHaveBeenCalled();
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("blocks uploads for users with pending required policies (consent gate)", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "LEGAL_ACCEPTANCE_REQUIRED" });
+
+    const response = await POST(buildUploadRequest());
+
+    expect(response.status).toBe(403);
+    const body = await response.json();
+
+    expect(body.code).toBe("LEGAL_ACCEPTANCE_REQUIRED");
     expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 

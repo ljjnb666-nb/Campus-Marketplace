@@ -21,8 +21,10 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${baseUrl}/search`, changeFrequency: "weekly", priority: 0.5 },
     { url: `${baseUrl}/login`, changeFrequency: "monthly", priority: 0.3 },
     { url: `${baseUrl}/register`, changeFrequency: "monthly", priority: 0.3 },
-    { url: `${baseUrl}/privacy`, changeFrequency: "yearly", priority: 0.3 },
-    { url: `${baseUrl}/rules`, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${baseUrl}/legal/privacy`, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${baseUrl}/legal/rules`, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${baseUrl}/legal/terms`, changeFrequency: "yearly", priority: 0.3 },
+    { url: `${baseUrl}/legal/prohibited`, changeFrequency: "yearly", priority: 0.3 },
   ];
 
   const { products, errands, services, rentals } = await getSitemapListings();

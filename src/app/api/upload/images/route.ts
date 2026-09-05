@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { withHttpMetrics } from "@/lib/http-metrics";
-import { auth } from "@/lib/auth";
+import {
+  VERIFIED_SESSION_HTTP_STATUS,
+  getVerifiedSession,
+} from "@/lib/server-auth";
 import {
   AssetServiceError,
   isImageValidationError,
@@ -20,18 +23,25 @@ async function postHandler(request: NextRequest) {
   let category = "unknown";
 
   try {
-    const session = await auth();
+    // 上传属于业务 mutation：需要账户状态复核 + consent gate（不可绕过）
+    const verified = await getVerifiedSession({ requireConsent: true });
 
-    if (!session?.user?.id) {
+    if (!verified.ok) {
       return NextResponse.json(
-        { error: "未登录，请先登录" },
-        { status: 401 }
+        {
+          error:
+            verified.reason === "LEGAL_ACCEPTANCE_REQUIRED"
+              ? "请先阅读并同意最新的平台协议"
+              : "未登录，请先登录",
+          code: verified.reason,
+        },
+        { status: VERIFIED_SESSION_HTTP_STATUS[verified.reason] }
       );
     }
-    userId = session.user.id;
+    userId = verified.user.id;
 
     const { limited } = await isRateLimited({
-      key: session.user.id,
+      key: userId,
       limit: MAX_REQUESTS_PER_MINUTE,
       windowMs: RATE_LIMIT_WINDOW_MS,
     });
@@ -81,7 +91,7 @@ async function postHandler(request: NextRequest) {
     }
 
     const result = await uploadImageAsset({
-      userId: session.user.id,
+      userId,
       category: rawCategory,
       file,
     });
@@ -89,7 +99,7 @@ async function postHandler(request: NextRequest) {
     logger.info("图片上传接口完成", "POST /api/upload/images", {
       operation: "upload",
       assetId: result.assetId,
-      userId: session.user.id,
+      userId,
       category,
       sizeBytes: result.sizeBytes,
       durationMs: Date.now() - startedAt,

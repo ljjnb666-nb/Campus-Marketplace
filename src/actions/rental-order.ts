@@ -2,6 +2,7 @@
 
 import { withTransaction, prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
+import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { requireUser } from "@/lib/server-auth";
 import {
   revalidateRentalOrderCreationViews,
@@ -144,6 +145,11 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
 
     return { success: true, message: '租赁申请已提交', redirectTo: `/rental-orders/${result.orderId}` };
   } catch (error) {
+    // participant guard（GOVERNANCE_SUBJECT_INACTIVE）返回可解释文案
+    if (isGovernanceError(error)) {
+      return { success: false, message: error.message };
+    }
+
     logger.error("rental-order action failed", "rental-order", { action: "createRentalOrder", error });
     return { success: false, message: '提交租赁申请失败，请稍后重试' };
   }

@@ -33,7 +33,7 @@ describe("sitemap", () => {
 
     const entries = await sitemap();
 
-    expect(entries.slice(0, 10)).toEqual([
+    expect(entries.slice(0, 12)).toEqual([
       { url: "https://campus.example.com/", changeFrequency: "daily", priority: 1 },
       { url: "https://campus.example.com/products", changeFrequency: "daily", priority: 0.8 },
       { url: "https://campus.example.com/errands", changeFrequency: "daily", priority: 0.8 },
@@ -42,8 +42,11 @@ describe("sitemap", () => {
       { url: "https://campus.example.com/search", changeFrequency: "weekly", priority: 0.5 },
       { url: "https://campus.example.com/login", changeFrequency: "monthly", priority: 0.3 },
       { url: "https://campus.example.com/register", changeFrequency: "monthly", priority: 0.3 },
-      { url: "https://campus.example.com/privacy", changeFrequency: "yearly", priority: 0.3 },
-      { url: "https://campus.example.com/rules", changeFrequency: "yearly", priority: 0.3 },
+      // Phase 5：法务页面迁移为版本化 /legal/* 路由
+      { url: "https://campus.example.com/legal/privacy", changeFrequency: "yearly", priority: 0.3 },
+      { url: "https://campus.example.com/legal/rules", changeFrequency: "yearly", priority: 0.3 },
+      { url: "https://campus.example.com/legal/terms", changeFrequency: "yearly", priority: 0.3 },
+      { url: "https://campus.example.com/legal/prohibited", changeFrequency: "yearly", priority: 0.3 },
     ]);
   });
 
@@ -59,8 +62,8 @@ describe("sitemap", () => {
 
     const entries = await sitemap();
 
-    expect(entries).toHaveLength(14);
-    expect(entries.slice(10)).toEqual([
+    expect(entries).toHaveLength(16);
+    expect(entries.slice(12)).toEqual([
       {
         url: "https://campus.example.com/products/product-1",
         lastModified: updatedAt,

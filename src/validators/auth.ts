@@ -14,6 +14,11 @@ export const registerSchema = z
     confirmPassword: z.string().min(8, "确认密码至少 8 位"),
     schoolName: z.string().min(2, "学校名称必填"),
     campusId: z.string().min(1, "请选择校区"),
+    // 注册时显式同意的当前 required 文档 id 集合（服务端与当前 required
+    // 集合做一致性校验，版本变化即 fail closed）
+    acceptedDocumentIds: z.array(z.string().min(1)).max(16),
+    // 显式勾选动作（checkbox 的 affirmative action，缺失即拒绝）
+    agreeLegal: z.literal("on", { message: "请阅读并勾选同意平台协议" }),
   })
   .refine((data) => data.password === data.confirmPassword, {
     message: "两次输入的密码不一致",

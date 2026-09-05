@@ -84,7 +84,8 @@ export const authOptions: NextAuthOptions = {
           where: { email: parsed.data.email },
         });
 
-        if (!user || user.deletedAt || user.status !== "ACTIVE") {
+        // 已注销（erasedAt）/软删除/停用账号一律拒绝认证
+        if (!user || user.deletedAt || user.erasedAt || user.status !== "ACTIVE") {
           return null;
         }
 

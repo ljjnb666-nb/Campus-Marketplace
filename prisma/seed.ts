@@ -7,6 +7,10 @@ import {
   VerificationStatus,
 } from "@prisma/client";
 import { hashSync } from "bcryptjs";
+import {
+  createTestFixtureAcceptance,
+  seedPublishedPolicies,
+} from "./legal-seed-content";
 
 if (process.env.NODE_ENV === "production") {
   console.error("❌ 禁止在生产环境运行 seed 脚本！");
@@ -519,6 +523,18 @@ async function main() {
   }
 
   console.log("✅ 租赁分类已创建:", rentalCategories.length, "个");
+
+  // Phase 5：发布初始平台政策文档（v1）。
+  await seedPublishedPolicies(prisma);
+  console.log("✅ 平台政策文档已发布（4 类 v1）");
+
+  // 仅开发环境：为种子用户创建 fixture 同意记录（模拟其在当前版本下注册）。
+  // 这不是生产 migration 行为——生产旧用户必须走 /legal/accept 真实重新同意。
+  const seededUsers = await prisma.user.findMany({ select: { id: true } });
+  for (const user of seededUsers) {
+    await createTestFixtureAcceptance(prisma, user.id);
+  }
+  console.log(`✅ 已为 ${seededUsers.length} 个种子用户创建开发环境同意记录（fixture）`);
 }
 
 main()

@@ -29,11 +29,13 @@ test("认证与个人资料：注册 → 登录 → 修改资料 → 刷新持�
   await flushRateLimits();
 
   // 1. 注册（真实表单 → server action → PostgreSQL；页面渲染两份输入框时取第一份）
+  // Phase 5：注册必须显式勾选同意当前 required 协议版本（未勾选无法提交）
   await page.goto("/register");
   await page.locator('input[name="name"]').first().fill(nickname);
   await page.locator('input[name="email"]').first().fill(email);
   await page.locator('input[name="password"]').first().fill("Gf1Pass#2026");
   await page.locator('input[name="confirmPassword"]').first().fill("Gf1Pass#2026");
+  await page.locator('input[name="agreeLegal"]').first().check();
   await page.getByRole("button", { name: "注册账户" }).click();
   await expect(page.getByText("注册成功，请登录")).toBeVisible();
 
