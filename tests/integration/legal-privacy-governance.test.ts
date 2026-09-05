@@ -1019,7 +1019,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(eraseRaceEnteredCount).toBe(1);
 
     let orderSettled = false;
-    const orderPromise = withTransaction((tx) =>
+    // 创建时即捕获结果（ok/err 联合）：rejected promise 永不裸露，
+    // 消除 unhandled rejection 窗口
+    const orderOutcome = withTransaction((tx) =>
       createProductOrderTx(tx, {
         buyerId: buyer.id,
         product: { id: product.id, price: "10.00", sellerId: product.sellerId },
@@ -1029,11 +1031,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     ).then(
       (order) => {
         orderSettled = true;
-        return order;
+        return { ok: true as const, order };
       },
       (error) => {
         orderSettled = true;
-        throw error;
+        return { ok: false as const, error };
       },
     );
 
@@ -1045,7 +1047,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await erasePromise;
 
     // 订单事务醒来 → participant 复核失败 → 创建被拒
-    await expect(orderPromise).rejects.toBeInstanceOf(GovernanceError);
+    const orderResult = await orderOutcome;
+    expect(orderResult.ok).toBe(false);
+    expect((orderResult as { error: unknown }).error).toBeInstanceOf(GovernanceError);
 
     // 不变量：账号已注销 + 零 active 订单
     const buyerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: buyer.id } });
@@ -1204,7 +1208,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(eraseRaceEnteredCount).toBe(1);
 
     let rentalSettled = false;
-    const rentalPromise = withTransaction((tx) =>
+    // 创建时即捕获结果：rejected promise 永不裸露
+    const rentalOutcome = withTransaction((tx) =>
       createRentalOrderTx(tx, {
         userId: renter.id,
         rentalListingId: listing.id,
@@ -1215,11 +1220,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     ).then(
       (result) => {
         rentalSettled = true;
-        return result;
+        return { ok: true as const, result };
       },
       (error) => {
         rentalSettled = true;
-        throw error;
+        return { ok: false as const, error };
       },
     );
 
@@ -1230,7 +1235,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     releaseErase!();
     await erasePromise;
 
-    await expect(rentalPromise).rejects.toBeInstanceOf(GovernanceError);
+    const rentalResult = await rentalOutcome;
+    expect(rentalResult.ok).toBe(false);
+    expect((rentalResult as { error: unknown }).error).toBeInstanceOf(GovernanceError);
 
     const renterRow = await rawClient!.user.findUniqueOrThrow({ where: { id: renter.id } });
     expect(renterRow.erasedAt).toBeTruthy();
@@ -1392,7 +1399,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(eraseRaceEnteredCount).toBe(1);
 
     let rentalSettled = false;
-    const rentalPromise = withTransaction((tx) =>
+    // 创建时即捕获结果：rejected promise 永不裸露（release 后 rental 会在
+    // erase 提交期间醒来并失败——捕获必须先行，避免 unhandled 窗口）
+    const rentalOutcome = withTransaction((tx) =>
       createRentalOrderTx(tx, {
         userId: renter.id,
         rentalListingId: listing.id,
@@ -1403,11 +1412,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     ).then(
       (result) => {
         rentalSettled = true;
-        return result;
+        return { ok: true as const, result };
       },
       (error) => {
         rentalSettled = true;
-        throw error;
+        return { ok: false as const, error };
       },
     );
 
@@ -1428,10 +1437,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(listingRow.status).toBe("OFFLINE");
 
     // rental 醒来 → participant active recheck 失败 → GOVERNANCE_SUBJECT_INACTIVE
-    const rejection: unknown = await rentalPromise.then(
-      () => undefined,
-      (error) => error,
-    );
+    const rentalResult = await rentalOutcome;
+    expect(rentalResult.ok).toBe(false);
+    const rejection = (rentalResult as { error: unknown }).error;
     expect(rejection).toBeInstanceOf(GovernanceError);
     expect((rejection as { code?: string }).code).toBe("GOVERNANCE_SUBJECT_INACTIVE");
     // 不得出现 SQLSTATE 40P01 / deadlock detected
