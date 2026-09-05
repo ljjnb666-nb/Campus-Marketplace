@@ -14,7 +14,7 @@
 | Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（GATE B 通过后重开） |
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
-| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（feat/production-phase-5-governance Draft PR） |
+| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8 经多轮独立验收合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
@@ -158,8 +158,8 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 3A：仓库侧生产部署基础（见上节，REPO_SIDE_ACCEPTED）
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
-- [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**，见下节）
-- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（NOT_STARTED——Phase 5 独立验收 + merge 前不得开始）
+- [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
+- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（NOT_STARTED——Phase 5 已 CLOSED；Phase 6 启动属下一独立流程）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
@@ -203,11 +203,19 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] 保持 `npm run db:verify`、`npm run app:smoke`、`npm run app:smoke:auth` 可重复通过
 - [x] 新增 `npm run text:verify`，把常见中文乱码片段纳入源码和文档检查
 
-## Production Phase 5（Privacy / Agreements / Platform Rules / Data Governance，2026-09-03 实现，2026-09-04 REPAIR 收口）
+## Production Phase 5（Privacy / Agreements / Platform Rules / Data Governance，2026-09-03 实现，2026-09-04/05 经四轮独立验收修复收口）
 
-状态：**IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（Draft PR，未 merge；独立验收 + master CI 完成前不宣布 DONE）。
+状态：**DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05）。
+Merge：PR #8（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/8>），
+merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（当前 master HEAD）。
+Post-merge master CI：run [33943242174](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33943242174)
+—— verify = success、e2e = success、attempt = 1。
+Final independent review：**PASS**（Initial review → Repair 1 → Repair 2 →
+Repair 3（rental owner-side 锁序死锁）→ Repair 4（竞态测试双 barrier 确定性）→ Final PASS）。
 权威契约文档：[LEGAL_GOVERNANCE.md](LEGAL_GOVERNANCE.md)、[DATA_GOVERNANCE.md](DATA_GOVERNANCE.md)、
-[PRIVACY_OPERATIONS.md](PRIVACY_OPERATIONS.md)。`LEGAL_REVIEW_REQUIRED = TRUE`（工程治理基线文本，非法律意见）。
+[PRIVACY_OPERATIONS.md](PRIVACY_OPERATIONS.md)。`LEGAL_REVIEW_REQUIRED = TRUE`
+（Phase 5 CLOSED = 工程治理范围完成；production legal text remains subject to formal legal review，
+不构成正式法律意见）。
 
 - [x] 版本化法务文档域 `LegalDocument`（4 类型；`(type,version)` 唯一；PUBLISHED 即不可变；SHA-256 contentHash；确定性 current 解析含 effectiveAt）
 - [x] 同意证据 `PolicyAcceptance`（快照 type/version/hash；`(userId,documentId)` 唯一幂等；故意不设 MIGRATION 来源；legacy 用户禁止伪造同意）
@@ -239,20 +247,21 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] **A EXPORT REJECTED 持久化**：`executeSynchronousDataExport` 失败路径改为 callback 内 return（REJECTED 随事务 COMMIT），事务外再抛安全错误；builder 注入 seam；`createDataExportRequest` 孤儿 footgun 删除；文档 snapshot 表述修正；回归 `SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST`（真实 PG 新连接查库：TOO_LARGE / EXECUTION_FAILED 两 case 各恰一条 REJECTED 台账）+ `SYNC_EXPORT_REQUEST_COMPLETES_TEST` 保留
 - [x] **B OBLIGATION 创建 vs 注销竞态**：`acquireGovernanceSubjectLocks`（去重 + 稳定锁序）+ `assertActiveGovernanceSubjects`/`withObligationGuard`（participant 锁 → 锁内活跃复核 → 写入）；四条 obligation 路径全部接入（product/service/errand 抽出 tx 级入口 + rental 持锁内联）；回归：`ORDER_CREATION_ERASURE_RACE_TEST` / `RENTAL_CREATION_ERASURE_RACE_TEST`（真实 PG barrier seam，A/B 双向线性化）+ service/errand erased-participant 拒绝回归 + obligation-guard 单测（锁去重/次序/复核失败零写入）
 
-## 当前测试基线（Phase 5 REPAIR 分支，待独立验收更新）
+## 当前测试基线
 
-Phase 5 REPAIR 分支本地全量验证（2026-09-04，真实 PostgreSQL / Redis / MinIO 集成全开，
-`INTEGRATION_DATABASE_URL` / `INTEGRATION_REDIS_URL` / `INTEGRATION_S3_ENDPOINT` 均真实执行）：
+以 master `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Production Phase 5 合并提交）
+对应的成功 master CI 为准（GitHub Actions run [33943242174](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33943242174)，
+2026-09-05，verify + e2e 双 job 全绿）：
 
-- **225** 个测试文件，**1305** 个测试全部通过（含治理域单测、真实库集成测试、
-  3 类真实 PG 并发竞态测试与 Privacy/Governance Drill）
+- **226** 个测试文件，**1322** 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
+  集成测试全部真实执行，无门控跳过；含治理域单测、真实库集成测试、
+  6 个真实 PG 并发竞态回归与 Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （本轮实测 82.86 / 81.59 / 81.93 / 82.86）
-- **E2E 基线：33 条**（原 24 条 critical flows 全部保留 + 9 条 Phase 5
-  governance golden flows）；REPAIR 后本地连续三轮 33/33 全绿（--workers=2，
-  与 CI 一致，retry=0，全部 first-attempt pass）
+  （实测 83 / 81.76 / 82.18 / 83）
+- **E2E 基线：33 条关键链路测试**（原 24 条 critical flows 全部保留 + 9 条
+  Phase 5 governance golden flows）CI 全绿
 - 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
-  Phase 5 合并后的数字以最近一次成功的 master CI 为准，不以本文快照为准
+  后续以最近一次成功的 master CI 为准，不以本文快照为准
 
 <details>
 <summary>历史基线：master be0fd94（Production Phase 4 合并提交，2026-09-02）</summary>

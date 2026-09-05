@@ -47,8 +47,11 @@
 | Phase 3A | Production Deployment Foundation（仓库侧） | **DONE / MERGED / MASTER-GREEN / REPO_SIDE_ACCEPTED**（2026-08-30）；`PRODUCTION_DEPLOYMENT_FOUNDATION_ACCEPTED = YES` |
 | Phase 3B | Real Production Deployment（真实服务器上线） | **DEFERRED**（外部资源缺口，非代码质量失败） |
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
+| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
 
-当前 master：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`（Phase 4 合并提交）。
+当前 master：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（Phase 5 合并提交；
+上一记录点：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`，Phase 4 合并提交、
+亦为 Roadmap v1.0 冻结基线——历史冻结事件记录保留于 §1，不随 master 前进改写）。
 
 同时保持：
 
@@ -58,9 +61,9 @@
 **绝不声称 `PRODUCTION_READY = TRUE`。** 本仓库当前状态是"具备可部署的仓库侧能力"，
 不是"已具备公开生产运营资格"（见 §9）。
 
-当前测试基线（来自冻结基线对应的成功 master CI，非本地估算）：
-215 个测试文件 / 1216 个测试全部通过，覆盖率 lines 88.23% / branches 81.84% /
-functions 84.06% / statements 88.23%；Playwright E2E 关键链路 24 条全绿。
+当前测试基线（来自最近一次成功的 master CI，非本地估算）：
+226 个测试文件 / 1322 个测试全部通过，覆盖率 lines 83% / branches 81.76% /
+functions 82.18% / statements 83%；Playwright E2E 关键链路 33 条全绿。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
 
 ---
@@ -141,7 +144,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 3B | Real Production Deployment | **DEFERRED**（GATE B 后重开） |
 | Phase 4 | Observability / Monitoring / Recovery | DONE / MERGED / MASTER-GREEN / CLOSED |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
-| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **IMPLEMENTED_PENDING_REVIEW**（feat/production-phase-5-governance Draft PR，等待独立验收；merge + master CI 前不得宣称 DONE） |
+| Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | NOT_STARTED |
 | Phase 7 | Operations Admin Foundation | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
@@ -172,6 +175,22 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 rules、agreement/policy versioning、acceptance records、data classification、
 retention、deletion、anonymization、account deletion、data export、
 privacy requests、legal hold、dispute hold、sensitive-data governance。
+
+**Closure record（2026-09-05）**：
+
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
+- Merge：PR #8（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/8>），
+  merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`（当前 master）
+- Post-merge master CI：run 33943242174 —— verify = success、e2e = success、attempt = 1
+- Final verification baseline：226 test files / 1322 tests；coverage
+  83 / 81.76 / 82.18 / 83；Playwright critical paths = 33
+- Independent review：Initial review → Repair 1 → Repair 2 → Repair 3 →
+  Repair 4 → Final review **PASS**
+- 权威细节文档：[LEGAL_GOVERNANCE.md](LEGAL_GOVERNANCE.md)、
+  [DATA_GOVERNANCE.md](DATA_GOVERNANCE.md)、[PRIVACY_OPERATIONS.md](PRIVACY_OPERATIONS.md)
+- **LEGAL_REVIEW_REQUIRED = TRUE**：Phase 5 CLOSED 的含义是工程治理范围完成；
+  production legal text remains subject to formal legal review——不构成正式法律意见，
+  不声称 fully compliant / PIPL compliant / GDPR compliant。
 
 ### 5.2 Phase 6 — Identity / Trust / Safety / RBAC / Audit
 
