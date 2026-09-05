@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getUserAcceptanceStatus } from "@/lib/legal/policy-service";
+import { ADMIN_SURFACE_PERMISSION_KEYS } from "@/lib/rbac/permissions";
+import { hasAnyPermission, loadAuthorizationContext } from "@/lib/rbac/service";
 
 /**
  * 中央 active-account resolver（Phase 5 REPAIR）。
@@ -72,10 +74,21 @@ export async function requireUser() {
   };
 }
 
+/**
+ * Phase 6A 兼容桥：后台入口判定收敛到中央 RBAC（permission 判定），
+ * 不再读取 user.role 字段。持有任意后台 permission 即放行——6A 中全部
+ * permission 仅由 PLATFORM_ADMIN 角色持有，行为与旧 `role === "ADMIN"`
+ * 完全一致（legacy admin 已由 migration / seed 同步授予角色）。
+ * 每个敏感 mutation 的具体 permission 在 action/service 层细化
+ * （如 verification.review / asset.sensitive.read / rbac.role.assign）。
+ * 禁止在任何新代码中恢复 role 字段判权。
+ */
 export async function requireAdmin() {
   const user = await requireUser();
 
-  if (user.role !== "ADMIN") {
+  const context = await loadAuthorizationContext(user.id);
+
+  if (!hasAnyPermission(context, ADMIN_SURFACE_PERMISSION_KEYS)) {
     redirect("/");
   }
 

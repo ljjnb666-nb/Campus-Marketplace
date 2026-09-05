@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 
+import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { isRbacError } from "@/lib/rbac/errors";
 import { logger } from "@/lib/logger";
 import { getRequestId } from "@/lib/request-context";
 import { classifyError } from "@/lib/error-taxonomy";
@@ -29,6 +31,12 @@ export function handleError(error: unknown, context: string): HandledError {
       message: error.issues[0]?.message ?? "请求参数不正确",
       statusCode: 400,
     };
+  }
+
+  // 治理域 / RBAC 业务错误：message 已是可直接展示的用户文案（无内部细节），
+  // status 为预期 4xx（不触发 server-fault 告警语义）
+  if (isGovernanceError(error) || isRbacError(error)) {
+    return { message: error.message, statusCode: error.status };
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {

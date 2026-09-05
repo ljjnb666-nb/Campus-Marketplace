@@ -2,16 +2,15 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
+import { submitMembershipVerification } from "@/lib/campus/verification-service";
 import {
   buildAssetReference,
   markAssetsForValuesPendingDelete,
   resolveSingleImageToken,
-  resolveImageTokens,
   uploadImageAsset,
 } from "@/lib/upload";
-import { createNotification } from "@/repositories/notification-repository";
 import { profileFormSchema, verificationFormSchema } from "@/validators/profile";
 
 export type UserActionState = {
@@ -175,59 +174,17 @@ export async function submitVerification(
 
     const previousVerification = await prisma.userVerification.findUnique({
       where: { userId: user.id },
-      select: { id: true, studentCardImage: true },
+      select: { studentCardImage: true },
     });
 
-    await withTransaction(async (tx) => {
-      await tx.user.update({
-        where: { id: user.id },
-        data: {
-          schoolName: parsed.data.schoolName,
-          studentIdLast4: parsed.data.studentIdLast4,
-          verificationStatus: "PENDING",
-        },
-      });
-
-      const verification = await tx.userVerification.upsert({
-        where: { userId: user.id },
-        update: {
-          schoolName: parsed.data.schoolName,
-          campusName: parsed.data.campusName,
-          studentIdLast4: parsed.data.studentIdLast4,
-          status: "PENDING",
-          reviewNote: null,
-          reviewedAt: null,
-          submittedAt: new Date(),
-        },
-        create: {
-          userId: user.id,
-          schoolName: parsed.data.schoolName,
-          campusName: parsed.data.campusName,
-          studentIdLast4: parsed.data.studentIdLast4,
-          studentCardImage: parsed.data.studentCardImage,
-          status: "PENDING",
-        },
-      });
-
-      // 学生证图片为私有资源：token 解析为 asset: 引用（禁止永久公开 URL）并绑定认证记录
-      const [studentCardImage] = await resolveImageTokens({
-        ownerId: user.id,
-        tokens: [parsed.data.studentCardImage],
-        target: { type: "verification", id: verification.id },
-        tx,
-      });
-
-      await tx.userVerification.update({
-        where: { id: verification.id },
-        data: { studentCardImage: studentCardImage ?? parsed.data.studentCardImage },
-      });
-
-      await createNotification(tx, {
-        userId: user.id,
-        type: "SYSTEM",
-        title: "认证材料已提交",
-        content: "你的校园认证材料已提交，平台会尽快完成审核，请留意后续通知。",
-      });
+    // Phase 6A：提交走中央认证状态机（subject 锁 → 账号/membership/policy
+    // 复核 → 状态机断言 → 证据落库），policy 版本快照随证据保留
+    await submitMembershipVerification({
+      userId: user.id,
+      schoolName: parsed.data.schoolName,
+      campusName: parsed.data.campusName,
+      studentIdLast4: parsed.data.studentIdLast4,
+      studentCardImageToken: parsed.data.studentCardImage,
     });
 
     // 重新提交时旧的学生证材料标记待删除（原 PENDING 审核材料被替换）

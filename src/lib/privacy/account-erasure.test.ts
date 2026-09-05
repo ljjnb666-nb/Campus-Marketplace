@@ -24,6 +24,9 @@ const txStub = {
   rentalListing: {
     updateMany: vi.fn(),
   },
+  campusMembership: {
+    updateMany: vi.fn(),
+  },
   session: {
     deleteMany: vi.fn(),
   },
@@ -81,6 +84,7 @@ beforeEach(() => {
   txStub.errandTask.updateMany.mockResolvedValue({ count: 0 });
   txStub.serviceListing.updateMany.mockResolvedValue({ count: 0 });
   txStub.rentalListing.updateMany.mockResolvedValue({ count: 0 });
+  txStub.campusMembership.updateMany.mockResolvedValue({ count: 1 });
   txStub.session.deleteMany.mockResolvedValue({ count: 0 });
   txStub.order.count.mockResolvedValue(0);
   txStub.rentalOrder.count.mockResolvedValue(0);
@@ -109,6 +113,13 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
 
     // 认证材料清理 + 敏感资产到期（由既有 storage:cleanup 物理删除）
     expect(txStub.userVerification.updateMany).toHaveBeenCalled();
+    // Phase 6A：成员关系闭环为 LEFT
+    expect(txStub.campusMembership.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: "user-1", status: { not: "LEFT" } },
+        data: { status: "LEFT" },
+      }),
+    );
     expect(txStub.uploadedAsset.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({

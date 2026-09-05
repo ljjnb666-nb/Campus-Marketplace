@@ -21,6 +21,13 @@ import {
   createTestFixtureAcceptance,
   seedPublishedPolicies,
 } from "../prisma/legal-seed-content";
+import { seedPublishedVerificationPolicy } from "../prisma/phase6-seed-content";
+// 相对导入 + tsx 兼容：bootstrap 链上全部为相对导入（tsx 无 @/ alias）
+import {
+  ensureCampusMemberships,
+  ensureRbacFoundation,
+  syncLegacyAdminRoles,
+} from "../src/lib/rbac/bootstrap";
 
 const E2E_DATABASE_URL =
   process.env.E2E_DATABASE_URL ??
@@ -126,6 +133,14 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.privacyRequest.deleteMany();
   await prisma.dataHold.deleteMany();
   await prisma.legalDocument.deleteMany();
+
+  // Phase 6A 身份/RBAC 表（userVerification 已先删；assignment/cascading 顺序删除）
+  await prisma.userRoleAssignment.deleteMany();
+  await prisma.campusVerificationPolicy.deleteMany();
+  await prisma.campusMembership.deleteMany();
+  await prisma.rolePermission.deleteMany();
+  await prisma.role.deleteMany();
+  await prisma.permission.deleteMany();
 
   await prisma.productCategory.deleteMany();
   await prisma.errandCategory.deleteMany();
@@ -294,6 +309,17 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
       await createTestFixtureAcceptance(prisma, user.id);
     }
   }
+
+  // Phase 6A：RBAC foundation + legacy admin（e2e-admin）同步 + membership
+  // 补齐 + 校区认证策略 v1（均幂等；accounts 已建，sync 必须在其后）
+  await ensureRbacFoundation(prisma);
+  const legacyAdminCount = await syncLegacyAdminRoles(prisma);
+  const membershipCount = await ensureCampusMemberships(prisma);
+  await seedPublishedVerificationPolicy(prisma, campus.id);
+  console.log(
+    `[e2e-setup] Phase 6A 就绪：RBAC foundation；legacy admin 新授 ${legacyAdminCount}；` +
+      `membership 补齐 ${membershipCount}；认证策略 v1 已就绪`,
+  );
 
   console.log("[e2e-setup] E2E 账号已创建（5 个，legacy 无同意记录）");
 }

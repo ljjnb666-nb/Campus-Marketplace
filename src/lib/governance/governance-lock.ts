@@ -121,3 +121,20 @@ export async function acquirePolicyLocks(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(${POLICY_LOCK_NAMESPACE}::int, hashtext(${type}))`;
   }
 }
+
+/**
+ * 校园认证策略锁（Phase 6A）：与法务政策锁共用 POLICY_LOCK_NAMESPACE，
+ * 键为 "CAMPUS_VERIFICATION_POLICY:<campusId>"（字符串键空间与法务 type 不重叠）。
+ *
+ * publish / retire 锁目标 campus；submitVerification 在同一命名空间锁
+ * 目标 membership 的 campus——current policy 的"解析 → 证据落库"窗口与
+ * 并发发布被互斥关闭。多 campus 按升序加锁，与全局锁序纪律一致。
+ */
+export async function acquireCampusVerificationPolicyLocks(
+  tx: Prisma.TransactionClient,
+  campusIds: readonly string[],
+): Promise<void> {
+  for (const campusId of ascendingStrings(campusIds)) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${POLICY_LOCK_NAMESPACE}::int, hashtext(${`CAMPUS_VERIFICATION_POLICY:${campusId}`}))`;
+  }
+}

@@ -4,6 +4,7 @@ const {
   hash,
   campusFindUnique,
   userCreate,
+  membershipCreate,
   mockHeaders,
   transactionMock,
   recordSignupAcceptances,
@@ -11,6 +12,7 @@ const {
   hash: vi.fn(),
   campusFindUnique: vi.fn(),
   userCreate: vi.fn(),
+  membershipCreate: vi.fn(),
   mockHeaders: vi.fn(),
   transactionMock: vi.fn(),
   recordSignupAcceptances: vi.fn(),
@@ -69,6 +71,7 @@ describe("auth actions", () => {
     hash.mockReset();
     campusFindUnique.mockReset();
     userCreate.mockReset();
+    membershipCreate.mockReset().mockResolvedValue({ id: "membership-1" });
     mockHeaders.mockReset();
     transactionMock.mockReset();
     recordSignupAcceptances.mockReset();
@@ -78,7 +81,10 @@ describe("auth actions", () => {
     userCreate.mockResolvedValue({ id: "user-1" });
     recordSignupAcceptances.mockResolvedValue({ created: 4, skipped: 0 });
     transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({ user: { create: userCreate } }),
+      callback({
+        user: { create: userCreate },
+        campusMembership: { create: membershipCreate },
+      }),
     );
   });
 
@@ -147,6 +153,10 @@ describe("auth actions", () => {
       "user-1",
       CURRENT_POLICY_IDS,
     );
+    // Phase 6A：注册同事务建立 ACTIVE campus membership
+    expect(membershipCreate).toHaveBeenCalledWith({
+      data: { userId: "user-1", campusId: "campus-1", status: "ACTIVE" },
+    });
     expect(result).toEqual({
       success: true,
       message: "注册成功，请登录",

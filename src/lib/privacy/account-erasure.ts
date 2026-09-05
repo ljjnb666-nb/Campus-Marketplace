@@ -174,6 +174,13 @@ export async function eraseAccount(
       },
     });
 
+    // Phase 6A：成员关系闭环为 LEFT（subject 锁已持有，与认证决定/角色变更
+    // 同一把锁串行化——不存在"已注销账号之后获得/保持生效成员身份"）
+    await client.campusMembership.updateMany({
+      where: { userId, status: { not: "LEFT" } },
+      data: { status: "LEFT" },
+    });
+
     // 敏感私有资产：立即到期 → 既有 storage:cleanup 物理删除对象（Phase 1 机制）
     const sensitiveAssets = await client.uploadedAsset.updateMany({
       where: {

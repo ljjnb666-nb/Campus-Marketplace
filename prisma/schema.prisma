@@ -17,11 +17,14 @@ enum UserStatus {
   SUSPENDED
 }
 
+// REVOKED 仅能由中央 verification service 的显式 revoke 决策产生
+// （Phase 6A：审核员吊销欺诈认证）；EXPIRED 语义留待未来有真实产生方时引入。
 enum VerificationStatus {
   UNVERIFIED
   PENDING
   VERIFIED
   REJECTED
+  REVOKED
 }
 
 enum ListingStatus {
@@ -170,6 +173,10 @@ model User {
   grade                 String?
   studentIdLast4        String?
   phone                 String?
+  // Phase 6A 起本字段不再作为授权依据（deprecated for authorization）：
+  // 授权一律经中央 RBAC（UserRole → Role → RolePermission → Permission）判断；
+  // 字段仅保留用于展示与迁移 bootstrap（migration/seed 会按 role=ADMIN
+  // 同步授予 PLATFORM_ADMIN 角色）。禁止新增任何 `role === "ADMIN"` 业务判断。
   role                  UserRole                  @default(STUDENT)
   status                UserStatus                @default(ACTIVE)
   verificationStatus    VerificationStatus        @default(UNVERIFIED)
@@ -220,6 +227,10 @@ model User {
   rentalFavorites       RentalFavorite[]
   policyAcceptances     PolicyAcceptance[]
   privacyRequests       PrivacyRequest[]
+  // Phase 6A：身份 / RBAC 关联
+  memberships           CampusMembership[]
+  userRoles             UserRoleAssignment[]
+  reviewedVerifications UserVerification[]        @relation("VerificationReviewer")
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
@@ -266,34 +277,58 @@ model VerificationToken {
 }
 
 model Campus {
-  id              String           @id @default(cuid())
-  name            String
-  slug            String           @unique
-  schoolName      String
-  district        String?
-  isActive        Boolean          @default(true)
-  users           User[]
-  products        Product[]
-  errandTasks     ErrandTask[]
-  serviceListings ServiceListing[]
-  rentalListings  RentalListing[]
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
+  id                   String                     @id @default(cuid())
+  name                 String
+  slug                 String                     @unique
+  schoolName           String
+  district             String?
+  isActive             Boolean                    @default(true)
+  users                User[]
+  products             Product[]
+  errandTasks          ErrandTask[]
+  serviceListings      ServiceListing[]
+  rentalListings       RentalListing[]
+  // Phase 6A：Campus 为一等领域实体（租户/校园边界）
+  memberships          CampusMembership[]
+  verificationPolicies CampusVerificationPolicy[]
+  userRoles            UserRoleAssignment[]
+  adminLogs            AdminLog[]
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
 }
 
+// 校园成员认证记录（Phase 6A 演进：挂在 CampusMembership 上，而非全局 user）。
+// 状态机：UNVERIFIED→PENDING→VERIFIED/REJECTED；REJECTED/REVOKED/VERIFIED→PENDING（重新提交）；
+// VERIFIED→REVOKED（审核员吊销）。所有状态流转必须经
+// src/lib/campus/verification-service.ts 的中央 transition service，禁止原地任意赋值。
+// @@unique([userId]) 为当前产品"单 active campus"现状的表达；多校区展开时随
+// CampusMembership 一并演进。历史迁移行 policy 三元组为 null（迁移前无 policy 机制，
+// 保留 null 即真实证据，不伪造历史认证依据）。
 model UserVerification {
-  id               String             @id @default(cuid())
-  userId           String             @unique
+  id               String                    @id @default(cuid())
+  userId           String                    @unique
+  membershipId     String                    @unique
   schoolName       String
   campusName       String
   studentIdLast4   String
   studentCardImage String
-  status           VerificationStatus @default(PENDING)
+  status           VerificationStatus        @default(PENDING)
   reviewNote       String?
-  submittedAt      DateTime           @default(now())
+  // 审核决策机器可读原因码（如 VERIFICATION_MATERIALS_INVALID），可空
+  reasonCode       String?
+  submittedAt      DateTime                  @default(now())
   reviewedAt       DateTime?
-  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  uploadedAssets   UploadedAsset[]    @relation("AssetVerification")
+  reviewedById     String?
+  // 认证证据必须能反查其依据的 policy/version（发布后不可变，冗余快照三元组，
+  // 与 PolicyAcceptance 同一工程原则）；迁移旧行为 null = 当时不存在 policy 机制
+  policyId         String?
+  policyVersion    Int?
+  policyHash       String?
+  user             User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  membership       CampusMembership          @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  reviewedBy       User?                     @relation("VerificationReviewer", fields: [reviewedById], references: [id])
+  policy           CampusVerificationPolicy? @relation(fields: [policyId], references: [id])
+  uploadedAssets   UploadedAsset[]           @relation("AssetVerification")
 }
 
 model ProductCategory {
@@ -653,6 +688,9 @@ model ModerationKeyword {
   updatedAt   DateTime             @updatedAt
 }
 
+// 管理审计日志（Phase 6A AdminAuditLog foundation，演进自既有 AdminLog）。
+// append-only：业务层不提供任何 update/delete 入口；metadata 仅接受
+// admin-audit 服务白名单键，禁止出现凭据/完整学号/私有对象键/私有 URL。
 model AdminLog {
   id         String   @id @default(cuid())
   adminId    String
@@ -660,10 +698,18 @@ model AdminLog {
   targetType String
   targetId   String
   detail     String?
+  // campus-scoped 操作的目标校区（可空 = 全局操作）
+  campusId   String?
+  // 机器可读执行结果（6A 全部写入路径为 SUCCESS；失败尝试仅记结构化日志）
+  result     String   @default("SUCCESS")
+  // 白名单结构化元数据（经 recordAdminAudit 过滤），可空
+  metadata   Json?
   createdAt  DateTime @default(now())
   admin      User     @relation("AdminActor", fields: [adminId], references: [id], onDelete: Cascade)
+  campus     Campus?  @relation(fields: [campusId], references: [id])
 
   @@index([adminId, createdAt])
+  @@index([targetType, targetId, createdAt])
 }
 
 // ============================================================
@@ -1194,4 +1240,141 @@ model DataHold {
 
   @@index([subjectType, subjectId, status])
   @@index([status, type, createdAt])
+}
+
+// ============================================================
+// Phase 6A：身份 / 校园成员 / 认证策略 / RBAC 模型
+// ============================================================
+
+enum CampusMembershipStatus {
+  // 已申请加入（6A 注册路径直接 ACTIVE，PENDING 为未来加入审批预留）
+  PENDING
+  ACTIVE
+  REJECTED
+  // 校园级停用（账号级停用仍在 User.status，二者独立判定，均须 ACTIVE 才放行）
+  SUSPENDED
+  LEFT
+}
+
+enum RoleScope {
+  // 平台级角色：权限覆盖所有校区
+  GLOBAL
+  // 校园级角色：权限仅在 campusId 匹配的目标校区内生效
+  CAMPUS
+}
+
+// 与 LegalDocument 同一版本化原则：PUBLISHED 即不可变
+// （version/instructions/contentHash/effectiveAt 一经发布不得原地修改），
+// 变更必须创建更高版本；current = PUBLISHED + effectiveAt<=now 中 version 最高。
+enum CampusVerificationPolicyStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+}
+
+// User ↔ Campus 的成员关系。membership 存在 != membership active；
+// 一切 campus-scoped 操作必须经中央 resolver
+// （src/lib/campus/membership-service.ts）解析 ACTIVE membership。
+model CampusMembership {
+  id            String                 @id @default(cuid())
+  userId        String
+  campusId      String
+  status        CampusMembershipStatus @default(PENDING)
+  createdAt     DateTime               @default(now())
+  updatedAt     DateTime               @updatedAt
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campus        Campus                 @relation(fields: [campusId], references: [id])
+  // 当前产品单 active campus：一个 membership 至多一条认证记录
+  verifications UserVerification[]
+
+  // membership 身份唯一性由数据库表达，不依赖 TypeScript if
+  @@unique([userId, campusId])
+  @@index([userId, status])
+  @@index([campusId, status])
+}
+
+// 校园认证策略（per-campus 版本化）。创建/发布入口 6A 仅暴露 service seam
+// （测试/seed 使用），管理界面属于 Phase 7，与 LegalDocument 同先例。
+model CampusVerificationPolicy {
+  id            String                         @id @default(cuid())
+  campusId      String
+  campus        Campus                         @relation(fields: [campusId], references: [id])
+  version       Int
+  status        CampusVerificationPolicyStatus @default(DRAFT)
+  title         String
+  // 展示给用户的认证要求说明；canonical content = 本字段 UTF-8 原文
+  instructions  String                         @db.Text
+  // 对 canonical content 的 SHA-256（hex 小写），认证证据反查用
+  contentHash   String
+  effectiveAt   DateTime
+  publishedAt   DateTime?
+  createdById   String?
+  createdAt     DateTime                       @default(now())
+  updatedAt     DateTime                       @updatedAt
+  verifications UserVerification[]
+
+  @@unique([campusId, version])
+  @@index([campusId, status, effectiveAt])
+}
+
+// 角色是 permission 的集合。业务授权依据是 permission，不是 role name：
+// 禁止 `role.key === "PLATFORM_ADMIN"` 之类业务判断，一律走
+// src/lib/rbac/service.ts 的 hasPermission / requirePermission。
+model Role {
+  id              String               @id @default(cuid())
+  key             String               @unique
+  name            String
+  scope           RoleScope            @default(GLOBAL)
+  // 系统内置角色不可删除；权限集合只能通过 bootstrap 幂等收敛
+  isSystem        Boolean              @default(false)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  rolePermissions RolePermission[]
+  userRoles       UserRoleAssignment[]
+}
+
+// permission key 为稳定 machine-readable 标识（如 "verification.review"），
+// 定义唯一来源：src/lib/rbac/permissions.ts。未知 permission 一律 DENY。
+model Permission {
+  id              String           @id @default(cuid())
+  key             String           @unique
+  description     String?
+  createdAt       DateTime         @default(now())
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+}
+
+// 角色授予。GLOBAL 角色行 campusId 为 null、scopeKey="GLOBAL"；
+// CAMPUS 角色行 campusId 必填、scopeKey="CAMPUS:<campusId>"。
+// scopeKey 兜底 Postgres 唯一约束不把 NULL 视为相等的问题，
+// 与 campusId 的一致性由 assignment service 维护。
+// 角色授予（命名注：与遗留 UserRole 枚举区分；遗留枚举仅为 User.role 展示字段服务）。
+// GLOBAL 角色行 campusId 为 null、scopeKey="GLOBAL"；
+// CAMPUS 角色行 campusId 必填、scopeKey="CAMPUS:<campusId>"。
+// scopeKey 兜底 Postgres 唯一约束不把 NULL 视为相等的问题，
+// 与 campusId 的一致性由 assignment service 维护。
+model UserRoleAssignment {
+  id           String   @id @default(cuid())
+  userId       String
+  roleId       String
+  campusId     String?
+  scopeKey     String
+  assignedById String?
+  assignedAt   DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role         Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  campus       Campus?  @relation(fields: [campusId], references: [id])
+
+  @@unique([userId, roleId, scopeKey])
+  @@index([userId])
+  @@index([roleId])
 }

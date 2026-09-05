@@ -1,12 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, resolvePrivateAssetAccess, resolvePublicAssetUrl } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getVerifiedSession, resolvePrivateAssetAccess, resolvePublicAssetUrl } = vi.hoisted(() => ({
+  getVerifiedSession: vi.fn(),
   resolvePrivateAssetAccess: vi.fn(),
   resolvePublicAssetUrl: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({ auth }));
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
+  VERIFIED_SESSION_HTTP_STATUS: {
+    UNAUTHENTICATED: 401,
+    ACCOUNT_INACTIVE: 401,
+    LEGAL_ACCEPTANCE_REQUIRED: 403,
+  },
+}));
 
 vi.mock("@/lib/asset-service", () => ({
   resolvePrivateAssetAccess,
@@ -29,13 +36,27 @@ function callGet(assetId = "asset-1") {
 
 describe("GET /api/assets/[assetId]/access", () => {
   beforeEach(() => {
-    auth.mockReset().mockResolvedValue({ user: { id: "user-1", role: "STUDENT" } });
+    getVerifiedSession
+      .mockReset()
+      .mockResolvedValue({
+        ok: true,
+        user: { id: "user-1", email: "u@example.com", name: "用户", role: "STUDENT" },
+      });
     resolvePrivateAssetAccess.mockReset();
     resolvePublicAssetUrl.mockReset();
   });
 
   it("returns 401 for anonymous requests", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
+
+    const response = await callGet();
+
+    expect(response.status).toBe(401);
+    expect(resolvePrivateAssetAccess).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 for inactive accounts（旧 JWT 在停用/注销后失效）", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "ACCOUNT_INACTIVE" });
 
     const response = await callGet();
 
@@ -46,6 +67,7 @@ describe("GET /api/assets/[assetId]/access", () => {
   it("returns a same-origin content proxy url for the asset owner (no internal endpoint leak)", async () => {
     resolvePrivateAssetAccess.mockResolvedValue({
       ok: true,
+      grantedBy: "owner",
       asset: {
         bucket: "campus-private",
         objectKey: "private/verification/u1/x.webp",
@@ -66,10 +88,14 @@ describe("GET /api/assets/[assetId]/access", () => {
     expect(body).not.toHaveProperty("expiresIn");
   });
 
-  it("keeps the same-origin proxy contract for admins", async () => {
-    auth.mockResolvedValue({ user: { id: "admin-1", role: "ADMIN" } });
+  it("keeps the same-origin proxy contract for governance permission access", async () => {
+    getVerifiedSession.mockResolvedValue({
+      ok: true,
+      user: { id: "reviewer-1", email: "r@example.com", name: "审核员", role: "ADMIN" },
+    });
     resolvePrivateAssetAccess.mockResolvedValue({
       ok: true,
+      grantedBy: "permission",
       asset: { bucket: "campus-private", objectKey: "private/report/u2/y.webp", category: "REPORT" },
     });
 
@@ -80,6 +106,7 @@ describe("GET /api/assets/[assetId]/access", () => {
       url: "/api/assets/asset-1/content",
       access: "PRIVATE",
     });
+    expect(resolvePrivateAssetAccess).toHaveBeenCalledWith("asset-1", { id: "reviewer-1" });
   });
 
   it("hides existence with 404 for missing or deleted assets", async () => {

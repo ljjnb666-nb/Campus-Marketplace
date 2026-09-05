@@ -22,6 +22,7 @@ import {
   parseAssetReference,
 } from "@/lib/asset-ref";
 import { isUploadCategory, UPLOAD_LIMITS, type UploadCategory } from "@/lib/upload-limits";
+import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
 
 export { buildAssetReference, isAssetReference, parseAssetReference };
 
@@ -730,25 +731,50 @@ export async function applyVerificationAssetRetention(
 // 私有资源访问授权
 // ============================================================
 
+export type PrivateAssetGrantedBy = "owner" | "order_participant" | "permission";
+
 export type PrivateAssetAccessResult =
-  | { ok: true; asset: UploadedAsset & { rentalOrder: { renterId: string; ownerId: string } | null } }
+  | {
+      ok: true;
+      asset: UploadedAsset & {
+        rentalOrder: { renterId: string; ownerId: string; rentalListing: { campusId: string } | null } | null;
+      };
+      grantedBy: PrivateAssetGrantedBy;
+    }
   | { ok: false; reason: "not_found" | "not_private" | "expired" | "forbidden" };
 
 /**
- * 私有资源访问授权：
- * - VERIFICATION：仅资源本人与 ADMIN
- * - HANDOVER / RETURN / REPORT：资源本人、对应租赁订单的租客/出租者、ADMIN
+ * 私有资源访问授权（Phase 6A 收敛到中央 RBAC）：
+ * - owner 本人：账号 active 即可
+ * - HANDOVER / RETURN / REPORT：对应租赁订单的租客/出租者
+ * - 治理/审核访问：`asset.sensitive.read` permission（取代旧 role 判定），
+ *   campus-scoped 授权必须与资产所属校区精确匹配（默认拒绝；
+ *   资产校区不可解析时仅 GLOBAL 授权放行）
  * - UPLOADING（上传中）/已删除/待删除 → not_found；已过保留期 → expired
+ *
+ * 资产校区解析（按绑定关系）：认证材料 → membership.campusId；
+ * 租赁单/租赁列表 → rentalListing.campusId；商品/服务 → 各自 listing；
+ * 其余（头像/举报附件）→ owner 的 ACTIVE membership 校区。
  */
 export async function resolvePrivateAssetAccess(
   assetId: string,
-  user: { id: string; role: string },
+  user: { id: string },
   now = new Date(),
 ): Promise<PrivateAssetAccessResult> {
   const asset = await prisma.uploadedAsset.findFirst({
     where: { id: assetId },
     include: {
-      rentalOrder: { select: { renterId: true, ownerId: true } },
+      rentalOrder: {
+        select: {
+          renterId: true,
+          ownerId: true,
+          rentalListing: { select: { campusId: true } },
+        },
+      },
+      verification: { select: { membership: { select: { campusId: true } } } },
+      rentalListing: { select: { campusId: true } },
+      product: { select: { campusId: true } },
+      serviceListing: { select: { campusId: true } },
     },
   });
 
@@ -767,9 +793,15 @@ export async function resolvePrivateAssetAccess(
     return { ok: false, reason: "expired" };
   }
 
-  const isAdmin = user.role === "ADMIN";
-  if (isAdmin || asset.ownerId === user.id) {
-    return { ok: true, asset };
+  // 访问者账号状态复核（active-account enforcement，与 Phase 5 一致）：
+  // 停用/已删除/已注销账号的一切私有资源访问 fail closed
+  const context = await loadAuthorizationContext(user.id);
+  if (!context || !context.accountActive) {
+    return { ok: false, reason: "forbidden" };
+  }
+
+  if (asset.ownerId === user.id) {
+    return { ok: true, asset, grantedBy: "owner" };
   }
 
   const order = asset.rentalOrder;
@@ -778,7 +810,30 @@ export async function resolvePrivateAssetAccess(
 
   const categoryAllowsOrderParticipants: AssetCategory[] = ["HANDOVER", "RETURN", "REPORT"];
   if (orderParticipant && categoryAllowsOrderParticipants.includes(asset.category)) {
-    return { ok: true, asset };
+    return { ok: true, asset, grantedBy: "order_participant" };
+  }
+
+  const targetCampusId =
+    asset.verification?.membership.campusId ??
+    asset.rentalOrder?.rentalListing.campusId ??
+    asset.rentalListing?.campusId ??
+    asset.product?.campusId ??
+    asset.serviceListing?.campusId ??
+    null;
+
+  const permissionTargetCampusId =
+    targetCampusId ??
+    (
+      await prisma.campusMembership.findFirst({
+        where: { userId: asset.ownerId, status: "ACTIVE" },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { campusId: true },
+      })
+    )?.campusId ??
+    null;
+
+  if (hasPermission(context, "asset.sensitive.read", permissionTargetCampusId)) {
+    return { ok: true, asset, grantedBy: "permission" };
   }
 
   return { ok: false, reason: "forbidden" };
@@ -807,13 +862,22 @@ export async function createPrivateAssetSignedUrl(asset: {
  * 授权），由 server 使用内部凭据经 S3_ENDPOINT 读取对象内容。
  * self-hosted 生产部署下浏览器无法解析内部 endpoint（如 http://minio:9000），
  * 私有对象必须经由本函数由应用读取后转发。错误路径不泄露 bucket/objectKey/端点。
+ * 返回 grantedBy/category 供调用方记录敏感访问审计（VERIFICATION 材料的
+ * permission 路径访问本身即审计事件）。
  */
 export async function readPrivateAssetObject(
   assetId: string,
-  user: { id: string; role: string },
+  user: { id: string },
   now = new Date(),
 ): Promise<
-  | { ok: true; body: Buffer; contentType: string | null; sizeBytes: number }
+  | {
+      ok: true;
+      body: Buffer;
+      contentType: string | null;
+      sizeBytes: number;
+      grantedBy: PrivateAssetGrantedBy;
+      category: AssetCategory;
+    }
   | { ok: false; reason: "not_found" | "forbidden" | "expired" }
 > {
   const access = await resolvePrivateAssetAccess(assetId, user, now);
@@ -835,6 +899,8 @@ export async function readPrivateAssetObject(
     body: object.body,
     contentType: object.contentType,
     sizeBytes: object.sizeBytes,
+    grantedBy: access.grantedBy,
+    category: access.asset.category,
   };
 }
 

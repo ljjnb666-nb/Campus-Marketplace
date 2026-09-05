@@ -5,7 +5,7 @@ import { actionErrorMessage } from "@/lib/error-handler";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
-import { applyVerificationAssetRetention } from "@/lib/upload";
+import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -226,50 +226,14 @@ export async function reviewVerification(
       return invalidFormState();
     }
 
-    const reviewedAt = new Date();
-
-    await withTransaction(async (tx) => {
-      await tx.userVerification.update({
-        where: { id: parsed.data.verificationId },
-        data: {
-          status: parsed.data.status,
-          reviewNote: parsed.data.reviewNote || null,
-          reviewedAt,
-        },
-      });
-
-      await tx.user.update({
-        where: { id: parsed.data.userId },
-        data: {
-          verificationStatus: parsed.data.status,
-        },
-      });
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: parsed.data.status === "VERIFIED" ? "APPROVE_VERIFICATION" : "REJECT_VERIFICATION",
-          targetType: "USER_VERIFICATION",
-          targetId: parsed.data.verificationId,
-          detail: parsed.data.reviewNote || null,
-        },
-      });
-
-      await createNotification(tx, {
-        userId: parsed.data.userId,
-        type: "SYSTEM",
-        title: parsed.data.status === "VERIFIED" ? "校园认证已通过" : "校园认证未通过",
-        content:
-          parsed.data.status === "VERIFIED"
-            ? "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。"
-            : `你的校园认证未通过审核。${
-                parsed.data.reviewNote ? `原因：${parsed.data.reviewNote}` : "请完善材料后重新提交。"
-              }`,
-      });
-
-      // 敏感材料保留期：审核出结果后 VERIFICATION_ASSET_RETENTION_DAYS 天
-      // 由 cleanup 删除学生证原图（认证结论保留，见 docs/STORAGE.md）
-      await applyVerificationAssetRetention(tx, parsed.data.verificationId, reviewedAt);
+    // Phase 6A：审核决定走中央认证状态机（subject 锁 → verification.review
+    // permission 复核 → 账号状态复核 → transition 断言 → 写 + 审计）。
+    // 自审拒绝 / 跨校区 scope 不匹配 / 非法流转在 service 内 fail closed。
+    await decideMembershipVerification({
+      actorId: admin.id,
+      verificationId: parsed.data.verificationId,
+      decision: parsed.data.status,
+      reviewNote: parsed.data.reviewNote || null,
     });
 
     revalidatePath("/admin");

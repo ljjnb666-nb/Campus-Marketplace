@@ -143,29 +143,66 @@ describe("requireUser", () => {
   });
 });
 
-describe("requireAdmin", () => {
-  it("redirects home when the user is not an admin", async () => {
+describe("requireAdmin（Phase 6A 兼容桥：permission 判定）", () => {
+  const ADMIN_BASE = {
+    ...ACTIVE_USER,
+    id: "admin-1",
+    role: "ADMIN" as const,
+    name: "管理员",
+  };
+
+  const ADMIN_WITH_GRANT = {
+    ...ADMIN_BASE,
+    memberships: [],
+    userRoles: [
+      {
+        campusId: null,
+        role: {
+          key: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          rolePermissions: [{ permission: { key: "verification.review" } }],
+        },
+      },
+    ],
+  };
+
+  it("redirects home when the user holds no admin permission", async () => {
     mockAuth.mockResolvedValue({
       user: { id: "user-1", role: "STUDENT" },
     });
-    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, name: "普通学生" });
+    mockFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      name: "普通学生",
+      memberships: [],
+      userRoles: [],
+    });
 
     await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");
     expect(mockRedirect).toHaveBeenCalledWith("/");
   });
 
-  it("returns the admin user", async () => {
+  it("denies legacy role=ADMIN without a UserRoleAssignment（单一授权来源锁定）", async () => {
+    // User.role 字段不再是授权依据：migration/seed 未同步授予角色时必须拒绝
+    mockAuth.mockResolvedValue({
+      user: { id: "admin-1", role: "ADMIN" },
+    });
+    mockFindUnique.mockResolvedValue({
+      ...ADMIN_BASE,
+      memberships: [],
+      userRoles: [],
+    });
+
+    await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");
+    expect(mockRedirect).toHaveBeenCalledWith("/");
+  });
+
+  it("returns the admin user when a PLATFORM_ADMIN grant exists", async () => {
     mockAuth.mockResolvedValue({
       user: { id: "admin-1", role: "ADMIN", name: "管理员" },
     });
-    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, id: "admin-1", role: "ADMIN", name: "管理员" });
+    mockFindUnique.mockResolvedValue({ ...ADMIN_WITH_GRANT });
 
-    await expect(requireAdmin()).resolves.toEqual({
-      ...ACTIVE_USER,
-      id: "admin-1",
-      role: "ADMIN",
-      name: "管理员",
-    });
+    await expect(requireAdmin()).resolves.toEqual({ ...ADMIN_WITH_GRANT });
   });
 });
 

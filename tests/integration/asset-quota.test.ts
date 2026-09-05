@@ -245,7 +245,7 @@ describe.skipIf(!integrationDatabaseUrl)("上传配额并发与崩溃恢复集�
 
     it("UPLOADING 状态对私有访问不可见（not_found）", async () => {
       const asset = await simulateCrashedReservation(false);
-      const result = await resolvePrivateAssetAccess(asset.id, { id: userId, role: "STUDENT" });
+      const result = await resolvePrivateAssetAccess(asset.id, { id: userId });
       expect(result).toEqual({ ok: false, reason: "not_found" });
       await runStorageCleanup();
     });

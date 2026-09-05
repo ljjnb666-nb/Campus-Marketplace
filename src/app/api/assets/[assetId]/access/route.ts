@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
 import {
   resolvePrivateAssetAccess,
   resolvePublicAssetUrl,
 } from "@/lib/asset-service";
+import {
+  getVerifiedSession,
+  VERIFIED_SESSION_HTTP_STATUS,
+} from "@/lib/server-auth";
 import { withHttpMetrics } from "@/lib/http-metrics";
 import { logger } from "@/lib/logger";
 
@@ -17,7 +20,10 @@ export const dynamic = "force-dynamic";
  *   内部 endpoint，且该 URL 会泄露内部基础设施信息）。
  * - PUBLIC 资源：直接返回公开 URL（无需签名）
  *
- * 状态码约定：401 未登录 / 403 无权 / 404 不存在（含已删除）/ 410 已过保留期
+ * Phase 6A：治理/审核访问走 `asset.sensitive.read` permission（含 campus
+ * scope），取代旧 role 判定；停用/注销账号的旧 JWT 在此失效（401）。
+ *
+ * 状态码约定：401 未登录/账号不可用 / 403 无权 / 404 不存在（含已删除）/ 410 已过保留期
  */
 async function getHandler(
   _request: Request,
@@ -26,15 +32,17 @@ async function getHandler(
   const startedAt = Date.now();
   const { assetId } = await params;
 
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ message: "未登录，请先登录" }, { status: 401 });
+  const session = await getVerifiedSession({ requireConsent: false });
+  if (!session.ok) {
+    return NextResponse.json(
+      { message: session.reason === "UNAUTHENTICATED" ? "未登录，请先登录" : "账号当前不可用" },
+      { status: VERIFIED_SESSION_HTTP_STATUS[session.reason] },
+    );
   }
   const userId = session.user.id;
-  const role = session.user.role ?? "STUDENT";
 
   try {
-    const result = await resolvePrivateAssetAccess(assetId, { id: userId, role });
+    const result = await resolvePrivateAssetAccess(assetId, { id: userId });
 
     if (!result.ok) {
       if (result.reason === "not_private") {

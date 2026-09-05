@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { registerSchema } from "@/validators/auth";
 import { isRateLimited } from "@/lib/rate-limit";
 import { prisma, withTransaction } from "@/lib/prisma";
+import { createActiveMembership } from "@/lib/campus/membership-service";
 import {
   isGovernanceError,
 } from "@/lib/governance/domain-errors";
@@ -75,6 +76,9 @@ export async function registerUser(
     // 用户创建与同意证据同事务：不存在"已注册但无同意记录"的中间态，
     // 也不存在"同意记录指向非当前版本"的中间态（recordSignupAcceptances
     // 内部 fail-closed 校验当前 required 集合）。
+    // Phase 6A：注册同事务建立 ACTIVE CampusMembership（加入校区开放，
+    // 学生认证是独立的更高信任层级）；后续一切 campus-scoped 逻辑
+    // 经中央 membership resolver，不再裸读 User.campusId 判资格。
     await withTransaction(async (tx) => {
       const user = await tx.user.create({
         data: {
@@ -84,6 +88,11 @@ export async function registerUser(
           schoolName: parsed.data.schoolName,
           campusId: parsed.data.campusId,
         },
+      });
+
+      await createActiveMembership(tx, {
+        userId: user.id,
+        campusId: parsed.data.campusId,
       });
 
       await recordSignupAcceptances(tx, user.id, parsed.data.acceptedDocumentIds);
