@@ -19,6 +19,7 @@ export const RBAC_ERROR_CODES = [
   "ROLE_ASSIGNMENT_INVALID_SCOPE",
   "ROLE_ASSIGNMENT_SELF_DENIED",
   "ROLE_ASSIGNMENT_CAMPUS_MISMATCH",
+  "ROLE_ASSIGNMENT_TARGET_MEMBERSHIP_INACTIVE",
 ] as const;
 
 export type RbacErrorCode = (typeof RBAC_ERROR_CODES)[number];
@@ -35,6 +36,7 @@ const STATUS_BY_CODE: Record<RbacErrorCode, number> = {
   ROLE_ASSIGNMENT_INVALID_SCOPE: 409,
   ROLE_ASSIGNMENT_SELF_DENIED: 403,
   ROLE_ASSIGNMENT_CAMPUS_MISMATCH: 403,
+  ROLE_ASSIGNMENT_TARGET_MEMBERSHIP_INACTIVE: 409,
 };
 
 export class RbacError extends Error {
@@ -71,6 +73,7 @@ export function rbacError(
     ROLE_ASSIGNMENT_INVALID_SCOPE: "角色授予参数无效",
     ROLE_ASSIGNMENT_SELF_DENIED: "不能变更自己的角色",
     ROLE_ASSIGNMENT_CAMPUS_MISMATCH: "无权在该校区执行角色授予",
+    ROLE_ASSIGNMENT_TARGET_MEMBERSHIP_INACTIVE: "目标用户当前不是该校区生效成员，无法授予校区角色",
   };
 
   const userMessage =

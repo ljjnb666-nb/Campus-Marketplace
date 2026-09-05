@@ -6,6 +6,7 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
+import { isPrivilegedTarget } from "@/lib/rbac/service";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -324,15 +325,17 @@ export async function toggleUserStatus(
 
     const target = await prisma.user.findUnique({
       where: { id: parsed.data.userId },
-      select: { role: true },
+      select: { id: true },
     });
 
     if (!target) {
       return { success: false, error: "用户不存在" };
     }
 
-    // 其他管理员同样依赖后台权限，停用后无法自助恢复，一律拒绝
-    if (target.role === "ADMIN") {
+    // Repair 1：高权限目标保护以 RBAC 授权上下文判定（full-admin 等价），
+    // 不读取 User.role——RBAC 平台管理员即使 role=STUDENT 也受保护；
+    // 授权已被撤回的用户即使 role=ADMIN 也不再受保护
+    if (await isPrivilegedTarget(parsed.data.userId)) {
       return { success: false, error: "不能停用或恢复其他管理员账号" };
     }
 

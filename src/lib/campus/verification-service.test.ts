@@ -8,7 +8,7 @@ const {
   txVerificationFindUnique,
   txVerificationUpdate,
   txMembershipFindFirst,
-  acquireGovernanceSubjectLock,
+  acquireGovernanceSubjectLocks,
   acquireCampusVerificationPolicyLocks,
   getCurrentVerificationPolicyMock,
   resolveImageTokens,
@@ -24,7 +24,7 @@ const {
   txVerificationFindUnique: vi.fn(),
   txVerificationUpdate: vi.fn(),
   txMembershipFindFirst: vi.fn(),
-  acquireGovernanceSubjectLock: vi.fn(),
+  acquireGovernanceSubjectLocks: vi.fn(),
   acquireCampusVerificationPolicyLocks: vi.fn(),
   getCurrentVerificationPolicyMock: vi.fn(),
   resolveImageTokens: vi.fn(),
@@ -45,7 +45,7 @@ vi.mock("@/lib/upload", () => ({
 }));
 
 vi.mock("@/lib/governance/governance-lock", () => ({
-  acquireGovernanceSubjectLock,
+  acquireGovernanceSubjectLocks,
   acquireCampusVerificationPolicyLocks,
 }));
 
@@ -109,7 +109,7 @@ function globalReviewer(): AuthorizationContext {
   return {
     userId: "reviewer-1",
     accountActive: true,
-    activeMembership: null,
+    activeCampusIds: [],
     grants: [
       {
         roleKey: "PLATFORM_ADMIN",
@@ -133,7 +133,7 @@ beforeEach(() => {
   txVerificationFindUnique.mockReset().mockResolvedValue(null);
   txVerificationUpdate.mockReset().mockResolvedValue({ id: "verification-1" });
   txMembershipFindFirst.mockReset().mockResolvedValue({ ...ACTIVE_MEMBERSHIP });
-  acquireGovernanceSubjectLock.mockReset().mockResolvedValue(undefined);
+  acquireGovernanceSubjectLocks.mockReset().mockResolvedValue(undefined);
   acquireCampusVerificationPolicyLocks.mockReset().mockResolvedValue(undefined);
   getCurrentVerificationPolicyMock.mockReset().mockResolvedValue(PUBLISHED_POLICY);
   resolveImageTokens.mockReset().mockResolvedValue(["asset:asset-1"]);
@@ -173,7 +173,9 @@ describe("submitMembershipVerification（学生侧提交）", () => {
   it("records the policy snapshot evidence and binds the private asset", async () => {
     const result = await submitMembershipVerification(input);
 
-    expect(acquireGovernanceSubjectLock).toHaveBeenCalledWith(txStub, "USER", "user-1");
+    expect(acquireGovernanceSubjectLocks).toHaveBeenCalledWith(txStub, [
+      { subjectType: "USER", subjectId: "user-1" },
+    ]);
     expect(acquireCampusVerificationPolicyLocks).toHaveBeenCalledWith(txStub, ["campus-a"]);
     expect(txVerificationUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -206,6 +208,25 @@ describe("submitMembershipVerification（学生侧提交）", () => {
     });
     expect(createNotification).toHaveBeenCalled();
     expect(result).toEqual({ id: "verification-1" });
+  });
+
+  it("rebinds membershipId on resubmission（Repair 1：A→B 重绑）", async () => {
+    txVerificationFindUnique.mockResolvedValue({ status: "VERIFIED" });
+
+    await submitMembershipVerification(input);
+
+    expect(txVerificationUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: "user-1" },
+        update: expect.objectContaining({
+          membershipId: "m-1",
+          status: "PENDING",
+        }),
+        create: expect.objectContaining({
+          membershipId: "m-1",
+        }),
+      }),
+    );
   });
 
   it("allows submissions without a published policy（证据如实记录 null）", async () => {
@@ -258,7 +279,7 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
     userId: "user-1",
     status: "PENDING" as const,
     policyVersion: 3,
-    membership: { campusId: "campus-a" },
+    membership: { campusId: "campus-a", status: "ACTIVE" },
   };
 
   beforeEach(() => {
@@ -276,7 +297,10 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
       reviewNote: "材料齐全",
     });
 
-    expect(acquireGovernanceSubjectLock).toHaveBeenCalledWith(txStub, "USER", "user-1");
+    expect(acquireGovernanceSubjectLocks).toHaveBeenCalledWith(txStub, [
+      { subjectType: "USER", subjectId: "reviewer-1" },
+      { subjectType: "USER", subjectId: "user-1" },
+    ]);
     expect(txVerificationUpdate).toHaveBeenCalledWith({
       where: { id: "verification-1" },
       data: expect.objectContaining({
@@ -313,7 +337,7 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
     loadAuthorizationContextMock.mockResolvedValue({
       userId: "reviewer-1",
       accountActive: true,
-      activeMembership: null,
+      activeCampusIds: [],
       grants: [],
     });
 
@@ -331,7 +355,7 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
     loadAuthorizationContextMock.mockResolvedValue({
       userId: "reviewer-b",
       accountActive: true,
-      activeMembership: null,
+      activeCampusIds: ["campus-b"],
       grants: [
         {
           roleKey: "CAMPUS_REVIEWER_B",
@@ -352,11 +376,11 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
     expect(txVerificationUpdate).not.toHaveBeenCalled();
   });
 
-  it("allows campus-scoped reviewers within their own campus", async () => {
+  it("allows campus-scoped reviewers within their own campus（active membership 命中）", async () => {
     loadAuthorizationContextMock.mockResolvedValue({
       userId: "reviewer-a",
       accountActive: true,
-      activeMembership: null,
+      activeCampusIds: ["campus-a"],
       grants: [
         {
           roleKey: "CAMPUS_REVIEWER_A",
@@ -385,6 +409,53 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
       }),
     ).rejects.toMatchObject({ code: "VERIFICATION_SELF_REVIEW_DENIED" });
     expect(txVerificationUpdate).not.toHaveBeenCalled();
+  });
+
+  it("denies decisions when the verification's membership is no longer ACTIVE（Repair 1：锁内重读断言）", async () => {
+    for (const status of ["SUSPENDED", "LEFT", "REJECTED"] as const) {
+      txVerificationFindUnique.mockResolvedValue({
+        ...PENDING_VERIFICATION,
+        membership: { campusId: "campus-a", status },
+      });
+
+      await expect(
+        decideMembershipVerification({
+          actorId: "reviewer-1",
+          verificationId: "verification-1",
+          decision: "VERIFIED",
+        }),
+      ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    }
+
+    expect(txVerificationUpdate).not.toHaveBeenCalled();
+    expect(recordAdminAudit).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the membership inside the lock instead of trusting the pre-lock row", async () => {
+    // pre-read（定位 target）与锁内重读由两次 findUnique 完成：重读必须带 membership include
+    const calls: Array<Record<string, unknown>> = [];
+    txVerificationFindUnique.mockImplementation((args: Record<string, unknown>) => {
+      calls.push(args);
+      if (calls.length === 1) {
+        return Promise.resolve({ id: "verification-1", userId: "user-1" });
+      }
+      return Promise.resolve({ ...PENDING_VERIFICATION });
+    });
+
+    await decideMembershipVerification({
+      actorId: "reviewer-1",
+      verificationId: "verification-1",
+      decision: "VERIFIED",
+    });
+
+    expect(calls[0]).toEqual({
+      where: { id: "verification-1" },
+      select: { id: true, userId: true },
+    });
+    expect(calls[1]).toMatchObject({
+      where: { id: "verification-1" },
+      include: { membership: { select: { campusId: true, status: true } } },
+    });
   });
 
   it("denies decisions on erased accounts（锁内复核 fail closed）", async () => {

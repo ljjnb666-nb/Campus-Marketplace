@@ -14,9 +14,11 @@ vi.mock("@/lib/prisma", () => ({
 
 import {
   hasAnyPermission,
+  hasFullAdminSurfaceAccess,
   hasPermission,
   loadAuthorizationContext,
 } from "@/lib/rbac/service";
+import { ADMIN_SURFACE_PERMISSION_KEYS } from "@/lib/rbac/permissions";
 
 const PLATFORM_ADMIN_GRANT = {
   campusId: null,
@@ -64,20 +66,35 @@ describe("loadAuthorizationContext", () => {
     expect(erased?.accountActive).toBe(false);
   });
 
-  it("resolves the single active membership deterministically", async () => {
+  it("collects ALL active membership campus ids（多校区模型）", async () => {
     mockFindUnique.mockResolvedValue(
       buildUserRow({
-        memberships: [{ id: "m-1", campusId: "campus-a", status: "ACTIVE" }],
+        memberships: [
+          { id: "m-1", campusId: "campus-a", status: "ACTIVE" },
+          { id: "m-2", campusId: "campus-b", status: "ACTIVE" },
+        ],
       }),
     );
 
     const context = await loadAuthorizationContext("user-1");
 
-    expect(context?.activeMembership).toEqual({
-      id: "m-1",
-      campusId: "campus-a",
-      status: "ACTIVE",
-    });
+    expect(context?.activeCampusIds).toEqual(["campus-a", "campus-b"]);
+  });
+
+  it("exposes the ACTIVE-only filter in the membership query（PENDING/SUSPENDED/LEFT 不进入上下文）", async () => {
+    mockFindUnique.mockResolvedValue(buildUserRow({}));
+
+    await loadAuthorizationContext("user-1");
+
+    expect(mockFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          memberships: expect.objectContaining({
+            where: { status: "ACTIVE" },
+          }),
+        }),
+      }),
+    );
   });
 
   it("flattens role-permission grants", async () => {
@@ -96,11 +113,11 @@ describe("loadAuthorizationContext", () => {
   });
 });
 
-describe("hasPermission（DEFAULT_DENY）", () => {
+describe("hasPermission（DEFAULT_DENY + active membership gate）", () => {
   const globalAdmin = {
     userId: "user-1",
     accountActive: true,
-    activeMembership: null,
+    activeCampusIds: [],
     grants: [
       {
         roleKey: "PLATFORM_ADMIN",
@@ -123,16 +140,20 @@ describe("hasPermission（DEFAULT_DENY）", () => {
     expect(hasPermission(globalAdmin, unknown)).toBe(false);
   });
 
-  it("allows global grants regardless of the target campus", () => {
+  it("GLOBAL + active account + no membership => ALLOW（平台管理员不受 membership 限制）", () => {
+    expect(globalAdmin.activeCampusIds).toEqual([]);
     expect(hasPermission(globalAdmin, "verification.review")).toBe(true);
     expect(hasPermission(globalAdmin, "verification.review", "campus-z")).toBe(true);
   });
 
-  it("allows campus grants only for the exact target campus", () => {
-    const campusReviewer = {
+  it.each([
+    ["missing membership", [] as string[]],
+    ["PENDING/REJECTED/SUSPENDED/LEFT membership（不进入 activeCampusIds）", [] as string[]],
+  ])("CAMPUS grant + %s => DENY", (_label, activeCampusIds) => {
+    const reviewer = {
       userId: "user-2",
       accountActive: true,
-      activeMembership: null,
+      activeCampusIds,
       grants: [
         {
           roleKey: "CAMPUS_REVIEWER",
@@ -143,11 +164,131 @@ describe("hasPermission（DEFAULT_DENY）", () => {
       ],
     };
 
-    expect(hasPermission(campusReviewer, "verification.review", "campus-a")).toBe(true);
-    // 跨校区（关键安全不变量）
-    expect(hasPermission(campusReviewer, "verification.review", "campus-b")).toBe(false);
-    // 未指明目标校区的 campus-scoped 授权 → DENY
-    expect(hasPermission(campusReviewer, "verification.review")).toBe(false);
+    expect(hasPermission(reviewer, "verification.review", "campus-a")).toBe(false);
+  });
+
+  it("CAMPUS + exact ACTIVE campus => ALLOW", () => {
+    const reviewer = {
+      userId: "user-2",
+      accountActive: true,
+      activeCampusIds: ["campus-a"],
+      grants: [
+        {
+          roleKey: "CAMPUS_REVIEWER",
+          scope: "CAMPUS" as const,
+          campusId: "campus-a",
+          permissionKeys: ["verification.review"],
+        },
+      ],
+    };
+
+    expect(hasPermission(reviewer, "verification.review", "campus-a")).toBe(true);
+  });
+
+  it("CAMPUS + ACTIVE membership in a different campus => DENY（wrong active campus）", () => {
+    const reviewer = {
+      userId: "user-2",
+      accountActive: true,
+      activeCampusIds: ["campus-b"],
+      grants: [
+        {
+          roleKey: "CAMPUS_REVIEWER",
+          scope: "CAMPUS" as const,
+          campusId: "campus-a",
+          permissionKeys: ["verification.review"],
+        },
+      ],
+    };
+
+    expect(hasPermission(reviewer, "verification.review", "campus-a")).toBe(false);
+    expect(hasPermission(reviewer, "verification.review", "campus-b")).toBe(false);
+  });
+
+  it("keeps denying campus grants without a target campus", () => {
+    const reviewer = {
+      userId: "user-2",
+      accountActive: true,
+      activeCampusIds: ["campus-a"],
+      grants: [
+        {
+          roleKey: "CAMPUS_REVIEWER",
+          scope: "CAMPUS" as const,
+          campusId: "campus-a",
+          permissionKeys: ["verification.review"],
+        },
+      ],
+    };
+
+    expect(hasPermission(reviewer, "verification.review")).toBe(false);
+  });
+});
+
+describe("hasFullAdminSurfaceAccess（legacy full-admin 等价）", () => {
+  function globalGrant(permissionKeys: string[]) {
+    return {
+      roleKey: "CUSTOM_GLOBAL",
+      scope: "GLOBAL" as const,
+      campusId: null,
+      permissionKeys,
+    };
+  }
+
+  it("allows only a GLOBAL grant covering the full legacy admin permission set", () => {
+    const fullAdmin = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [globalGrant([...ADMIN_SURFACE_PERMISSION_KEYS])],
+    };
+
+    expect(hasFullAdminSurfaceAccess(fullAdmin)).toBe(true);
+  });
+
+  it("denies a limited GLOBAL role（细粒度全局权限 ≠ legacy 超管）", () => {
+    const limited = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [globalGrant(["report.review"])],
+    };
+
+    expect(hasFullAdminSurfaceAccess(limited)).toBe(false);
+  });
+
+  it("denies拼接 multiple partial GLOBAL grants", () => {
+    const stitched = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        globalGrant(ADMIN_SURFACE_PERMISSION_KEYS.slice(0, 5)),
+        globalGrant(ADMIN_SURFACE_PERMISSION_KEYS.slice(5)),
+      ],
+    };
+
+    expect(hasFullAdminSurfaceAccess(stitched)).toBe(false);
+  });
+
+  it("denies campus-scoped grants even when covering the full set", () => {
+    const campusFull = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: ["campus-a"],
+      grants: [
+        {
+          roleKey: "CAMPUS_SUPER",
+          scope: "CAMPUS" as const,
+          campusId: "campus-a",
+          permissionKeys: [...ADMIN_SURFACE_PERMISSION_KEYS],
+        },
+      ],
+    };
+
+    expect(hasFullAdminSurfaceAccess(campusFull)).toBe(false);
+  });
+
+  it("denies null context", () => {
+    expect(hasFullAdminSurfaceAccess(null)).toBe(false);
   });
 });
 
@@ -156,7 +297,7 @@ describe("hasAnyPermission", () => {
     const context = {
       userId: "user-1",
       accountActive: true,
-      activeMembership: null,
+      activeCampusIds: [],
       grants: [
         {
           roleKey: "R",

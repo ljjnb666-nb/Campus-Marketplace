@@ -1,13 +1,16 @@
 import { Prisma, type UserRoleAssignment } from "@prisma/client";
 
-import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
+import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { rbacError } from "@/lib/rbac/errors";
 import {
   campusScopeKey,
   GLOBAL_SCOPE_KEY,
 } from "@/lib/rbac/roles";
-import { loadAuthorizationContext } from "@/lib/rbac/service";
+import {
+  loadAuthorizationContext,
+  type AuthorizationContext,
+} from "@/lib/rbac/service";
 import { withTransaction } from "@/lib/prisma";
 
 /**
@@ -15,14 +18,23 @@ import { withTransaction } from "@/lib/prisma";
  *
  * 安全不变量：
  * - 授予/撤回角色本身需要 `rbac.role.assign` permission（DEFAULT_DENY）
- * - 禁止变更自己的角色（self-escalation 面，fail closed）
+ * - 禁止变更自己的角色（self-escalation 面，锁前 fail closed）
  * - CAMPUS 角色必须指明 campusId；GLOBAL 角色必须不指明 campusId
- * - campus-scoped 的 rbac.role.assign 只能授予本校区 CAMPUS 角色，
- *   不能授予 GLOBAL 角色（防跨校区/全局提权）
- * - 目标账号必须 active（与 Phase 5 erasure 共享 subject 治理锁：
- *   锁内复核账号状态，erased/deleted 账号不能被授角色——与注销严格先后）
+ * - CAMPUS-scoped 的 rbac.role.assign 要求 actor 持有该校区 grant
+ *   且 actor 当前是该校区 ACTIVE member（Repair 1：不能只看 grant.campusId）
+ * - 授予 CAMPUS 角色要求 target 是该校区 ACTIVE member（Repair 1）；
+ *   撤回不要求（stale assignment 必须可清理，Repair 1 #8）
+ * - campus-scoped 的授予权不能授予 GLOBAL 角色（防跨校区/全局提权）
+ * - target 账号必须 active（与 Phase 5 erasure 共享 subject 治理锁）
  *
- * 锁序：subject 锁（USER:target）→ 授权/状态复核 → 行写。
+ * Actor serialization（Repair 1，Blocker C）：
+ * 统一 acquireGovernanceSubjectLocks 排序锁 {USER:actor, USER:target}，
+ * 消除"actor 权限检查 → actor 注销/撤权提交 → 特权写随后提交"的 TOCTOU。
+ *
+ * 锁序（PHASE_6A_LOCK_ORDER）：
+ *   governance subject locks（sorted USER:actor + USER:target）
+ *   → actor active/permission 复核 → target active/membership 复核
+ *   → 行写 + 审计
  */
 
 export type RoleAssignmentResult = {
@@ -36,71 +48,67 @@ type RoleGrantContext = {
   targetUserId: string;
   roleKey: string;
   campusId?: string | null;
+  /** 测试 seam：subject 锁取得之后、全部复核之前的受控暂停点（并发测试用） */
+  racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
 };
 
-async function lockAndLoadTarget(
+/** 排序取得 {USER:actor, USER:target} subject 锁（自指时去重为单锁）。 */
+async function acquireActorTargetLocks(
   tx: Prisma.TransactionClient,
+  actorId: string,
   targetUserId: string,
-): Promise<{ id: string; status: string; deletedAt: Date | null; erasedAt: Date | null }> {
-  const firstRead = await tx.user.findUnique({
-    where: { id: targetUserId },
-    select: { id: true, status: true, deletedAt: true, erasedAt: true },
-  });
-
-  if (!firstRead) {
-    throw rbacError("AUTH_PERMISSION_DENIED", "目标用户不存在");
-  }
-
-  await acquireGovernanceSubjectLock(tx, "USER", targetUserId);
-
-  // 锁内重读：check 与 commit 之间的窗口由 subject 锁互斥关闭（TOCTOU）
-  const target = await tx.user.findUnique({
-    where: { id: targetUserId },
-    select: { id: true, status: true, deletedAt: true, erasedAt: true },
-  });
-
-  if (!target || target.deletedAt || target.erasedAt || target.status !== "ACTIVE") {
-    throw rbacError("AUTH_ACCOUNT_INACTIVE");
-  }
-
-  return target;
+): Promise<void> {
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: actorId },
+    { subjectType: "USER", subjectId: targetUserId },
+  ]);
 }
 
 /**
- * 角色授予权限的精确判定（区别于通用 permission 拒绝）：
- * - 完全不持有 rbac.role.assign → AUTH_PERMISSION_DENIED
- * - 持有但 scope 不匹配（campus 授权授予 GLOBAL 角色 / 跨 campus）→
- *   ROLE_ASSIGNMENT_CAMPUS_MISMATCH
- * - 账号非 active → AUTH_ACCOUNT_INACTIVE
+ * actor 前置复核（锁内）：账号 active + 至少持有 rbac.role.assign。
+ * 角色相关的 scope 精确匹配在 role 读出后判定（避免向未授权者泄露角色存在性）。
+ * 返回收窄后的非空 context。
  */
-function assertRoleAssignPermission(
-  context: Awaited<ReturnType<typeof loadAuthorizationContext>>,
-  roleScope: "GLOBAL" | "CAMPUS",
-  targetCampusId: string | null,
-): void {
+function assertActorMayManageRoles(
+  context: AuthorizationContext | null,
+): AuthorizationContext {
   if (!context) {
     throw rbacError("AUTH_PERMISSION_DENIED");
   }
   if (!context.accountActive) {
     throw rbacError("AUTH_ACCOUNT_INACTIVE");
   }
-
-  const holdsPermission = (grant: { scope: string; campusId: string | null; permissionKeys: string[] }) =>
-    grant.permissionKeys.includes("rbac.role.assign");
-
-  if (!context.grants.some(holdsPermission)) {
+  if (!context.grants.some((grant) => grant.permissionKeys.includes("rbac.role.assign"))) {
     throw rbacError("AUTH_PERMISSION_DENIED");
   }
+  return context;
+}
+
+/**
+ * 角色授予 scope 精确判定（Repair 1）：
+ * - GLOBAL 角色：须存在 GLOBAL 授予权
+ * - CAMPUS 角色：须存在该 campus 的 CAMPUS 授予权，且 actor 当前持有
+ *   该校区的 ACTIVE membership（activeCampusIds 命中）
+ */
+function assertRoleAssignScope(
+  context: AuthorizationContext,
+  roleScope: "GLOBAL" | "CAMPUS",
+  targetCampusId: string | null,
+): void {
+  const holdsAssign = (grant: { permissionKeys: string[] }) =>
+    grant.permissionKeys.includes("rbac.role.assign");
 
   const scopeMatched =
     roleScope === "GLOBAL"
-      ? context.grants.some((grant) => grant.scope === "GLOBAL" && holdsPermission(grant))
-      : context.grants.some(
+      ? context.grants.some((grant) => grant.scope === "GLOBAL" && holdsAssign(grant))
+      : targetCampusId != null &&
+        context.grants.some(
           (grant) =>
             grant.scope === "CAMPUS" &&
             grant.campusId === targetCampusId &&
-            holdsPermission(grant),
-        );
+            holdsAssign(grant),
+        ) &&
+        context.activeCampusIds.includes(targetCampusId);
 
   if (!scopeMatched) {
     throw rbacError("ROLE_ASSIGNMENT_CAMPUS_MISMATCH");
@@ -110,11 +118,34 @@ function assertRoleAssignPermission(
 /** 授予角色。幂等：同一 (user, role, scope) 重复授予返回既有行。 */
 export async function assignRole(input: RoleGrantContext): Promise<RoleAssignmentResult> {
   return withTransaction(async (tx) => {
-    const target = await lockAndLoadTarget(tx, input.targetUserId);
-
+    // self-mutation 锁前 fail closed（不制造重复锁）
     if (input.targetUserId === input.actorId) {
       throw rbacError("ROLE_ASSIGNMENT_SELF_DENIED");
     }
+
+    await acquireActorTargetLocks(tx, input.actorId, input.targetUserId);
+
+    if (input.racePoint) {
+      await input.racePoint(tx);
+    }
+
+    // 锁内重读 target：erased/deleted/suspended 账号不能被授角色（与注销严格先后）
+    const target = await tx.user.findUnique({
+      where: { id: input.targetUserId },
+      select: { id: true, status: true, deletedAt: true, erasedAt: true },
+    });
+
+    if (!target) {
+      throw rbacError("AUTH_PERMISSION_DENIED", "目标用户不存在");
+    }
+    if (target.deletedAt || target.erasedAt || target.status !== "ACTIVE") {
+      throw rbacError("AUTH_ACCOUNT_INACTIVE");
+    }
+
+    // actor 复核在锁之后（先于 role 探测，防未授权角色存在性枚举）
+    const actorContext = assertActorMayManageRoles(
+      await loadAuthorizationContext(input.actorId, tx),
+    );
 
     const role = await tx.role.findUnique({ where: { key: input.roleKey } });
     if (!role) {
@@ -128,9 +159,20 @@ export async function assignRole(input: RoleGrantContext): Promise<RoleAssignmen
       throw rbacError("ROLE_ASSIGNMENT_INVALID_SCOPE");
     }
 
-    // 授权复核在 subject 锁之后（Phase 6A TOCTOU 契约），按角色 scope 精确判定
-    const actorContext = await loadAuthorizationContext(input.actorId, tx);
-    assertRoleAssignPermission(actorContext, role.scope, role.scope === "GLOBAL" ? null : input.campusId!);
+    assertRoleAssignScope(actorContext, role.scope, role.scope === "GLOBAL" ? null : input.campusId!);
+
+    // Repair 1 #7：授予 CAMPUS 角色要求 target 是该校区 ACTIVE member
+    if (role.scope === "CAMPUS") {
+      const membership = await tx.campusMembership.findUnique({
+        where: {
+          userId_campusId: { userId: target.id, campusId: input.campusId! },
+        },
+        select: { status: true },
+      });
+      if (!membership || membership.status !== "ACTIVE") {
+        throw rbacError("ROLE_ASSIGNMENT_TARGET_MEMBERSHIP_INACTIVE");
+      }
+    }
 
     const scopeKey =
       role.scope === "GLOBAL"
@@ -196,16 +238,34 @@ export async function assignRole(input: RoleGrantContext): Promise<RoleAssignmen
   });
 }
 
-/** 撤回角色。幂等：角色未授予时为 no-op。 */
-export async function revokeRole(
-  input: RoleGrantContext,
-): Promise<{ removed: boolean }> {
+/** 撤回角色。幂等：角色未授予时为 no-op。target membership 不要求 ACTIVE（遗留清理例外）。 */
+export async function revokeRole(input: RoleGrantContext): Promise<{ removed: boolean }> {
   return withTransaction(async (tx) => {
-    const target = await lockAndLoadTarget(tx, input.targetUserId);
-
     if (input.targetUserId === input.actorId) {
       throw rbacError("ROLE_ASSIGNMENT_SELF_DENIED");
     }
+
+    await acquireActorTargetLocks(tx, input.actorId, input.targetUserId);
+
+    if (input.racePoint) {
+      await input.racePoint(tx);
+    }
+
+    const target = await tx.user.findUnique({
+      where: { id: input.targetUserId },
+      select: { id: true, status: true, deletedAt: true, erasedAt: true },
+    });
+
+    if (!target) {
+      throw rbacError("AUTH_PERMISSION_DENIED", "目标用户不存在");
+    }
+    if (target.deletedAt || target.erasedAt || target.status !== "ACTIVE") {
+      throw rbacError("AUTH_ACCOUNT_INACTIVE");
+    }
+
+    const actorContext = assertActorMayManageRoles(
+      await loadAuthorizationContext(input.actorId, tx),
+    );
 
     const role = await tx.role.findUnique({ where: { key: input.roleKey } });
     if (!role) {
@@ -219,8 +279,9 @@ export async function revokeRole(
       throw rbacError("ROLE_ASSIGNMENT_INVALID_SCOPE");
     }
 
-    const actorContext = await loadAuthorizationContext(input.actorId, tx);
-    assertRoleAssignPermission(actorContext, role.scope, role.scope === "GLOBAL" ? null : input.campusId!);
+    // 撤回同样要求 actor 的 scope/active membership 有效（授权仍须成立），
+    // 但不要求 target membership ACTIVE（Repair 1 #8 清理例外）
+    assertRoleAssignScope(actorContext, role.scope, role.scope === "GLOBAL" ? null : input.campusId!);
 
     const scopeKey =
       role.scope === "GLOBAL"

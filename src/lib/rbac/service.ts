@@ -1,7 +1,11 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { asPermissionKey, type PermissionKey } from "@/lib/rbac/permissions";
+import {
+  ADMIN_SURFACE_PERMISSION_KEYS,
+  asPermissionKey,
+  type PermissionKey,
+} from "@/lib/rbac/permissions";
 import { rbacError } from "@/lib/rbac/errors";
 
 /**
@@ -10,7 +14,11 @@ import { rbacError } from "@/lib/rbac/errors";
  * 原则（DEFAULT_DENY）：
  * - 用户不存在 / 账号非 active（status!=ACTIVE || deletedAt || erasedAt）→ DENY
  * - 未知 permission → DENY
- * - CAMPUS 角色只在 campusId 匹配的目标校区内放行；未指明目标校区 → DENY
+ * - CAMPUS 角色必须同时满足：grant.campusId == targetCampusId
+ *   且 targetCampusId ∈ actor 的 ACTIVE campus memberships
+ *   （Repair 1：membership missing / PENDING / REJECTED / SUSPENDED / LEFT
+ *   一律 DENY——campus 权限 = role_permission AND scope_match AND active_membership）
+ * - GLOBAL 角色不要求 campus membership（平台管理员无 membership 仍可工作）
  * - 任何业务代码不得再以 `role === "ADMIN"` 判权，一律经由本模块
  *
  * 与 Phase 5 的关系：active-account enforcement（server-auth.ts）是授权的
@@ -28,7 +36,8 @@ export type AuthorizationGrant = {
 export type AuthorizationContext = {
   userId: string;
   accountActive: boolean;
-  activeMembership: { id: string; campusId: string; status: string } | null;
+  /** 全部 ACTIVE membership 的 campusId（模型支持多校区；当前产品单 active campus） */
+  activeCampusIds: string[];
   grants: AuthorizationGrant[];
 };
 
@@ -42,10 +51,9 @@ const authorizationSelect = {
   deletedAt: true,
   erasedAt: true,
   memberships: {
-    // 当前产品单 active campus；确定性排序，绝不依赖数据库返回顺序
+    // 只取 ACTIVE membership——PENDING/REJECTED/SUSPENDED/LEFT 不进入授权上下文
     where: { status: "ACTIVE" as const },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }] as const,
-    take: 1,
     select: { id: true, campusId: true, status: true },
   },
   userRoles: {
@@ -90,14 +98,10 @@ export async function loadAuthorizationContext(
     permissionKeys: assignment.role.rolePermissions.map((rp) => rp.permission.key),
   }));
 
-  const membership = user.memberships[0];
-
   return {
     userId: user.id,
     accountActive: isActiveAccount(user),
-    activeMembership: membership
-      ? { id: membership.id, campusId: membership.campusId, status: membership.status }
-      : null,
+    activeCampusIds: user.memberships.map((membership) => membership.campusId),
     grants,
   };
 }
@@ -105,8 +109,11 @@ export async function loadAuthorizationContext(
 /**
  * permission 判定（纯函数，DEFAULT_DENY）。
  *
+ * CAMPUS_PERMISSION = ROLE_PERMISSION AND CAMPUS_SCOPE_MATCH AND ACTIVE_MEMBERSHIP_MATCH：
+ * campus-scoped grant 必须命中目标校区且 actor 当前持有该校区的 ACTIVE membership。
+ *
  * @param targetCampusId campus-scoped permission 的目标校区；GLOBAL 角色无需此参
- *        即可放行，CAMPUS 角色必须与目标校区精确匹配。
+ *        即可放行，且不因无 membership 被拒。
  */
 export function hasPermission(
   context: AuthorizationContext | null,
@@ -129,7 +136,11 @@ export function hasPermission(
     if (grant.scope === "GLOBAL") {
       return true;
     }
-    if (targetCampusId != null && grant.campusId === targetCampusId) {
+    if (
+      targetCampusId != null &&
+      grant.campusId === targetCampusId &&
+      context.activeCampusIds.includes(targetCampusId)
+    ) {
       return true;
     }
   }
@@ -143,6 +154,37 @@ export function hasAnyPermission(
   targetCampusId?: string | null,
 ): boolean {
   return permissions.some((permission) => hasPermission(context, permission, targetCampusId));
+}
+
+/**
+ * legacy full-admin 等价判定（Repair 1，Blocker D）：
+ * 必须存在一个 GLOBAL grant 且其 permission 集合完整覆盖 legacy admin surface
+ * （PLATFORM_ADMIN-like full authority）。禁止 any-permission 拼接：
+ * 细粒度 GLOBAL/CAMPUS 角色一律不构成旧超管。
+ */
+export function hasFullAdminSurfaceAccess(context: AuthorizationContext | null): boolean {
+  if (!context) {
+    return false;
+  }
+
+  return context.grants.some(
+    (grant) =>
+      grant.scope === "GLOBAL" &&
+      ADMIN_SURFACE_PERMISSION_KEYS.every((key) => grant.permissionKeys.includes(key)),
+  );
+}
+
+/**
+ * 高权限目标判定（toggleUserStatus 等管理保护用，Repair 1）：
+ * 以 RBAC 授权上下文判断 target 是否拥有 full-admin 等价权限，
+ * 不读取 User.role 字段。
+ */
+export async function isPrivilegedTarget(
+  userId: string,
+  tx?: Prisma.TransactionClient,
+): Promise<boolean> {
+  const context = await loadAuthorizationContext(userId, tx);
+  return hasFullAdminSurfaceAccess(context);
 }
 
 /**

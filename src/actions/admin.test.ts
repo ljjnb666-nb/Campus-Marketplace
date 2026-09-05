@@ -540,7 +540,14 @@ describe("admin actions", () => {
   });
 
   it("suspends a student account and notifies them", async () => {
-    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -570,7 +577,25 @@ describe("admin actions", () => {
     let result = await toggleUserStatus(formData);
     expect(result).toEqual({ success: false, error: "不能停用或恢复自己的账号" });
 
-    userFindUnique.mockResolvedValue({ role: "ADMIN" });
+    // RBAC full-admin 等价目标（含 role=ADMIN 的 legacy 同步账号）受保护
+    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+    userFindUnique.mockResolvedValue({
+      id: "admin-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [
+        {
+          campusId: null,
+          role: {
+            key: "PLATFORM_ADMIN",
+            scope: "GLOBAL",
+            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
+          },
+        },
+      ],
+    });
     formData.set("userId", "admin-2");
     result = await toggleUserStatus(formData);
     expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
@@ -711,7 +736,14 @@ describe("admin actions", () => {
   });
 
   it("restores a suspended account with a friendly notification", async () => {
-    userFindUnique.mockResolvedValue({ role: "STUDENT" });
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -726,6 +758,61 @@ describe("admin actions", () => {
       expect.anything(),
       expect.objectContaining({ userId: "user-2", title: "账号已恢复正常" }),
     );
+  });
+
+  it("protects RBAC full-admin targets regardless of User.role（Repair 1 #27）", async () => {
+    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+    // role=STUDENT 但持有 PLATFORM_ADMIN 等价授权 → 受保护
+    userFindUnique.mockResolvedValue({
+      id: "user-2",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [
+        {
+          campusId: null,
+          role: {
+            key: "PLATFORM_ADMIN",
+            scope: "GLOBAL",
+            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
+          },
+        },
+      ],
+    });
+
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
+    expect(userUpdate).not.toHaveBeenCalled();
+  });
+
+  it("stops protecting targets whose grants were revoked despite role=ADMIN（Repair 1 #27）", async () => {
+    // role=ADMIN 但无任何 UserRoleAssignment（授权已撤回/未同步）→ 不再受保护
+    userFindUnique.mockResolvedValue({
+      id: "user-3",
+      status: "ACTIVE",
+      deletedAt: null,
+      erasedAt: null,
+      memberships: [],
+      userRoles: [],
+    });
+
+    const formData = new FormData();
+    formData.set("userId", "user-3");
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).not.toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
+    expect(userUpdate).toHaveBeenCalledWith({
+      where: { id: "user-3" },
+      data: { status: "SUSPENDED" },
+    });
   });
 
   it("creates product and service categories with typed admin logs", async () => {

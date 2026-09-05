@@ -3,7 +3,7 @@ import type { Prisma, UserVerification, VerificationStatus } from "@prisma/clien
 import { applyVerificationAssetRetention, resolveImageTokens } from "@/lib/upload";
 import {
   acquireCampusVerificationPolicyLocks,
-  acquireGovernanceSubjectLock,
+  acquireGovernanceSubjectLocks,
 } from "@/lib/governance/governance-lock";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { getCurrentVerificationPolicy } from "@/lib/campus/verification-policy-service";
@@ -84,7 +84,8 @@ export async function prepareVerificationSubmission(
   tx: Prisma.TransactionClient,
   userId: string,
 ): Promise<VerificationSubmissionPreparation> {
-  await acquireGovernanceSubjectLock(tx, "USER", userId);
+  // 提交是自动作（actor == target）：单 subject 锁，与决策/注销同一锁体系
+  await acquireGovernanceSubjectLocks(tx, [{ subjectType: "USER", subjectId: userId }]);
 
   const user = await tx.user.findUnique({
     where: { id: userId },
@@ -162,6 +163,9 @@ export async function submitMembershipVerification(
     const verification = await tx.userVerification.upsert({
       where: { userId: input.userId },
       update: {
+        // Repair 1：重新提交必须重绑当前 ACTIVE membership——
+        // membership A→B 后，证据/审核 scope 跟随 B（禁止留在旧 membership）
+        membershipId: prepared.membership.id,
         schoolName: input.schoolName,
         campusName: input.campusName,
         studentIdLast4: input.studentIdLast4,
@@ -233,10 +237,17 @@ export type DecideVerificationInput = {
 /**
  * 审核决定（approve / reject / revoke 的唯一入口）。
  *
- * 顺序：读目标（定位 subject）→ subject 锁 → 授权复核
- * （verification.review，campus-scoped 授权按 membership.campusId 校验）
- * → 锁内重读 target + verification → 账号 active 复核 → transition 断言
- * → 写 + 用户投影 + 审计 + 通知 + 敏感材料保留期。
+ * 顺序（Repair 1：actor serialization + membership integrity）：
+ *   pre-read verification（定位 target userId，供 self-deny 与锁键）
+ *   → sorted subject 治理锁 {USER:actor, USER:target}（acquireGovernanceSubjectLocks，
+ *     与 erasure/hold/submit 同一命名空间；消除 actor 侧 TOCTOU）
+ *   → 锁内重读 verification + membership（不信任 pre-lock 的 campus）
+ *   → membership ACTIVE assert（SUSPENDED/LEFT/REJECTED → MEMBERSHIP_NOT_ACTIVE）
+ *   → actor authorization check（verification.review，按锁定 campus；
+ *     actor 账号 active 由 context.accountActive 强制）
+ *   → target account recheck（锁内重读）
+ *   → transition 断言
+ *   → 写 + 用户投影 + 审计 + 通知 + 敏感材料保留期
  */
 export async function decideMembershipVerification(
   input: DecideVerificationInput,
@@ -244,48 +255,54 @@ export async function decideMembershipVerification(
   return withTransaction(async (tx) => {
     const located = await tx.userVerification.findUnique({
       where: { id: input.verificationId },
-      select: {
-        id: true,
-        userId: true,
-        membership: { select: { campusId: true } },
-      },
+      select: { id: true, userId: true },
     });
 
     if (!located) {
       throw rbacError("VERIFICATION_NOT_FOUND");
     }
 
-    // 自审拒绝（含自吊销）：任何人不得决定自己的认证申请
+    // 自审拒绝（含自吊销）：任何人不得决定自己的认证申请（锁前 fail closed）
     if (located.userId === input.actorId) {
       throw rbacError("VERIFICATION_SELF_REVIEW_DENIED");
     }
 
-    // subject 治理锁（与 erasure / hold / submit 同一把锁，全局锁序一致）
-    await acquireGovernanceSubjectLock(tx, "USER", located.userId);
+    // subject 治理锁（actor + target 排序；与 erasure/hold/submit 同一把锁体系）
+    await acquireGovernanceSubjectLocks(tx, [
+      { subjectType: "USER", subjectId: input.actorId },
+      { subjectType: "USER", subjectId: located.userId },
+    ]);
+
+    // 锁内重读 verification + membership（READ COMMITTED 下锁+同事务读 = 线性化）
+    const current = await tx.userVerification.findUnique({
+      where: { id: located.id },
+      include: {
+        membership: { select: { campusId: true, status: true } },
+      },
+    });
+
+    if (!current) {
+      throw rbacError("VERIFICATION_NOT_FOUND");
+    }
+
+    // membership 必须仍然 ACTIVE：认证决定只对生效成员身份有效
+    if (current.membership.status !== "ACTIVE") {
+      throw rbacError("MEMBERSHIP_NOT_ACTIVE");
+    }
+
+    const lockedCampusId = current.membership.campusId;
 
     const actorContext = await loadAuthorizationContext(input.actorId, tx);
-    await requirePermissionInContext(
-      actorContext,
-      "verification.review",
-      located.membership.campusId,
-    );
+    await requirePermissionInContext(actorContext, "verification.review", lockedCampusId);
 
     // 锁内重读 target 账号状态（erased/deleted/suspended → fail closed）
     const target = await tx.user.findUnique({
-      where: { id: located.userId },
+      where: { id: current.userId },
       select: { status: true, deletedAt: true, erasedAt: true },
     });
 
     if (!target || !isActiveAccount(target)) {
       throw rbacError("AUTH_ACCOUNT_INACTIVE");
-    }
-
-    const current = await tx.userVerification.findUnique({
-      where: { id: located.id },
-    });
-
-    if (!current) {
-      throw rbacError("VERIFICATION_NOT_FOUND");
     }
 
     assertVerificationTransition(current.status, input.decision);
@@ -324,7 +341,7 @@ export async function decideMembershipVerification(
               : "REVOKE_VERIFICATION",
         targetType: "USER_VERIFICATION",
         targetId: current.id,
-        campusId: located.membership.campusId,
+        campusId: lockedCampusId,
         detail: input.reviewNote || null,
         metadata: {
           decision: input.decision,

@@ -4,6 +4,7 @@ import {
   requireAdmin,
   requireUser,
 } from "@/lib/server-auth";
+import { ADMIN_SURFACE_PERMISSION_KEYS } from "@/lib/rbac/permissions";
 
 const {
   mockAuth,
@@ -143,7 +144,7 @@ describe("requireUser", () => {
   });
 });
 
-describe("requireAdmin（Phase 6A 兼容桥：permission 判定）", () => {
+describe("requireAdmin（Phase 6A 兼容桥：full-admin 等价判定）", () => {
   const ADMIN_BASE = {
     ...ACTIVE_USER,
     id: "admin-1",
@@ -151,19 +152,20 @@ describe("requireAdmin（Phase 6A 兼容桥：permission 判定）", () => {
     name: "管理员",
   };
 
+  // full-admin 等价：GLOBAL grant 完整覆盖 legacy admin surface
+  const FULL_ADMIN_GRANT = {
+    campusId: null,
+    role: {
+      key: "PLATFORM_ADMIN",
+      scope: "GLOBAL",
+      rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
+    },
+  };
+
   const ADMIN_WITH_GRANT = {
     ...ADMIN_BASE,
     memberships: [],
-    userRoles: [
-      {
-        campusId: null,
-        role: {
-          key: "PLATFORM_ADMIN",
-          scope: "GLOBAL",
-          rolePermissions: [{ permission: { key: "verification.review" } }],
-        },
-      },
-    ],
+    userRoles: [FULL_ADMIN_GRANT],
   };
 
   it("redirects home when the user holds no admin permission", async () => {
@@ -190,6 +192,65 @@ describe("requireAdmin（Phase 6A 兼容桥：permission 判定）", () => {
       ...ADMIN_BASE,
       memberships: [],
       userRoles: [],
+    });
+
+    await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");
+    expect(mockRedirect).toHaveBeenCalledWith("/");
+  });
+
+  it("denies a limited GLOBAL role（仅 report.review ≠ legacy 超管，Repair 1 #25）", async () => {
+    mockAuth.mockResolvedValue({
+      user: { id: "limited-1", role: "STUDENT" },
+    });
+    mockFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      id: "limited-1",
+      name: "举报处理员",
+      memberships: [],
+      userRoles: [
+        {
+          campusId: null,
+          role: {
+            key: "GLOBAL_REPORT_REVIEWER",
+            scope: "GLOBAL",
+            rolePermissions: [{ permission: { key: "report.review" } }],
+          },
+        },
+      ],
+    });
+
+    await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");
+    expect(mockRedirect).toHaveBeenCalledWith("/");
+  });
+
+  it("denies stitched campus-scoped grants even when the union covers the full set", async () => {
+    const keys = ADMIN_SURFACE_PERMISSION_KEYS;
+    const half = Math.ceil(keys.length / 2);
+    mockAuth.mockResolvedValue({
+      user: { id: "stitched-1", role: "STUDENT" },
+    });
+    mockFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      id: "stitched-1",
+      memberships: [],
+      userRoles: [
+        {
+          campusId: "campus-a",
+          role: {
+            key: "CAMPUS_A_HALF",
+            scope: "CAMPUS",
+            rolePermissions: keys.slice(0, half).map((key) => ({ permission: { key } })),
+          },
+        },
+        {
+          campusId: "campus-b",
+          role: {
+            key: "CAMPUS_B_HALF",
+            scope: "CAMPUS",
+            rolePermissions: keys.slice(half).map((key) => ({ permission: { key } })),
+          },
+        },
+      ],
     });
 
     await expect(requireAdmin()).rejects.toThrow("REDIRECT:/");

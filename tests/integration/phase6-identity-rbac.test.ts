@@ -446,9 +446,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
     releaseErasure();
     await erasurePromise;
 
+    // 注销已把 membership 闭环为 LEFT：决定在锁内重读 membership 即 fail closed
+    // （MEMBERSHIP_NOT_ACTIVE 先于账号状态检查——两个检查均为 fail closed）
     await expect(decisionAPromise).resolves.toMatchObject({
       rejected: true,
-      code: "AUTH_ACCOUNT_INACTIVE",
+      code: "MEMBERSHIP_NOT_ACTIVE",
     });
 
     const erasedUser = await rawClient!.user.findUnique({ where: { id: userA.id } });
@@ -600,4 +602,554 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
     const suspended = await loadAuthorizationContext(legacyAdmin.id);
     expect(hasPermission(suspended, "verification.review")).toBe(false);
   });
+
+  // ============================================================
+  // Repair 1：CAMPUS 权限必须要求 ACTIVE membership
+  // ============================================================
+
+  it("CAMPUS permission membership matrix：仅 ACTIVE membership 放行（context 级）", async () => {
+    const { loadAuthorizationContext, hasPermission } = await import("@/lib/rbac/service");
+
+    const reviewerA = await createFixtureUser("校区审核员M", campusA.id);
+    await grantRole(reviewerA.id, "CAMPUS_REVIEWER_M", ["verification.review"], "CAMPUS", campusA.id);
+
+    const membership = await rawClient!.campusMembership.findFirstOrThrow({
+      where: { userId: reviewerA.id },
+    });
+
+    // ACTIVE → ALLOW
+    const active = await loadAuthorizationContext(reviewerA.id);
+    expect(active?.activeCampusIds).toEqual([campusA.id]);
+    expect(hasPermission(active, "verification.review", campusA.id)).toBe(true);
+
+    // PENDING / REJECTED / SUSPENDED / LEFT → 全部 DENY
+    for (const status of ["PENDING", "REJECTED", "SUSPENDED", "LEFT"] as const) {
+      await rawClient!.campusMembership.update({
+        where: { id: membership.id },
+        data: { status },
+      });
+      const context = await loadAuthorizationContext(reviewerA.id);
+      expect(context?.activeCampusIds).toEqual([]);
+      expect(hasPermission(context, "verification.review", campusA.id)).toBe(false);
+    }
+
+    // 恢复 ACTIVE → ALLOW
+    await rawClient!.campusMembership.update({
+      where: { id: membership.id },
+      data: { status: "ACTIVE" },
+    });
+    const restored = await loadAuthorizationContext(reviewerA.id);
+    expect(hasPermission(restored, "verification.review", campusA.id)).toBe(true);
+  });
+
+  it("CAMPUS reviewer 无 ACTIVE membership → 真实 decide DENY；GLOBAL 审核员无 membership → ALLOW", async () => {
+    const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
+
+    // campus reviewer + membership SUSPENDED → deny
+    const suspendedReviewer = await createFixtureUser("停用成员审核员", campusA.id);
+    await grantRole(
+      suspendedReviewer.id,
+      "CAMPUS_REVIEWER_SUSP",
+      ["verification.review"],
+      "CAMPUS",
+      campusA.id,
+    );
+    await rawClient!.campusMembership.updateMany({
+      where: { userId: suspendedReviewer.id },
+      data: { status: "SUSPENDED" },
+    });
+
+    const verificationA = await createPendingVerification(student.id);
+    await expect(
+      decideMembershipVerification({
+        actorId: suspendedReviewer.id,
+        verificationId: verificationA.id,
+        decision: "VERIFIED",
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_CAMPUS_SCOPE_MISMATCH" });
+
+    // GLOBAL reviewer 完全没有 membership → 仍可工作（GLOBAL 不受 membership 限制）
+    const globalNoMembership = await rawClient!.user.create({
+      data: {
+        email: `${RUN_TAG}-global-nomembership@it.local`,
+        name: "无成员关系全局审核员",
+        passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfix",
+        schoolName: "集成测试大学",
+        campusId: campusA.id,
+      },
+    });
+    createdUserIds.push(globalNoMembership.id);
+    await grantRole(
+      globalNoMembership.id,
+      "GLOBAL_REVIEWER_NOM",
+      ["verification.review"],
+      "GLOBAL",
+    );
+
+    const decided = await decideMembershipVerification({
+      actorId: globalNoMembership.id,
+      verificationId: verificationA.id,
+      decision: "REJECTED",
+    });
+    expect(decided.status).toBe("REJECTED");
+  });
+
+  it("verification 所属 membership 非 ACTIVE → 决定 fail closed（MEMBERSHIP_NOT_ACTIVE）", async () => {
+    const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
+
+    const inactiveStudent = await createFixtureUser("非活跃成员学生", campusA.id);
+    const verification = await createPendingVerification(inactiveStudent.id);
+
+    for (const status of ["SUSPENDED", "LEFT", "REJECTED"] as const) {
+      await rawClient!.campusMembership.updateMany({
+        where: { userId: inactiveStudent.id },
+        data: { status },
+      });
+
+      await expect(
+        decideMembershipVerification({
+          actorId: reviewer.id,
+          verificationId: verification.id,
+          decision: "VERIFIED",
+        }),
+      ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    }
+
+    const unchanged = await rawClient!.userVerification.findUnique({
+      where: { id: verification.id },
+    });
+    expect(unchanged?.status).toBe("PENDING");
+  });
+
+  it("membership A→B 后重新提交：verification 重绑 B + policy B；A 审核员 DENY、B 审核员 ALLOW", async () => {
+    const { createVerificationPolicy, publishVerificationPolicy, getCurrentVerificationPolicy } =
+      await import("@/lib/campus/verification-policy-service");
+    const { submitMembershipVerification, decideMembershipVerification } = await import(
+      "@/lib/campus/verification-service"
+    );
+
+    async function nextPolicyVersion(campusId: string): Promise<number> {
+      const highest = await rawClient!.campusVerificationPolicy.findFirst({
+        where: { campusId },
+        orderBy: { version: "desc" },
+        select: { version: true },
+      });
+      return (highest?.version ?? 900) + 1;
+    }
+
+    const abStudent = await createFixtureUser("AB学生", campusA.id);
+    const membershipA = await rawClient!.campusMembership.findFirstOrThrow({
+      where: { userId: abStudent.id },
+    });
+
+    const versionA = await nextPolicyVersion(campusA.id);
+    const policyA = await createVerificationPolicy({
+      campusId: campusA.id,
+      version: versionA,
+      title: `A 规则 ${RUN_TAG} v${versionA}`,
+      instructions: `A 指引 ${RUN_TAG} v${versionA}`,
+    });
+    createdPolicyIds.push(policyA.id);
+    await publishVerificationPolicy(policyA.id);
+
+    // 首次提交：绑定 membership A + policy A
+    const first = await submitMembershipVerification({
+      userId: abStudent.id,
+      schoolName: "集成测试大学",
+      campusName: "集成校区A",
+      studentIdLast4: "1111",
+      studentCardImageToken: `it-ref-${RUN_TAG}-ab1`,
+    });
+    expect(first.membershipId).toBe(membershipA.id);
+    expect(first.policyId).toBe(policyA.id);
+    expect(first.policyVersion).toBe(versionA);
+    // 不变量：policy.campusId == membership.campusId
+    const policyARow = await rawClient!.campusVerificationPolicy.findUniqueOrThrow({
+      where: { id: policyA.id },
+      select: { campusId: true },
+    });
+    expect(policyARow.campusId).toBe(campusA.id);
+
+    // membership A → LEFT；membership B（campusB）→ ACTIVE
+    await rawClient!.campusMembership.update({
+      where: { id: membershipA.id },
+      data: { status: "LEFT" },
+    });
+    const membershipB = await rawClient!.campusMembership.create({
+      data: { userId: abStudent.id, campusId: campusB.id, status: "ACTIVE" },
+    });
+
+    const versionB = await nextPolicyVersion(campusB.id);
+    const policyB = await createVerificationPolicy({
+      campusId: campusB.id,
+      version: versionB,
+      title: `B 规则 ${RUN_TAG} v${versionB}`,
+      instructions: `B 指引 ${RUN_TAG} v${versionB}`,
+    });
+    createdPolicyIds.push(policyB.id);
+    await publishVerificationPolicy(policyB.id);
+
+    // 重新提交：membershipId 重绑 B，policy 证据来自 B
+    const resubmitted = await submitMembershipVerification({
+      userId: abStudent.id,
+      schoolName: "集成测试大学",
+      campusName: "集成校区B",
+      studentIdLast4: "2222",
+      studentCardImageToken: `it-ref-${RUN_TAG}-ab2`,
+    });
+
+    expect(resubmitted.membershipId).toBe(membershipB.id);
+    expect(resubmitted.policyId).toBe(policyB.id);
+    expect(resubmitted.policyVersion).toBe(versionB);
+    expect(resubmitted.policyHash).toBe(policyB.contentHash);
+
+    // campus-A reviewer → DENY（scope 与 membership 都不在 A）
+    const reviewerA = await createFixtureUser("A侧审核员AB", campusA.id);
+    await grantRole(reviewerA.id, "CAMPUS_REVIEWER_AB_A", ["verification.review"], "CAMPUS", campusA.id);
+    await expect(
+      decideMembershipVerification({
+        actorId: reviewerA.id,
+        verificationId: resubmitted.id,
+        decision: "VERIFIED",
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_CAMPUS_SCOPE_MISMATCH" });
+
+    // campus-B reviewer → ALLOW
+    const reviewerB = await createFixtureUser("B侧审核员AB", campusB.id);
+    await grantRole(reviewerB.id, "CAMPUS_REVIEWER_AB_B", ["verification.review"], "CAMPUS", campusB.id);
+    const decided = await decideMembershipVerification({
+      actorId: reviewerB.id,
+      verificationId: resubmitted.id,
+      decision: "VERIFIED",
+    });
+    expect(decided.status).toBe("VERIFIED");
+
+    // current policy 解析仍各自独立
+    const currentA = await getCurrentVerificationPolicy(campusA.id, new Date());
+    const currentB = await getCurrentVerificationPolicy(campusB.id, new Date());
+    expect(currentB?.id).toBe(policyB.id);
+    expect(currentA?.id).not.toBe(policyB.id);
+  });
+
+  // ============================================================
+  // Repair 1：Actor authorization serialization（真实 PG 竞态）
+  // ============================================================
+
+  it("actor 注销 vs 审核决定竞态：双方向确定性，无 40P01，无'已注销 actor 完成决定'", async () => {
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
+
+    /** 显式屏障：轮询直到存在未授予锁（第二个事务已进入锁等待队列） */
+    async function waitForLockWaiter(): Promise<void> {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
+          SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
+        if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error("10 秒内未观察到锁等待（屏障失效）");
+    }
+
+    // Direction A：actor 注销先赢 → 决定在锁上阻塞 → 注销提交 → 决定 AUTH_ACCOUNT_INACTIVE
+    const actorA = await createFixtureUser("竞态ActorA", campusA.id, { role: "ADMIN" });
+    await grantRole(actorA.id, "RACE_REVIEWER_A", ["verification.review"], "GLOBAL");
+    const targetA = await createFixtureUser("竞态目标A", campusA.id);
+    const verificationA = await createPendingVerificationFor(targetA.id);
+
+    let erasureLockedA!: () => void;
+    const erasureLockedPromiseA = new Promise<void>((resolve) => {
+      erasureLockedA = resolve;
+    });
+    let releaseErasureA!: () => void;
+    const erasureGateA = new Promise<void>((resolve) => {
+      releaseErasureA = resolve;
+    });
+
+    const erasurePromiseA = eraseAccount(actorA.id, undefined, async () => {
+      erasureLockedA();
+      await erasureGateA;
+    });
+    await erasureLockedPromiseA;
+
+    const decisionPromiseA = decideMembershipVerification({
+      actorId: actorA.id,
+      verificationId: verificationA.id,
+      decision: "VERIFIED",
+    }).then(
+      () => "fulfilled" as const,
+      (error) => ({ rejected: true as const, code: error.code as string }),
+    );
+
+    await waitForLockWaiter();
+    releaseErasureA();
+    await erasurePromiseA;
+
+    await expect(decisionPromiseA).resolves.toMatchObject({
+      rejected: true,
+      code: "AUTH_ACCOUNT_INACTIVE",
+    });
+    const untouchedA = await rawClient!.userVerification.findUnique({
+      where: { id: verificationA.id },
+    });
+    expect(untouchedA?.status).toBe("PENDING");
+    const auditsA = await rawClient!.adminLog.findMany({
+      where: { targetType: "USER_VERIFICATION", targetId: verificationA.id },
+    });
+    expect(auditsA).toHaveLength(0);
+
+    // Direction B：决定先锁 {actor, target} → actor 注销阻塞 → 决定提交 → 注销完成
+    const actorB = await createFixtureUser("竞态ActorB", campusA.id);
+    await grantRole(actorB.id, "RACE_REVIEWER_B", ["verification.review"], "GLOBAL");
+    const targetB = await createFixtureUser("竞态目标B", campusA.id);
+    const verificationB = await createPendingVerificationFor(targetB.id);
+
+    let decisionLockedB!: () => void;
+    const decisionLockedPromiseB = new Promise<void>((resolve) => {
+      decisionLockedB = resolve;
+    });
+    let releaseDecisionB!: () => void;
+    const decisionGateB = new Promise<void>((resolve) => {
+      releaseDecisionB = resolve;
+    });
+
+    const decisionPromiseB = decideMembershipVerification({
+      actorId: actorB.id,
+      verificationId: verificationB.id,
+      decision: "VERIFIED",
+      racePoint: async () => {
+        decisionLockedB();
+        await decisionGateB;
+      },
+    });
+    await decisionLockedPromiseB;
+
+    const erasurePromiseB = eraseAccount(actorB.id).then(
+      () => "fulfilled" as const,
+      (error) => ({ rejected: true as const, code: error.code as string }),
+    );
+
+    await waitForLockWaiter();
+    releaseDecisionB();
+
+    const decidedB = await decisionPromiseB;
+    expect(decidedB.status).toBe("VERIFIED");
+    await expect(erasurePromiseB).resolves.toBe("fulfilled");
+
+    const erasedActor = await rawClient!.user.findUnique({ where: { id: actorB.id } });
+    expect(erasedActor?.erasedAt).toBeTruthy();
+    const decidedTarget = await rawClient!.userVerification.findUnique({
+      where: { id: verificationB.id },
+    });
+    expect(decidedTarget?.status).toBe("VERIFIED");
+  });
+
+  it("actor 被撤权 vs 审核决定竞态：撤权先提交 → 后续决定 DENY（真实 PG，无死锁）", async () => {
+    const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
+    const { revokeRole } = await import("@/lib/rbac/assignment-service");
+
+    async function waitForLockWaiter(): Promise<void> {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
+          SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
+        if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      throw new Error("10 秒内未观察到锁等待（屏障失效）");
+    }
+
+    // 另一位持有 rbac.role.assign 的平台管理员（不由业务服务绕道，符合撤权路径）
+    const revoker = await createFixtureUser("撤权管理员", campusA.id);
+    await grantRole(revoker.id, "RACE_ASSIGNER", ["rbac.role.assign"], "GLOBAL");
+
+    // 待撤权的审核 actor（GLOBAL verification.review）
+    const actor = await createFixtureUser("被撤权审核员", campusA.id);
+    const actorRole = await grantRole(actor.id, "RACE_REVIEWER_C", ["verification.review"], "GLOBAL");
+
+    const target = await createFixtureUser("撤权竞态目标", campusA.id);
+    const verification = await createPendingVerificationFor(target.id);
+
+    let revokerLocked!: () => void;
+    const revokerLockedPromise = new Promise<void>((resolve) => {
+      revokerLocked = resolve;
+    });
+    let releaseRevoker!: () => void;
+    const revokerGate = new Promise<void>((resolve) => {
+      releaseRevoker = resolve;
+    });
+
+    // 撤权事务：锁 {USER:revoker, USER:actor} → racePoint 信号 → 等待放行
+    const revokerPromise = revokeRole({
+      actorId: revoker.id,
+      targetUserId: actor.id,
+      roleKey: actorRole.key,
+      racePoint: async () => {
+        revokerLocked();
+        await revokerGate;
+      },
+    }).then(
+      () => "fulfilled" as const,
+      (error) => ({ rejected: true as const, code: error.code as string }),
+    );
+    await revokerLockedPromise;
+
+    // 决定事务在撤权持锁期间启动 → 在 {USER:actor,...} 锁上阻塞
+    const decisionPromise = decideMembershipVerification({
+      actorId: actor.id,
+      verificationId: verification.id,
+      decision: "VERIFIED",
+    }).then(
+      () => "fulfilled" as const,
+      (error) => ({ rejected: true as const, code: error.code as string }),
+    );
+
+    await waitForLockWaiter();
+    releaseRevoker();
+
+    // 撤权先提交 → 决定唤醒后 actor 已无 permission → DENY
+    await expect(revokerPromise).resolves.toBe("fulfilled");
+    await expect(decisionPromise).resolves.toMatchObject({
+      rejected: true,
+      code: "AUTH_PERMISSION_DENIED",
+    });
+
+    const untouched = await rawClient!.userVerification.findUnique({
+      where: { id: verification.id },
+    });
+    expect(untouched?.status).toBe("PENDING");
+    const audits = await rawClient!.adminLog.findMany({
+      where: { targetType: "USER_VERIFICATION", targetId: verification.id },
+    });
+    expect(audits).toHaveLength(0);
+  });
+
+  // ============================================================
+  // Repair 1：高权限目标保护以 RBAC 判定（User.role 不再参与授权）
+  // ============================================================
+
+  it("privileged target 保护以 RBAC full-admin 等价判定（role 字段不参与）", async () => {
+    const { isPrivilegedTarget, hasPermission, loadAuthorizationContext } = await import(
+      "@/lib/rbac/service"
+    );
+    const { PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+
+    // role=STUDENT + PLATFORM_ADMIN 等价授权（全量 permission 的 GLOBAL 角色）→ 受保护
+    const rbacAdmin = await createFixtureUser("RBAC管理员", campusA.id);
+    await grantRole(rbacAdmin.id, "FULL_ADMIN_EQUIV", [...PERMISSION_KEYS], "GLOBAL");
+    await expect(isPrivilegedTarget(rbacAdmin.id)).resolves.toBe(true);
+
+    // role=ADMIN 但无任何授权（未同步/已撤回）→ 不再受保护
+    const bareAdmin = await rawClient!.user.create({
+      data: {
+        email: `${RUN_TAG}-bare-admin@it.local`,
+        name: "裸 role 管理员",
+        passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfix",
+        schoolName: "集成测试大学",
+        campusId: campusA.id,
+        role: "ADMIN",
+      },
+    });
+    createdUserIds.push(bareAdmin.id);
+    await expect(isPrivilegedTarget(bareAdmin.id)).resolves.toBe(false);
+
+    // 细粒度 GLOBAL 角色（仅 report.review）：具备该 permission，但不构成 legacy 超管
+    const limited = await createFixtureUser("受限全局审核", campusA.id);
+    await grantRole(limited.id, "GLOBAL_REPORT_REVIEWER_IT", ["report.review"], "GLOBAL");
+    await expect(isPrivilegedTarget(limited.id)).resolves.toBe(false);
+    const limitedContext = await loadAuthorizationContext(limited.id);
+    expect(hasPermission(limitedContext, "report.review")).toBe(true);
+  });
+
+  // ============================================================
+  // Repair 1：私有资产治理访问的 membership 回归
+  // ============================================================
+
+  it("campus sensitive reader 需 ACTIVE membership；GLOBAL reader 不需要（私有资产）", async () => {
+    const { resolvePrivateAssetAccess } = await import("@/lib/asset-service");
+
+    // 资产属主：campusA 成员 + PENDING 认证（VERIFICATION 材料绑定 membership）
+    const assetOwner = await createFixtureUser("资产属主", campusA.id);
+    const verification = await createPendingVerification(assetOwner.id);
+    const asset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: assetOwner.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/asset-${randomUUID()}`,
+        mimeType: "image/jpeg",
+        sizeBytes: 128,
+        status: "ATTACHED",
+        verificationId: verification.id,
+      },
+    });
+
+    // campus-A sensitive reader + ACTIVE membership → ALLOW
+    const readerA = await createFixtureUser("校区敏感读取员", campusA.id);
+    await grantRole(readerA.id, "CAMPUS_SENSITIVE_A", ["asset.sensitive.read"], "CAMPUS", campusA.id);
+    const granted = await resolvePrivateAssetAccess(asset.id, { id: readerA.id });
+    expect(granted.ok).toBe(true);
+    if (granted.ok) {
+      expect(granted.grantedBy).toBe("permission");
+    }
+
+    // membership SUSPENDED → DENY
+    const membership = await rawClient!.campusMembership.findFirstOrThrow({
+      where: { userId: readerA.id },
+    });
+    await rawClient!.campusMembership.update({
+      where: { id: membership.id },
+      data: { status: "SUSPENDED" },
+    });
+    await expect(resolvePrivateAssetAccess(asset.id, { id: readerA.id })).resolves.toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+
+    // membership LEFT → DENY
+    await rawClient!.campusMembership.update({
+      where: { id: membership.id },
+      data: { status: "LEFT" },
+    });
+    await expect(resolvePrivateAssetAccess(asset.id, { id: readerA.id })).resolves.toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+
+    // 恢复 ACTIVE → ALLOW
+    await rawClient!.campusMembership.update({
+      where: { id: membership.id },
+      data: { status: "ACTIVE" },
+    });
+    await expect(resolvePrivateAssetAccess(asset.id, { id: readerA.id })).resolves.toMatchObject({
+      ok: true,
+    });
+
+    // GLOBAL reader 完全无 membership → ALLOW（不受 membership 限制）
+    const globalReader = await rawClient!.user.create({
+      data: {
+        email: `${RUN_TAG}-global-reader@it.local`,
+        name: "全局敏感读取员",
+        passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfix",
+        schoolName: "集成测试大学",
+        campusId: campusA.id,
+      },
+    });
+    createdUserIds.push(globalReader.id);
+    await grantRole(globalReader.id, "GLOBAL_SENSITIVE_NOM", ["asset.sensitive.read"], "GLOBAL");
+    await expect(resolvePrivateAssetAccess(asset.id, { id: globalReader.id })).resolves.toMatchObject({
+      ok: true,
+      grantedBy: "permission",
+    });
+  });
 });
+
+/** 为指定用户创建 PENDING 认证（与 createPendingVerification 相同，语义命名区分竞态用例） */
+async function createPendingVerificationFor(userId: string) {
+  return createPendingVerification(userId);
+}

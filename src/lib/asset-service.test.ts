@@ -638,18 +638,19 @@ describe("resolvePrivateAssetAccess", () => {
   const activeNoGrants: AuthorizationContext = {
     userId: "caller-1",
     accountActive: true,
-    activeMembership: null,
+    activeCampusIds: [],
     grants: [],
   };
 
   function ctxWith(
     grants: AuthorizationContext["grants"],
+    activeCampusIds: string[] = [],
     active = true,
   ): AuthorizationContext {
     return {
       userId: "caller-1",
       accountActive: active,
-      activeMembership: null,
+      activeCampusIds,
       grants,
     };
   }
@@ -724,7 +725,7 @@ describe("resolvePrivateAssetAccess", () => {
 
   it("forbids owner access when the account is inactive（fail closed）", async () => {
     assetFindFirst.mockResolvedValue(baseAsset);
-    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant], false));
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant], [], false));
 
     expect(await resolvePrivateAssetAccess("asset-1", { id: "user-1" })).toEqual({
       ok: false,
@@ -781,16 +782,33 @@ describe("resolvePrivateAssetAccess", () => {
     });
   });
 
-  it("grants campus-scoped access only within the asset's campus", async () => {
+  it("grants campus-scoped access only within the asset's campus（+ ACTIVE membership）", async () => {
     assetFindFirst.mockResolvedValue({
       ...baseAsset,
       category: "VERIFICATION",
       verification: { membership: { campusId: "campus-a" } },
     });
-    loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([campusScopedGrant("campus-a")], ["campus-a"]),
+    );
 
     const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" });
     expect(granted.ok).toBe(true);
+  });
+
+  it("denies campus-scoped readers whose membership is inactive（Repair 1：SUSPENDED/LEFT → DENY）", async () => {
+    assetFindFirst.mockResolvedValue({
+      ...baseAsset,
+      category: "VERIFICATION",
+      verification: { membership: { campusId: "campus-a" } },
+    });
+    // membership SUSPENDED/LEFT → 不进入 activeCampusIds
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
   });
 
   it("denies cross-campus reviewers（关键安全不变量 negative test）", async () => {
@@ -817,7 +835,9 @@ describe("resolvePrivateAssetAccess", () => {
       product: null,
       serviceListing: null,
     });
-    loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([campusScopedGrant("campus-a")], ["campus-a"]),
+    );
     campusMembershipFindFirstMock.mockResolvedValue({ campusId: "campus-a" });
 
     const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" });
