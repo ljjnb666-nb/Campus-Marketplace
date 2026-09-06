@@ -65,6 +65,11 @@ vi.mock("@/repositories/notification-repository", () => ({
   createNotification,
 }));
 
+vi.mock("@/lib/enforcement/risk-service", () => ({
+  recordRiskFlag: vi.fn().mockResolvedValue({ created: true }),
+  resolveRiskFlag: vi.fn().mockResolvedValue({ resolved: true }),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     order: {

@@ -241,6 +241,23 @@ admin security foundation。
   产品化、完整 admin 角色 UI（Phase 7）——`PHASE_6B = NOT_STARTED`，
   是否启动 6B 属下一独立步骤
 
+**Phase 6B 进度（2026-09-05）**：
+
+- `PHASE_6B = IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`
+  （PR：feat/production-phase-6b-trust-risk-enforcement → master，Draft）
+- 6B 范围（trust / risk / enforcement foundation）：中央 trust snapshot
+  （只读既有事实信号，creditScore 明确为 legacy display signal）、显式风险状态
+  （NORMAL/WATCH/RESTRICTED，GLOBAL/CAMPUS scope）、RiskFlag（source-linked、
+  去重、可解析；举报仅记录信号，绝不自动处罚）、marketplace capability gate
+  （受限用户禁止开始新活动，既有义务/隐私/消息不受影响）、中央
+  account suspend/reinstate service（toggleUserStatus 收敛为薄 adapter）、
+  campus membership suspend/reinstate service（状态机 fail closed）、
+  EnforcementAction 执法历史（provenance，非第二授权源）、
+  `USER_STATUS_ROLE_ASSIGNMENT_RACE` 正式关闭（账号停用与角色授予共享
+  sorted subject 锁边界）
+- `PHASE_6 = IN_PROGRESS`；6C 预留：appeal 完整生命周期、受限用户的
+  listing lifecycle 清理策略、hard-suspension 隐私例外路径
+
 ### 5.3 Phase 7 — Operations Admin Foundation
 
 **此阶段必须在在线支付之前完成；同时它不依赖真实在线支付。**

@@ -23,6 +23,12 @@ const {
   applyVerificationAssetRetention,
   transactionMock,
   decideMembershipVerification,
+  suspendAccount,
+  reinstateAccount,
+  recordRiskFlag,
+  resolveRiskFlag,
+  riskFlagFindUnique,
+  riskFlagUpdate,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireAdmin: vi.fn(),
@@ -46,6 +52,12 @@ const {
   applyVerificationAssetRetention: vi.fn(),
   transactionMock: vi.fn(),
   decideMembershipVerification: vi.fn(),
+  suspendAccount: vi.fn(),
+  reinstateAccount: vi.fn(),
+  recordRiskFlag: vi.fn(),
+  resolveRiskFlag: vi.fn(),
+  riskFlagFindUnique: vi.fn(),
+  riskFlagUpdate: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
@@ -54,6 +66,16 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/campus/verification-service", () => ({
   decideMembershipVerification,
+}));
+
+vi.mock("@/lib/enforcement/account-enforcement-service", () => ({
+  suspendAccount,
+  reinstateAccount,
+}));
+
+vi.mock("@/lib/enforcement/risk-service", () => ({
+  recordRiskFlag,
+  resolveRiskFlag,
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -108,6 +130,10 @@ vi.mock("@/lib/prisma", () => ({
     adminLog: {
       create: adminLogCreate,
     },
+    riskFlag: {
+      findUnique: riskFlagFindUnique,
+      update: riskFlagUpdate,
+    },
     $transaction: transactionMock,
   },
   withTransaction: transactionMock,
@@ -151,6 +177,12 @@ describe("admin actions", () => {
     createNotification.mockReset();
     applyVerificationAssetRetention.mockReset().mockResolvedValue(0);
     decideMembershipVerification.mockReset().mockResolvedValue({});
+    suspendAccount.mockReset();
+    reinstateAccount.mockReset();
+    recordRiskFlag.mockReset().mockResolvedValue({ created: true });
+    resolveRiskFlag.mockReset().mockResolvedValue({ resolved: true });
+    riskFlagFindUnique.mockReset().mockResolvedValue(null);
+    riskFlagUpdate.mockReset().mockResolvedValue({});
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
@@ -159,6 +191,10 @@ describe("admin actions", () => {
         },
         adminLog: {
           create: adminLogCreate,
+        },
+        riskFlag: {
+          findUnique: riskFlagFindUnique,
+          update: riskFlagUpdate,
         },
         userVerification: {
           update: userVerificationUpdate,
@@ -539,15 +575,8 @@ describe("admin actions", () => {
     expect(transactionMock).not.toHaveBeenCalled();
   });
 
-  it("suspends a student account and notifies them", async () => {
-    userFindUnique.mockResolvedValue({
-      id: "user-2",
-      status: "ACTIVE",
-      deletedAt: null,
-      erasedAt: null,
-      memberships: [],
-      userRoles: [],
-    });
+  it("suspends a student account through the central enforcement service（Phase 6B 薄 adapter）", async () => {
+    suspendAccount.mockResolvedValue({ status: "SUSPENDED", alreadyInState: false });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -555,13 +584,13 @@ describe("admin actions", () => {
 
     await toggleUserStatus(formData);
 
-    expect(userUpdate).toHaveBeenCalledWith({
-      where: { id: "user-2" },
-      data: { status: "SUSPENDED" },
+    expect(suspendAccount).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      targetUserId: "user-2",
+      reasonCode: "MANUAL_REVIEW",
+      sourceType: "ADMIN_ACTION",
     });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ action: "SUSPEND_USER", targetId: "user-2" }),
-    });
+    expect(reinstateAccount).not.toHaveBeenCalled();
     expect(createNotification).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: "user-2", title: "账号已被停用" }),
@@ -569,41 +598,37 @@ describe("admin actions", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/admin/users");
   });
 
-  it("refuses to suspend the admin's own account or other admins", async () => {
+  it("refuses to suspend the admin's own account（self-deny 透传）", async () => {
+    const { enforcementError } = await import("@/lib/enforcement/errors");
+    suspendAccount.mockRejectedValue(enforcementError("ENFORCEMENT_SELF_DENIED"));
+
     const formData = new FormData();
     formData.set("userId", "admin-1");
     formData.set("nextStatus", "SUSPENDED");
 
-    let result = await toggleUserStatus(formData);
-    expect(result).toEqual({ success: false, error: "不能停用或恢复自己的账号" });
+    const result = await toggleUserStatus(formData);
 
-    // RBAC full-admin 等价目标（含 role=ADMIN 的 legacy 同步账号）受保护
-    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
-    userFindUnique.mockResolvedValue({
-      id: "admin-2",
-      status: "ACTIVE",
-      deletedAt: null,
-      erasedAt: null,
-      memberships: [],
-      userRoles: [
-        {
-          campusId: null,
-          role: {
-            key: "PLATFORM_ADMIN",
-            scope: "GLOBAL",
-            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
-          },
-        },
-      ],
-    });
+    expect(result).toEqual({ success: false, error: "不能对自己执行该操作" });
+    expect(createNotification).not.toHaveBeenCalled();
+  });
+
+  it("refuses privileged targets（RBAC 保护由 service 承担）", async () => {
+    const { enforcementError } = await import("@/lib/enforcement/errors");
+    suspendAccount.mockRejectedValue(enforcementError("ENFORCEMENT_PRIVILEGED_TARGET"));
+
+    const formData = new FormData();
     formData.set("userId", "admin-2");
-    result = await toggleUserStatus(formData);
-    expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
-    expect(transactionMock).not.toHaveBeenCalled();
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "不能对该账号执行此管理操作" });
+    expect(createNotification).not.toHaveBeenCalled();
   });
 
   it("refuses to toggle a missing user", async () => {
-    userFindUnique.mockResolvedValue(null);
+    const { enforcementError } = await import("@/lib/enforcement/errors");
+    reinstateAccount.mockRejectedValue(enforcementError("ENFORCEMENT_TARGET_NOT_FOUND"));
 
     const formData = new FormData();
     formData.set("userId", "ghost");
@@ -611,7 +636,20 @@ describe("admin actions", () => {
 
     const result = await toggleUserStatus(formData);
 
-    expect(result).toEqual({ success: false, error: "用户不存在" });
+    expect(result).toEqual({ success: false, error: "目标不存在" });
+  });
+
+  it("is a deterministic no-op when the target is already in state（#51）", async () => {
+    suspendAccount.mockResolvedValue({ status: "SUSPENDED", alreadyInState: true });
+
+    const formData = new FormData();
+    formData.set("userId", "user-2");
+    formData.set("nextStatus", "SUSPENDED");
+
+    const result = await toggleUserStatus(formData);
+
+    expect(result).toEqual({ success: false, error: "账号已处于该状态" });
+    expect(createNotification).not.toHaveBeenCalled();
   });
 
   it("takes products offline through moderation", async () => {
@@ -735,15 +773,8 @@ describe("admin actions", () => {
     expect(userFindUnique).not.toHaveBeenCalled();
   });
 
-  it("restores a suspended account with a friendly notification", async () => {
-    userFindUnique.mockResolvedValue({
-      id: "user-2",
-      status: "ACTIVE",
-      deletedAt: null,
-      erasedAt: null,
-      memberships: [],
-      userRoles: [],
-    });
+  it("restores a suspended account through the central enforcement service", async () => {
+    reinstateAccount.mockResolvedValue({ status: "ACTIVE", alreadyInState: false });
 
     const formData = new FormData();
     formData.set("userId", "user-2");
@@ -751,8 +782,11 @@ describe("admin actions", () => {
 
     await toggleUserStatus(formData);
 
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ action: "RESTORE_USER", targetId: "user-2" }),
+    expect(reinstateAccount).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      targetUserId: "user-2",
+      reasonCode: "MANUAL_REVIEW",
+      sourceType: "ADMIN_ACTION",
     });
     expect(createNotification).toHaveBeenCalledWith(
       expect.anything(),
@@ -760,59 +794,18 @@ describe("admin actions", () => {
     );
   });
 
-  it("protects RBAC full-admin targets regardless of User.role（Repair 1 #27）", async () => {
-    const { ADMIN_SURFACE_PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
-    // role=STUDENT 但持有 PLATFORM_ADMIN 等价授权 → 受保护
-    userFindUnique.mockResolvedValue({
-      id: "user-2",
-      status: "ACTIVE",
-      deletedAt: null,
-      erasedAt: null,
-      memberships: [],
-      userRoles: [
-        {
-          campusId: null,
-          role: {
-            key: "PLATFORM_ADMIN",
-            scope: "GLOBAL",
-            rolePermissions: ADMIN_SURFACE_PERMISSION_KEYS.map((key) => ({ permission: { key } })),
-          },
-        },
-      ],
-    });
-
-    const formData = new FormData();
-    formData.set("userId", "user-2");
-    formData.set("nextStatus", "SUSPENDED");
-
-    const result = await toggleUserStatus(formData);
-
-    expect(result).toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
-    expect(userUpdate).not.toHaveBeenCalled();
-  });
-
-  it("stops protecting targets whose grants were revoked despite role=ADMIN（Repair 1 #27）", async () => {
-    // role=ADMIN 但无任何 UserRoleAssignment（授权已撤回/未同步）→ 不再受保护
-    userFindUnique.mockResolvedValue({
-      id: "user-3",
-      status: "ACTIVE",
-      deletedAt: null,
-      erasedAt: null,
-      memberships: [],
-      userRoles: [],
-    });
+  it("stops protecting targets whose grants were revoked despite role=ADMIN（service 决定放行）", async () => {
+    // 授权已撤回的目标不再受 privileged 保护——由 central service 判定放行
+    reinstateAccount.mockResolvedValue({ status: "ACTIVE", alreadyInState: false });
 
     const formData = new FormData();
     formData.set("userId", "user-3");
-    formData.set("nextStatus", "SUSPENDED");
+    formData.set("nextStatus", "ACTIVE");
 
     const result = await toggleUserStatus(formData);
 
-    expect(result).not.toEqual({ success: false, error: "不能停用或恢复其他管理员账号" });
-    expect(userUpdate).toHaveBeenCalledWith({
-      where: { id: "user-3" },
-      data: { status: "SUSPENDED" },
-    });
+    expect(result).not.toEqual({ success: false, error: "不能对该账号执行此管理操作" });
+    expect(createNotification).toHaveBeenCalled();
   });
 
   it("creates product and service categories with typed admin logs", async () => {

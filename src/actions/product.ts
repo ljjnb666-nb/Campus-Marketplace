@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -107,9 +108,12 @@ export async function createProduct(
       return { ...initialState, message: "商品分类不存在或已停用" };
     }
 
-    // 事务内完成：商品落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库。
+    // 事务内完成：subject 治理锁 + marketplace 能力门（account/membership/risk，
+    // Phase 6B）→ 商品落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库。
     // token 中的 asset: 引用被规范化为公开 URL 后才写入 ProductImage。
     const product = await withTransaction(async (tx) => {
+      await enforceMarketplaceCreationGate(tx, user.id, seller.campusId);
+
       const created = await tx.product.create({
         data: {
           title: parsed.data.title,

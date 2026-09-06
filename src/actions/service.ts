@@ -4,7 +4,8 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { prisma } from "@/lib/prisma";
+import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -102,18 +103,23 @@ export async function createService(
       return { ...initialState, message: "服务分类不存在或已停用" };
     }
 
-    const service = await prisma.serviceListing.create({
-      data: {
-        title: parsed.data.title,
-        description: parsed.data.description,
-        categoryId: parsed.data.categoryId,
-        price: decimalValue(parsed.data.price),
-        pricingUnit: parsed.data.pricingUnit,
-        locationText: parsed.data.locationText,
-        availableSchedule: parsed.data.availableSchedule || null,
-        campusId: provider.campusId,
-        providerId: user.id,
-      },
+    // Phase 6B：subject 治理锁 + marketplace 能力门与服务创建同事务
+    const service = await withTransaction(async (tx) => {
+      await enforceMarketplaceCreationGate(tx, user.id, provider.campusId);
+
+      return tx.serviceListing.create({
+        data: {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          categoryId: parsed.data.categoryId,
+          price: decimalValue(parsed.data.price),
+          pricingUnit: parsed.data.pricingUnit,
+          locationText: parsed.data.locationText,
+          availableSchedule: parsed.data.availableSchedule || null,
+          campusId: provider.campusId,
+          providerId: user.id,
+        },
+      });
     });
 
     // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源

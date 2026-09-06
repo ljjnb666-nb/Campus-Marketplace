@@ -5,6 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
 import { claimErrandTx } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateErrandViews } from "@/lib/revalidate";
@@ -109,24 +110,30 @@ export async function createErrand(
       return { ...initialState, message: "任务分类不存在或已停用" };
     }
 
-    const errand = await prisma.errandTask.create({
-      data: {
-        title: parsed.data.title,
-        description: parsed.data.description,
-        categoryId: parsed.data.categoryId,
-        reward: decimalValue(parsed.data.reward),
-        pickupLocation: parsed.data.pickupLocation,
-        deliveryLocation: parsed.data.deliveryLocation,
-        deadline,
-        contactNote: parsed.data.contactNote || null,
-        needsAdvancePay: parsed.data.needsAdvancePay === "true",
-        advanceAmount:
-          parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
-            ? decimalValue(parsed.data.advanceAmount)
-            : null,
-        campusId: publisher.campusId,
-        publisherId: user.id,
-      },
+    // Phase 6B：subject 治理锁 + marketplace 能力门（account/membership/risk）
+    // 与任务创建同事务——membership 停用 vs 任务发布严格先后线性化
+    const errand = await withTransaction(async (tx) => {
+      await enforceMarketplaceCreationGate(tx, user.id, publisher.campusId);
+
+      return tx.errandTask.create({
+        data: {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          categoryId: parsed.data.categoryId,
+          reward: decimalValue(parsed.data.reward),
+          pickupLocation: parsed.data.pickupLocation,
+          deliveryLocation: parsed.data.deliveryLocation,
+          deadline,
+          contactNote: parsed.data.contactNote || null,
+          needsAdvancePay: parsed.data.needsAdvancePay === "true",
+          advanceAmount:
+            parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
+              ? decimalValue(parsed.data.advanceAmount)
+              : null,
+          campusId: publisher.campusId,
+          publisherId: user.id,
+        },
+      });
     });
 
     revalidateErrandViews(errand.id);
@@ -266,6 +273,7 @@ export async function claimErrand(formData: FormData) {
         accepterId: true,
         status: true,
         reward: true,
+        campusId: true,
       },
     });
 
@@ -282,6 +290,7 @@ export async function claimErrand(formData: FormData) {
         errandId,
         publisherId: errand.publisherId,
         claimerId: user.id,
+        campusId: errand.campusId,
         reward: errand.reward,
       }),
     );

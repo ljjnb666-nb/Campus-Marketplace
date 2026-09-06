@@ -31,10 +31,18 @@ const {
   const txOrderUpdate = vi.fn();
   const txOrderUpdateMany = vi.fn();
   const txUserUpdate = vi.fn();
+  const txErrandTaskCreate = vi.fn();
   const transactionClient = {
     errandTask: {
+      create: txErrandTaskCreate,
       update: txErrandTaskUpdate,
       updateMany: txErrandTaskUpdateMany,
+    },
+    campusMembership: {
+      findFirst: vi.fn().mockResolvedValue({ id: "m-1" }),
+    },
+    riskState: {
+      findMany: vi.fn().mockResolvedValue([]),
     },
     order: {
       create: txOrderCreate,
@@ -59,7 +67,7 @@ const {
     createNotifications: vi.fn(),
     userFindUnique: vi.fn(),
     errandCategoryFindUnique: vi.fn(),
-    errandTaskCreate: vi.fn(),
+    errandTaskCreate: txErrandTaskCreate,
     errandTaskFindFirst: vi.fn(),
     errandTaskUpdate: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
@@ -76,6 +84,11 @@ const {
     txUserFindMany,
   };
 });
+
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("next/cache", () => ({
   revalidatePath,

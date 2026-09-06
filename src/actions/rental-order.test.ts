@@ -118,6 +118,10 @@ const {
   };
 });
 
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));

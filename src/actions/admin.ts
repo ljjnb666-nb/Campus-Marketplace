@@ -6,7 +6,8 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
-import { isPrivilegedTarget } from "@/lib/rbac/service";
+import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
+import { recordRiskFlag, resolveRiskFlag } from "@/lib/enforcement/risk-service";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -288,6 +289,53 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
         },
       });
 
+      // Phase 6B：举报信号闭环（信号 != 裁决事实，绝不自动处罚）：
+      // RESOLVED（核查成立）→ 记录 REPORT_CONFIRMED 确认信号；
+      // REJECTED（未通过）→ 将 REPORT_SUBMITTED 未裁决信号闭环为 RESOLVED。
+      // 两者都只更新 RiskFlag，不触碰 User.status / RiskState / creditScore。
+      if (parsed.data.status === "RESOLVED") {
+        const submitted = await tx.riskFlag.findUnique({
+          where: {
+            kind_sourceType_sourceId: {
+              kind: "REPORT_SUBMITTED",
+              sourceType: "REPORT",
+              sourceId: parsed.data.reportId,
+            },
+          },
+          select: { id: true, status: true, userId: true, campusId: true },
+        });
+        if (submitted) {
+          if (submitted.status === "ACTIVE") {
+            await tx.riskFlag.update({
+              where: { id: submitted.id },
+              data: { status: "RESOLVED", resolvedById: admin.id, resolvedAt: new Date() },
+            });
+          }
+          await recordRiskFlag(
+            {
+              userId: submitted.userId,
+              campusId: submitted.campusId,
+              kind: "REPORT_CONFIRMED",
+              severity: "MEDIUM",
+              sourceType: "REPORT",
+              sourceId: parsed.data.reportId,
+              createdById: admin.id,
+            },
+            tx,
+          );
+        }
+      } else if (parsed.data.status === "REJECTED") {
+        await resolveRiskFlag(
+          {
+            kind: "REPORT_SUBMITTED",
+            sourceType: "REPORT",
+            sourceId: parsed.data.reportId,
+            resolvedById: admin.id,
+          },
+          tx,
+        );
+      }
+
       await createNotification(tx, {
         userId: report.reporterId,
         type: "REPORT",
@@ -318,42 +366,27 @@ export async function toggleUserStatus(
       return invalidFormState();
     }
 
-    // 防止管理员停用自己，导致所有后台入口被锁死
-    if (parsed.data.userId === admin.id) {
-      return { success: false, error: "不能停用或恢复自己的账号" };
-    }
+    // Phase 6B：账号硬停用/恢复收敛到中央 enforcement service（薄 adapter）。
+    // service 内部承担：sorted subject 锁（正式关闭 USER_STATUS_ROLE_ASSIGNMENT_RACE）
+    // → user.suspend permission 复核 → self-deny → privileged target 保护（RBAC）
+    // → 幂等转移 → EnforcementAction + 审计。
+    const enforcementInput = {
+      actorId: admin.id,
+      targetUserId: parsed.data.userId,
+      reasonCode: "MANUAL_REVIEW" as const,
+      sourceType: "ADMIN_ACTION",
+    };
 
-    const target = await prisma.user.findUnique({
-      where: { id: parsed.data.userId },
-      select: { id: true },
-    });
+    const result =
+      parsed.data.nextStatus === "SUSPENDED"
+        ? await suspendAccount(enforcementInput)
+        : await reinstateAccount(enforcementInput);
 
-    if (!target) {
-      return { success: false, error: "用户不存在" };
-    }
-
-    // Repair 1：高权限目标保护以 RBAC 授权上下文判定（full-admin 等价），
-    // 不读取 User.role——RBAC 平台管理员即使 role=STUDENT 也受保护；
-    // 授权已被撤回的用户即使 role=ADMIN 也不再受保护
-    if (await isPrivilegedTarget(parsed.data.userId)) {
-      return { success: false, error: "不能停用或恢复其他管理员账号" };
+    if (result.alreadyInState) {
+      return { success: false, error: "账号已处于该状态" };
     }
 
     await withTransaction(async (tx) => {
-      await tx.user.update({
-        where: { id: parsed.data.userId },
-        data: { status: parsed.data.nextStatus },
-      });
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: parsed.data.nextStatus === "SUSPENDED" ? "SUSPEND_USER" : "RESTORE_USER",
-          targetType: "USER",
-          targetId: parsed.data.userId,
-        },
-      });
-
       await createNotification(tx, {
         userId: parsed.data.userId,
         type: "SYSTEM",

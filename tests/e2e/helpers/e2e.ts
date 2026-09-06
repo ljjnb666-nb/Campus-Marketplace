@@ -28,6 +28,12 @@ export const E2E_ACCOUNTS = {
     password: `${E2E_PASSWORD_PREFIX}Outsider#2026`,
     name: "E2E无关用户",
   },
+  // Phase 6B：能力门 E2E 专用账号（spec 内由 seedActiveRestriction 打标）
+  restricted: {
+    email: "e2e-restricted@e2e.test",
+    password: `${E2E_PASSWORD_PREFIX}Restricted#2026`,
+    name: "E2E受限用户",
+  },
   // Phase 5：legacy 用户——setup 不为其插入同意记录，
   // 登录后会被 consent gate 引导到 /legal/accept
   legacy: {

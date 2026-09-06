@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
+import { recordRiskFlag } from "@/lib/enforcement/risk-service";
 import { createNotification } from "@/repositories/notification-repository";
 import { reportFormSchema, reviewFormSchema } from "@/validators/trust";
 
@@ -263,6 +264,23 @@ export async function createReport(
           ...payload,
         },
       });
+
+      // Phase 6B：举报创建仅记录未裁决风险信号（REPORT_SUBMITTED，signal 而
+      //非 adjudicated fact）。绝不在此同步 restrict/suspend/扣分——处罚只能
+      // 来自显式 enforcement 决策（见 src/lib/enforcement/*）。同一举报来源
+      // 幂等去重（(kind, sourceType, sourceId) 唯一）。
+      if (targetOwnerId) {
+        await recordRiskFlag(
+          {
+            userId: targetOwnerId,
+            kind: "REPORT_SUBMITTED",
+            severity: "INFO",
+            sourceType: "REPORT",
+            sourceId: report.id,
+          },
+          tx,
+        );
+      }
 
       await createNotification(tx, {
         userId: user.id,

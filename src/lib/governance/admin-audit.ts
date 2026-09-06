@@ -24,6 +24,12 @@ const ALLOWED_METADATA_KEYS = new Set([
   "roleKey",
   "targetUserId",
   "reasonCode",
+  // Phase 6B：risk / enforcement 元数据（全部为机器可读码，无敏感载荷）
+  "scopeKey",
+  "riskState",
+  "resultState",
+  "sourceType",
+  "sourceId",
 ]);
 
 function sanitizeMetadata(

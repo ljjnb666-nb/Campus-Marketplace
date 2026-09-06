@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { decimalValue } from "@/lib/decimal";
+import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { createOrderNo } from "@/lib/order-no";
 import { createNotifications } from "@/repositories/notification-repository";
 import {
@@ -17,6 +18,12 @@ import {
  * requireUser 预检；真正的写事务从这里开始——requireUser 是事务前校验，
  * 不足以关闭"校验后被注销"的竞态窗口。
  *
+ * Phase 6B：participant 锁内进一步复核**发起方**（buyer/claimer）的
+ * marketplace 能力门（account ACTIVE + 该校区 membership ACTIVE +
+ * risk state != RESTRICTED）。门只约束发起"新活动"的一方；对手方
+ * （卖家/发布者）不受其自身 restriction 影响其既有 listing 被下单
+ * （lifecycle 策略 DEFER_TO_6C_OR_PHASE_8）。
+ *
  * racePoint 为测试 seam（锁 + 复核之后、义务写入之前），生产路径不传。
  */
 
@@ -28,13 +35,16 @@ export async function createProductOrderTx(
   tx: Prisma.TransactionClient,
   input: {
     buyerId: string;
-    product: { id: string; price: string; sellerId: string };
+    product: { id: string; price: string; sellerId: string; campusId: string };
     meetingLocation: string;
     note: string | null;
   },
   racePoint?: ObligationRacePoint,
 ) {
   return withObligationGuard(tx, [input.buyerId, input.product.sellerId], async () => {
+    // Phase 6B：buyer 的新活动能力门（participant 锁已由 guard 取得）
+    await requireMarketplaceCapability(tx, input.buyerId, input.product.campusId);
+
     const reserveResult = await tx.product.updateMany({
       where: {
         id: input.product.id,
@@ -88,13 +98,16 @@ export async function createServiceOrderTx(
   tx: Prisma.TransactionClient,
   input: {
     buyerId: string;
-    service: { id: string; price: string; providerId: string };
+    service: { id: string; price: string; providerId: string; campusId: string };
     meetingLocation: string;
     note: string | null;
   },
   racePoint?: ObligationRacePoint,
 ) {
   return withObligationGuard(tx, [input.buyerId, input.service.providerId], async () => {
+    // Phase 6B：buyer 的新活动能力门
+    await requireMarketplaceCapability(tx, input.buyerId, input.service.campusId);
+
     const order = await tx.order.create({
       data: {
         orderNo: createOrderNo(),
@@ -137,11 +150,15 @@ export async function claimErrandTx(
     errandId: string;
     publisherId: string;
     claimerId: string;
+    campusId: string;
     reward: Prisma.Decimal;
   },
   racePoint?: ObligationRacePoint,
 ) {
   return withObligationGuard(tx, [input.publisherId, input.claimerId], async () => {
+    // Phase 6B：claimer 的新活动能力门
+    await requireMarketplaceCapability(tx, input.claimerId, input.campusId);
+
     const claimResult = await tx.errandTask.updateMany({
       where: {
         id: input.errandId,

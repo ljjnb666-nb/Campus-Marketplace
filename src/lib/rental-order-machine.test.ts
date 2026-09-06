@@ -10,6 +10,10 @@ vi.mock("@/repositories/notification-repository", () => ({
   createNotifications,
 }));
 
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/repositories/rental-order-repository", () => ({
   checkTimeConflict,
 }));

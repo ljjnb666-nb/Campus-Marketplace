@@ -159,7 +159,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
-- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿，见 MASTER_ROADMAP.md §5.2 与下节）；Phase 6B NOT_STARTED）
+- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（2026-09-05，见 MASTER_ROADMAP.md §5.2）；Phase 6C NOT_STARTED）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
