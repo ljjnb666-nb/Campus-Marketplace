@@ -52,21 +52,28 @@ async function nextVersion(
 }
 
 async function createFixtureUser(name: string) {
+  const campus = await rawClient!.campus.upsert({
+    where: { slug: "it-main-campus" },
+    update: {},
+    create: { name: "集成主校区", slug: "it-main-campus", schoolName: "集成测试大学" },
+  });
+
   const user = await rawClient!.user.create({
     data: {
       email: `${RUN_TAG}-${createdUserIds.length}@it.local`,
       name,
       passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfixtureitfix",
       schoolName: "集成测试大学",
-      campus: {
-        connectOrCreate: {
-          where: { slug: "it-main-campus" },
-          create: { name: "集成主校区", slug: "it-main-campus", schoolName: "集成测试大学" },
-        },
-      },
+      campusId: campus.id,
     },
   });
   createdUserIds.push(user.id);
+
+  // Phase 6B：义务创建入口新增 membership 能力门——fixture 用户必须持有
+  // ACTIVE CampusMembership 才能创建订单/义务（与生产注册语义一致）
+  await rawClient!.campusMembership.create({
+    data: { userId: user.id, campusId: campus.id, status: "ACTIVE" },
+  });
 
   return user;
 }
