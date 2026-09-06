@@ -33,6 +33,14 @@ vi.mock("@/lib/governance/admin-audit", () => ({
   recordAdminAudit,
 }));
 
+const { createNotification } = vi.hoisted(() => ({
+  createNotification: vi.fn(),
+}));
+
+vi.mock("@/repositories/notification-repository", () => ({
+  createNotification,
+}));
+
 // isPrivilegedTarget / hasPermission 用真实实现，仅替换 context 加载
 vi.mock("@/lib/rbac/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
@@ -84,6 +92,7 @@ beforeEach(() => {
   txEnforcementActionCreate.mockReset().mockResolvedValue({});
   acquireGovernanceSubjectLocks.mockReset().mockResolvedValue(undefined);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
+  createNotification.mockReset().mockResolvedValue({});
   loadAuthorizationContextMock.mockReset().mockImplementation(async (userId: string) => {
     if (userId === "actor-1") {
       return actorWithSuspend();

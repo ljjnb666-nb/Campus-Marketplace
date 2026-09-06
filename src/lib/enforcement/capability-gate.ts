@@ -112,3 +112,44 @@ export async function enforceMarketplaceCreationGate(
   ]);
   await requireMarketplaceCapability(tx, userId, campusId);
 }
+
+/**
+ * Repair 1 Blocker E：新义务参与方 membership integrity。
+ *
+ * 创建**新的**持续性义务（商品订单/服务预约/跑腿接单/租赁订单）时，
+ * 全部参与方（发起方 + 对手方）都必须是活动校区（listing 所在校区）的
+ * ACTIVE member——任何一方 membership 缺失/非 ACTIVE（含 SUSPENDED）→
+ * 整个义务创建 fail closed。
+ *
+ * 语义边界（与软限制互补，不重叠）：
+ * - 本门只看 membership，不看 RiskState：RESTRICTED 卖家（membership 仍
+ *   ACTIVE）可以继续**接收**新订单——对其的处置是 listing lifecycle 策略
+ *   （DEFER_TO_6C_OR_PHASE_8），不在本门
+ * - 必须在 participant governance subject 锁已取得之后调用
+ *   （order-creation/rental-machine 的 guard 已持全部参与方锁）
+ */
+export async function requireParticipantsMembership(
+  tx: Prisma.TransactionClient,
+  participantUserIds: string[],
+  campusId: string,
+): Promise<void> {
+  const uniqueIds = [...new Set(participantUserIds)];
+
+  const memberships = await tx.campusMembership.findMany({
+    where: {
+      userId: { in: uniqueIds },
+      campusId,
+      status: "ACTIVE",
+    },
+    select: { userId: true },
+  });
+
+  const activeSet = new Set(memberships.map((m) => m.userId));
+  if (uniqueIds.every((id) => activeSet.has(id))) {
+    return;
+  }
+
+  // 统一 fail closed：不向 actor 区分是哪一方 membership 失效
+  //（避免泄露对手方账号状态）
+  throw rbacError("MEMBERSHIP_NOT_ACTIVE");
+}

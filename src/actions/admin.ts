@@ -7,7 +7,10 @@ import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
-import { recordRiskFlag, resolveRiskFlag } from "@/lib/enforcement/risk-service";
+import {
+  assertReportStatusTransition,
+  reconcileReportRiskProjection,
+} from "@/lib/enforcement/report-projection";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -265,6 +268,14 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
 
     await withTransaction(async (tx) => {
+      // Repair 1 Blocker D：中央 transition assertion——任意 status 跳转拒绝
+      // （RESOLVED/REJECTED 仅可经 IN_REVIEW 重开；同状态重提交幂等合法）
+      const currentReport = await tx.report.findUniqueOrThrow({
+        where: { id: parsed.data.reportId },
+        select: { status: true },
+      });
+      assertReportStatusTransition(currentReport.status, parsed.data.status);
+
       const report = await tx.report.update({
         where: { id: parsed.data.reportId },
         data: {
@@ -289,52 +300,13 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
         },
       });
 
-      // Phase 6B：举报信号闭环（信号 != 裁决事实，绝不自动处罚）：
-      // RESOLVED（核查成立）→ 记录 REPORT_CONFIRMED 确认信号；
-      // REJECTED（未通过）→ 将 REPORT_SUBMITTED 未裁决信号闭环为 RESOLVED。
-      // 两者都只更新 RiskFlag，不触碰 User.status / RiskState / creditScore。
-      if (parsed.data.status === "RESOLVED") {
-        const submitted = await tx.riskFlag.findUnique({
-          where: {
-            kind_sourceType_sourceId: {
-              kind: "REPORT_SUBMITTED",
-              sourceType: "REPORT",
-              sourceId: parsed.data.reportId,
-            },
-          },
-          select: { id: true, status: true, userId: true, campusId: true },
-        });
-        if (submitted) {
-          if (submitted.status === "ACTIVE") {
-            await tx.riskFlag.update({
-              where: { id: submitted.id },
-              data: { status: "RESOLVED", resolvedById: admin.id, resolvedAt: new Date() },
-            });
-          }
-          await recordRiskFlag(
-            {
-              userId: submitted.userId,
-              campusId: submitted.campusId,
-              kind: "REPORT_CONFIRMED",
-              severity: "MEDIUM",
-              sourceType: "REPORT",
-              sourceId: parsed.data.reportId,
-              createdById: admin.id,
-            },
-            tx,
-          );
-        }
-      } else if (parsed.data.status === "REJECTED") {
-        await resolveRiskFlag(
-          {
-            kind: "REPORT_SUBMITTED",
-            sourceType: "REPORT",
-            sourceId: parsed.data.reportId,
-            resolvedById: admin.id,
-          },
-          tx,
-        );
-      }
+      // Repair 1 Blocker D：举报信号投影确定性收敛（读取 canonical Report，
+      // 统一收敛 REPORT_SUBMITTED / REPORT_CONFIRMED，支持 legacy 缺投影与
+      // 幂等重放；绝不触碰 User.status / RiskState / creditScore）
+      await reconcileReportRiskProjection(
+        { reportId: parsed.data.reportId, actorId: admin.id },
+        tx,
+      );
 
       await createNotification(tx, {
         userId: report.reporterId,
@@ -348,6 +320,10 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     revalidatePath("/admin/reports");
     revalidatePath("/notifications");
   } catch (error) {
+    // 中央 transition assertion 的领域错误转用户可读提示
+    if (error instanceof Error && error.message.startsWith("REPORT_STATUS_INVALID_TRANSITION:")) {
+      return { success: false, error: "举报当前状态不允许此操作" };
+    }
     return { success: false, error: actionErrorMessage(error, "reviewReport") };
   }
 }
@@ -369,7 +345,8 @@ export async function toggleUserStatus(
     // Phase 6B：账号硬停用/恢复收敛到中央 enforcement service（薄 adapter）。
     // service 内部承担：sorted subject 锁（正式关闭 USER_STATUS_ROLE_ASSIGNMENT_RACE）
     // → user.suspend permission 复核 → self-deny → privileged target 保护（RBAC）
-    // → 幂等转移 → EnforcementAction + 审计。
+    // → 幂等转移 → EnforcementAction + 审计 + 通知（Repair 1 Blocker C：
+    // 通知随命令同事务提交——通知失败整体回滚，不会伪装成 enforcement 失败）。
     const enforcementInput = {
       actorId: admin.id,
       targetUserId: parsed.data.userId,
@@ -385,18 +362,6 @@ export async function toggleUserStatus(
     if (result.alreadyInState) {
       return { success: false, error: "账号已处于该状态" };
     }
-
-    await withTransaction(async (tx) => {
-      await createNotification(tx, {
-        userId: parsed.data.userId,
-        type: "SYSTEM",
-        title: parsed.data.nextStatus === "SUSPENDED" ? "账号已被停用" : "账号已恢复正常",
-        content:
-          parsed.data.nextStatus === "SUSPENDED"
-            ? "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。"
-            : "你的账号已恢复正常使用。",
-      });
-    });
 
     revalidatePath("/admin/users");
   } catch (error) {

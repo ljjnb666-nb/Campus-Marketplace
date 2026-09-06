@@ -12,6 +12,7 @@ vi.mock("@/repositories/notification-repository", () => ({
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/repositories/rental-order-repository", () => ({
@@ -39,6 +40,11 @@ function buildTx() {
     rentalDamageClaim: { findFirst: vi.fn(), update: vi.fn() },
     rentalReview: { count: vi.fn() },
     user: { update: vi.fn() },
+    campusMembership: {
+      findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] } } }) =>
+        where.userId.in.map((userId: string) => ({ userId })),
+      ),
+    },
   };
 }
 

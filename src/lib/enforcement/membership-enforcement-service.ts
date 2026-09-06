@@ -8,6 +8,7 @@ import { withTransaction } from "@/lib/prisma";
 import { rbacError } from "@/lib/rbac/errors";
 import {
   hasPermission,
+  isPrivilegedTarget,
   loadAuthorizationContext,
 } from "@/lib/rbac/service";
 
@@ -101,6 +102,12 @@ export async function suspendCampusMembership(
       throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
     }
 
+    // Repair 1 Blocker F：privileged target 保护（full-admin 等价，
+    // RBAC-derived——campus 经理不能停用 PLATFORM_ADMIN 的成员关系）
+    if (await isPrivilegedTarget(input.targetUserId, tx)) {
+      throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
+    }
+
     const membership = await tx.campusMembership.findUnique({
       where: { userId_campusId: { userId: input.targetUserId, campusId: input.campusId } },
       select: { id: true, status: true },
@@ -171,6 +178,11 @@ export async function reinstateCampusMembership(
     });
     if (!target || target.deletedAt || target.erasedAt) {
       throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
+    }
+
+    // Repair 1 Blocker F：privileged target 保护
+    if (await isPrivilegedTarget(input.targetUserId, tx)) {
+      throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
     }
 
     const membership = await tx.campusMembership.findUnique({

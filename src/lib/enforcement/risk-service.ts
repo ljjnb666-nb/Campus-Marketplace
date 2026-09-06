@@ -115,7 +115,7 @@ export type SetRiskStateResult = {
 
 export async function setRiskState(input: SetRiskStateInput): Promise<SetRiskStateResult> {
   return withTransaction(async (tx) => {
-    // SELF_ENFORCEMENT = DENY（锁前 fail closed）
+    // SELF_ENFORCEMENT = DENY（锁前 fail closed；非探测通道）
     if (input.actorId === input.targetUserId) {
       throw enforcementError("ENFORCEMENT_SELF_DENIED");
     }
@@ -130,23 +130,10 @@ export async function setRiskState(input: SetRiskStateInput): Promise<SetRiskSta
       await input.racePoint(tx);
     }
 
-    // target 存在性 + 未注销（已注销账号不进入风险态管理——其能力已被账号门关闭）
-    const target = await tx.user.findUnique({
-      where: { id: input.targetUserId },
-      select: { id: true, status: true, deletedAt: true, erasedAt: true },
-    });
-    if (!target || target.deletedAt || target.erasedAt) {
-      throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
-    }
-
-    // privileged target 保护：full-admin 等价账号不接受风险态变更
-    if (await hasFullAdminSurfaceAccess(await loadAuthorizationContext(input.targetUserId, tx))) {
-      throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
-    }
-
-    const scopeKey = riskScopeKey(input.campusId);
-
-    // actor 权限（subject 锁之后复核；TOCTOU 关闭）
+    // ---- Repair 1 Blocker G：授权顺序收紧 ----
+    // actor 授权必须先于任何 target 探测：未授权 actor 对 missing/normal/
+    // privileged/cross-campus target 一律得到统一的 AUTH_* denial family，
+    // 无法通过错误路径差异推断目标状态。
     const actorContext = await loadAuthorizationContext(input.actorId, tx);
     if (!actorContext || !actorContext.accountActive) {
       throw rbacError("AUTH_ACCOUNT_INACTIVE");
@@ -158,6 +145,43 @@ export async function setRiskState(input: SetRiskStateInput): Promise<SetRiskSta
     if (!allowed) {
       throw rbacError("AUTH_PERMISSION_DENIED");
     }
+
+    // ---- target 存在性（已授权 actor 才可达） ----
+    const target = await tx.user.findUnique({
+      where: { id: input.targetUserId },
+      select: { id: true, status: true, deletedAt: true, erasedAt: true },
+    });
+    if (!target || target.deletedAt || target.erasedAt) {
+      throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
+    }
+
+    // ---- Repair 1 Blocker A：CAMPUS 风险态必须绑定真实 target membership ----
+    // campus 作用域变更要求 target 对该校区存在 membership 且
+    // status ∈ {ACTIVE, SUSPENDED}：ACTIVE 正常成员；SUSPENDED 管理员仍须
+    // 能维护/恢复其风险态；missing/PENDING/REJECTED/LEFT 一律 DENY
+    // （LEFT 已离校不再新增校区处罚；PENDING/REJECTED 尚非有效成员）。
+    // GLOBAL 权限不能绕过 "target 与 campus 无关系" 这一领域不变量。
+    if (input.campusId != null) {
+      const targetMembership = await tx.campusMembership.findUnique({
+        where: {
+          userId_campusId: { userId: input.targetUserId, campusId: input.campusId },
+        },
+        select: { status: true },
+      });
+      if (
+        !targetMembership ||
+        (targetMembership.status !== "ACTIVE" && targetMembership.status !== "SUSPENDED")
+      ) {
+        throw enforcementError("ENFORCEMENT_TARGET_SCOPE_MISMATCH");
+      }
+    }
+
+    // ---- privileged target 保护（full-admin 等价） ----
+    if (await hasFullAdminSurfaceAccess(await loadAuthorizationContext(input.targetUserId, tx))) {
+      throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
+    }
+
+    const scopeKey = riskScopeKey(input.campusId);
 
     const existing = await tx.riskState.findUnique({
       where: { userId_scopeKey: { userId: input.targetUserId, scopeKey } },

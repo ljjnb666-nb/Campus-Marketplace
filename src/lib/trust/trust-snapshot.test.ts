@@ -1,20 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { userFindUnique, reportCount, membershipFindMany } = vi.hoisted(() => ({
+const { userFindUnique, riskStateFindMany, riskFlagCount, reportFindMany } = vi.hoisted(() => ({
   userFindUnique: vi.fn(),
-  reportCount: vi.fn(),
-  membershipFindMany: vi.fn(),
+  riskStateFindMany: vi.fn(),
+  riskFlagCount: vi.fn(),
+  reportFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: { findUnique: userFindUnique },
-    report: { count: reportCount },
-    campusMembership: { findMany: membershipFindMany },
+    riskState: { findMany: riskStateFindMany },
+    riskFlag: { count: riskFlagCount },
+    report: { findMany: reportFindMany },
   },
 }));
 
-import { getTrustSnapshot } from "@/lib/trust/trust-snapshot";
+// loadAuthorizationContext 替换（授权路径单测）；hasPermission 用真实实现
+const { loadAuthorizationContextMock } = vi.hoisted(() => ({
+  loadAuthorizationContextMock: vi.fn(),
+}));
+vi.mock("@/lib/rbac/service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
+  return {
+    ...actual,
+    loadAuthorizationContext: loadAuthorizationContextMock,
+  };
+});
+
+import type { AuthorizationContext } from "@/lib/rbac/service";
+import {
+  getInternalTrustSnapshot,
+  getPublicTrustSnapshot,
+} from "@/lib/trust/trust-snapshot";
 
 const USER_ROW = {
   id: "user-1",
@@ -34,62 +52,157 @@ const USER_ROW = {
   _count: { receivedReviews: 7 },
 };
 
+const AUDITED_ACTOR: AuthorizationContext = {
+  userId: "actor-1",
+  accountActive: true,
+  activeCampusIds: [],
+  grants: [
+    {
+      roleKey: "PLATFORM_ADMIN",
+      scope: "GLOBAL",
+      campusId: null,
+      permissionKeys: ["audit.read"],
+    },
+  ],
+};
+
 beforeEach(() => {
   userFindUnique.mockReset().mockResolvedValue({ ...USER_ROW });
-  reportCount.mockReset().mockResolvedValue(0);
-  membershipFindMany.mockReset().mockResolvedValue([]);
+  riskStateFindMany.mockReset().mockResolvedValue([]);
+  riskFlagCount.mockReset().mockResolvedValue(0);
+  loadAuthorizationContextMock.mockReset().mockResolvedValue(AUDITED_ACTOR);
 });
 
-describe("getTrustSnapshot（中央 trust 快照，只读既有事实）", () => {
-  it("aggregates existing signals without inventing scores", async () => {
-    reportCount.mockResolvedValueOnce(2).mockResolvedValueOnce(5);
-
-    const snapshot = await getTrustSnapshot("user-1");
+describe("getPublicTrustSnapshot（public 安全信号）", () => {
+  it("returns only public-safe signals and never risk/report internals", async () => {
+    const snapshot = await getPublicTrustSnapshot("user-1");
 
     expect(snapshot).toMatchObject({
       userId: "user-1",
       verification: { status: "VERIFIED" },
-      membership: { activeCampusIds: ["campus-a"], statuses: ["ACTIVE", "LEFT"] },
+      membership: { activeCampusCount: 1 },
       transactionHistory: { completedOrdersCount: 12 },
       reviewSignals: { positiveReviewRate: 0.95, receivedReviewsCount: 7 },
-      rentalSignals: { rentalDisputeCount: 1, onTimeReturnRate: 0.9 },
-      reportSignals: {
-        openReportCount: 2,
-        resolvedReportCount: 5,
-        signalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
-      },
+      rentalSignals: { rentalDisputeCount: 1 },
       legacyCreditScore: { value: 100, policy: "LEGACY_DISPLAY_SIGNAL" },
     });
-    // 无综合评分字段（NO_OPAQUE_SCORING）
+
+    const json = JSON.stringify(snapshot);
+    // Repair 1 Blocker B 禁止项在结构上不可出现
+    expect(json).not.toContain("risk");
+    expect(json).not.toContain("reportSignals");
+    expect(json).not.toContain("openReport");
+    expect(json).not.toContain("resolvedReport");
+    expect(json).not.toContain("activeRestrictions");
     expect(snapshot && "riskScore" in snapshot).toBe(false);
-    expect(snapshot && "trustScore" in snapshot).toBe(false);
-  });
-
-  it("hides risk data unless includeRisk is set（#39 admin-only）", async () => {
-    const withoutRisk = await getTrustSnapshot("user-1");
-    expect(withoutRisk?.risk).toBeUndefined();
-
-    const { getRiskStateRows } = await import("@/lib/enforcement/risk-service");
-    const rowsSpy = vi.spyOn(await import("@/lib/enforcement/risk-service"), "getRiskStateRows");
-    // getRiskStateRows 在 includeRisk 下经 prisma 路径读取 riskState
-    const prismaModule = await import("@/lib/prisma");
-    (prismaModule.prisma as unknown as Record<string, unknown>).riskState = {
-      findMany: vi.fn().mockResolvedValue([
-        { scopeKey: "GLOBAL", campusId: null, state: "RESTRICTED", reasonCode: "FRAUD_CONFIRMED" },
-      ]),
-    };
-    void rowsSpy;
-
-    const withRisk = await getTrustSnapshot("user-1", { includeRisk: true });
-
-    expect(withRisk?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
-    expect(withRisk?.risk?.states[0]).toMatchObject({ state: "RESTRICTED" });
-    void getRiskStateRows;
+    // 公开视图不透出内部 campusId 列表
+    expect(JSON.stringify(snapshot)).not.toContain("campus-a");
   });
 
   it("returns null for unknown users", async () => {
     userFindUnique.mockResolvedValue(null);
+    await expect(getPublicTrustSnapshot("ghost")).resolves.toBeNull();
+  });
+});
 
-    await expect(getTrustSnapshot("ghost")).resolves.toBeNull();
+describe("getInternalTrustSnapshot（admin-only 授权视图）", () => {
+  it("denies actors without audit.read（DEFAULT_DENY，不依赖 includeRisk 自报）", async () => {
+    loadAuthorizationContextMock.mockResolvedValue({
+      userId: "actor-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [],
+    });
+
+    await expect(
+      getInternalTrustSnapshot({ actorId: "actor-1", targetUserId: "user-1" }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+    expect(userFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("denies inactive actors", async () => {
+    loadAuthorizationContextMock.mockResolvedValue({
+      userId: "actor-1",
+      accountActive: false,
+      activeCampusIds: [],
+      grants: AUDITED_ACTOR.grants,
+    });
+
+    await expect(
+      getInternalTrustSnapshot({ actorId: "actor-1", targetUserId: "user-1" }),
+    ).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+  });
+
+  it("requires campus-scoped audit.read for campus views", async () => {
+    loadAuthorizationContextMock.mockResolvedValue({
+      userId: "actor-1",
+      accountActive: true,
+      activeCampusIds: ["campus-b"],
+      grants: [
+        {
+          roleKey: "CAMPUS_AUDITOR",
+          scope: "CAMPUS",
+          campusId: "campus-b",
+          permissionKeys: ["audit.read"],
+        },
+      ],
+    });
+
+    // campus-a 视角：scope 不匹配 → DENY
+    await expect(
+      getInternalTrustSnapshot({ actorId: "actor-1", targetUserId: "user-1", campusId: "campus-a" }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+
+    // campus-b 视角：命中 → ALLOW
+    await expect(
+      getInternalTrustSnapshot({ actorId: "actor-1", targetUserId: "user-1", campusId: "campus-b" }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("aggregates RiskFlag-based submitted/confirmed signals distinctly", async () => {
+    riskFlagCount.mockImplementation(async ({ where }: { where: { kind: string } }) =>
+      where.kind === "REPORT_SUBMITTED" ? 3 : 1,
+    );
+    riskStateFindMany.mockResolvedValue([
+      { scopeKey: "GLOBAL", campusId: null, state: "RESTRICTED", reasonCode: "FRAUD_CONFIRMED" },
+    ]);
+
+    const snapshot = await getInternalTrustSnapshot({
+      actorId: "actor-1",
+      targetUserId: "user-1",
+    });
+
+    expect(snapshot?.reportSignals).toEqual({
+      submittedReportSignals: 3,
+      confirmedReportSignals: 1,
+      submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
+      confirmedSignalNote: "CONFIRMED_AFTER_REVIEW",
+    });
+    expect(snapshot?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
+    expect(snapshot?.risk?.states[0]).toMatchObject({ state: "RESTRICTED" });
+  });
+
+  it("scopes campus views to GLOBAL + that campus risk rows only", async () => {
+    await getInternalTrustSnapshot({
+      actorId: "actor-1",
+      targetUserId: "user-1",
+      campusId: "campus-a",
+    });
+
+    expect(riskStateFindMany).toHaveBeenCalledWith({
+      where: {
+        userId: "user-1",
+        scopeKey: { in: ["GLOBAL", "CAMPUS:campus-a"] },
+      },
+      select: { scopeKey: true, campusId: true, state: true, reasonCode: true },
+      orderBy: [{ scopeKey: "asc" }],
+    });
+  });
+
+  it("returns null for unknown targets (authorized actor)", async () => {
+    userFindUnique.mockResolvedValue(null);
+    await expect(
+      getInternalTrustSnapshot({ actorId: "actor-1", targetUserId: "ghost" }),
+    ).resolves.toBeNull();
   });
 });

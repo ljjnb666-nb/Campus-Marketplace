@@ -1,7 +1,10 @@
 import type { Prisma } from "@prisma/client";
 
 import { decimalValue } from "@/lib/decimal";
-import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import {
+  requireMarketplaceCapability,
+  requireParticipantsMembership,
+} from "@/lib/enforcement/capability-gate";
 import { createOrderNo } from "@/lib/order-no";
 import { createNotifications } from "@/repositories/notification-repository";
 import {
@@ -44,6 +47,8 @@ export async function createProductOrderTx(
   return withObligationGuard(tx, [input.buyerId, input.product.sellerId], async () => {
     // Phase 6B：buyer 的新活动能力门（participant 锁已由 guard 取得）
     await requireMarketplaceCapability(tx, input.buyerId, input.product.campusId);
+    // Repair 1 Blocker E：全部参与方 membership integrity
+    await requireParticipantsMembership(tx, [input.buyerId, input.product.sellerId], input.product.campusId);
 
     const reserveResult = await tx.product.updateMany({
       where: {
@@ -107,6 +112,8 @@ export async function createServiceOrderTx(
   return withObligationGuard(tx, [input.buyerId, input.service.providerId], async () => {
     // Phase 6B：buyer 的新活动能力门
     await requireMarketplaceCapability(tx, input.buyerId, input.service.campusId);
+    // Repair 1 Blocker E：全部参与方 membership integrity
+    await requireParticipantsMembership(tx, [input.buyerId, input.service.providerId], input.service.campusId);
 
     const order = await tx.order.create({
       data: {
@@ -158,6 +165,8 @@ export async function claimErrandTx(
   return withObligationGuard(tx, [input.publisherId, input.claimerId], async () => {
     // Phase 6B：claimer 的新活动能力门
     await requireMarketplaceCapability(tx, input.claimerId, input.campusId);
+    // Repair 1 Blocker E：全部参与方 membership integrity
+    await requireParticipantsMembership(tx, [input.publisherId, input.claimerId], input.campusId);
 
     const claimResult = await tx.errandTask.updateMany({
       where: {

@@ -1,5 +1,8 @@
 import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
-import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import {
+  requireMarketplaceCapability,
+  requireParticipantsMembership,
+} from "@/lib/enforcement/capability-gate";
 import { createNotifications } from "@/repositories/notification-repository";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
@@ -140,6 +143,8 @@ export async function createRentalOrderTx(
       // ---- Phase 6B：renter 的新活动能力门（participant 锁已取得；
       //      listing 的 campus 归属在创建后不可变，pre-read 值可靠）----
       await requireMarketplaceCapability(tx, userId, candidate.campusId);
+      // ---- Repair 1 Blocker E：全部参与方 membership integrity ----
+      await requireParticipantsMembership(tx, [userId, candidate.ownerId], candidate.campusId);
 
       // ---- 步骤 4：取得 subject locks 后再 FOR UPDATE 同一行 ----
     // ⚠️ 维护注意：此处使用 $queryRaw + FOR UPDATE 绕过 Prisma 类型化查询以获取行锁。

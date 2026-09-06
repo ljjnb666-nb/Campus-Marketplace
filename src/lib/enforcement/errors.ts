@@ -12,6 +12,7 @@ export const ENFORCEMENT_ERROR_CODES = [
   "ENFORCEMENT_PRIVILEGED_TARGET",
   "ENFORCEMENT_INVALID_TRANSITION",
   "ENFORCEMENT_TARGET_NOT_FOUND",
+  "ENFORCEMENT_TARGET_SCOPE_MISMATCH",
   "MARKETPLACE_RESTRICTED",
 ] as const;
 
@@ -22,6 +23,7 @@ const STATUS_BY_CODE: Record<EnforcementErrorCode, number> = {
   ENFORCEMENT_PRIVILEGED_TARGET: 403,
   ENFORCEMENT_INVALID_TRANSITION: 409,
   ENFORCEMENT_TARGET_NOT_FOUND: 404,
+  ENFORCEMENT_TARGET_SCOPE_MISMATCH: 409,
   MARKETPLACE_RESTRICTED: 403,
 };
 
@@ -52,6 +54,8 @@ export function enforcementError(
     ENFORCEMENT_PRIVILEGED_TARGET: "不能对该账号执行此管理操作",
     ENFORCEMENT_INVALID_TRANSITION: "当前状态不允许该操作",
     ENFORCEMENT_TARGET_NOT_FOUND: "目标不存在",
+    // target 与目标校区无有效成员关联（Repair 1 Blocker A）
+    ENFORCEMENT_TARGET_SCOPE_MISMATCH: "目标与该校区无有效成员关联",
     // MARKETPLACE_RESTRICTED 对用户呈现为统一的能力限制提示：
     // 不区分 membership / risk 细节，不暴露风控内部状态
     MARKETPLACE_RESTRICTED: "当前无法开始新的交易活动，如有疑问请联系平台管理员",

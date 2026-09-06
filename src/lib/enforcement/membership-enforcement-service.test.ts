@@ -9,6 +9,7 @@ const {
   acquireGovernanceSubjectLocks,
   recordAdminAudit,
   loadAuthorizationContextMock,
+  isPrivilegedTargetMock,
 } = vi.hoisted(() => ({
   withTransactionMock: vi.fn(),
   txUserFindUnique: vi.fn(),
@@ -18,6 +19,7 @@ const {
   acquireGovernanceSubjectLocks: vi.fn(),
   recordAdminAudit: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
+  isPrivilegedTargetMock: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -33,11 +35,20 @@ vi.mock("@/lib/governance/admin-audit", () => ({
   recordAdminAudit,
 }));
 
+const { createNotification } = vi.hoisted(() => ({
+  createNotification: vi.fn(),
+}));
+
+vi.mock("@/repositories/notification-repository", () => ({
+  createNotification,
+}));
+
 vi.mock("@/lib/rbac/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
   return {
     ...actual,
     loadAuthorizationContext: loadAuthorizationContextMock,
+    isPrivilegedTarget: isPrivilegedTargetMock,
   };
 });
 
@@ -88,6 +99,8 @@ beforeEach(() => {
   txEnforcementActionCreate.mockReset().mockResolvedValue({});
   acquireGovernanceSubjectLocks.mockReset().mockResolvedValue(undefined);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
+  createNotification.mockReset().mockResolvedValue({});
+  isPrivilegedTargetMock.mockReset().mockResolvedValue(false);
   loadAuthorizationContextMock.mockReset().mockResolvedValue(campusManager("campus-a"));
 });
 
@@ -186,6 +199,29 @@ describe("suspendCampusMembership（校园成员停用）", () => {
     await expect(
       suspendCampusMembership({ ...BASE_INPUT, targetUserId: "actor-1" }),
     ).rejects.toMatchObject({ code: "ENFORCEMENT_SELF_DENIED" });
+  });
+
+  it("denies privileged targets（Repair 1 Blocker F）", async () => {
+    loadAuthorizationContextMock.mockResolvedValue({
+      userId: "actor-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        {
+          roleKey: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: ["campus.manage"],
+        },
+      ],
+    });
+    isPrivilegedTargetMock.mockResolvedValue(true);
+
+    await expect(
+      suspendCampusMembership({ ...BASE_INPUT, targetUserId: "privileged-1" }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_PRIVILEGED_TARGET" });
+    expect(txMembershipUpdate).not.toHaveBeenCalled();
+    expect(isPrivilegedTargetMock).toHaveBeenCalledWith("privileged-1", txStub);
   });
 
   it("preserves verification evidence（#27：停用不触碰认证记录）", async () => {

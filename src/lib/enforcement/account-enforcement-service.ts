@@ -5,6 +5,7 @@ import { resultStateFor, riskScopeKey } from "@/lib/enforcement/risk-scope";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { prisma, withTransaction } from "@/lib/prisma";
+import { createNotification } from "@/repositories/notification-repository";
 import { rbacError } from "@/lib/rbac/errors";
 import {
   hasPermission,
@@ -28,7 +29,11 @@ import {
  * - 每次**实际**状态变更写入 EnforcementAction（provenance，非第二授权源）
  *   + AdminAudit
  *
- * 锁序：subject locks → actor 复核 → target 状态/特权复核 → 行写 → 审计。
+ * Repair 1 Blocker C（command/notification 原子性）：
+ * 站内通知在**同一事务内**随 enforcement 写入——通知失败 → 整个命令回滚，
+ * 不存在"已提交但报错"或"已成功但无声"的歧义中间态。
+ *
+ * 锁序：subject locks → actor 复核 → target 状态/特权复核 → 行写 → 审计+通知。
  */
 
 export type AccountEnforcementInput = {
@@ -145,6 +150,14 @@ export async function suspendAccount(
       tx,
     );
 
+    // Repair 1 Blocker C：通知随命令同事务提交（失败整体回滚，无歧义中间态）
+    await createNotification(tx, {
+      userId: target.id,
+      type: "SYSTEM",
+      title: "账号已被停用",
+      content: "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。",
+    });
+
     return { status: "SUSPENDED", alreadyInState: false };
   });
 }
@@ -197,6 +210,14 @@ export async function reinstateAccount(
       },
       tx,
     );
+
+    // Repair 1 Blocker C：通知随命令同事务提交
+    await createNotification(tx, {
+      userId: target.id,
+      type: "SYSTEM",
+      title: "账号已恢复正常",
+      content: "你的账号已恢复正常使用。",
+    });
 
     return { status: "ACTIVE", alreadyInState: false };
   });

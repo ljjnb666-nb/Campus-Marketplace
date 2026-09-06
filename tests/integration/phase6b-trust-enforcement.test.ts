@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { waitForAdvisoryLockWaiter } from "./helpers/lock-barrier";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -98,18 +99,7 @@ async function grantRole(
   return role;
 }
 
-async function waitForLockWaiter(): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
-      SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
-    if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error("10 秒内未观察到锁等待（屏障失效）");
-}
+
 
 describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成测试（真实 PostgreSQL）", () => {
   let campusA: { id: string };
@@ -465,7 +455,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${targetA.id}`]);
     releaseGrantA();
 
     await expect(grantPromiseA).resolves.toBe("fulfilled");
@@ -515,7 +505,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${targetB.id}`]);
     releaseSuspendB();
 
     await expect(suspendPromiseB).resolves.toBe("fulfilled");
@@ -562,7 +552,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${actorA.id}`]);
     releaseEraseA();
     await erasePromiseA;
 
@@ -606,7 +596,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${actorB.id}`]);
     releaseSuspendB();
 
     const suspended = await suspendPromiseB;
@@ -660,7 +650,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${target.id}`]);
     releaseRestrict();
 
     await expect(restrictPromise).resolves.toMatchObject({ state: "RESTRICTED", changed: true });
@@ -763,7 +753,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${owner.id}`]);
     releaseSuspendA();
 
     await expect(suspendPromiseA).resolves.toMatchObject({ status: "SUSPENDED" });
@@ -813,7 +803,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       reasonCode: "POLICY_VIOLATION",
     });
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${owner.id}`]);
     releaseCreateB();
 
     const created = await createPromiseB;
@@ -829,8 +819,187 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
     void requireMarketplaceCapability;
   });
 
-  it("trust snapshot：信号聚合 + admin-only risk 隔离", async () => {
-    const { getTrustSnapshot } = await import("@/lib/trust/trust-snapshot");
+  // ============================================================
+  // Repair 1 Blocker A：CAMPUS RiskState target membership integrity
+  // ============================================================
+
+  it("Repair 1 A：campus-A 经理不能对仅属于 campus-B 的 target 写 CAMPUS:A 风险态", async () => {
+    const { setRiskState } = await import("@/lib/enforcement/risk-service");
+
+    const managerA = await createFixtureUser("A区风控经理R1", campusA.id);
+    await grantRole(managerA.id, "CAMPUS_MANAGER_R1", ["campus.manage"], "CAMPUS", campusA.id);
+    const targetBOnly = await createFixtureUser("仅B区成员R1", campusB.id);
+
+    await expect(
+      setRiskState({
+        actorId: managerA.id,
+        targetUserId: targetBOnly.id,
+        campusId: campusA.id,
+        state: "RESTRICTED",
+        reasonCode: "POLICY_VIOLATION",
+      }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
+
+    // 三张表零写入
+    expect(await rawClient!.riskState.count({ where: { userId: targetBOnly.id } })).toBe(0);
+    expect(await rawClient!.enforcementAction.count({ where: { targetId: targetBOnly.id } })).toBe(0);
+    expect(await rawClient!.adminLog.count({ where: { targetId: targetBOnly.id } })).toBe(0);
+  });
+
+  it("Repair 1 A：GLOBAL enforcer 也不能绕过 target-campus 关联不变量", async () => {
+    const { setRiskState } = await import("@/lib/enforcement/risk-service");
+    const notMemberOfA = await createFixtureUser("非A区成员R1", campusB.id);
+
+    await expect(
+      setRiskState({
+        actorId: globalAdmin.id,
+        targetUserId: notMemberOfA.id,
+        campusId: campusA.id,
+        state: "RESTRICTED",
+        reasonCode: "POLICY_VIOLATION",
+      }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
+    expect(await rawClient!.riskState.count({ where: { userId: notMemberOfA.id } })).toBe(0);
+
+    // SUSPENDED membership 仍可被维护（管理员必须能恢复/调整其风险态）
+    const suspendedMember = await createFixtureUser("停用成员R1", campusA.id);
+    await rawClient!.campusMembership.updateMany({
+      where: { userId: suspendedMember.id },
+      data: { status: "SUSPENDED" },
+    });
+    await expect(
+      setRiskState({
+        actorId: globalAdmin.id,
+        targetUserId: suspendedMember.id,
+        campusId: campusA.id,
+        state: "RESTRICTED",
+        reasonCode: "POLICY_VIOLATION",
+      }),
+    ).resolves.toMatchObject({ state: "RESTRICTED", changed: true });
+  });
+
+  // ============================================================
+  // Repair 1 Blocker G：授权顺序收紧（统一 denial family）
+  // ============================================================
+
+  it("Repair 1 G：无权限 actor 对 missing/normal/privileged/cross-campus target 统一 AUTH_PERMISSION_DENIED", async () => {
+    const { setRiskState } = await import("@/lib/enforcement/risk-service");
+    const unauthorized = await createFixtureUser("无权限探测者", campusA.id);
+    const privileged = await createFixtureUser("特权R1", campusA.id);
+    const { PERMISSION_KEYS } = await import("@/lib/rbac/permissions");
+    await grantRole(privileged.id, "FULL_ADMIN_R1", [...PERMISSION_KEYS], "GLOBAL");
+
+    const probes: Array<[string, string | null, string]> = [
+      ["ghost-target", null, "missing"],
+      [student.id, null, "normal"],
+      [privileged.id, null, "privileged"],
+      [student.id, campusB.id, "cross-campus"],
+    ];
+
+    for (const [targetId, campusId, label] of probes) {
+      await expect(
+        setRiskState({
+          actorId: unauthorized.id,
+          targetUserId: targetId,
+          campusId,
+          state: "RESTRICTED",
+          reasonCode: "MANUAL_REVIEW",
+        }),
+        `probe ${label}`,
+      ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+    }
+
+    // 探测零副作用
+    expect(await rawClient!.riskState.count({ where: { userId: student.id } })).toBe(0);
+  });
+
+  // ============================================================
+  // Repair 1 Blocker C：enforcement command/notification 原子性
+  // ============================================================
+
+  it("Repair 1 C：suspendAccount 通知随命令同事务提交（无歧义中间态）", async () => {
+    const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+    const suspender = await createFixtureUser("停用者C1", campusA.id);
+    await grantRole(suspender.id, "SUSPENDER_C1", ["user.suspend"], "GLOBAL");
+    const target = await createFixtureUser("停用目标C1", campusA.id);
+
+    await suspendAccount({
+      actorId: suspender.id,
+      targetUserId: target.id,
+      reasonCode: "ACCOUNT_SECURITY",
+    });
+
+    const notification = await rawClient!.notification.findFirst({
+      where: { userId: target.id, title: "账号已被停用" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(notification).toBeTruthy();
+
+    // 状态与通知同生共死：状态变更存在 → 通知存在
+    const user = await rawClient!.user.findUniqueOrThrow({ where: { id: target.id } });
+    expect(user.status).toBe("SUSPENDED");
+  });
+
+  // ============================================================
+  // Repair 1 Blocker E：新义务参与方 membership integrity
+  // ============================================================
+
+  it("Repair 1 E：counterparty membership 缺失 → 新义务创建 DENY（零订单）", async () => {
+    const { createProductOrderTx } = await import("@/lib/order-creation");
+    const { withTransaction } = await import("@/lib/prisma");
+
+    // 无 membership 的卖家（直接建行，不经 fixture helper）
+    const sellerNoMembership = await rawClient!.user.create({
+      data: {
+        email: `${RUN_TAG}-nomembership-seller@it.local`,
+        name: "无成员卖家",
+        passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfix",
+        schoolName: "集成测试大学",
+        campusId: campusA.id,
+      },
+    });
+    createdUserIds.push(sellerNoMembership.id);
+
+    const category = await rawClient!.productCategory.create({
+      data: { name: `IT分类E1 ${RUN_TAG}`, slug: `it-cat-e1-${RUN_TAG}` },
+    });
+    const product = await rawClient!.product.create({
+      data: {
+        title: `E1 商品 ${randomUUID()}`,
+        description: "Repair1 E",
+        price: 10,
+        condition: "NORMAL_USED",
+        locationText: "IT",
+        categoryId: category.id,
+        campusId: campusA.id,
+        sellerId: sellerNoMembership.id,
+      },
+    });
+
+    await expect(
+      withTransaction((tx) =>
+        createProductOrderTx(tx, {
+          buyerId: student.id,
+          product: {
+            id: product.id,
+            price: "10.00",
+            sellerId: sellerNoMembership.id,
+            campusId: campusA.id,
+          },
+          meetingLocation: "IT",
+          note: null,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+
+    expect(await rawClient!.order.count({ where: { productId: product.id } })).toBe(0);
+    expect((await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status).toBe("ACTIVE");
+  });
+
+  it("trust snapshot：public/internal 分离 + RiskFlag 信号（Repair 1 Blocker B）", async () => {
+    const { getPublicTrustSnapshot, getInternalTrustSnapshot } = await import(
+      "@/lib/trust/trust-snapshot"
+    );
 
     const snapshotUser = await createFixtureUser("快照用户", campusA.id);
     await rawClient!.riskState.create({
@@ -842,32 +1011,171 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
         reasonCode: "POLICY_VIOLATION",
       },
     });
-    await rawClient!.report.create({
+    // 经真实服务层记录一个 REPORT_SUBMITTED 信号（等价举报创建投影）
+    const { recordRiskFlag } = await import("@/lib/enforcement/risk-service");
+    await recordRiskFlag({
+      userId: snapshotUser.id,
+      kind: "REPORT_SUBMITTED",
+      sourceType: "REPORT",
+      sourceId: `rep-${RUN_TAG}`,
+    });
+
+    // 公开视图：仅安全信号；无 risk / 举报计数 / 内部 campusId 列表
+    const publicSnapshot = await getPublicTrustSnapshot(snapshotUser.id);
+    expect(publicSnapshot).toMatchObject({
+      verification: { status: "UNVERIFIED" },
+      membership: { activeCampusCount: 1 },
+      legacyCreditScore: { policy: "LEGACY_DISPLAY_SIGNAL" },
+    });
+    const publicJson = JSON.stringify(publicSnapshot);
+    expect(publicJson).not.toContain("RESTRICTED");
+    expect(publicJson).not.toContain("REPORT_SUBMITTED");
+    expect(publicJson).not.toContain("campus-a");
+
+    // 内部视图未授权：student 无 audit.read → DENY
+    await expect(
+      getInternalTrustSnapshot({ actorId: student.id, targetUserId: snapshotUser.id }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+
+    // 内部视图（GLOBAL audit.read）：risk + RiskFlag 信号可见
+    const internal = await getInternalTrustSnapshot({
+      actorId: globalAdmin.id,
+      targetUserId: snapshotUser.id,
+    });
+    expect(internal?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
+    expect(internal?.risk?.states[0]).toMatchObject({
+      scopeKey: "GLOBAL",
+      state: "RESTRICTED",
+      reasonCode: "POLICY_VIOLATION",
+    });
+    expect(internal?.reportSignals).toMatchObject({
+      submittedReportSignals: 1,
+      confirmedReportSignals: 0,
+      submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
+    });
+
+    // campus 视角（campusA 无 audit.read 授权者时用 GLOBAL 也无妨——scope 行过滤）
+    const campusView = await getInternalTrustSnapshot({
+      actorId: globalAdmin.id,
+      targetUserId: snapshotUser.id,
+      campusId: campusA.id,
+    });
+    expect(campusView?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
+  });
+
+  it("Repair 1 D：report lifecycle reconcile（真实 PG，legacy + reopen + 幂等）", async () => {
+    const { reconcileReportRiskProjection } = await import(
+      "@/lib/enforcement/report-projection"
+    );
+
+    const reporter = await createFixtureUser("举报者D1", campusA.id);
+    const reported = await createFixtureUser("被举报者D1", campusA.id);
+
+    // legacy 举报：直接建 Report 行（无任何 RiskFlag 投影）
+    const report = await rawClient!.report.create({
       data: {
         targetType: "USER",
         reason: "FAKE_INFO",
-        reporterId: student.id,
-        targetUserId: snapshotUser.id,
+        reporterId: reporter.id,
+        targetUserId: reported.id,
       },
     });
 
-    // 公开视图（默认）：无任何 risk 数据
-    const publicSnapshot = await getTrustSnapshot(snapshotUser.id);
-    expect(publicSnapshot).toMatchObject({
-      verification: { status: "UNVERIFIED" },
-      membership: { activeCampusIds: [campusA.id] },
-      legacyCreditScore: { policy: "LEGACY_DISPLAY_SIGNAL" },
+    // OPEN → reconcile：SUBMITTED ACTIVE 创建
+    await reconcileReportRiskProjection({ reportId: report.id });
+    const submitted = await rawClient!.riskFlag.findUniqueOrThrow({
+      where: {
+        kind_sourceType_sourceId: {
+          kind: "REPORT_SUBMITTED",
+          sourceType: "REPORT",
+          sourceId: report.id,
+        },
+      },
     });
-    expect(publicSnapshot?.risk).toBeUndefined();
-    expect(publicSnapshot?.reportSignals.signalNote).toBe("SIGNAL_NOT_ADIJUDICATED_FACT");
+    expect(submitted.status).toBe("ACTIVE");
+    expect(submitted.userId).toBe(reported.id);
+    await expect(
+      rawClient!.riskFlag.findUnique({
+        where: {
+          kind_sourceType_sourceId: {
+            kind: "REPORT_CONFIRMED",
+            sourceType: "REPORT",
+            sourceId: report.id,
+          },
+        },
+      }),
+    ).resolves.toBeNull();
 
-    // admin 视图：risk state 可见
-    const adminSnapshot = await getTrustSnapshot(snapshotUser.id, { includeRisk: true });
-    expect(adminSnapshot?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
-    expect(adminSnapshot?.risk?.states[0]).toMatchObject({
-      scopeKey: "GLOBAL",
-      state: "RESTRICTED",
+    // RESOLVED → SUBMITTED resolved + CONFIRMED active
+    await rawClient!.report.update({
+      where: { id: report.id },
+      data: { status: "RESOLVED" },
     });
-    expect(adminSnapshot?.reportSignals.openReportCount).toBe(1);
+    await reconcileReportRiskProjection({ reportId: report.id, actorId: globalAdmin.id });
+    const confirmed = await rawClient!.riskFlag.findUniqueOrThrow({
+      where: {
+        kind_sourceType_sourceId: {
+          kind: "REPORT_CONFIRMED",
+          sourceType: "REPORT",
+          sourceId: report.id,
+        },
+      },
+    });
+    expect(confirmed.status).toBe("ACTIVE");
+    expect(
+      (await rawClient!.riskFlag.findUniqueOrThrow({
+        where: {
+          kind_sourceType_sourceId: {
+            kind: "REPORT_SUBMITTED",
+            sourceType: "REPORT",
+            sourceId: report.id,
+          },
+        },
+      })).status,
+    ).toBe("RESOLVED");
+
+    // reopen（Option B）：RESOLVED → IN_REVIEW → SUBMITTED 重激活、CONFIRMED 闭环
+    await rawClient!.report.update({
+      where: { id: report.id },
+      data: { status: "IN_REVIEW" },
+    });
+    await reconcileReportRiskProjection({ reportId: report.id, actorId: globalAdmin.id });
+    expect(
+      (await rawClient!.riskFlag.findUniqueOrThrow({
+        where: {
+          kind_sourceType_sourceId: {
+            kind: "REPORT_SUBMITTED",
+            sourceType: "REPORT",
+            sourceId: report.id,
+          },
+        },
+      })).status,
+    ).toBe("ACTIVE");
+    expect(
+      (await rawClient!.riskFlag.findUniqueOrThrow({
+        where: {
+          kind_sourceType_sourceId: {
+            kind: "REPORT_CONFIRMED",
+            sourceType: "REPORT",
+            sourceId: report.id,
+          },
+        },
+      })).status,
+    ).toBe("RESOLVED");
+
+    // 幂等：重复对账零变更
+    const before = await rawClient!.riskFlag.findMany({
+      where: { sourceType: "REPORT", sourceId: report.id },
+    });
+    await reconcileReportRiskProjection({ reportId: report.id });
+    const after = await rawClient!.riskFlag.findMany({
+      where: { sourceType: "REPORT", sourceId: report.id },
+    });
+    expect(after).toHaveLength(before.length);
+
+    // 绝不自动处罚：全流程 target 的 User.status/RiskState 不变
+    const user = await rawClient!.user.findUniqueOrThrow({ where: { id: reported.id } });
+    expect(user.status).toBe("ACTIVE");
+    expect(await rawClient!.riskState.count({ where: { userId: reported.id } })).toBe(0);
   });
 });

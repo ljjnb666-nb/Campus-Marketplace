@@ -9,6 +9,7 @@ const {
   txRiskFlagFindUnique,
   txRiskFlagUpdate,
   txUserFindUnique,
+  txMembershipFindUnique,
   txEnforcementActionCreate,
   acquireGovernanceSubjectLocks,
   recordAdminAudit,
@@ -21,6 +22,7 @@ const {
   txRiskFlagFindUnique: vi.fn(),
   txRiskFlagUpdate: vi.fn(),
   txUserFindUnique: vi.fn(),
+  txMembershipFindUnique: vi.fn(),
   txEnforcementActionCreate: vi.fn(),
   acquireGovernanceSubjectLocks: vi.fn(),
   recordAdminAudit: vi.fn(),
@@ -61,6 +63,7 @@ const txStub = {
   riskState: { findUnique: txRiskStateFindUnique, upsert: txRiskStateUpsert, findMany: vi.fn().mockResolvedValue([]) },
   riskFlag: { create: txRiskFlagCreate, findUnique: txRiskFlagFindUnique, update: txRiskFlagUpdate },
   user: { findUnique: txUserFindUnique },
+  campusMembership: { findUnique: txMembershipFindUnique },
   enforcementAction: { create: txEnforcementActionCreate },
 };
 
@@ -101,6 +104,7 @@ beforeEach(() => {
   txRiskFlagFindUnique.mockReset().mockResolvedValue(null);
   txRiskFlagUpdate.mockReset().mockResolvedValue({});
   txUserFindUnique.mockReset().mockResolvedValue({ ...ACTIVE_TARGET });
+  txMembershipFindUnique.mockReset().mockResolvedValue({ status: "ACTIVE" });
   txEnforcementActionCreate.mockReset().mockResolvedValue({});
   acquireGovernanceSubjectLocks.mockReset().mockResolvedValue(undefined);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
@@ -293,6 +297,82 @@ describe("setRiskState（显式可解释风险状态）", () => {
         reasonCode: "MANUAL_REVIEW",
       }),
     ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_NOT_FOUND" });
+  });
+
+  it("denies CAMPUS risk mutation when the target has no membership in that campus（Repair 1 Blocker A）", async () => {
+    txMembershipFindUnique.mockResolvedValue(null);
+
+    await expect(
+      setRiskState({
+        actorId: "actor-1",
+        targetUserId: "target-1",
+        campusId: "campus-a",
+        state: "RESTRICTED",
+        reasonCode: "MANUAL_REVIEW",
+      }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
+    expect(txRiskStateUpsert).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).not.toHaveBeenCalled();
+  });
+
+  it("denies LEFT/PENDING/REJECTED target memberships for CAMPUS risk mutation", async () => {
+    for (const status of ["LEFT", "PENDING", "REJECTED"]) {
+      txMembershipFindUnique.mockResolvedValue({ status });
+      await expect(
+        setRiskState({
+          actorId: "actor-1",
+          targetUserId: "target-1",
+          campusId: "campus-a",
+          state: "RESTRICTED",
+          reasonCode: "MANUAL_REVIEW",
+        }),
+      ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
+    }
+    expect(txRiskStateUpsert).not.toHaveBeenCalled();
+  });
+
+  it("allows ACTIVE and SUSPENDED target memberships for CAMPUS risk mutation", async () => {
+    for (const status of ["ACTIVE", "SUSPENDED"]) {
+      txMembershipFindUnique.mockResolvedValue({ status });
+      await setRiskState({
+        actorId: "actor-1",
+        targetUserId: "target-1",
+        campusId: "campus-a",
+        state: "RESTRICTED",
+        reasonCode: "MANUAL_REVIEW",
+      });
+    }
+    expect(txRiskStateUpsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks actor authorization BEFORE any target probing（Repair 1 Blocker G）", async () => {
+    // 未授权 actor：missing / normal target 全部得到 authorization denial，
+    // 无法通过错误路径差异推断目标状态（target 从未被探测）
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([]));
+    txUserFindUnique.mockResolvedValue(null);
+    await expect(
+      setRiskState({
+        actorId: "actor-1",
+        targetUserId: "missing-1",
+        campusId: null,
+        state: "RESTRICTED",
+        reasonCode: "MANUAL_REVIEW",
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+
+    txUserFindUnique.mockResolvedValue({ ...ACTIVE_TARGET });
+    await expect(
+      setRiskState({
+        actorId: "actor-1",
+        targetUserId: "target-1",
+        campusId: null,
+        state: "RESTRICTED",
+        reasonCode: "MANUAL_REVIEW",
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+
+    expect(txUserFindUnique).not.toHaveBeenCalled();
+    expect(txMembershipFindUnique).not.toHaveBeenCalled();
   });
 
   it("takes sorted {USER:actor, USER:target} subject locks", async () => {

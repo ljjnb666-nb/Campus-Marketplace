@@ -88,6 +88,7 @@ const {
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("next/cache", () => ({
