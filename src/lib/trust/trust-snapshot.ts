@@ -109,6 +109,14 @@ export type InternalTrustSnapshot =
 const trustUserSelect = {
   id: true,
   verificationStatus: true,
+  // Phase 6B Repair 3 Blocker A：认证有效性必须读 canonical 认证记录
+  //（UserVerification + 其绑定的 membership status），不能只信兼容投影
+  verification: {
+    select: {
+      status: true,
+      membership: { select: { campusId: true, status: true } },
+    },
+  },
   creditScore: true,
   completedOrdersCount: true,
   positiveReviewRate: true,
@@ -126,7 +134,10 @@ const trustUserSelect = {
 
 type UserTrustBase = {
   userId: string;
-  verificationStatus: VerificationStatus;
+  /** Repair 3 Blocker A：有效认证状态（canonical 认证 + 绑定 membership 推导） */
+  effectiveVerification: VerificationStatus;
+  /** 有效认证绑定的校区（canonical 认证行缺失时为 null） */
+  effectiveVerificationBoundCampusId: string | null;
   creditScore: number;
   completedOrdersCount: number;
   positiveReviewRate: number;
@@ -151,9 +162,23 @@ async function loadUserTrustBase(
     return null;
   }
 
+  // EFFECTIVE_VERIFIED = UserVerification.status == VERIFIED
+  //   AND 绑定 membership.status == ACTIVE（Repair 3 Blocker A 合同）。
+  // canonical 认证行缺失时仅回退到兼容投影（历史遗留行为，fail-safe）。
+  let effectiveVerification: VerificationStatus = user.verification
+    ? user.verification.status
+    : (user.verificationStatus as VerificationStatus);
+  const effectiveVerificationBoundCampusId: string | null =
+    user.verification?.membership?.campusId ?? null;
+  if (user.verification && user.verification.status === "VERIFIED") {
+    effectiveVerification =
+      user.verification.membership?.status === "ACTIVE" ? "VERIFIED" : "UNVERIFIED";
+  }
+
   return {
     userId: user.id,
-    verificationStatus: user.verificationStatus,
+    effectiveVerification,
+    effectiveVerificationBoundCampusId,
     creditScore: user.creditScore,
     completedOrdersCount: user.completedOrdersCount,
     positiveReviewRate: user.positiveReviewRate,
@@ -205,7 +230,7 @@ export async function getPublicTrustSnapshot(
     membership: {
       activeCampusCount: base.memberships.filter((m) => m.status === "ACTIVE").length,
     },
-    verification: { status: base.verificationStatus },
+    verification: { status: base.effectiveVerification },
     ...toPublicTrustSignals(base),
   };
 }
@@ -272,7 +297,7 @@ async function getGlobalInternalTrustSnapshot(
       activeCampusIds: base.memberships.filter((m) => m.status === "ACTIVE").map((m) => m.campusId),
       statuses: base.memberships.map((m) => m.status),
     },
-    verification: { status: base.verificationStatus },
+    verification: { status: base.effectiveVerification },
     ...toPublicTrustSignals(base),
     reportSignals: {
       submittedReportSignals: submittedFlags,
@@ -345,7 +370,14 @@ async function getCampusInternalTrustSnapshot(
     userId: base.userId,
     identity: { userId: base.userId },
     membership: { status: targetMembership.status },
-    verification: { status: base.verificationStatus },
+    // Repair 3 Blocker B：认证必须绑定请求的校区——绑定校区 != 请求校区时
+    // 不展示 VERIFIED（即使全局投影为 VERIFIED）
+    verification: {
+      status:
+        base.effectiveVerificationBoundCampusId === campusId
+          ? base.effectiveVerification
+          : "UNVERIFIED",
+    },
     reportSignals: {
       submittedReportSignals: submittedFlags,
       confirmedReportSignals: confirmedFlags,

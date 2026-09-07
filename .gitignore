@@ -50,6 +50,7 @@ next-env.d.ts
 .DS_Store
 Thumbs.db
 *.pem
+*.stackdump
 
 # Local databases
 prisma/dev.db

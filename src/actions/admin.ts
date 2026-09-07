@@ -316,8 +316,9 @@ export async function toggleUserStatus(
     // Phase 6B：账号硬停用/恢复收敛到中央 enforcement service（薄 adapter）。
     // service 内部承担：sorted subject 锁（正式关闭 USER_STATUS_ROLE_ASSIGNMENT_RACE）
     // → user.suspend permission 复核 → self-deny → privileged target 保护（RBAC）
-    // → 幂等转移 → EnforcementAction + 审计 + 通知（Repair 1 Blocker C：
-    // 通知随命令同事务提交——通知失败整体回滚，不会伪装成 enforcement 失败）。
+    // → 幂等转移 → EnforcementAction + 审计（authoritative transaction）。
+    // Repair 2 Blocker C：站内通知为 commit 后 best-effort 投递——通知失败仅记
+    // ENFORCEMENT_NOTIFICATION_FAILED 日志，不影响 enforcement 成败。
     const enforcementInput = {
       actorId: admin.id,
       targetUserId: parsed.data.userId,

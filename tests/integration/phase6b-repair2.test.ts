@@ -95,17 +95,34 @@ async function grantRole(
   return role;
 }
 
-async function waitForLockWaiter(): Promise<void> {
-  const deadline = Date.now() + 15_000;
+/**
+ * Repair 3 Blocker C：确定性 barrier 必须绑定 **exact loser backend PID**。
+ * 旧实现轮询"任意未授予锁"——任何其他集成文件的事务等待都会误触发屏障。
+ * winner 的 racePoint seam 保证 winner 已持行锁；loser 事务在 FOR UPDATE
+ * 之前发布自己的 pg_backend_pid()，barrier 轮询该精确 PID 的未授予锁。
+ */
+async function waitForExactPidLockWaiter(
+  loserPid: number,
+  options: { timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
-      SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
-    if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
+    const rows = await rawClient!.$queryRaw<{ waiting: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_locks
+        WHERE pid = ${loserPid}
+          AND granted = false
+      ) AS waiting`;
+    if (rows[0]?.waiting === true) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error("15 秒内未观察到锁等待（屏障失效）");
+  throw new Error(
+    `advisory/row-lock barrier 超时：loser pid=${loserPid} 未进入锁等待`,
+  );
 }
 
 describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试（真实 PostgreSQL）", () => {
@@ -204,18 +221,26 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
     );
     await winnerLockedPromise;
 
-    const t2 = withTransaction((tx) =>
-      applyReportReviewTx(tx, {
+    // Repair 3 Blocker C：loser 事务先发布自己的 backend PID
+    let loserPidResolve!: (pid: number) => void;
+    const loserPidReady = new Promise<number>((resolve) => {
+      loserPidResolve = resolve;
+    });
+    const t2 = withTransaction(async (tx) => {
+      const pidRows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      loserPidResolve(pidRows[0]!.pid);
+      return applyReportReviewTx(tx, {
         reportId: report.id,
         actorId: admin2.id,
         status: "REJECTED",
-      }),
-    ).then(
+      });
+    }).then(
       () => "fulfilled" as const,
       (error) => ({ rejected: true as const, message: error.message as string }),
     );
 
-    await waitForLockWaiter();
+    const loserPid = await loserPidReady;
+    await waitForExactPidLockWaiter(loserPid);
 
     releaseWinner();
     await expect(t1).resolves.toMatchObject({ status: "RESOLVED" });
@@ -291,18 +316,30 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
     );
     await winnerLockedPromise;
 
-    const t2 = withTransaction((tx) =>
-      applyReportReviewTx(tx, {
+    // Repair 3 Blocker C：loser 事务先发布自己的 backend PID
+    let loserPidResolve!: (pid: number) => void;
+    const loserPidReady = new Promise<number>((resolve) => {
+      loserPidResolve = resolve;
+    });
+    const t2 = withTransaction(async (tx) => {
+      const pidRows = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      loserPidResolve(pidRows[0]!.pid);
+      return applyReportReviewTx(tx, {
         reportId: report.id,
         actorId: admin2.id,
         status: "RESOLVED",
-      }),
-    ).then(
+      });
+    }).then(
       () => "fulfilled" as const,
-      (error) => ({ rejected: true as const, message: error.message as string }),
+      (error) => ({
+        rejected: true as const,
+        code: error.code as string,
+        message: error.message as string,
+      }),
     );
 
-    await waitForLockWaiter();
+    const loserPid = await loserPidReady;
+    await waitForExactPidLockWaiter(loserPid);
 
     releaseWinner();
     await expect(t1).resolves.toMatchObject({ status: "REJECTED" });
@@ -793,4 +830,76 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
     expect(messageFlag.userId).toBe(seller.id);
     expect(messageFlag.campusId).toBeNull();
   });
+
+  // ============================================================
+  // Repair 3 §13：effective verification campus scope（真实 PG）
+  // ============================================================
+
+  it("Repair 3 §13：verification 绑定 B——A 视角 NOT VERIFIED；B 视角 VERIFIED→SUSPENDED 后 NOT VERIFIED", async () => {
+    const { getInternalTrustSnapshot } = await import("@/lib/trust/trust-snapshot");
+
+    const auditorA = await createFixtureUser("A区审计V1", campusA.id);
+    await grantRole(auditorA.id, "CAMPUS_AUDITOR_V1", ["audit.read"], "CAMPUS", campusA.id);
+    const auditorB = await createFixtureUser("B区审计V1", campusB.id);
+    await grantRole(auditorB.id, "CAMPUS_AUDITOR_B_V1", ["audit.read"], "CAMPUS", campusB.id);
+
+    // target：A、B 双 ACTIVE membership；canonical 认证绑定 Campus B、VERIFIED
+    const dualTarget = await createFixtureUser("双校区认证目标", campusA.id);
+    await rawClient!.campusMembership.create({
+      data: { userId: dualTarget.id, campusId: campusB.id, status: "ACTIVE" },
+    });
+    const membershipB = await rawClient!.campusMembership.findUniqueOrThrow({
+      where: { userId_campusId: { userId: dualTarget.id, campusId: campusB.id } },
+    });
+    const verification = await rawClient!.userVerification.create({
+      data: {
+        userId: dualTarget.id,
+        membershipId: membershipB.id,
+        schoolName: "集成测试大学",
+        campusName: "B 校区",
+        studentIdLast4: "2468",
+        studentCardImage: "erased",
+        status: "VERIFIED",
+      },
+    });
+
+    const globalView = await getInternalTrustSnapshot({
+      actorId: globalAdmin.id,
+      targetUserId: dualTarget.id,
+    });
+    expect(globalView?.verification.status).toBe("VERIFIED");
+
+    const campusAView = await getInternalTrustSnapshot({
+      actorId: auditorA.id,
+      targetUserId: dualTarget.id,
+      campusId: campusA.id,
+    });
+    expect(campusAView?.verification.status).not.toBe("VERIFIED");
+
+    const campusBView = await getInternalTrustSnapshot({
+      actorId: auditorB.id,
+      targetUserId: dualTarget.id,
+      campusId: campusB.id,
+    });
+    expect(campusBView?.verification.status).toBe("VERIFIED");
+
+    // B membership SUSPENDED → B 视角也不再 VERIFIED（effective 降级）
+    await rawClient!.campusMembership.update({
+      where: { id: membershipB.id },
+      data: { status: "SUSPENDED" },
+    });
+    const campusBViewAfter = await getInternalTrustSnapshot({
+      actorId: auditorB.id,
+      targetUserId: dualTarget.id,
+      campusId: campusB.id,
+    });
+    expect(campusBViewAfter?.verification.status).not.toBe("VERIFIED");
+
+    // canonical 证据未被篡改：UserVerification.status 仍 VERIFIED
+    expect(
+      (await rawClient!.userVerification.findUniqueOrThrow({ where: { id: verification.id } })).status,
+    ).toBe("VERIFIED");
+    void verification;
+  });
+
 });

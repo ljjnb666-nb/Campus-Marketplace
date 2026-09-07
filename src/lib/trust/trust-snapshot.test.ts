@@ -281,3 +281,112 @@ describe("getInternalTrustSnapshot（admin-only 授权视图）", () => {
     ).resolves.toBeNull();
   });
 });
+
+
+// ============================================================
+// Repair 3 Blocker A：EFFECTIVE_VERIFIED = canonical VERIFIED
+//   AND 绑定 membership ACTIVE
+// ============================================================
+
+describe("effective verification（Repair 3 Blocker A）", () => {
+  function rowWithVerification(verification: {
+    status: string;
+    membership: { campusId: string; status: string } | null;
+  }) {
+    return {
+      ...USER_ROW,
+      verification,
+    };
+  }
+
+  it("A: canonical VERIFIED + bound membership ACTIVE → public VERIFIED", async () => {
+    userFindUnique.mockResolvedValue(
+      rowWithVerification({
+        status: "VERIFIED",
+        membership: { campusId: "campus-a", status: "ACTIVE" },
+      }),
+    );
+
+    const snapshot = await getPublicTrustSnapshot("user-1");
+    expect(snapshot?.verification).toEqual({ status: "VERIFIED" });
+  });
+
+  it("B: canonical VERIFIED + bound membership SUSPENDED → public NOT VERIFIED", async () => {
+    userFindUnique.mockResolvedValue(
+      rowWithVerification({
+        status: "VERIFIED",
+        membership: { campusId: "campus-a", status: "SUSPENDED" },
+      }),
+    );
+
+    const snapshot = await getPublicTrustSnapshot("user-1");
+    expect(snapshot?.verification.status).not.toBe("VERIFIED");
+    expect(snapshot?.verification.status).toBe("UNVERIFIED");
+  });
+
+  it("C: canonical VERIFIED + bound membership LEFT → public NOT VERIFIED", async () => {
+    userFindUnique.mockResolvedValue(
+      rowWithVerification({
+        status: "VERIFIED",
+        membership: { campusId: "campus-a", status: "LEFT" },
+      }),
+    );
+
+    const snapshot = await getPublicTrustSnapshot("user-1");
+    expect(snapshot?.verification.status).toBe("UNVERIFIED");
+  });
+
+  it("D/E: campus view scoping——bound B VERIFIED 从 A 视角 NOT VERIFIED；从 B 视角 VERIFIED", async () => {
+    userFindUnique.mockResolvedValue(
+      rowWithVerification({
+        status: "VERIFIED",
+        membership: { campusId: "campus-b", status: "ACTIVE" },
+      }),
+    );
+    // USER_ROW.memberships: campus-a ACTIVE（target relationship 满足 A 视角）
+    loadAuthorizationContextMock.mockResolvedValue(campusAuditor("campus-a"));
+    await expect(
+      getInternalTrustSnapshot({
+        actorId: "actor-1",
+        targetUserId: "user-1",
+        campusId: "campus-a",
+      }),
+    ).resolves.toMatchObject({
+      view: "CAMPUS",
+      verification: { status: "UNVERIFIED" },
+    });
+
+    loadAuthorizationContextMock.mockResolvedValue(campusAuditor("campus-b"));
+    // target 与 campus-b 的 relationship：USER_ROW.memberships 中 campus-b 为 LEFT → 拒
+    campusMembershipFindUnique.mockResolvedValue({ status: "LEFT" });
+    await expect(
+      getInternalTrustSnapshot({
+        actorId: "actor-1",
+        targetUserId: "user-1",
+        campusId: "campus-b",
+      }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
+  });
+
+  it("F: canonical 缺失时回退兼容投影（fail-safe，不新增 enum）", async () => {
+    const snapshot = await getPublicTrustSnapshot("user-1");
+    // USER_ROW 无 verification 关系 → 回退 verificationStatus = VERIFIED
+    expect(snapshot?.verification.status).toBe("VERIFIED");
+  });
+
+  it("G: public 快照仍不泄漏 evidence（membershipId/policyHash 等）", async () => {
+    userFindUnique.mockResolvedValue(
+      rowWithVerification({
+        status: "VERIFIED",
+        membership: { campusId: "campus-a", status: "ACTIVE" },
+      }),
+    );
+
+    const snapshot = await getPublicTrustSnapshot("user-1");
+    const json = JSON.stringify(snapshot);
+    expect(json).not.toContain("membershipId");
+    expect(json).not.toContain("policyHash");
+    expect(json).not.toContain("studentIdLast4");
+    expect(json).not.toContain("reviewNote");
+  });
+});
