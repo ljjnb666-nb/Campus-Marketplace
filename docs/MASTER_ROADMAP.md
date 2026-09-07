@@ -58,6 +58,9 @@ Phase 6A master-green reference：`d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`
 （PR #10 合并提交——Phase 6A 代码范围的固定引用点，**不随 master 前进而改写**）；
 Phase 6B master-green reference：`d5f8e19151184f7b5ce5660103cc5632f183e9b9`
 （PR #12 合并提交——Phase 6B 代码范围的固定引用点，**不随 master 前进而改写**）；
+Phase 6B Closure Recovery current master reference：`97f53cd3494b24854a56b19e0418d50a5b5efeb6`
+（PR #14 合并提交——RBAC bootstrap 并发修复的固定引用点，**不随 master 前进而改写**；
+两者语义不同：d5f8e19 = 6B core code merge，97f53cd = closure recovery merge）；
 上一记录点：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`，Phase 4 合并提交、
 亦为 Roadmap v1.0 冻结基线（历史冻结事件记录保留于 §1，不随 master 前进改写）。
 
@@ -69,11 +72,12 @@ Phase 6B master-green reference：`d5f8e19151184f7b5ce5660103cc5632f183e9b9`
 **绝不声称 `PRODUCTION_READY = TRUE`。** 本仓库当前状态是"具备可部署的仓库侧能力"，
 不是"已具备公开生产运营资格"（见 §9）。
 
-当前测试基线（来自最近一次成功的 master CI，非本地估算）：
-243 个测试文件 / 1567 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
-集成测试全部真实执行，无环境门控 skip），覆盖率 lines 85.72% / branches 83.44% /
-functions 84.74% / statements 85.72%；Playwright E2E 关键链路 36 条全绿；
-真实 PostgreSQL 集成测试：Phase 6A 17 条 + Phase 6B 27 条。
+当前测试基线（来自最近一次成功的 master CI，非本地估算；source = master CI
+34132745423，Closure Recovery merge `97f53cd3494b24854a56b19e0418d50a5b5efeb6`）：
+243 个测试文件 / 1580 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
+集成测试全部真实执行，无环境门控 skip），覆盖率 lines 85.72% / branches 83.50% /
+functions 84.76% / statements 85.72%；Playwright E2E 关键链路 36 条全绿；
+真实 PostgreSQL 集成测试：Phase 6A 19 条 + Phase 6B 27 条。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
 
 ---
@@ -321,11 +325,36 @@ Trust / risk / enforcement invariants（closure 时最终合同）：
   coverage 83.33 / 82.36 / 82.27 / 83.33；真实 PostgreSQL 集成：
   Phase 6B 27 条（Phase 6A 17 条保留）；Playwright 36/36 × 3
   （workers=2、retry=0）；Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
-- Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，非生产授权 fail-open，
-  未在本 closure 中修改代码）：① tests/ops/ops-scripts.test.ts 本地高负载
-  偶发 120s timeout（isolated run PASS；exact-head/post-merge CI PASS）；
-  ② ensureCampusMemberships bootstrap 与并行 integration fixture hard-delete
-  存在跨文件测试时序窗口（定向真实 PG suites PASS）
+- Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，非生产授权 fail-open）：
+  ① tests/ops/ops-scripts.test.ts 本地高负载偶发 120s timeout（isolated run
+  PASS；exact-head/post-merge CI PASS）——唯一仍开放债务。
+  原 ② ensureCampusMemberships bootstrap 竞态已关闭，见下方 Closure Recovery，
+  不列为开放债务
+
+**Closure Recovery（2026-09-07）**：
+
+- Trigger：PR #13 canonical docs merge 后 master CI attempt=1 红灯——
+  failed master `131d54c38484a92ba905daa4548a27105822ec5e`、failed CI
+  run 34124977074（verify = failure、e2e = skipped、attempt = 1，
+  **INITIAL DOCS POST-MERGE CI = FAILED，保留为历史证据、未 rerun**）。
+  根因 = `ensureCampusMemberships` snapshot→create 真实并发缺陷
+  （Prisma P2002 on (userId, campusId)），非 GitHub 基础设施故障
+- Recovery：PR #14，reviewed head `423bfd0852511aa6aae4d52398434a32e6d814e8`，
+  merge commit `97f53cd3494b24854a56b19e0418d50a5b5efeb6`
+  （Closure Recovery current master reference，与 6B core merge reference
+  d5f8e19 语义不同）
+- 修复语义：snapshot→blind-create 收敛为 attempt create once → inspect
+  expected conflict → re-read canonical DB truth → converge or rethrow。
+  P2002（预期 (userId,campusId) 目标精确判定）→ exact membership 复查：
+  赢家已写入 = 幂等成功、缺失 = rethrow；P2003 → user/campus referent 复查：
+  消失 = stale snapshot no-op、仍在 = rethrow；
+  NO retry loop / NO sleep ordering / NO membership status rehabilitation
+  （bootstrap 不绕过 membership 状态机）；并新增确定性真实 PG 并发回归
+  （Phase 6A 集成 17 → 19）
+- SUPERSEDED MASTER EVIDENCE：Recovery post-merge master CI run 34132745423
+  —— event = push、branch = master、verify = success、e2e = success、
+  **attempt = 1**
+- Old failed CI rerun：**NO**
 
 **Phase 6B 之后**：
 
@@ -726,7 +755,7 @@ Master Roadmap v1.0 一旦被接受即视为冻结。
 | 8 | Redis degraded local fallback precision | Redis 故障回退进程内限流计数时，多实例精度下降（已知取舍） |
 | 9 | external real alert delivery absent | 真实告警渠道未接入——因为 3B DEFERRED（无生产服务器/域名）；规则契约已就绪（docs/ALERTING.md） |
 | 10 | ops shell regression local load flake | tests/ops/ops-scripts.test.ts 本地高负载偶发 120s timeout；isolated run PASS；exact-head/post-merge CI PASS（NON_BLOCKING / TEST_INFRA_DEBT） |
-| 11 | ensureCampusMemberships bootstrap test-race window | bootstrap 全表 findMany→create 与并行 integration fixture hard-delete 存在跨文件测试时序窗口；Phase 6A/6B 定向真实 PG suites PASS；非生产授权 fail-open（NON_BLOCKING / TEST_INFRA_DEBT） |
+| 11 | ensureCampusMemberships bootstrap concurrency race | 曾存在 findMany snapshot→create 与并行 fixture mutation 竞态（P2002 / P2003 两个方向），在 PR #13 post-merge CI 34124977074（attempt=1，未 rerun）真实显形；PR #14 修复 P2002/P2003 convergence 并新增确定性真实 PG 回归；merge `97f53cd3494b24854a56b19e0418d50a5b5efeb6`；post-merge CI 34132745423 attempt=1 verify/e2e success → **CLOSED / RESOLVED_BY_CLOSURE_RECOVERY**（历史记录保留） |
 
 新增债务一律先记录到 Backlog（§11 字段），由对应 Phase 或 amendment 决定何时处理；
 **不得**在本文件之外私自把某项债务改标为 blocker。
