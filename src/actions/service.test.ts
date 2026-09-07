@@ -53,6 +53,11 @@ vi.mock("@/lib/upload", () => ({
   markAssetsForValuesPendingDelete,
 }));
 
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: {
@@ -67,6 +72,13 @@ vi.mock("@/lib/prisma", () => ({
       update: serviceListingUpdate,
     },
   },
+  withTransaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
+    callback({
+      serviceListing: {
+        create: serviceListingCreate,
+      },
+    }),
+  ),
 }));
 
 import { createService, deleteService, updateService, updateServiceStatus } from "@/actions/service";

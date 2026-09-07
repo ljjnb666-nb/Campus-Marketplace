@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isRbacError } from "@/lib/rbac/errors";
+import { isEnforcementError } from "@/lib/enforcement/errors";
 import { logger } from "@/lib/logger";
 import { getRequestId } from "@/lib/request-context";
 import { classifyError } from "@/lib/error-taxonomy";
@@ -33,9 +34,9 @@ export function handleError(error: unknown, context: string): HandledError {
     };
   }
 
-  // 治理域 / RBAC 业务错误：message 已是可直接展示的用户文案（无内部细节），
+  // 治理域 / RBAC / 执法域业务错误：message 已是可直接展示的用户文案（无内部细节），
   // status 为预期 4xx（不触发 server-fault 告警语义）
-  if (isGovernanceError(error) || isRbacError(error)) {
+  if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
     return { message: error.message, statusCode: error.status };
   }
 

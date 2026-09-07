@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { waitForAdvisoryLockWaiter } from "./helpers/lock-barrier";
 import { PrismaClient, type VerificationStatus } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -392,19 +393,6 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       "@/lib/campus/verification-service"
     );
 
-    /** 轮询直到存在未授予锁（显式屏障：第二个事务已进入锁等待队列） */
-    async function waitForLockWaiter(): Promise<void> {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
-          SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
-        if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      throw new Error("10 秒内未观察到锁等待（屏障失效）");
-    }
 
     // ---- Case A：注销先赢（racePoint 信号确认持锁后决定才启动）→ 决定被拒绝 ----
     const userA = await createFixtureUser("竞态A", campusA.id);
@@ -441,7 +429,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${userA.id}`]);
 
     releaseErasure();
     await erasurePromise;
@@ -493,7 +481,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${userB.id}`]);
 
     releaseDecision();
     const decisionB = await decisionBPromise;
@@ -839,19 +827,6 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
     const { eraseAccount } = await import("@/lib/privacy/account-erasure");
     const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
 
-    /** 显式屏障：轮询直到存在未授予锁（第二个事务已进入锁等待队列） */
-    async function waitForLockWaiter(): Promise<void> {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
-          SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
-        if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      throw new Error("10 秒内未观察到锁等待（屏障失效）");
-    }
 
     // Direction A：actor 注销先赢 → 决定在锁上阻塞 → 注销提交 → 决定 AUTH_ACCOUNT_INACTIVE
     const actorA = await createFixtureUser("竞态ActorA", campusA.id, { role: "ADMIN" });
@@ -883,7 +858,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${actorA.id}`]);
     releaseErasureA();
     await erasurePromiseA;
 
@@ -931,7 +906,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${actorB.id}`]);
     releaseDecisionB();
 
     const decidedB = await decisionPromiseB;
@@ -950,18 +925,6 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
     const { decideMembershipVerification } = await import("@/lib/campus/verification-service");
     const { revokeRole } = await import("@/lib/rbac/assignment-service");
 
-    async function waitForLockWaiter(): Promise<void> {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        const locks = await rawClient!.$queryRaw<{ count: bigint }[]>`
-          SELECT count(*)::int AS count FROM pg_locks WHERE NOT granted`;
-        if (Number(locks[0]?.count ?? BigInt(0)) > 0) {
-          return;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      throw new Error("10 秒内未观察到锁等待（屏障失效）");
-    }
 
     // 另一位持有 rbac.role.assign 的平台管理员（不由业务服务绕道，符合撤权路径）
     const revoker = await createFixtureUser("撤权管理员", campusA.id);
@@ -1008,7 +971,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       (error) => ({ rejected: true as const, code: error.code as string }),
     );
 
-    await waitForLockWaiter();
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${actor.id}`]);
     releaseRevoker();
 
     // 撤权先提交 → 决定唤醒后 actor 已无 permission → DENY

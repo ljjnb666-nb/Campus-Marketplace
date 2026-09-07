@@ -57,6 +57,11 @@ const {
     $queryRaw: txQueryRaw,
     $executeRaw: txExecuteRaw,
     user: { findMany: txUserFindMany, update: txUserUpdate },
+    campusMembership: {
+      findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] } } }) =>
+        where.userId.in.map((userId: string) => ({ userId })),
+      ),
+    },
     rentalListing: { findFirst: txRentalListingFindFirst },
     rentalUnavailablePeriod: { findFirst: txRentalUnavailableFindFirst },
     rentalOrder: {
@@ -117,6 +122,11 @@ const {
     txDisputeCreate,
   };
 });
+
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("next/cache", () => ({
   revalidatePath,

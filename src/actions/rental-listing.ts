@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -108,8 +109,11 @@ export async function createRentalListing(
 
     if (!owner) return { ...initialState, message: "用户不存在" };
 
-    // 事务内完成：listing 落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库
+    // 事务内完成：subject 治理锁 + marketplace 能力门（Phase 6B）→
+    // listing 落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库
     const listing = await withTransaction(async (tx) => {
+      await enforceMarketplaceCreationGate(tx, user.id, owner.campusId);
+
       const created = await tx.rentalListing.create({
         data: {
           title: data.title,

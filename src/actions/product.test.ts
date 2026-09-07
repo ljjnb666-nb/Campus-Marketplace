@@ -65,6 +65,11 @@ vi.mock("@/lib/upload", () => ({
   markAssetsForValuesPendingDelete,
 }));
 
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     user: {

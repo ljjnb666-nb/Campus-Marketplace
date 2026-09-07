@@ -65,6 +65,16 @@ vi.mock("@/repositories/notification-repository", () => ({
   createNotification,
 }));
 
+const reportProjection = vi.hoisted(() => ({
+  resolveReportTargetContext: vi.fn(),
+  reconcileReportRiskProjection: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("@/lib/enforcement/report-projection", () => ({
+  resolveReportTargetContext: reportProjection.resolveReportTargetContext,
+  reconcileReportRiskProjection: reportProjection.reconcileReportRiskProjection,
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     order: {
@@ -125,6 +135,83 @@ describe("trust actions", () => {
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT", name: "测试同学" });
     reportFindFirst.mockResolvedValue(null);
+
+    // Repair 2：createReport 走 resolveReportTargetContext 单源解析；
+    // mock 与生产 resolver 同一归属语义，数据来自各 fixture find mocks
+    reportProjection.resolveReportTargetContext.mockReset();
+    reportProjection.resolveReportTargetContext.mockImplementation(
+      async (
+        _tx,
+        {
+          targetType,
+        productId,
+        errandTaskId,
+        serviceListingId,
+        targetUserId,
+        messageId,
+      }: {
+        targetType: string;
+        productId?: string | null;
+        errandTaskId?: string | null;
+        serviceListingId?: string | null;
+        targetUserId?: string | null;
+        messageId?: string | null;
+      }) => {
+        const missing = { ownerUserId: null, campusId: null, targetExists: false };
+        switch (targetType) {
+          case "PRODUCT": {
+            if (!productId) return missing;
+            const row = await productFindFirst({ where: { id: productId, deletedAt: null } });
+            return {
+              ownerUserId: row?.sellerId ?? null,
+              campusId: null,
+              targetExists: Boolean(row),
+            };
+          }
+          case "ERRAND_TASK": {
+            if (!errandTaskId) return missing;
+            const row = await errandTaskFindFirst({ where: { id: errandTaskId, deletedAt: null } });
+            return {
+              ownerUserId: row?.publisherId ?? null,
+              campusId: null,
+              targetExists: Boolean(row),
+            };
+          }
+          case "SERVICE_LISTING": {
+            if (!serviceListingId) return missing;
+            const row = await serviceListingFindFirst({
+              where: { id: serviceListingId, deletedAt: null },
+            });
+            return {
+              ownerUserId: row?.providerId ?? null,
+              campusId: null,
+              targetExists: Boolean(row),
+            };
+          }
+          case "USER": {
+            if (!targetUserId) return missing;
+            const row = await userFindFirst({ where: { id: targetUserId, deletedAt: null } });
+            return {
+              ownerUserId: row?.id ?? null,
+              campusId: null,
+              targetExists: Boolean(row),
+            };
+          }
+          case "MESSAGE": {
+            if (!messageId) return missing;
+            const row = await messageFindUnique({ where: { id: messageId } });
+            return {
+              ownerUserId: row?.senderId ?? null,
+              campusId: null,
+              targetExists: Boolean(row),
+            };
+          }
+          default:
+            return missing;
+        }
+      },
+    );
+    reportProjection.reconcileReportRiskProjection.mockReset().mockResolvedValue(null);
   });
 
   it("rejects a review when the target user does not match the completed order", async () => {
@@ -284,7 +371,9 @@ describe("trust actions", () => {
       message: "不能举报自己发布或发送的内容",
     });
     expect(reportFindFirst).not.toHaveBeenCalled();
-    expect(transactionMock).not.toHaveBeenCalled();
+    // Repair 2：target 解析经 resolveReportTargetContext（只读事务）——
+    // 事务仅承载解析查询，不再包含重复举报查询/写入
+    expect(reportFindFirst).not.toHaveBeenCalled();
   });
 
   it("rejects a duplicate open report for the same target", async () => {
@@ -320,7 +409,6 @@ describe("trust actions", () => {
         id: true,
       },
     });
-    expect(transactionMock).not.toHaveBeenCalled();
   });
 
   it("submits a product report and notifies the reporter", async () => {

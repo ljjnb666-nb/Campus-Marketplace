@@ -6,7 +6,8 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
-import { isPrivilegedTarget } from "@/lib/rbac/service";
+import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
+import { applyReportReviewTx } from "@/lib/enforcement/report-projection";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -264,32 +265,19 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
 
     await withTransaction(async (tx) => {
-      const report = await tx.report.update({
-        where: { id: parsed.data.reportId },
-        data: {
-          status: parsed.data.status,
-          handledById: admin.id,
-          handledNote: parsed.data.handledNote || null,
-          handledAt:
-            parsed.data.status === "RESOLVED" || parsed.data.status === "REJECTED" ? new Date() : null,
-        },
-        select: {
-          reporterId: true,
-        },
-      });
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: `REPORT_${parsed.data.status}`,
-          targetType: "REPORT",
-          targetId: parsed.data.reportId,
-          detail: parsed.data.handledNote || null,
-        },
+      // Repair 2 Blocker D：SELECT ... FOR UPDATE 序列化同一 Report 的状态变更
+      // （locked status → transition 断言 → canonical update → projection →
+      // AdminLog，全部同一 locked transaction；本路径不引入 USER subject locks，
+      // 无 row lock → advisory 反序）
+      const review = await applyReportReviewTx(tx, {
+        reportId: parsed.data.reportId,
+        actorId: admin.id,
+        status: parsed.data.status,
+        handledNote: parsed.data.handledNote || null,
       });
 
       await createNotification(tx, {
-        userId: report.reporterId,
+        userId: review.reporterId,
         type: "REPORT",
         title: notification.title,
         content: notification.content,
@@ -300,6 +288,13 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     revalidatePath("/admin/reports");
     revalidatePath("/notifications");
   } catch (error) {
+    // 中央 transition/存在性错误的用户可读提示
+    if (error instanceof Error && error.message.startsWith("REPORT_STATUS_INVALID_TRANSITION:")) {
+      return { success: false, error: "举报当前状态不允许此操作" };
+    }
+    if (error instanceof Error && error.message.startsWith("REPORT_NOT_FOUND:")) {
+      return { success: false, error: "举报不存在" };
+    }
     return { success: false, error: actionErrorMessage(error, "reviewReport") };
   }
 }
@@ -318,52 +313,27 @@ export async function toggleUserStatus(
       return invalidFormState();
     }
 
-    // 防止管理员停用自己，导致所有后台入口被锁死
-    if (parsed.data.userId === admin.id) {
-      return { success: false, error: "不能停用或恢复自己的账号" };
+    // Phase 6B：账号硬停用/恢复收敛到中央 enforcement service（薄 adapter）。
+    // service 内部承担：sorted subject 锁（正式关闭 USER_STATUS_ROLE_ASSIGNMENT_RACE）
+    // → user.suspend permission 复核 → self-deny → privileged target 保护（RBAC）
+    // → 幂等转移 → EnforcementAction + 审计（authoritative transaction）。
+    // Repair 2 Blocker C：站内通知为 commit 后 best-effort 投递——通知失败仅记
+    // ENFORCEMENT_NOTIFICATION_FAILED 日志，不影响 enforcement 成败。
+    const enforcementInput = {
+      actorId: admin.id,
+      targetUserId: parsed.data.userId,
+      reasonCode: "MANUAL_REVIEW" as const,
+      sourceType: "ADMIN_ACTION",
+    };
+
+    const result =
+      parsed.data.nextStatus === "SUSPENDED"
+        ? await suspendAccount(enforcementInput)
+        : await reinstateAccount(enforcementInput);
+
+    if (result.alreadyInState) {
+      return { success: false, error: "账号已处于该状态" };
     }
-
-    const target = await prisma.user.findUnique({
-      where: { id: parsed.data.userId },
-      select: { id: true },
-    });
-
-    if (!target) {
-      return { success: false, error: "用户不存在" };
-    }
-
-    // Repair 1：高权限目标保护以 RBAC 授权上下文判定（full-admin 等价），
-    // 不读取 User.role——RBAC 平台管理员即使 role=STUDENT 也受保护；
-    // 授权已被撤回的用户即使 role=ADMIN 也不再受保护
-    if (await isPrivilegedTarget(parsed.data.userId)) {
-      return { success: false, error: "不能停用或恢复其他管理员账号" };
-    }
-
-    await withTransaction(async (tx) => {
-      await tx.user.update({
-        where: { id: parsed.data.userId },
-        data: { status: parsed.data.nextStatus },
-      });
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: parsed.data.nextStatus === "SUSPENDED" ? "SUSPEND_USER" : "RESTORE_USER",
-          targetType: "USER",
-          targetId: parsed.data.userId,
-        },
-      });
-
-      await createNotification(tx, {
-        userId: parsed.data.userId,
-        type: "SYSTEM",
-        title: parsed.data.nextStatus === "SUSPENDED" ? "账号已被停用" : "账号已恢复正常",
-        content:
-          parsed.data.nextStatus === "SUSPENDED"
-            ? "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。"
-            : "你的账号已恢复正常使用。",
-      });
-    });
 
     revalidatePath("/admin/users");
   } catch (error) {

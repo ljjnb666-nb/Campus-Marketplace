@@ -282,6 +282,15 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
       withAcceptance: true,
     },
     {
+      // Phase 6B：受限用户（能力门 E2E 专用，setup 阶段不设限——由 spec 的
+      // seedActiveRestriction fixture 按需打标，账号本身保持 NORMAL）
+      email: "e2e-restricted@e2e.test",
+      name: "E2E受限用户",
+      password: `${passwordPrefix}Restricted#2026`,
+      role: UserRole.STUDENT,
+      withAcceptance: true,
+    },
+    {
       // 【无同意记录】legacy 用户：登录后会被 consent gate 引导到 /legal/accept
       email: "e2e-legacy@e2e.test",
       name: "E2E老用户",

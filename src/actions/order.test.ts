@@ -45,7 +45,11 @@ const {
       update: txUserUpdate,
       findMany: txUserFindMany,
     },
-    $executeRaw: txExecuteRaw,
+    campusMembership: {
+      findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] }; campusId: string } }) =>
+        where.userId.in.map((userId: string) => ({ userId })),
+      ),
+    },    $executeRaw: txExecuteRaw,
   };
 
   return {
@@ -81,6 +85,11 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/repositories/notification-repository", () => ({
   createNotifications,
+}));
+
+vi.mock("@/lib/enforcement/capability-gate", () => ({
+  requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/prisma", () => ({

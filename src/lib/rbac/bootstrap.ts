@@ -9,7 +9,7 @@
  * 通过再次运行 bootstrap（seed/迁移）收敛，避免每次请求付出同步成本。
  */
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 // 相对导入：本模块被 prisma/seed.ts 与 scripts/e2e-setup.ts 以 tsx 直接执行
 // （tsx 无 @/ alias），且不依赖 prisma 单例——客户端一律由调用方传入。
@@ -134,10 +134,21 @@ export async function syncLegacyAdminRoles(client: RbacBootstrapClient): Promise
     if (existing) {
       continue;
     }
-    await client.userRoleAssignment.create({
-      data: { userId: admin.id, roleId: role.id, scopeKey: GLOBAL_SCOPE_KEY },
-    });
-    created += 1;
+    try {
+      await client.userRoleAssignment.create({
+        data: { userId: admin.id, roleId: role.id, scopeKey: GLOBAL_SCOPE_KEY },
+      });
+      created += 1;
+    } catch (error) {
+      // 并发 bootstrap（如并行测试文件/多进程同时收敛）唯一约束兜底幂等
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        continue;
+      }
+      throw error;
+    }
   }
 
   return created;

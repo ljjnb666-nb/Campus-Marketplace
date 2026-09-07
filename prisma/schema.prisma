@@ -231,6 +231,11 @@ model User {
   memberships           CampusMembership[]
   userRoles             UserRoleAssignment[]
   reviewedVerifications UserVerification[]        @relation("VerificationReviewer")
+  // Phase 6B：trust / risk / enforcement 关联
+  riskStates            RiskState[]
+  riskFlags             RiskFlag[]
+  enforcementAsActor    EnforcementAction[]       @relation("EnforcementActor")
+  enforcementAsTarget   EnforcementAction[]       @relation("EnforcementTarget")
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
@@ -293,6 +298,10 @@ model Campus {
   verificationPolicies CampusVerificationPolicy[]
   userRoles            UserRoleAssignment[]
   adminLogs            AdminLog[]
+  // Phase 6B：trust / risk / enforcement
+  riskStates           RiskState[]
+  riskFlags            RiskFlag[]
+  enforcementActions   EnforcementAction[]
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
 }
@@ -1377,4 +1386,139 @@ model UserRoleAssignment {
   @@unique([userId, roleId, scopeKey])
   @@index([userId])
   @@index([roleId])
+}
+
+// ============================================================
+// Phase 6B：Trust / Risk State / Marketplace Restriction / Enforcement
+// ============================================================
+
+// 显式、可解释的风险状态。NORMAL/WATCH/RESTRICTED 与账号硬停用（User.status）
+// 是不同概念：RESTRICTED 仅禁止"开始新的 marketplace 活动"，既有义务、
+// 消息沟通、隐私操作不受影响（见 src/lib/enforcement/capability-gate.ts）。
+// scope 语义：GLOBAL 行 campusId 为 null、scopeKey="GLOBAL"；
+// CAMPUS 行 campusId 必填、scopeKey="CAMPUS:<campusId>"（同 UserRoleAssignment
+// 的 nullable-unique 解法）。无行 = NORMAL（真实默认，不做任何推断式回填）。
+enum RiskStateLevel {
+  NORMAL
+  WATCH
+  RESTRICTED
+}
+
+// RiskState 是可变操作态 projection（更新必须持 USER subject 锁）；
+// 历史溯源在 EnforcementAction / AdminLog，绝不在此表考古。
+model RiskState {
+  id          String         @id @default(cuid())
+  userId      String
+  campusId    String?
+  scopeKey    String
+  state       RiskStateLevel @default(NORMAL)
+  // 最近一次变更的机器可读原因（enforcement reason code）
+  reasonCode  String?
+  updatedById String?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campus      Campus?        @relation(fields: [campusId], references: [id])
+
+  @@unique([userId, scopeKey])
+  @@index([userId, state])
+}
+
+enum RiskFlagKind {
+  // 未裁决举报信号（举报创建时记录；不是事实认定）
+  REPORT_SUBMITTED
+  // 经人工核查成立的举报（review RESOLVED 时记录）
+  REPORT_CONFIRMED
+  // 租赁纠纷开启
+  RENTAL_DISPUTE_OPENED
+  // 管理员手动标记（Phase 7 UI 提供，服务层 6B 先行）
+  MANUAL_FLAG
+}
+
+enum RiskFlagSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum RiskFlagStatus {
+  ACTIVE
+  RESOLVED
+}
+
+// 风险信号（source-linked / deduplicated / resolvable）。
+// 信号 != 裁决事实：REPORT_SUBMITTED 绝不自动产生任何处罚。
+// (kind, sourceType, sourceId) 唯一 = 同一来源同一类信号至多一条。
+model RiskFlag {
+  id           String           @id @default(cuid())
+  userId       String
+  campusId     String?
+  kind         RiskFlagKind
+  severity     RiskFlagSeverity @default(INFO)
+  sourceType   String
+  sourceId     String
+  reasonCode   String?
+  note         String?
+  status       RiskFlagStatus   @default(ACTIVE)
+  createdById  String?
+  resolvedById String?
+  resolvedAt   DateTime?
+  createdAt    DateTime         @default(now())
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campus       Campus?          @relation(fields: [campusId], references: [id])
+
+  @@unique([kind, sourceType, sourceId])
+  @@index([userId, status])
+  @@index([status, severity])
+}
+
+enum EnforcementActionType {
+  MARKETPLACE_RESTRICT
+  MARKETPLACE_RESTORE
+  ACCOUNT_SUSPEND
+  ACCOUNT_REINSTATE
+  MEMBERSHIP_SUSPEND
+  MEMBERSHIP_REINSTATE
+}
+
+// 处罚原因码（机器可读；自由文本 note 仅辅助说明）。
+enum EnforcementReasonCode {
+  FRAUD_CONFIRMED
+  HARASSMENT_CONFIRMED
+  ACCOUNT_SECURITY
+  POLICY_VIOLATION
+  MANUAL_REVIEW
+  FALSE_POSITIVE_CORRECTION
+  OTHER
+}
+
+// 执法历史 / provenance（who/what/whom/where/why/when/source）。
+// 这不是第二套 operational state：真实账号状态仍是 User.status，
+// 成员状态仍是 CampusMembership.status，限制态仍是 RiskState——
+// 本表只记录"谁在何时依据什么对谁做了什么"，append-only。
+model EnforcementAction {
+  id          String                @id @default(cuid())
+  type        EnforcementActionType
+  actorId     String
+  targetId    String
+  // campus-scoped 动作的目标校区（GLOBAL 动作为 null）
+  campusId    String?
+  scopeKey    String
+  reasonCode  EnforcementReasonCode
+  note        String?
+  // 来源追溯（如 Report / RiskFlag / MANUAL）
+  sourceType  String?
+  sourceId    String?
+  // 动作生效后的状态快照（如 "USER:SUSPENDED" / "CAMPUS_MEMBERSHIP:SUSPENDED" /
+  // "RISK_STATE:RESTRICTED@CAMPUS:<id>"），仅作历史证据
+  resultState String
+  createdAt   DateTime              @default(now())
+  actor       User                  @relation("EnforcementActor", fields: [actorId], references: [id])
+  target      User                  @relation("EnforcementTarget", fields: [targetId], references: [id])
+  campus      Campus?               @relation(fields: [campusId], references: [id])
+
+  @@index([targetId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([type, createdAt])
 }

@@ -90,6 +90,30 @@ export async function eraseUserFixture(email: string): Promise<void> {
 }
 
 /**
+ * Phase 6B fixture seam：为指定账号直接写入 GLOBAL RESTRICTED 风险状态，
+ * 用于 marketplace 能力门 E2E（受限用户不能开始新交易活动）。
+ * 仅供 E2E 基建使用（真实 restrict 入口是执法 service，属管理端操作）。
+ */
+export async function seedActiveRestriction(email: string): Promise<void> {
+  const db = e2eDb();
+  const user = await db.user.findUniqueOrThrow({
+    where: { email },
+    select: { id: true },
+  });
+  await db.riskState.upsert({
+    where: { userId_scopeKey: { userId: user.id, scopeKey: "GLOBAL" } },
+    update: { state: "RESTRICTED" },
+    create: {
+      userId: user.id,
+      campusId: null,
+      scopeKey: "GLOBAL",
+      state: "RESTRICTED",
+      reasonCode: "MANUAL_REVIEW",
+    },
+  });
+}
+
+/**
  * Phase 5 fixture seam：【TEST FIXTURE ACCEPTANCE】为指定账号直接插入
  * 对某文档的同意证据（仅在升级测试里用于把版本升级对并行 worker 中
  * 其他 storageState 账号的影响窗口压到毫秒级；不代表生产语义）。

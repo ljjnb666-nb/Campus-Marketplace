@@ -52,21 +52,28 @@ async function nextVersion(
 }
 
 async function createFixtureUser(name: string) {
+  const campus = await rawClient!.campus.upsert({
+    where: { slug: "it-main-campus" },
+    update: {},
+    create: { name: "集成主校区", slug: "it-main-campus", schoolName: "集成测试大学" },
+  });
+
   const user = await rawClient!.user.create({
     data: {
       email: `${RUN_TAG}-${createdUserIds.length}@it.local`,
       name,
       passwordHash: "$2a$10$itfixtureitfixtureitfixtureitfixtureitfixtureitfixtureitfix",
       schoolName: "集成测试大学",
-      campus: {
-        connectOrCreate: {
-          where: { slug: "it-main-campus" },
-          create: { name: "集成主校区", slug: "it-main-campus", schoolName: "集成测试大学" },
-        },
-      },
+      campusId: campus.id,
     },
   });
   createdUserIds.push(user.id);
+
+  // Phase 6B：义务创建入口新增 membership 能力门——fixture 用户必须持有
+  // ACTIVE CampusMembership 才能创建订单/义务（与生产注册语义一致）
+  await rawClient!.campusMembership.create({
+    data: { userId: user.id, campusId: campus.id, status: "ACTIVE" },
+  });
 
   return user;
 }
@@ -79,6 +86,7 @@ async function eraseAccountPublic(userId: string): Promise<void> {
 
 describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy Drill（真实 PostgreSQL）", () => {
   let exportOwnerId = "";
+  let itCampusId = "";
   let otherUserId = "";
 
   beforeAll(async () => {
@@ -87,6 +95,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       update: {},
       create: { name: "集成主校区", slug: "it-main-campus", schoolName: "集成测试大学" },
     });
+
+    // Phase 6B：订单/义务创建入口新增 campusId 能力门参数——fixture 校区固定复用
+    itCampusId = (
+      await rawClient!.campus.findUniqueOrThrow({ where: { slug: "it-main-campus" }, select: { id: true } })
+    ).id;
 
     const owner = await createFixtureUser("导出主体");
     const other = await createFixtureUser("其他用户");
@@ -962,7 +975,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         tx,
         {
           buyerId: buyer.id,
-          product: { id: product.id, price: "10.00", sellerId: product.sellerId },
+          product: { id: product.id, price: "10.00", sellerId: product.sellerId, campusId: itCampusId },
           meetingLocation: "IT 测试点",
           note: null,
         },
@@ -1024,7 +1037,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const orderOutcome = withTransaction((tx) =>
       createProductOrderTx(tx, {
         buyerId: buyer.id,
-        product: { id: product.id, price: "10.00", sellerId: product.sellerId },
+        product: { id: product.id, price: "10.00", sellerId: product.sellerId, campusId: itCampusId },
         meetingLocation: "IT 测试点",
         note: null,
       }),
@@ -1488,7 +1501,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       withTransaction((tx) =>
         createServiceOrderTx(tx, {
           buyerId: buyer.id,
-          service: { id: listing.id, price: "30.00", providerId: provider.id },
+          service: { id: listing.id, price: "30.00", providerId: provider.id, campusId },
           meetingLocation: "IT",
           note: null,
         }),
@@ -1536,6 +1549,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
           errandId: errand.id,
           publisherId: publisher.id,
           claimerId: runner.id,
+          campusId,
           reward: errand.reward,
         }),
       ),

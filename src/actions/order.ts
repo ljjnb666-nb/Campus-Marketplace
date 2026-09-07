@@ -83,6 +83,7 @@ export async function createProductOrder(
         id: true,
         price: true,
         sellerId: true,
+        campusId: true,
       },
     });
 
@@ -115,6 +116,7 @@ export async function createProductOrder(
           id: product.id,
           price: product.price.toString(),
           sellerId: product.sellerId,
+          campusId: product.campusId,
         },
         meetingLocation: parsed.data.meetingLocation,
         note: parsed.data.note || null,
@@ -167,6 +169,7 @@ export async function createServiceOrder(
         id: true,
         price: true,
         providerId: true,
+        campusId: true,
       },
     });
 
@@ -185,6 +188,7 @@ export async function createServiceOrder(
           id: service.id,
           price: service.price.toString(),
           providerId: service.providerId,
+          campusId: service.campusId,
         },
         meetingLocation: parsed.data.meetingLocation,
         note: parsed.data.note || null,

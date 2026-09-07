@@ -15,6 +15,7 @@ const roles = [
   ["seller", E2E_ACCOUNTS.seller],
   ["admin", E2E_ACCOUNTS.admin],
   ["outsider", E2E_ACCOUNTS.outsider],
+  ["restricted", E2E_ACCOUNTS.restricted],
 ] as const;
 
 for (const [role, account] of roles) {
