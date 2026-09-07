@@ -592,6 +592,75 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
   });
 
   // ============================================================
+  // Closure recovery：ensureCampusMemberships 并发收敛（真实 PostgreSQL）
+  // master 131d54c post-merge CI 失败（P2002 (userId,campusId) 竞态）的回归锁定。
+  // seam = testing-only afterSnapshot barrier：两个执行都持有 missing 快照后
+  // 同时放行 create，确定性复现并发路径（无 sleep 定序）。
+  // ============================================================
+
+  it("ensureCampusMemberships 并发收敛：双执行同一 missing 用户 → 恰一行 ACTIVE、双 resolve", async () => {
+    const raceTarget = await createFixtureUser("并发收敛目标", campusA.id);
+    // 6A fixture 内联创建 membership——先移除，构造"用户存在但缺 membership"的真实 bootstrap 输入
+    await rawClient!.campusMembership.deleteMany({ where: { userId: raceTarget.id } });
+
+    const { ensureCampusMemberships } = await import("@/lib/rbac/bootstrap");
+
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const afterSnapshot = async () => {
+      arrived += 1;
+      if (arrived === 2) {
+        release();
+      }
+      await gate;
+    };
+
+    const [first, second] = await Promise.all([
+      ensureCampusMemberships(prisma!, { afterSnapshot }),
+      ensureCampusMemberships(prisma!, { afterSnapshot }),
+    ]);
+
+    // 竞态确实发生：两个执行都在写入前读取了快照
+    expect(arrived).toBe(2);
+
+    // 恰一行 membership，状态 ACTIVE（并发赢家写入，loser 幂等收敛）
+    const memberships = await rawClient!.campusMembership.findMany({
+      where: { userId: raceTarget.id, campusId: campusA.id },
+    });
+    expect(memberships).toHaveLength(1);
+    expect(memberships[0].status).toBe("ACTIVE");
+
+    // 目标用户恰贡献一次真实创建（该用户在两个快照中均缺失且无他人写入）
+    expect(first + second).toBeGreaterThanOrEqual(1);
+  });
+
+  it("ensureCampusMemberships stale snapshot：快照后 fixture 用户被并发硬删 → no-op 不炸（真实 PG P2003 收敛）", async () => {
+    const victim = await createFixtureUser("快照后删除目标", campusA.id);
+    // 移除内联 membership，使 victim 成为 bootstrap 快照中的"缺失"用户
+    await rawClient!.campusMembership.deleteMany({ where: { userId: victim.id } });
+
+    const { ensureCampusMemberships } = await import("@/lib/rbac/bootstrap");
+
+    let deleted = false;
+    const afterSnapshot = async () => {
+      if (!deleted) {
+        deleted = true;
+        // 独立裸客户端硬删除（模拟并行测试文件 afterAll fixture 清理赢家）
+        await rawClient!.user.delete({ where: { id: victim.id } });
+      }
+    };
+
+    // bootstrap 读到 victim 缺失快照 → create P2003 → 复查 user 不存在 → no-op
+    await expect(ensureCampusMemberships(prisma!, { afterSnapshot })).resolves.toBeGreaterThanOrEqual(0);
+
+    const gone = await rawClient!.user.findUnique({ where: { id: victim.id } });
+    expect(gone).toBeNull();
+  });
+
+  // ============================================================
   // Repair 1：CAMPUS 权限必须要求 ACTIVE membership
   // ============================================================
 

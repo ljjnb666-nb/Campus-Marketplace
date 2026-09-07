@@ -39,15 +39,22 @@ export type RbacBootstrapClient = {
   };
   user: {
     findMany: (args: Prisma.UserFindManyArgs) => Promise<Array<{ id: string; campusId: string }>>;
+    findUnique: (args: Prisma.UserFindUniqueArgs) => Promise<{ id: string } | null>;
   };
   userRoleAssignment: {
     findFirst: (args: Prisma.UserRoleAssignmentFindFirstArgs) => Promise<{ id: string } | null>;
     create: (args: Prisma.UserRoleAssignmentCreateArgs) => Promise<unknown>;
   };
+  campus: {
+    findUnique: (args: Prisma.CampusFindUniqueArgs) => Promise<{ id: string } | null>;
+  };
   campusMembership: {
     findMany: (
       args: Prisma.CampusMembershipFindManyArgs,
     ) => Promise<Array<{ userId: string; campusId: string }>>;
+    findUnique: (
+      args: Prisma.CampusMembershipFindUniqueArgs,
+    ) => Promise<{ status: string } | null>;
     create: (args: Prisma.CampusMembershipCreateArgs) => Promise<unknown>;
   };
 };
@@ -155,11 +162,53 @@ export async function syncLegacyAdminRoles(client: RbacBootstrapClient): Promise
 }
 
 /**
- * membership 补齐（幂等）：为没有 membership 的用户按 User.campusId 创建
- * ACTIVE membership。fresh DB 注册路径在注册事务内直接创建 membership；
- * 本函数服务于 seed / e2e-setup / 存量数据的 belt-and-braces 场景。
+ * P2002 是否命中指定字段的唯一约束。
+ *
+ * Prisma meta.target 的真实形状随版本/约束形态变化：字段数组
+ * （["userId","campusId"]）或约束名字符串（"CampusMembership_userId_campusId_key"）。
+ * 这里统一解析后要求请求的字段全部出现，防止无关唯一约束被误判吞掉。
  */
-export async function ensureCampusMemberships(client: RbacBootstrapClient): Promise<number> {
+function isUniqueConstraintOn(error: unknown, fields: string[]): boolean {
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+    error.code !== "P2002"
+  ) {
+    return false;
+  }
+  const raw: unknown = error.meta?.target;
+  const targetFields = Array.isArray(raw)
+    ? raw.map(String)
+    : typeof raw === "string"
+      ? raw.split(/[\s,_]+/).filter(Boolean)
+      : [];
+  return fields.every((field) => targetFields.includes(field));
+}
+
+/**
+ * membership 补齐（convergent bootstrap / reconciliation，并发幂等）：
+ * 为仍存在、且尚无 home-campus membership 的用户补建 ACTIVE membership。
+ * fresh DB 注册路径在注册事务内直接创建 membership；本函数服务于
+ * seed / e2e-setup / 测试 fixture / 存量数据的 belt-and-braces 场景。
+ *
+ * 并发收敛合同（与 syncLegacyAdminRoles 同一原则——并发赢家产出目标行
+ * = 幂等成功）：
+ * - P2002 且目标为 (userId, campusId)：复查 exact membership——已存在（任何
+ *   status，含 SUSPENDED/LEFT 等）则视为并发赢家已写入，幂等成功；仍不存在
+ *   则 rethrow 原错误。绝不 rehabilitate 既有 membership（bootstrap 不绕过
+ *   正式 membership 状态机）。
+ * - P2003：复查 candidate user 与 campus 是否仍存在——任一已被并发删除
+ *   （STALE_BOOTSTRAP_SNAPSHOT）则本轮 no-op；referent 仍在则 rethrow
+ *   （真实数据库完整性问题不得静默吞掉）。
+ * - 其余错误一律 rethrow。
+ *
+ * `options.afterSnapshot` 是 internal/testing-only seam（默认 undefined，
+ * production 行为不变）：在快照读取后、写入前插入 barrier，供集成测试
+ * 确定性复现并发竞态（替代 sleep 定序）。
+ */
+export async function ensureCampusMemberships(
+  client: RbacBootstrapClient,
+  options?: { afterSnapshot?: () => Promise<void> },
+): Promise<number> {
   const users = await client.user.findMany({
     select: { id: true, campusId: true },
   });
@@ -169,21 +218,54 @@ export async function ensureCampusMemberships(client: RbacBootstrapClient): Prom
   });
   const existingKeys = new Set(existing.map((m) => `${m.userId}:${m.campusId}`));
 
+  if (options?.afterSnapshot) {
+    await options.afterSnapshot();
+  }
+
   let created = 0;
   for (const user of users) {
     const key = `${user.id}:${user.campusId}`;
     if (existingKeys.has(key)) {
       continue;
     }
-    await client.campusMembership.create({
-      data: {
-        userId: user.id,
-        campusId: user.campusId,
-        status: "ACTIVE",
-      },
-    });
+    try {
+      await client.campusMembership.create({
+        data: {
+          userId: user.id,
+          campusId: user.campusId,
+          status: "ACTIVE",
+        },
+      });
+      created += 1;
+    } catch (error) {
+      if (isUniqueConstraintOn(error, ["userId", "campusId"])) {
+        // CONCURRENT_WINNER_CONFIRMED 路径：exact membership 已由并发执行写入
+        // → 幂等成功；任何现有 status 都不改写（禁止 SUSPENDED/LEFT → ACTIVE）
+        const winner = await client.campusMembership.findUnique({
+          where: { userId_campusId: { userId: user.id, campusId: user.campusId } },
+          select: { status: true },
+        });
+        if (!winner) {
+          throw error;
+        }
+      } else if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2003"
+      ) {
+        // STALE_BOOTSTRAP_SNAPSHOT 路径：candidate user / campus 已被并发删除
+        // → 本轮 no-op；referent 仍在 → 真实完整性问题，rethrow
+        const [userStillExists, campusStillExists] = await Promise.all([
+          client.user.findUnique({ where: { id: user.id }, select: { id: true } }),
+          client.campus.findUnique({ where: { id: user.campusId }, select: { id: true } }),
+        ]);
+        if (userStillExists && campusStillExists) {
+          throw error;
+        }
+      } else {
+        throw error;
+      }
+    }
     existingKeys.add(key);
-    created += 1;
   }
 
   return created;
