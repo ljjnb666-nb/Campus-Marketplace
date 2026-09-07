@@ -101,7 +101,8 @@ describe("getPublicTrustSnapshot（public 安全信号）", () => {
 
     expect(snapshot).toMatchObject({
       userId: "user-1",
-      verification: { status: "VERIFIED" },
+      // USER_ROW 无 canonical verification（仅 legacy 投影 VERIFIED）→ fail closed
+      verification: { status: "UNVERIFIED" },
       membership: { activeCampusCount: 1 },
       transactionHistory: { completedOrdersCount: 12 },
       reviewSignals: { positiveReviewRate: 0.95, receivedReviewsCount: 7 },
@@ -368,10 +369,40 @@ describe("effective verification（Repair 3 Blocker A）", () => {
     ).rejects.toMatchObject({ code: "ENFORCEMENT_TARGET_SCOPE_MISMATCH" });
   });
 
-  it("F: canonical 缺失时回退兼容投影（fail-safe，不新增 enum）", async () => {
+  it("F: canonical 缺失 + legacy 投影 VERIFIED → public UNVERIFIED（fail closed，不新增 enum）", async () => {
     const snapshot = await getPublicTrustSnapshot("user-1");
-    // USER_ROW 无 verification 关系 → 回退 verificationStatus = VERIFIED
-    expect(snapshot?.verification.status).toBe("VERIFIED");
+    // USER_ROW 无 verification 关系 → LEGACY_VERIFICATION_PROJECTION
+    // = NON_AUTHORITATIVE_FOR_TRUST，不得产生 VERIFIED
+    expect(snapshot?.verification.status).toBe("UNVERIFIED");
+  });
+
+  it("Final Repair: canonical 缺失 + legacy 投影 VERIFIED → GLOBAL internal UNVERIFIED", async () => {
+    // actor = GLOBAL audit.read
+    const snapshot = await getInternalTrustSnapshot({
+      actorId: "actor-1",
+      targetUserId: "user-1",
+    });
+    expect(snapshot?.view).toBe("GLOBAL");
+    if (snapshot?.view !== "GLOBAL") {
+      throw new Error("expected GLOBAL view");
+    }
+    expect(snapshot.verification.status).toBe("UNVERIFIED");
+  });
+
+  it("Final Repair: canonical 缺失 + target membership ACTIVE → CAMPUS internal UNVERIFIED", async () => {
+    // USER_ROW.memberships: campus-a ACTIVE → target relationship 满足，
+    // 但 canonical 认证缺失时 campus 视图同样 fail closed
+    loadAuthorizationContextMock.mockResolvedValue(campusAuditor("campus-a"));
+    const snapshot = await getInternalTrustSnapshot({
+      actorId: "actor-1",
+      targetUserId: "user-1",
+      campusId: "campus-a",
+    });
+    expect(snapshot?.view).toBe("CAMPUS");
+    if (snapshot?.view === "CAMPUS") {
+      expect(snapshot.membership.status).toBe("ACTIVE");
+      expect(snapshot.verification.status).toBe("UNVERIFIED");
+    }
   });
 
   it("G: public 快照仍不泄漏 evidence（membershipId/policyHash 等）", async () => {

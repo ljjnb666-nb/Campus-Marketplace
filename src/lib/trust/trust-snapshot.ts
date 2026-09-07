@@ -108,9 +108,10 @@ export type InternalTrustSnapshot =
 
 const trustUserSelect = {
   id: true,
-  verificationStatus: true,
-  // Phase 6B Repair 3 Blocker A：认证有效性必须读 canonical 认证记录
-  //（UserVerification + 其绑定的 membership status），不能只信兼容投影
+  // Phase 6B Repair 3 Blocker A + Final Repair：认证有效性只读 canonical
+  // 认证记录（UserVerification + 其绑定 membership status）。
+  // User.verificationStatus（LEGACY_VERIFICATION_PROJECTION =
+  // NON_AUTHORITATIVE_FOR_TRUST）不进入本 select，不参与 trust 推导。
   verification: {
     select: {
       status: true,
@@ -162,18 +163,23 @@ async function loadUserTrustBase(
     return null;
   }
 
-  // EFFECTIVE_VERIFIED = UserVerification.status == VERIFIED
-  //   AND 绑定 membership.status == ACTIVE（Repair 3 Blocker A 合同）。
-  // canonical 认证行缺失时仅回退到兼容投影（历史遗留行为，fail-safe）。
-  let effectiveVerification: VerificationStatus = user.verification
-    ? user.verification.status
-    : (user.verificationStatus as VerificationStatus);
-  const effectiveVerificationBoundCampusId: string | null =
-    user.verification?.membership?.campusId ?? null;
-  if (user.verification && user.verification.status === "VERIFIED") {
+  // EFFECTIVE_VERIFIED = canonical UserVerification.status == VERIFIED
+  //   AND 绑定 CampusMembership.status == ACTIVE（Phase 6B canonical trust contract）。
+  // canonical 认证行缺失 => fail closed：UNVERIFIED（Final Repair）。
+  // LEGACY_VERIFICATION_PROJECTION = NON_AUTHORITATIVE_FOR_TRUST：
+  // User.verificationStatus 仅保留 display/session/bootstrap/migration 兼容，
+  // 不能独立产生 effective VERIFIED trust 信号。
+  let effectiveVerification: VerificationStatus;
+  if (!user.verification) {
+    effectiveVerification = "UNVERIFIED";
+  } else if (user.verification.status === "VERIFIED") {
     effectiveVerification =
       user.verification.membership?.status === "ACTIVE" ? "VERIFIED" : "UNVERIFIED";
+  } else {
+    effectiveVerification = user.verification.status;
   }
+  const effectiveVerificationBoundCampusId: string | null =
+    user.verification?.membership?.campusId ?? null;
 
   return {
     userId: user.id,
