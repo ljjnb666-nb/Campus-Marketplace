@@ -49,12 +49,15 @@
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
 | Phase 6A | Identity / Campus Membership / Verification / RBAC Foundation（Phase 6 第一实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10，经独立验收 Repair 1 + post-merge master CI 收口） |
+| Phase 6B | Trust / Risk / Enforcement Foundation（Phase 6 第二实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12，经多轮独立验收 Repair 1–3 + Final Repair + post-merge master CI 收口） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
 实时 master 以 git 仓库为准）；
 Phase 6A master-green reference：`d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`
 （PR #10 合并提交——Phase 6A 代码范围的固定引用点，**不随 master 前进而改写**）；
+Phase 6B master-green reference：`d5f8e19151184f7b5ce5660103cc5632f183e9b9`
+（PR #12 合并提交——Phase 6B 代码范围的固定引用点，**不随 master 前进而改写**）；
 上一记录点：`be0fd94c92a751c0dd6acd1f417abdd42b6f5751`，Phase 4 合并提交、
 亦为 Roadmap v1.0 冻结基线（历史冻结事件记录保留于 §1，不随 master 前进改写）。
 
@@ -67,9 +70,10 @@ Phase 6A master-green reference：`d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`
 不是"已具备公开生产运营资格"（见 §9）。
 
 当前测试基线（来自最近一次成功的 master CI，非本地估算）：
-235 个测试文件 / 1452 个测试全部通过（其中 77 个为环境门控 skip，非失败），
-覆盖率 lines 83.01% / branches 82.01% / functions 81.97% / statements 83.01%；
-Playwright E2E 关键链路 34 条全绿；Phase 6A 真实 PostgreSQL 集成测试 17 条。
+243 个测试文件 / 1567 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
+集成测试全部真实执行，无环境门控 skip），覆盖率 lines 85.72% / branches 83.44% /
+functions 84.74% / statements 85.72%；Playwright E2E 关键链路 36 条全绿；
+真实 PostgreSQL 集成测试：Phase 6A 17 条 + Phase 6B 27 条。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
 
 ---
@@ -228,35 +232,109 @@ admin security foundation。
   `DUAL_AUTH_SOURCE_CONVERGENCE = PASS_FOR_PHASE_6A`；
   `User.role` authorization callsites = 0（字段保留，仅限 display / session
   compatibility / seed / migration/bootstrap 用途，未被删除）
-- Known non-blocking follow-up（`NON_BLOCKING / NO_FAIL_OPEN / DEFERRED_TO_PHASE_6B_OR_PHASE_7`）：
+- Known non-blocking follow-up（Phase 6A 收口时点历史快照，
+  `NON_BLOCKING / NO_FAIL_OPEN`，当时标记
+  `DEFERRED_TO_PHASE_6B_OR_PHASE_7`）：
   `USER_STATUS_ROLE_ASSIGNMENT_RACE`——`toggleUserStatus` 的 privileged-target
   检查与 role assignment/revocation 尚未共享同一个 target subject serialization
-  boundary。
+  boundary。**后续状态：CLOSED_IN_PHASE_6B / PASS**——Phase 6B 已通过共享
+  sorted `USER:target` governance subject serialization 关闭账号停用与
+  角色授予/撤销竞态（真实 PostgreSQL 双方向竞态回归锁定）。
 
-**Phase 6A 之后**：
+**Phase 6A 之后（historical state at Phase 6A closure）**：
 
 - `PHASE_6A = DONE / MERGED / MASTER-GREEN / CLOSED`
-- `PHASE_6 = IN_PROGRESS`（6B 未开始，不宣称 Phase 6 完成）
-- 6B/6C 预留：trust profile、risk state、enforcement、appeal、suspension
-  产品化、完整 admin 角色 UI（Phase 7）——`PHASE_6B = NOT_STARTED`，
-  是否启动 6B 属下一独立步骤
+- `PHASE_6 = IN_PROGRESS`
+- 以下为 Phase 6A 收口时点的历史快照（当时 `PHASE_6B = NOT_STARTED`；
+  6B/6C 预留 trust profile、risk state、enforcement、appeal、suspension
+  产品化、完整 admin 角色 UI（Phase 7））——该表述仅是历史记录，
+  Phase 6B 现已关闭（见下方 Closure record），不得解读为当前状态。
 
-**Phase 6B 进度（2026-09-05）**：
+**Phase 6B 进度快照（2026-09-05，historical snapshot）**：
 
-- `PHASE_6B = IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`
-  （PR：feat/production-phase-6b-trust-risk-enforcement → master，Draft）
-- 6B 范围（trust / risk / enforcement foundation）：中央 trust snapshot
-  （只读既有事实信号，creditScore 明确为 legacy display signal）、显式风险状态
-  （NORMAL/WATCH/RESTRICTED，GLOBAL/CAMPUS scope）、RiskFlag（source-linked、
-  去重、可解析；举报仅记录信号，绝不自动处罚）、marketplace capability gate
-  （受限用户禁止开始新活动，既有义务/隐私/消息不受影响）、中央
-  account suspend/reinstate service（toggleUserStatus 收敛为薄 adapter）、
-  campus membership suspend/reinstate service（状态机 fail closed）、
-  EnforcementAction 执法历史（provenance，非第二授权源）、
-  `USER_STATUS_ROLE_ASSIGNMENT_RACE` 正式关闭（账号停用与角色授予共享
-  sorted subject 锁边界）
-- `PHASE_6 = IN_PROGRESS`；6C 预留：appeal 完整生命周期、受限用户的
-  listing lifecycle 清理策略、hard-suspension 隐私例外路径
+- 该时点 `PHASE_6B = IMPLEMENTED / PENDING_INDEPENDENT_REVIEW`
+  （PR #12，Draft）。此为实现完成时点的历史记录；当前状态见下方
+  Closure record，不构成 current state。
+
+**Phase 6B Closure record（2026-09-07）**：
+
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
+- Merge：PR #12（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/12>），
+  merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`（Phase 6B master-green reference）
+- Final reviewed PR head：`90630a43de04478b93969d2899d63d885b352a9f`
+  （pre-merge exact-head PR CI run 34110863736：verify = success、
+  e2e = success、attempt = 1）
+- Post-merge master CI：run 34113125694 —— event = push、branch = master、
+  verify = success、e2e = success、**attempt = 1**
+- Final independent review：Initial implementation → Repair 1 → Repair 2 →
+  Repair 3 → Final Repair（canonical-missing fail closed）→
+  **Final review PASS** → merge → post-merge master CI PASS
+  （`PRODUCTION_PHASE_6B_FINAL_REVIEW = PASS`、
+  `PRODUCTION_PHASE_6B_POST_MERGE_REVIEW = PASS`；
+  `ENGINEERING_BLOCKERS = 0`、`TEST_BLOCKERS = 0`、
+  `MERGE_HYGIENE_BLOCKERS = 0`、`REPAIR_REQUIRED = NO`）
+
+Final scope（6B foundation，精炼记录）：central Trust Snapshot、RiskState、
+RiskFlag、EnforcementAction、marketplace capability gate、
+account suspension / reinstatement、campus membership suspension / reinstatement、
+governance subject-lock serialization、effective verification、
+report-risk deterministic reconciliation。
+**`TRUST SIGNAL != RISK STATE != ENFORCEMENT`。**
+
+Trust / risk / enforcement invariants（closure 时最终合同）：
+
+- `NO_OPAQUE_SCORING = TRUE`（无任何综合分/自动判定）；
+  `CREDIT_SCORE = LEGACY_DISPLAY_SIGNAL`（绝不作为 enforcement source）；
+  `REPORT_AUTO_PUNISHMENT = DISABLED`（举报创建仅记录信号，零自动处罚）
+- **Effective verification final contract**：
+  `EFFECTIVE_VERIFIED = canonical UserVerification.status == VERIFIED
+  AND bound CampusMembership.status == ACTIVE`；
+  `canonical UserVerification missing => UNVERIFIED`；
+  `User.verificationStatus = NON_AUTHORITATIVE_FOR_TRUST`
+  （仅 display/session/bootstrap/migration 兼容投影；
+  **无任何 legacy fallback VERIFIED**）
+- **Trust isolation**：`PUBLIC TRUST = public-safe only`；
+  `GLOBAL INTERNAL = GLOBAL audit.read`（全部 membership / risk states /
+  全平台信号）；`CAMPUS INTERNAL = audit.read@campus + target membership ∈
+  {ACTIVE, SUSPENDED} + campus-local risk/report signals`；
+  `cross-campus internal risk/report leakage = CLOSED`
+- **Risk / enforcement 分层**：`RiskState = NORMAL / WATCH / RESTRICTED`；
+  `RESTRICTED = soft marketplace restriction`（仅禁止开始新 marketplace 活动）；
+  `User.status = SUSPENDED = hard account-level enforcement`（二者不混同）；
+  report creation → signal only → **NO automatic restriction/suspension**
+- **Marketplace capability gate**：new marketplace activity requires
+  account ACTIVE + applicable CampusMembership ACTIVE +
+  applicable RiskState != RESTRICTED；
+  新义务 participant invariant：**ALL CAMPUS OBLIGATION PARTICIPANTS must
+  have ACTIVE CampusMembership at obligation creation**；
+  existing obligation fulfillment 不受新活动 gate 误伤
+  （EXISTING_OBLIGATION_PRESERVATION）
+- **Concurrency closure**（真实 PostgreSQL；barrier = exact loser PID /
+  exact governance lock evidence，非 sleep 定序；`NO_40P01 = PASS`）：
+  `USER_STATUS_ROLE_ASSIGNMENT_RACE = CLOSED`、
+  `ACTOR_ERASURE_VS_ENFORCEMENT = SERIALIZED`、
+  `RISK_RESTRICT_VS_RESTORE = SERIALIZED`、
+  `MEMBERSHIP_SUSPEND_VS_LISTING_CREATE = SERIALIZED`、
+  `REPORT_REVIEW_TRANSITION = ROW_LOCK_SERIALIZED`
+- **Phase 6B final reviewed baseline**（Final Repair 验证轮）：
+  243 test files / 1567 tests（1463 passed + 104 env-gated skip）；
+  coverage 83.33 / 82.36 / 82.27 / 83.33；真实 PostgreSQL 集成：
+  Phase 6B 27 条（Phase 6A 17 条保留）；Playwright 36/36 × 3
+  （workers=2、retry=0）；Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
+- Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，非生产授权 fail-open，
+  未在本 closure 中修改代码）：① tests/ops/ops-scripts.test.ts 本地高负载
+  偶发 120s timeout（isolated run PASS；exact-head/post-merge CI PASS）；
+  ② ensureCampusMemberships bootstrap 与并行 integration fixture hard-delete
+  存在跨文件测试时序窗口（定向真实 PG suites PASS）
+
+**Phase 6B 之后**：
+
+- `PHASE_6B = DONE / MERGED / MASTER-GREEN / CLOSED`
+- `PHASE_6 = IN_PROGRESS`（6B 关闭不等于 Phase 6 完成）
+- `PHASE_6C = NOT_STARTED`（Phase 6 内部实施拆分，不是新的 canonical
+  roadmap row）：appeal 完整生命周期、enforcement completion /
+  safety hardening、hard-suspension 隐私例外路径、受限/停用用户的
+  listing / enforcement policy completion
 
 ### 5.3 Phase 7 — Operations Admin Foundation
 
@@ -647,6 +725,8 @@ Master Roadmap v1.0 一旦被接受即视为冻结。
 | 7 | multi-instance in-process metrics aggregation assumption | `/api/internal/metrics` 为单进程指标，多实例部署时需外部聚合，当前单实例语义 |
 | 8 | Redis degraded local fallback precision | Redis 故障回退进程内限流计数时，多实例精度下降（已知取舍） |
 | 9 | external real alert delivery absent | 真实告警渠道未接入——因为 3B DEFERRED（无生产服务器/域名）；规则契约已就绪（docs/ALERTING.md） |
+| 10 | ops shell regression local load flake | tests/ops/ops-scripts.test.ts 本地高负载偶发 120s timeout；isolated run PASS；exact-head/post-merge CI PASS（NON_BLOCKING / TEST_INFRA_DEBT） |
+| 11 | ensureCampusMemberships bootstrap test-race window | bootstrap 全表 findMany→create 与并行 integration fixture hard-delete 存在跨文件测试时序窗口；Phase 6A/6B 定向真实 PG suites PASS；非生产授权 fail-open（NON_BLOCKING / TEST_INFRA_DEBT） |
 
 新增债务一律先记录到 Backlog（§11 字段），由对应 Phase 或 amendment 决定何时处理；
 **不得**在本文件之外私自把某项债务改标为 blocker。

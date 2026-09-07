@@ -15,7 +15,7 @@
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8 经多轮独立验收合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | IN_PROGRESS（Phase 6A CLOSED，Phase 6B NOT_STARTED） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | IN_PROGRESS（Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6C NOT_STARTED） |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | NOT_STARTED |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
@@ -159,7 +159,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
-- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **IMPLEMENTED / PENDING_INDEPENDENT_REVIEW**（2026-09-05，见 MASTER_ROADMAP.md §5.2）；Phase 6C NOT_STARTED）
+- [ ] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（IN_PROGRESS——Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12；merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`；post-merge master CI run 34113125694 双绿，见下节）；Phase 6C NOT_STARTED）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
 
@@ -247,23 +247,87 @@ Repair 3（rental owner-side 锁序死锁）→ Repair 4（竞态测试双 barri
 - [x] **A EXPORT REJECTED 持久化**：`executeSynchronousDataExport` 失败路径改为 callback 内 return（REJECTED 随事务 COMMIT），事务外再抛安全错误；builder 注入 seam；`createDataExportRequest` 孤儿 footgun 删除；文档 snapshot 表述修正；回归 `SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST`（真实 PG 新连接查库：TOO_LARGE / EXECUTION_FAILED 两 case 各恰一条 REJECTED 台账）+ `SYNC_EXPORT_REQUEST_COMPLETES_TEST` 保留
 - [x] **B OBLIGATION 创建 vs 注销竞态**：`acquireGovernanceSubjectLocks`（去重 + 稳定锁序）+ `assertActiveGovernanceSubjects`/`withObligationGuard`（participant 锁 → 锁内活跃复核 → 写入）；四条 obligation 路径全部接入（product/service/errand 抽出 tx 级入口 + rental 持锁内联）；回归：`ORDER_CREATION_ERASURE_RACE_TEST` / `RENTAL_CREATION_ERASURE_RACE_TEST`（真实 PG barrier seam，A/B 双向线性化）+ service/errand erased-participant 拒绝回归 + obligation-guard 单测（锁去重/次序/复核失败零写入）
 
+## Production Phase 6B（Trust / Risk / Enforcement Foundation，2026-09-05 实现，2026-09-06/07 经 Repair 1–3 + Final Repair 独立验收收口）
+
+状态：**DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07）。
+Merge：PR #12（<https://github.com/ljjnb666-nb/Campus-Marketplace/pull/12>），
+merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`（Phase 6B master-green reference，
+不随 master 前进改写）。Final reviewed PR head：`90630a43de04478b93969d2899d63d885b352a9f`
+（pre-merge exact-head PR CI run 34110863736：verify = success、e2e = success、attempt = 1）。
+Post-merge master CI：run [34113125694](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34113125694)
+—— event = push、branch = master、verify = success、e2e = success、attempt = 1。
+Final independent review：**PASS**（Initial → Repair 1 → Repair 2 → Repair 3 →
+Final Repair → Final review PASS → merge → post-merge PASS；
+ENGINEERING_BLOCKERS = 0 / TEST_BLOCKERS = 0 / MERGE_HYGIENE_BLOCKERS = 0 /
+REPAIR_REQUIRED = NO）。范围与不变量权威记录见
+[MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.2 Phase 6B Closure record。
+
+- [x] Central Trust Snapshot（`getPublicTrustSnapshot` / `getInternalTrustSnapshot`
+      server-side 授权判别联合：GLOBAL INTERNAL = GLOBAL audit.read；
+      CAMPUS INTERNAL = audit.read@campus + target membership ∈ {ACTIVE, SUSPENDED}
+      + campus-local signals；cross-campus internal leakage = CLOSED）；
+      `TRUST SIGNAL != RISK STATE != ENFORCEMENT`
+- [x] Effective verification final contract：`EFFECTIVE_VERIFIED = canonical
+      UserVerification.status == VERIFIED AND bound CampusMembership.status == ACTIVE`；
+      canonical UserVerification missing => UNVERIFIED；
+      `User.verificationStatus = NON_AUTHORITATIVE_FOR_TRUST`（无 legacy fallback VERIFIED）
+- [x] RiskState（NORMAL/WATCH/RESTRICTED，GLOBAL/CAMPUS scope，无行 = NORMAL）+
+      RiskFlag（source-linked 去重可解析；REPORT_SUBMITTED ≠ REPORT_CONFIRMED）+
+      EnforcementAction（provenance，非第二授权源）
+- [x] `NO_OPAQUE_SCORING = TRUE`；`CREDIT_SCORE = LEGACY_DISPLAY_SIGNAL`；
+      `REPORT_AUTO_PUNISHMENT = DISABLED`（举报仅记录信号，零自动处罚）
+- [x] Marketplace capability gate（account ACTIVE + membership ACTIVE +
+      risk != RESTRICTED 才可发起新活动；全部参与方 obligation participant
+      membership invariant；EXISTING_OBLIGATION_PRESERVATION）；
+      soft restriction（RiskState RESTRICTED）与 hard suspension（User.status）
+      分层不混同
+- [x] Account suspend/reinstate + campus membership suspend/reinstate 服务
+      （状态机 fail closed、privileged target 保护、SELF_ENFORCEMENT = DENY、
+      认证证据保留不篡改）
+- [x] Governance subject-lock serialization + 真实 PG 并发闭环：
+      `USER_STATUS_ROLE_ASSIGNMENT_RACE = CLOSED`（6A deferred 项）、
+      erasure vs enforcement / restrict vs restore / membership suspend vs
+      listing create 全 SERIALIZED、report review transition ROW_LOCK_SERIALIZED；
+      exact loser PID barrier；`NO_40P01 = PASS`
+- [x] Report–RiskFlag deterministic reconciliation（create/review/reconcile
+      共用单一 resolver + 同事务投影收敛）
+- [x] 独立验收修复轮：Repair 1（A–H）→ Repair 2（campus isolation/provenance/
+      notification/transition serialization/owner single source + 测试）→
+      Repair 3（effective verification contract/campus scope/exact PID barrier/
+      stackdump hygiene）→ Final Repair（canonical-missing fail closed、
+      legacy 投影退出 trust 推导）
+- [x] Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，本 closure 未修代码）：
+      ops-scripts shell 回归本地负载 flake（isolated/CI PASS）；
+      ensureCampusMemberships bootstrap 跨文件测试时序窗口（定向真实 PG PASS）
+
+Phase 6B 关闭后：`PHASE_6 = IN_PROGRESS`（不整体关闭）；
+`PHASE_6C = NOT_STARTED`——剩余：appeal 完整生命周期、enforcement completion /
+safety hardening、hard-suspension 隐私例外路径、受限/停用用户 listing /
+enforcement policy completion。
+
 ## 当前测试基线
 
-以 master `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`（Production Phase 6A 合并提交——
-Phase 6A master-green reference，不随 master 前进改写）对应的成功 master CI 为准
-（GitHub Actions run [33968202720](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/33968202720)，
-2026-09-05，verify + e2e 双 job 全绿，attempt = 1）：
+以 master `d5f8e19151184f7b5ce5660103cc5632f183e9b9`（Production Phase 6B 合并提交——
+Phase 6B master-green reference，不随 master 前进改写）对应的成功 master CI 为准
+（GitHub Actions run [34113125694](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34113125694)，
+2026-09-07，verify + e2e 双 job 全绿，attempt = 1）：
 
-- **235** 个测试文件，**1452** 个测试全部通过（其中 **1375** 执行通过 +
-  **77** 个环境门控 skip——本地无对应真实服务时按设计跳过，非失败；
-  CI 中真实 PostgreSQL / Redis / MinIO 集成测试全部真实执行；
-  含 Phase 6A 真实 PG 并发竞态回归与 Privacy/Governance Drill）
+- **243** 个测试文件，**1567** 个测试全部通过（CI 中真实 PostgreSQL / Redis /
+  MinIO 集成测试全部真实执行，无环境门控 skip；含 Phase 6A 真实 PG 并发竞态
+  回归、Phase 6B trust/risk/enforcement 集成与并发竞态回归、
+  Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （实测 83.01 / 82.01 / 81.97 / 83.01）
-- **E2E 基线：34 条关键链路测试**（33 条既有 critical flows 全部保留 +
-  1 条 Phase 6A 认证生命周期/RBAC golden flow）CI 全绿
-- **Phase 6A 真实 PostgreSQL 集成测试：17 条**
-  （membership/认证状态机/RBAC/actor 序列化并发竞态/跨校区拒绝/legacy 迁移）
+  （实测 85.72 / 83.44 / 84.74 / 85.72）
+- **E2E 基线：36 条关键链路测试**（33 条既有 critical flows 全部保留 +
+  Phase 5/6A/6B 新增 governance/认证生命周期/受限用户 golden flows）CI 全绿
+- **真实 PostgreSQL 集成测试：Phase 6A 17 条 + Phase 6B 27 条**
+- Phase 6B final reviewed 基线（Final Repair 验证轮，集成 env-gated 本地运行；
+  与 master CI 同一套件）：243 文件 / 1567 测试 = 1463 passed +
+  104 env-gated skip、coverage 83.33 / 82.36 / 82.27 / 83.33、
+  Playwright 36/36 × 3（workers=2、retry=0）、
+  Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
+- 历史基线：Phase 6A 合并时 235 文件 / 1452 用例 / E2E 34 条
+  （master CI 33968202720）；后续以最近一次成功的 master CI 为准，不以本文快照为准
 - 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）；
   后续以最近一次成功的 master CI 为准，不以本文快照为准
 - 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
