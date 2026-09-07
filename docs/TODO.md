@@ -262,6 +262,27 @@ ENGINEERING_BLOCKERS = 0 / TEST_BLOCKERS = 0 / MERGE_HYGIENE_BLOCKERS = 0 /
 REPAIR_REQUIRED = NO）。范围与不变量权威记录见
 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.2 Phase 6B Closure record。
 
+### Closure Recovery（2026-09-07）
+
+- **INITIAL DOCS POST-MERGE CI = FAILED / ATTEMPT 1**：PR #13 canonical docs
+  merge（`131d54c38484a92ba905daa4548a27105822ec5e`）后 master CI run
+  [34124977074](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34124977074)
+  —— verify = failure、e2e = skipped、attempt = 1。ROOT CAUSE =
+  **REAL CONCURRENCY DEFECT**（`ensureCampusMemberships` snapshot→create
+  并发竞态，Prisma P2002 on (userId, campusId)），非 GitHub 基础设施故障；
+  该失败 run **未 rerun**，保留为历史证据
+- RESOLUTION = PR #14（reviewed head `423bfd0852511aa6aae4d52398434a32e6d814e8`）：
+  `ensureCampusMemberships` 收敛为 attempt create once → inspect expected
+  conflict → re-read canonical DB truth → converge or rethrow
+  （P2002 exact-membership 复查幂等收敛 / P2003 stale-snapshot no-op /
+  零状态 rehabilitation / 无 retry 无 sleep），并新增确定性真实 PG 并发回归
+- **SUPERSEDED MASTER EVIDENCE**：merge commit
+  `97f53cd3494b24854a56b19e0418d50a5b5efeb6`（Closure Recovery current master
+  reference）→ master CI run
+  [34132745423](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34132745423)
+  —— event = push、branch = master、verify = success、e2e = success、
+  attempt = 1
+
 - [x] Central Trust Snapshot（`getPublicTrustSnapshot` / `getInternalTrustSnapshot`
       server-side 授权判别联合：GLOBAL INTERNAL = GLOBAL audit.read；
       CAMPUS INTERNAL = audit.read@campus + target membership ∈ {ACTIVE, SUSPENDED}
@@ -296,9 +317,14 @@ REPAIR_REQUIRED = NO）。范围与不变量权威记录见
       Repair 3（effective verification contract/campus scope/exact PID barrier/
       stackdump hygiene）→ Final Repair（canonical-missing fail closed、
       legacy 投影退出 trust 推导）
-- [x] Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，本 closure 未修代码）：
-      ops-scripts shell 回归本地负载 flake（isolated/CI PASS）；
-      ensureCampusMemberships bootstrap 跨文件测试时序窗口（定向真实 PG PASS）
+- [x] Known non-blocking 债务处置（`TEST_INFRA_DEBT`）：
+      ② ensureCampusMemberships bootstrap 跨文件测试时序窗口 →
+      **[x] CLOSED / RESOLVED_BY_CLOSURE_RECOVERY**（PR #14，head
+      `423bfd0852511aa6aae4d52398434a32e6d814e8`，merge
+      `97f53cd3494b24854a56b19e0418d50a5b5efeb6`，post-merge CI
+      34132745423 attempt = 1 verify/e2e success；曾在 PR #13 post-merge
+      CI 34124977074 attempt = 1 真实显形——失败 run 未 rerun，由代码修复取代）；
+      仍开放：① ops-scripts shell 回归本地负载 flake（isolated/CI PASS）
 
 Phase 6B 关闭后：`PHASE_6 = IN_PROGRESS`（不整体关闭）；
 `PHASE_6C = NOT_STARTED`——剩余：appeal 完整生命周期、enforcement completion /
@@ -307,25 +333,29 @@ enforcement policy completion。
 
 ## 当前测试基线
 
-以 master `d5f8e19151184f7b5ce5660103cc5632f183e9b9`（Production Phase 6B 合并提交——
-Phase 6B master-green reference，不随 master 前进改写）对应的成功 master CI 为准
-（GitHub Actions run [34113125694](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34113125694)，
+以 master `97f53cd3494b24854a56b19e0418d50a5b5efeb6`（Phase 6B Closure Recovery
+合并提交——PR #14，current master reference，不随 master 前进改写）对应的成功
+master CI 为准（GitHub Actions run
+[34132745423](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/34132745423)，
 2026-09-07，verify + e2e 双 job 全绿，attempt = 1）：
 
-- **243** 个测试文件，**1567** 个测试全部通过（CI 中真实 PostgreSQL / Redis /
-  MinIO 集成测试全部真实执行，无环境门控 skip；含 Phase 6A 真实 PG 并发竞态
-  回归、Phase 6B trust/risk/enforcement 集成与并发竞态回归、
-  Privacy/Governance Drill）
+- **243** 个测试文件，**1580** 个测试全部通过、0 skip（CI 中真实 PostgreSQL /
+  Redis / MinIO 集成测试全部真实执行，无环境门控 skip；含 Phase 6A 真实 PG
+  并发竞态回归与 bootstrap 并发收敛回归、Phase 6B trust/risk/enforcement
+  集成与并发竞态回归、Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （实测 85.72 / 83.44 / 84.74 / 85.72）
+  （实测 85.72 / 83.50 / 84.76 / 85.72）
 - **E2E 基线：36 条关键链路测试**（33 条既有 critical flows 全部保留 +
   Phase 5/6A/6B 新增 governance/认证生命周期/受限用户 golden flows）CI 全绿
-- **真实 PostgreSQL 集成测试：Phase 6A 17 条 + Phase 6B 27 条**
+- **真实 PostgreSQL 集成测试：Phase 6A 19 条（17 既有 + 2 条 Closure Recovery
+  bootstrap 并发收敛回归）+ Phase 6B 27 条**
+- 历史基线：Phase 6B core 合并时 243 文件 / 1567 用例 / E2E 36 条
+  （master CI 34113125694，d5f8e19；真实 PG 6A 17 + 6B 27）；后续以最近一次
+  成功的 master CI 为准，不以本文快照为准
 - Phase 6B final reviewed 基线（Final Repair 验证轮，集成 env-gated 本地运行；
-  与 master CI 同一套件）：243 文件 / 1567 测试 = 1463 passed +
-  104 env-gated skip、coverage 83.33 / 82.36 / 82.27 / 83.33、
-  Playwright 36/36 × 3（workers=2、retry=0）、
-  Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
+  历史证据）：243 文件 / 1567 测试 = 1463 passed + 104 env-gated skip、
+  coverage 83.33 / 82.36 / 82.27 / 83.33、Playwright 36/36 × 3
+  （workers=2、retry=0）、Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
 - 历史基线：Phase 6A 合并时 235 文件 / 1452 用例 / E2E 34 条
   （master CI 33968202720）；后续以最近一次成功的 master CI 为准，不以本文快照为准
 - 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）；
