@@ -7,10 +7,7 @@ import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
-import {
-  assertReportStatusTransition,
-  reconcileReportRiskProjection,
-} from "@/lib/enforcement/report-projection";
+import { applyReportReviewTx } from "@/lib/enforcement/report-projection";
 import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
@@ -268,48 +265,19 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
 
     await withTransaction(async (tx) => {
-      // Repair 1 Blocker D：中央 transition assertion——任意 status 跳转拒绝
-      // （RESOLVED/REJECTED 仅可经 IN_REVIEW 重开；同状态重提交幂等合法）
-      const currentReport = await tx.report.findUniqueOrThrow({
-        where: { id: parsed.data.reportId },
-        select: { status: true },
+      // Repair 2 Blocker D：SELECT ... FOR UPDATE 序列化同一 Report 的状态变更
+      // （locked status → transition 断言 → canonical update → projection →
+      // AdminLog，全部同一 locked transaction；本路径不引入 USER subject locks，
+      // 无 row lock → advisory 反序）
+      const review = await applyReportReviewTx(tx, {
+        reportId: parsed.data.reportId,
+        actorId: admin.id,
+        status: parsed.data.status,
+        handledNote: parsed.data.handledNote || null,
       });
-      assertReportStatusTransition(currentReport.status, parsed.data.status);
-
-      const report = await tx.report.update({
-        where: { id: parsed.data.reportId },
-        data: {
-          status: parsed.data.status,
-          handledById: admin.id,
-          handledNote: parsed.data.handledNote || null,
-          handledAt:
-            parsed.data.status === "RESOLVED" || parsed.data.status === "REJECTED" ? new Date() : null,
-        },
-        select: {
-          reporterId: true,
-        },
-      });
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: `REPORT_${parsed.data.status}`,
-          targetType: "REPORT",
-          targetId: parsed.data.reportId,
-          detail: parsed.data.handledNote || null,
-        },
-      });
-
-      // Repair 1 Blocker D：举报信号投影确定性收敛（读取 canonical Report，
-      // 统一收敛 REPORT_SUBMITTED / REPORT_CONFIRMED，支持 legacy 缺投影与
-      // 幂等重放；绝不触碰 User.status / RiskState / creditScore）
-      await reconcileReportRiskProjection(
-        { reportId: parsed.data.reportId, actorId: admin.id },
-        tx,
-      );
 
       await createNotification(tx, {
-        userId: report.reporterId,
+        userId: review.reporterId,
         type: "REPORT",
         title: notification.title,
         content: notification.content,
@@ -320,9 +288,12 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
     revalidatePath("/admin/reports");
     revalidatePath("/notifications");
   } catch (error) {
-    // 中央 transition assertion 的领域错误转用户可读提示
+    // 中央 transition/存在性错误的用户可读提示
     if (error instanceof Error && error.message.startsWith("REPORT_STATUS_INVALID_TRANSITION:")) {
       return { success: false, error: "举报当前状态不允许此操作" };
+    }
+    if (error instanceof Error && error.message.startsWith("REPORT_NOT_FOUND:")) {
+      return { success: false, error: "举报不存在" };
     }
     return { success: false, error: actionErrorMessage(error, "reviewReport") };
   }

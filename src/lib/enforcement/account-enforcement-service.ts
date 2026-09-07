@@ -4,6 +4,7 @@ import { enforcementError } from "@/lib/enforcement/errors";
 import { resultStateFor, riskScopeKey } from "@/lib/enforcement/risk-scope";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
+import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { createNotification } from "@/repositories/notification-repository";
 import { rbacError } from "@/lib/rbac/errors";
@@ -29,11 +30,15 @@ import {
  * - 每次**实际**状态变更写入 EnforcementAction（provenance，非第二授权源）
  *   + AdminAudit
  *
- * Repair 1 Blocker C（command/notification 原子性）：
- * 站内通知在**同一事务内**随 enforcement 写入——通知失败 → 整个命令回滚，
- * 不存在"已提交但报错"或"已成功但无声"的歧义中间态。
+ * Repair 2 Blocker C（command/notification 语义修正）：
+ * authoritative transaction 只包含 subject 锁 + 授权/校验 + User.status
+ * mutation + EnforcementAction + AdminAudit；站内通知为 **post-commit
+ * best effort**——通知失败只记结构化日志（ENFORCEMENT_NOTIFICATION_FAILED），
+ * 绝不回滚 enforcement、绝不伪装成 enforcement 失败。ACCOUNT_SUSPEND 的
+ * SUCCESS 仅由 authoritative state transaction 决定。
  *
- * 锁序：subject locks → actor 复核 → target 状态/特权复核 → 行写 → 审计+通知。
+ * 锁序：subject locks → actor 复核 → target 状态/特权复核 → 行写 → 审计
+ * → commit → best-effort notification。
  */
 
 export type AccountEnforcementInput = {
@@ -51,7 +56,48 @@ export type AccountEnforcementResult = {
   status: "SUSPENDED" | "ACTIVE";
   /** true = 目标本已处于目标状态（幂等 no-op，未产生执法记录） */
   alreadyInState: boolean;
+  /**
+   * Repair 2 Blocker C：通知为 post-commit best effort——
+   * true = 已投递；false = 投递失败（仅日志/运营观察，不影响 command success）
+   */
+  notificationDelivered: boolean;
 };
+
+type NotificationPayloadSpec = {
+  title: string;
+  content: string;
+};
+
+/**
+ * post-commit best-effort 通知：失败仅记结构化日志，不回滚、不上抛。
+ * 日志载荷仅含 event/action/targetUserId/error class——不含 reason note
+ * 原文、私密举报详情、凭据（Repair 2 §15）。
+ */
+async function bestEffortEnforcementNotification(
+  action: "ACCOUNT_SUSPEND" | "ACCOUNT_REINSTATE",
+  targetUserId: string,
+  payload: NotificationPayloadSpec,
+): Promise<boolean> {
+  try {
+    await withTransaction((tx) =>
+      createNotification(tx, {
+        userId: targetUserId,
+        type: "SYSTEM",
+        title: payload.title,
+        content: payload.content,
+      }),
+    );
+    return true;
+  } catch (error) {
+    logger.warn("账号执法通知投递失败（enforcement 不受影响）", "enforcement", {
+      event: "ENFORCEMENT_NOTIFICATION_FAILED",
+      action,
+      targetUserId,
+      error,
+    });
+    return false;
+  }
+}
 
 async function lockAndValidateActor(
   tx: Prisma.TransactionClient,
@@ -105,12 +151,12 @@ async function lockAndValidateTarget(
 export async function suspendAccount(
   input: AccountEnforcementInput,
 ): Promise<AccountEnforcementResult> {
-  return withTransaction(async (tx) => {
+  const authoritative = await withTransaction(async (tx) => {
     await lockAndValidateActor(tx, input);
     const target = await lockAndValidateTarget(tx, input);
 
     if (target.status === "SUSPENDED") {
-      return { status: "SUSPENDED", alreadyInState: true };
+      return { status: "SUSPENDED" as const, alreadyInState: true };
     }
 
     await tx.user.update({
@@ -150,28 +196,30 @@ export async function suspendAccount(
       tx,
     );
 
-    // Repair 1 Blocker C：通知随命令同事务提交（失败整体回滚，无歧义中间态）
-    await createNotification(tx, {
-      userId: target.id,
-      type: "SYSTEM",
-      title: "账号已被停用",
-      content: "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。",
-    });
-
-    return { status: "SUSPENDED", alreadyInState: false };
+    return { status: "SUSPENDED" as const, alreadyInState: false };
   });
+
+  // Repair 2 Blocker C：post-commit best-effort 通知（失败不影响 command success）
+  const notificationDelivered = authoritative.alreadyInState
+    ? false
+    : await bestEffortEnforcementNotification("ACCOUNT_SUSPEND", input.targetUserId, {
+        title: "账号已被停用",
+        content: "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。",
+      });
+
+  return { ...authoritative, notificationDelivered };
 }
 
 /** 恢复账号（User.status SUSPENDED → ACTIVE）。幂等：已 ACTIVE 为 no-op。 */
 export async function reinstateAccount(
   input: AccountEnforcementInput,
 ): Promise<AccountEnforcementResult> {
-  return withTransaction(async (tx) => {
+  const authoritative = await withTransaction(async (tx) => {
     await lockAndValidateActor(tx, input);
     const target = await lockAndValidateTarget(tx, input);
 
     if (target.status === "ACTIVE") {
-      return { status: "ACTIVE", alreadyInState: true };
+      return { status: "ACTIVE" as const, alreadyInState: true };
     }
 
     await tx.user.update({
@@ -211,16 +259,17 @@ export async function reinstateAccount(
       tx,
     );
 
-    // Repair 1 Blocker C：通知随命令同事务提交
-    await createNotification(tx, {
-      userId: target.id,
-      type: "SYSTEM",
-      title: "账号已恢复正常",
-      content: "你的账号已恢复正常使用。",
-    });
-
-    return { status: "ACTIVE", alreadyInState: false };
+    return { status: "ACTIVE" as const, alreadyInState: false };
   });
+
+  const notificationDelivered = authoritative.alreadyInState
+    ? false
+    : await bestEffortEnforcementNotification("ACCOUNT_REINSTATE", input.targetUserId, {
+        title: "账号已恢复正常",
+        content: "你的账号已恢复正常使用。",
+      });
+
+  return { ...authoritative, notificationDelivered };
 }
 
 /** 供审计读取（Phase 7 之前无 UI）：目标的执法历史（append-only）。 */

@@ -299,7 +299,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       reasonCode: "ACCOUNT_SECURITY",
       note: "集成测试停用",
     });
-    expect(suspended).toEqual({ status: "SUSPENDED", alreadyInState: false });
+    expect(suspended).toMatchObject({ status: "SUSPENDED", alreadyInState: false });
+    // Repair 2 Blocker C：通知 post-commit 投递成功
+    expect(suspended.notificationDelivered).toBe(true);
     expect(
       (await rawClient!.user.findUniqueOrThrow({ where: { id: target.id } })).status,
     ).toBe("SUSPENDED");
@@ -369,7 +371,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       campusId: campusA.id,
       reasonCode: "POLICY_VIOLATION",
     });
-    expect(suspended).toEqual({ status: "SUSPENDED", alreadyInState: false });
+    expect(suspended).toMatchObject({ status: "SUSPENDED", alreadyInState: false });
     expect(
       (
         await rawClient!.campusMembership.findUniqueOrThrow({
@@ -1042,25 +1044,34 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
       actorId: globalAdmin.id,
       targetUserId: snapshotUser.id,
     });
-    expect(internal?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
-    expect(internal?.risk?.states[0]).toMatchObject({
+    if (internal?.view !== "GLOBAL") {
+      throw new Error("expected GLOBAL view");
+    }
+    expect(internal.risk.activeRestrictions).toEqual(["GLOBAL"]);
+    expect(internal.risk.states[0]).toMatchObject({
       scopeKey: "GLOBAL",
       state: "RESTRICTED",
       reasonCode: "POLICY_VIOLATION",
     });
-    expect(internal?.reportSignals).toMatchObject({
+    expect(internal.reportSignals).toMatchObject({
       submittedReportSignals: 1,
       confirmedReportSignals: 0,
       submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
     });
 
-    // campus 视角（campusA 无 audit.read 授权者时用 GLOBAL 也无妨——scope 行过滤）
+    // Repair 2 Blocker A：campus 视角（GLOBAL admin 请求 campusId=A 同样受
+    // target relationship 约束；snapshotUser 是 A 的 ACTIVE member）→
+    // 校园局部最小化视图：GLOBAL 行的 RESTRICTED 不进入 campus 视图
     const campusView = await getInternalTrustSnapshot({
       actorId: globalAdmin.id,
       targetUserId: snapshotUser.id,
       campusId: campusA.id,
     });
-    expect(campusView?.risk?.activeRestrictions).toEqual(["GLOBAL"]);
+    if (campusView?.view !== "CAMPUS") {
+      throw new Error("expected CAMPUS view");
+    }
+    expect(campusView.membership).toEqual({ status: "ACTIVE" });
+    expect(campusView.risk.state).toBe("NORMAL");
   });
 
   it("Repair 1 D：report lifecycle reconcile（真实 PG，legacy + reopen + 幂等）", async () => {
@@ -1094,6 +1105,17 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
     });
     expect(submitted.status).toBe("ACTIVE");
     expect(submitted.userId).toBe(reported.id);
+    // Repair 2 合同：CONFIRMED 以 RESOLVED 状态补建（absent-or-resolved）
+    const confirmedAfterOpen = await rawClient!.riskFlag.findUnique({
+      where: {
+        kind_sourceType_sourceId: {
+          kind: "REPORT_CONFIRMED",
+          sourceType: "REPORT",
+          sourceId: report.id,
+        },
+      },
+    });
+    expect(confirmedAfterOpen === null || confirmedAfterOpen.status === "RESOLVED").toBe(true);
     await expect(
       rawClient!.riskFlag.findUnique({
         where: {
@@ -1104,7 +1126,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
           },
         },
       }),
-    ).resolves.toBeNull();
+    ).resolves.toSatisfy((row: { status: string } | null) => row === null || row.status === "RESOLVED");
 
     // RESOLVED → SUBMITTED resolved + CONFIRMED active
     await rawClient!.report.update({

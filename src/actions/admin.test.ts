@@ -25,9 +25,8 @@ const {
   decideMembershipVerification,
   suspendAccount,
   reinstateAccount,
-  assertReportStatusTransition,
-  reconcileReportRiskProjection,
-  reportFindUnique,
+  applyReportReviewTx,
+  reportQueryRaw,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireAdmin: vi.fn(),
@@ -53,9 +52,8 @@ const {
   decideMembershipVerification: vi.fn(),
   suspendAccount: vi.fn(),
   reinstateAccount: vi.fn(),
-  assertReportStatusTransition: vi.fn(),
-  reconcileReportRiskProjection: vi.fn(),
-  reportFindUnique: vi.fn(),
+  applyReportReviewTx: vi.fn(),
+  reportQueryRaw: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
@@ -69,6 +67,10 @@ vi.mock("@/lib/campus/verification-service", () => ({
 vi.mock("@/lib/enforcement/account-enforcement-service", () => ({
   suspendAccount,
   reinstateAccount,
+}));
+
+vi.mock("@/lib/enforcement/report-projection", () => ({
+  applyReportReviewTx,
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -85,10 +87,6 @@ vi.mock("@/lib/upload", () => ({
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    report: {
-      findUnique: reportFindUnique,
-      update: reportUpdate,
-    },
     productCategory: {
       create: productCategoryCreate,
       update: productCategoryUpdate,
@@ -169,22 +167,18 @@ describe("admin actions", () => {
     decideMembershipVerification.mockReset().mockResolvedValue({});
     suspendAccount.mockReset();
     reinstateAccount.mockReset();
-    reportFindUnique.mockReset().mockResolvedValue({ status: "OPEN" });
-    assertReportStatusTransition.mockReset();
-    reconcileReportRiskProjection.mockReset().mockResolvedValue({
-      ownerUserId: "user-3",
-      reportStatus: "RESOLVED",
-      submittedFlagStatus: "RESOLVED",
-      confirmedFlagStatus: "ACTIVE",
+    reportQueryRaw.mockReset().mockResolvedValue([
+      { id: "report-1", status: "OPEN", reporterId: "user-2" },
+    ]);
+    applyReportReviewTx.mockReset().mockResolvedValue({
+      reportId: "report-1",
+      status: "RESOLVED",
+      reporterId: "user-2",
     });
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
-        report: {
-          findUnique: reportFindUnique,
-          findUniqueOrThrow: reportFindUnique,
-          update: reportUpdate,
-        },
+        $queryRaw: reportQueryRaw,
         adminLog: {
           create: adminLogCreate,
         },

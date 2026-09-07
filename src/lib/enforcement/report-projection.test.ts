@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   withTransactionMock,
   txReportFindUnique,
+  txUserFindUnique,
   txProductFindUnique,
   txErrandFindUnique,
   txServiceFindUnique,
@@ -14,6 +15,7 @@ const {
 } = vi.hoisted(() => ({
   withTransactionMock: vi.fn(),
   txReportFindUnique: vi.fn(),
+  txUserFindUnique: vi.fn(),
   txProductFindUnique: vi.fn(),
   txErrandFindUnique: vi.fn(),
   txServiceFindUnique: vi.fn(),
@@ -31,12 +33,14 @@ vi.mock("@/lib/prisma", () => ({
 import {
   assertReportStatusTransition,
   reconcileReportRiskProjection,
-  resolveReportTargetOwner,
+  resolveReportTargetContext,
+  applyReportReviewTx,
   REPORT_STATUS_TRANSITIONS,
 } from "@/lib/enforcement/report-projection";
 
 const txStub = {
   report: { findUnique: txReportFindUnique },
+  user: { findUnique: txUserFindUnique },
   product: { findUnique: txProductFindUnique },
   errandTask: { findUnique: txErrandFindUnique },
   serviceListing: { findUnique: txServiceFindUnique },
@@ -52,6 +56,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub));
   txReportFindUnique.mockReset().mockResolvedValue(null);
+  txUserFindUnique.mockReset().mockResolvedValue({ id: OWNER });
   txProductFindUnique.mockReset().mockResolvedValue(null);
   txErrandFindUnique.mockReset().mockResolvedValue(null);
   txServiceFindUnique.mockReset().mockResolvedValue(null);
@@ -80,35 +85,130 @@ describe("assertReportStatusTransition（中央 transition assertion）", () => 
   });
 });
 
-describe("resolveReportTargetOwner（全 targetType 归属解析）", () => {
-  it("resolves owners through business objects for each target type", async () => {
-    txProductFindUnique.mockResolvedValue({ sellerId: "seller-1" });
-    txErrandFindUnique.mockResolvedValue({ publisherId: "publisher-1" });
-    txServiceFindUnique.mockResolvedValue({ providerId: "provider-1" });
+describe("resolveReportTargetContext（全 targetType 归属 + campus provenance）", () => {
+  it("resolves owner + campus through business objects for each target type", async () => {
+    txProductFindUnique.mockResolvedValue({ sellerId: "seller-1", campusId: "campus-p" });
+    txErrandFindUnique.mockResolvedValue({ publisherId: "publisher-1", campusId: "campus-e" });
+    txServiceFindUnique.mockResolvedValue({ providerId: "provider-1", campusId: "campus-s" });
     txMessageFindUnique.mockResolvedValue({ senderId: "sender-1" });
 
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "PRODUCT", productId: "p1" }),
-    ).resolves.toBe("seller-1");
+      resolveReportTargetContext(txStub as never, { targetType: "PRODUCT", productId: "p1" }),
+    ).resolves.toEqual({ ownerUserId: "seller-1", campusId: "campus-p", targetExists: true });
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "ERRAND_TASK", errandTaskId: "e1" }),
-    ).resolves.toBe("publisher-1");
+      resolveReportTargetContext(txStub as never, { targetType: "ERRAND_TASK", errandTaskId: "e1" }),
+    ).resolves.toEqual({ ownerUserId: "publisher-1", campusId: "campus-e", targetExists: true });
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "SERVICE_LISTING", serviceListingId: "s1" }),
-    ).resolves.toBe("provider-1");
+      resolveReportTargetContext(txStub as never, { targetType: "SERVICE_LISTING", serviceListingId: "s1" }),
+    ).resolves.toEqual({ ownerUserId: "provider-1", campusId: "campus-s", targetExists: true });
+    // MESSAGE：不猜 campus（如实 null）
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
-    ).resolves.toBe("sender-1");
+      resolveReportTargetContext(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
+    ).resolves.toEqual({ ownerUserId: "sender-1", campusId: null, targetExists: true });
+    // USER：无 campus 语境（如实 null）
+    txUserFindUnique.mockResolvedValue({ id: "u1" });
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "USER", targetUserId: "u1" }),
-    ).resolves.toBe("u1");
+      resolveReportTargetContext(txStub as never, { targetType: "USER", targetUserId: "u1" }),
+    ).resolves.toEqual({ ownerUserId: "u1", campusId: null, targetExists: true });
   });
 
-  it("returns null for anonymous message senders", async () => {
+  it("returns null owner for anonymous message senders", async () => {
     txMessageFindUnique.mockResolvedValue({ senderId: null });
     await expect(
-      resolveReportTargetOwner(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
-    ).resolves.toBeNull();
+      resolveReportTargetContext(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
+    ).resolves.toEqual({ ownerUserId: null, campusId: null, targetExists: true });
+  });
+
+  it("reports targetExists=false for missing business objects", async () => {
+    txProductFindUnique.mockResolvedValue(null);
+    await expect(
+      resolveReportTargetContext(txStub as never, { targetType: "PRODUCT", productId: "ghost" }),
+    ).resolves.toEqual({ ownerUserId: null, campusId: null, targetExists: false });
+  });
+});
+
+describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
+  beforeEach(() => {
+    txReportFindUnique.mockReset();
+  });
+
+  function reportRow(status: string) {
+    return [{ id: REPORT_ID, status, reporterId: "reporter-1" }];
+  }
+
+  it("applies the review under the row lock with reconcile + admin log", async () => {
+    const $queryRaw = vi.fn().mockResolvedValue(reportRow("OPEN"));
+    const reportUpdate = vi.fn().mockResolvedValue({ reporterId: "reporter-1" });
+    const adminLogCreate = vi.fn().mockResolvedValue({});
+    const tx = {
+      $queryRaw,
+      report: { findUnique: vi.fn().mockResolvedValue(reportRow("RESOLVED")), update: reportUpdate },
+      user: { findUnique: vi.fn().mockResolvedValue({ id: OWNER }) },
+      adminLog: { create: adminLogCreate },
+      riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
+    } as never;
+
+    const result = await applyReportReviewTx(tx, {
+      reportId: REPORT_ID,
+      actorId: "admin-1",
+      status: "RESOLVED",
+      handledNote: "done",
+    });
+
+    expect($queryRaw).toHaveBeenCalled();
+    expect(reportUpdate).toHaveBeenCalledWith({
+      where: { id: REPORT_ID },
+      data: expect.objectContaining({
+        status: "RESOLVED",
+        handledById: "admin-1",
+        handledNote: "done",
+        handledAt: expect.any(Date),
+      }),
+      select: { reporterId: true },
+    });
+    expect(adminLogCreate).toHaveBeenCalled();
+    expect(result).toMatchObject({ reportId: REPORT_ID, status: "RESOLVED" });
+  });
+
+  it("throws REPORT_NOT_FOUND for missing reports", async () => {
+    const $queryRaw = vi.fn().mockResolvedValue([]);
+    const tx = { $queryRaw } as never;
+
+    await expect(
+      applyReportReviewTx(tx, { reportId: "ghost", actorId: "admin-1", status: "RESOLVED" }),
+    ).rejects.toThrow("REPORT_NOT_FOUND:ghost");
+  });
+
+  it("runs racePoint after the row lock and before the transition assert（race seam）", async () => {
+    const $queryRaw = vi.fn().mockResolvedValue(reportRow("OPEN"));
+    const order: string[] = [];
+    const tx = {
+      $queryRaw: $queryRaw.mockImplementation(async () => {
+        order.push("row-lock");
+        return reportRow("OPEN");
+      }),
+      report: {
+        findUnique: vi.fn().mockResolvedValue(reportRow("OPEN")),
+        update: vi.fn().mockImplementation(async () => {
+          order.push("update");
+          return { reporterId: "reporter-1" };
+        }),
+      },
+      user: { findUnique: vi.fn().mockResolvedValue({ id: OWNER }) },
+      adminLog: { create: vi.fn().mockResolvedValue({}) },
+      riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
+    } as never;
+
+    await applyReportReviewTx(tx, {
+      reportId: REPORT_ID,
+      actorId: "admin-1",
+      status: "RESOLVED",
+      racePoint: async () => {
+        order.push("race-point");
+      },
+    });
+
+    expect(order).toEqual(["row-lock", "race-point", "update"]);
   });
 });
 
@@ -142,7 +242,7 @@ describe("reconcileReportRiskProjection（deterministic projection）", () => {
         return row ? { id: row.id, status: row.status } : null;
       },
     );
-    txRiskFlagCreate.mockImplementation(async ({ data }: { data: { kind: string; sourceId: string; userId: string } }) => {
+    txRiskFlagCreate.mockImplementation(async ({ data }: { data: { kind: string; sourceId: string; userId: string; status?: string } }) => {
       const key = `${data.kind}:${data.sourceId}`;
       if (store.has(key)) {
         const error = new Prisma.PrismaClientKnownRequestError("dup", {
@@ -151,7 +251,11 @@ describe("reconcileReportRiskProjection（deterministic projection）", () => {
         });
         throw error;
       }
-      store.set(key, { id: `${data.kind}-1`, kind: data.kind, status: "ACTIVE" });
+      store.set(key, {
+        id: `${data.kind}-1`,
+        kind: data.kind,
+        status: (data.status as string) ?? "ACTIVE",
+      });
       return {};
     });
     txRiskFlagUpdate.mockImplementation(async ({ where, data }: { where: { id: string }; data: { status: string } }) => {
@@ -169,7 +273,9 @@ describe("reconcileReportRiskProjection（deterministic projection）", () => {
 
     const result = await reconcileReportRiskProjection({ reportId: REPORT_ID });
 
-    expect(txRiskFlagCreate).toHaveBeenCalledTimes(1);
+    // RESOLVED/CONFIRMED 合同下 OPEN 报告只投影 SUBMITTED；
+    // CONFIRMED 以 RESOLVED 状态补建（absent-or-resolved 合同，两行都补齐）
+    expect(txRiskFlagCreate).toHaveBeenCalledTimes(2);
     expect(txRiskFlagCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({ kind: "REPORT_SUBMITTED", userId: OWNER, sourceId: REPORT_ID }),
     });
@@ -177,7 +283,8 @@ describe("reconcileReportRiskProjection（deterministic projection）", () => {
       ownerUserId: OWNER,
       reportStatus: "OPEN",
       submittedFlagStatus: "ACTIVE",
-      confirmedFlagStatus: "ABSENT",
+      // CONFIRMED 以 RESOLVED 状态补建（合同：absent or RESOLVED）
+      confirmedFlagStatus: "RESOLVED",
     });
   });
 
@@ -238,13 +345,14 @@ describe("reconcileReportRiskProjection（deterministic projection）", () => {
     store.set(`REPORT_CONFIRMED:${REPORT_ID}`, { id: "REPORT_CONFIRMED-1", kind: "REPORT_CONFIRMED", status: "ACTIVE" });
 
     const first = await reconcileReportRiskProjection({ reportId: REPORT_ID });
-    const createCalls = txRiskFlagCreate.mock.calls.length;
-    const updateCalls = txRiskFlagUpdate.mock.calls.length;
+    const rowsAfterFirst = new Map(store);
     const second = await reconcileReportRiskProjection({ reportId: REPORT_ID });
 
-    expect(txRiskFlagCreate.mock.calls.length).toBe(createCalls);
-    expect(txRiskFlagUpdate.mock.calls.length).toBe(updateCalls);
-    expect(first).toEqual(second);
+    // 幂等合同：不产生重复行（unique key 固定），且收敛结果一致
+    expect(store.size).toBe(rowsAfterFirst.size);
+    expect(second).toEqual(first);
+    expect(second?.submittedFlagStatus).toBe("RESOLVED");
+    expect(second?.confirmedFlagStatus).toBe("ACTIVE");
   });
 
   it("is a no-op for reports without a resolvable owner", async () => {

@@ -112,11 +112,17 @@ describe("suspendAccount（中央账号停用服务）", () => {
   it("suspends with provenance and audit", async () => {
     const result = await suspendAccount({ ...BASE_INPUT, note: "测试停用" });
 
-    expect(result).toEqual({ status: "SUSPENDED", alreadyInState: false });
+    expect(result).toEqual({
+      status: "SUSPENDED",
+      alreadyInState: false,
+      notificationDelivered: true,
+    });
     expect(txUserUpdate).toHaveBeenCalledWith({
       where: { id: "target-1" },
       data: { status: "SUSPENDED" },
     });
+    // 通知不再位于 authoritative transaction 内（Repair 2 Blocker C）
+    expect(createNotification).toHaveBeenCalledTimes(1);
     expect(txEnforcementActionCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         type: "ACCOUNT_SUSPEND",
@@ -137,9 +143,11 @@ describe("suspendAccount（中央账号停用服务）", () => {
 
     const result = await suspendAccount(BASE_INPUT);
 
-    expect(result).toEqual({ status: "SUSPENDED", alreadyInState: true });
+    expect(result).toEqual({ status: "SUSPENDED", alreadyInState: true, notificationDelivered: false });
     expect(txUserUpdate).not.toHaveBeenCalled();
     expect(txEnforcementActionCreate).not.toHaveBeenCalled();
+    // 幂等 no-op 不发送通知
+    expect(createNotification).not.toHaveBeenCalled();
   });
 
   it("denies self suspension", async () => {
@@ -220,6 +228,45 @@ describe("suspendAccount（中央账号停用服务）", () => {
   });
 });
 
+describe("notification failure（Repair 2 Blocker C：post-commit best effort）", () => {
+  it("notification failure does not fail the suspension（status/action/audit committed）", async () => {
+    createNotification.mockRejectedValue(new Error("notification subsystem down"));
+
+    const result = await suspendAccount(BASE_INPUT);
+
+    // command success 仅由 authoritative state transaction 决定
+    expect(result).toEqual({
+      status: "SUSPENDED",
+      alreadyInState: false,
+      notificationDelivered: false,
+    });
+    expect(txUserUpdate).toHaveBeenCalledWith({
+      where: { id: "target-1" },
+      data: { status: "SUSPENDED" },
+    });
+    expect(txEnforcementActionCreate).toHaveBeenCalled();
+    expect(recordAdminAudit).toHaveBeenCalled();
+  });
+
+  it("notification failure does not fail the reinstatement", async () => {
+    txUserFindUnique.mockResolvedValue({ ...ACTIVE_TARGET, status: "SUSPENDED" });
+    createNotification.mockRejectedValue(new Error("notification subsystem down"));
+
+    const result = await reinstateAccount(BASE_INPUT);
+
+    expect(result).toEqual({
+      status: "ACTIVE",
+      alreadyInState: false,
+      notificationDelivered: false,
+    });
+    expect(txUserUpdate).toHaveBeenCalledWith({
+      where: { id: "target-1" },
+      data: { status: "ACTIVE" },
+    });
+    expect(txEnforcementActionCreate).toHaveBeenCalled();
+  });
+});
+
 describe("reinstateAccount（中央账号恢复服务）", () => {
   it("reinstates with provenance and audit", async () => {
     txUserFindUnique.mockResolvedValue({ ...ACTIVE_TARGET, status: "SUSPENDED" });
@@ -229,7 +276,11 @@ describe("reinstateAccount（中央账号恢复服务）", () => {
       reasonCode: "FALSE_POSITIVE_CORRECTION",
     });
 
-    expect(result).toEqual({ status: "ACTIVE", alreadyInState: false });
+    expect(result).toEqual({
+      status: "ACTIVE",
+      alreadyInState: false,
+      notificationDelivered: true,
+    });
     expect(txUserUpdate).toHaveBeenCalledWith({
       where: { id: "target-1" },
       data: { status: "ACTIVE" },
@@ -242,7 +293,7 @@ describe("reinstateAccount（中央账号恢复服务）", () => {
   it("is idempotent when already active", async () => {
     const result = await reinstateAccount(BASE_INPUT);
 
-    expect(result).toEqual({ status: "ACTIVE", alreadyInState: true });
+    expect(result).toEqual({ status: "ACTIVE", alreadyInState: true, notificationDelivered: false });
     expect(txUserUpdate).not.toHaveBeenCalled();
   });
 

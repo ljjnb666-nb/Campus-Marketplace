@@ -21,7 +21,7 @@ import { withTransaction } from "@/lib/prisma";
  *   REPORT_SUBMITTED 并闭环 REPORT_CONFIRMED（当前后台已支持任意改状态，
  *   因此采用 Option B + 中央 transition assertion 收敛，而不是假设 terminal）
  *
- * 目标 user 解析：resolveReportTargetOwner 对全部 targetType 解析归属
+ * 目标 user/campus 解析：resolveReportTargetContext 对全部 targetType 解析
  * （USER 直读；PRODUCT/ERRAND_TASK/SERVICE_LISTING/MESSAGE 经业务对象），
  * createReport / reviewReport / reconcile 三处共用本 helper。
  */
@@ -46,8 +46,7 @@ export function assertReportStatusTransition(
   }
 }
 
-export type ReportOwnerRef = {
-  reportId?: string;
+export type ReportTargetRef = {
   targetType: ReportTargetType;
   productId?: string | null;
   errandTaskId?: string | null;
@@ -56,52 +55,104 @@ export type ReportOwnerRef = {
   messageId?: string | null;
 };
 
+export type ReportTargetContext = {
+  /** 被举报方归属用户；匿名消息等无归属场景为 null */
+  ownerUserId: string | null;
+  /**
+   * 举报的 campus provenance：PRODUCT/ERRAND_TASK/SERVICE_LISTING 按业务对象
+   * 所在校区解析；USER/MESSAGE 当前 Report 无 campus 语境，如实返回 null
+   * （GLOBAL/unscoped），禁止用 User.campusId 之类猜测绑定。
+   */
+  campusId: string | null;
+  /** 目标业务对象是否存在（用于 createReport 的存在性校验） */
+  targetExists: boolean;
+};
+
 /**
- * 解析举报的归属用户（被举报方）。
+ * 解析举报的归属用户与 campus provenance（唯一实现）。
  * createReport / reviewReport / reconcileReportRiskProjection 共用，
- * 避免三处各写一套 ownership 逻辑。解析不到（如匿名消息）返回 null。
+ * 仓库内不得再出现重复的 target owner switch（Repair 2 Blocker E）。
  */
-export async function resolveReportTargetOwner(
+export async function resolveReportTargetContext(
   tx: Prisma.TransactionClient,
-  ref: ReportOwnerRef,
-): Promise<string | null> {
+  ref: ReportTargetRef,
+): Promise<ReportTargetContext> {
   switch (ref.targetType) {
-    case "USER":
-      return ref.targetUserId ?? null;
+    case "USER": {
+      if (!ref.targetUserId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
+      const row = await tx.user.findUnique({
+        where: { id: ref.targetUserId },
+        select: { id: true },
+      });
+      // USER 举报无 campus 语境（Report 无 campusId 字段，不编造）
+      return {
+        ownerUserId: row ? ref.targetUserId : null,
+        campusId: null,
+        targetExists: Boolean(row),
+      };
+    }
     case "PRODUCT": {
-      if (!ref.productId) return null;
+      if (!ref.productId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
       const row = await tx.product.findUnique({
         where: { id: ref.productId },
-        select: { sellerId: true },
+        select: { sellerId: true, campusId: true },
       });
-      return row?.sellerId ?? null;
+      return {
+        ownerUserId: row?.sellerId ?? null,
+        campusId: row?.campusId ?? null,
+        targetExists: Boolean(row),
+      };
     }
     case "ERRAND_TASK": {
-      if (!ref.errandTaskId) return null;
+      if (!ref.errandTaskId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
       const row = await tx.errandTask.findUnique({
         where: { id: ref.errandTaskId },
-        select: { publisherId: true },
+        select: { publisherId: true, campusId: true },
       });
-      return row?.publisherId ?? null;
+      return {
+        ownerUserId: row?.publisherId ?? null,
+        campusId: row?.campusId ?? null,
+        targetExists: Boolean(row),
+      };
     }
     case "SERVICE_LISTING": {
-      if (!ref.serviceListingId) return null;
+      if (!ref.serviceListingId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
       const row = await tx.serviceListing.findUnique({
         where: { id: ref.serviceListingId },
-        select: { providerId: true },
+        select: { providerId: true, campusId: true },
       });
-      return row?.providerId ?? null;
+      return {
+        ownerUserId: row?.providerId ?? null,
+        campusId: row?.campusId ?? null,
+        targetExists: Boolean(row),
+      };
     }
     case "MESSAGE": {
-      if (!ref.messageId) return null;
+      if (!ref.messageId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
       const row = await tx.message.findUnique({
         where: { id: ref.messageId },
         select: { senderId: true },
       });
-      return row?.senderId ?? null;
+      // MESSAGE 无法可靠推导 campus（conversation 语境不绑定单校区）：
+      // 如实返回 null，禁止用 sender 的 User.campusId 猜测绑定
+      return {
+        ownerUserId: row?.senderId ?? null,
+        campusId: null,
+        targetExists: Boolean(row),
+      };
     }
     default:
-      return null;
+      return { ownerUserId: null, campusId: null, targetExists: false };
   }
 }
 
@@ -111,6 +162,7 @@ async function upsertReportFlag(
   tx: Prisma.TransactionClient,
   input: {
     userId: string;
+    campusId: string | null;
     kind: "REPORT_SUBMITTED" | "REPORT_CONFIRMED";
     reportId: string;
     active: boolean;
@@ -126,15 +178,26 @@ async function upsertReportFlag(
         sourceId: input.reportId,
       },
     },
-    select: { id: true, status: true },
+    select: { id: true, status: true, userId: true, campusId: true },
   });
+
+  // Repair 2 Blocker B：projection 必须与 canonical target context 收敛——
+  // 既有行的 userId/campusId 与解析结果不一致时同步修正（ownership 可变）。
+  const needsContextSync =
+    existing && (existing.userId !== input.userId || existing.campusId !== input.campusId);
 
   if (input.active) {
     if (existing) {
-      if (existing.status !== "ACTIVE") {
+      if (needsContextSync || existing.status !== "ACTIVE") {
         await tx.riskFlag.update({
           where: { id: existing.id },
-          data: { status: "ACTIVE", resolvedById: null, resolvedAt: null },
+          data: {
+            status: "ACTIVE",
+            userId: input.userId,
+            campusId: input.campusId,
+            resolvedById: null,
+            resolvedAt: null,
+          },
         });
       }
       return;
@@ -144,6 +207,7 @@ async function upsertReportFlag(
       await tx.riskFlag.create({
         data: {
           userId: input.userId,
+          campusId: input.campusId,
           kind: input.kind,
           severity: input.severity ?? "INFO",
           sourceType: REPORT_FLAG_SOURCE_TYPE,
@@ -164,12 +228,48 @@ async function upsertReportFlag(
     return;
   }
 
-  // 期望非 ACTIVE：absent 或 RESOLVED 皆满足；ACTIVE 才需要闭环
-  if (existing && existing.status === "ACTIVE") {
-    await tx.riskFlag.update({
-      where: { id: existing.id },
-      data: { status: "RESOLVED", resolvedById: input.actorId ?? null, resolvedAt: new Date() },
+  // 期望非 ACTIVE：absent 或 RESOLVED 皆满足；ACTIVE 才需要闭环。
+  // legacy 缺投影（RESOLVED/REJECTED 报告从未有过 SUBMITTED flag）时
+  // 直接以 RESOLVED 状态补建——保证投影总是完整存在。
+  if (existing) {
+    if (needsContextSync || existing.status === "ACTIVE") {
+      await tx.riskFlag.update({
+        where: { id: existing.id },
+        data: {
+          status: "RESOLVED",
+          userId: input.userId,
+          campusId: input.campusId,
+          resolvedById: input.actorId ?? null,
+          resolvedAt: new Date(),
+        },
+      });
+    }
+    return;
+  }
+
+  try {
+    await tx.riskFlag.create({
+      data: {
+        userId: input.userId,
+        campusId: input.campusId,
+        kind: input.kind,
+        severity: input.severity ?? "INFO",
+        sourceType: REPORT_FLAG_SOURCE_TYPE,
+        sourceId: input.reportId,
+        status: "RESOLVED",
+        createdById: input.actorId ?? null,
+        resolvedById: input.actorId ?? null,
+        resolvedAt: new Date(),
+      },
     });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      return;
+    }
+    throw error;
   }
 }
 
@@ -214,8 +314,8 @@ export async function reconcileReportRiskProjection(
       return null;
     }
 
-    const ownerUserId = await resolveReportTargetOwner(client, report);
-    if (!ownerUserId) {
+    const targetContext = await resolveReportTargetContext(client, report);
+    if (!targetContext.ownerUserId) {
       return {
         ownerUserId: null,
         reportStatus: report.status,
@@ -228,7 +328,8 @@ export async function reconcileReportRiskProjection(
     const confirmedActive = report.status === "RESOLVED";
 
     await upsertReportFlag(client, {
-      userId: ownerUserId,
+      userId: targetContext.ownerUserId,
+      campusId: targetContext.campusId,
       kind: "REPORT_SUBMITTED",
       reportId: report.id,
       active: reportActive,
@@ -236,7 +337,8 @@ export async function reconcileReportRiskProjection(
     });
 
     await upsertReportFlag(client, {
-      userId: ownerUserId,
+      userId: targetContext.ownerUserId,
+      campusId: targetContext.campusId,
       kind: "REPORT_CONFIRMED",
       reportId: report.id,
       active: confirmedActive,
@@ -268,7 +370,7 @@ export async function reconcileReportRiskProjection(
     ]);
 
     return {
-      ownerUserId,
+      ownerUserId: targetContext.ownerUserId,
       reportStatus: report.status,
       submittedFlagStatus: (submitted?.status ?? "ABSENT") as "ACTIVE" | "RESOLVED" | "ABSENT",
       confirmedFlagStatus: (confirmed?.status ?? "ABSENT") as "ACTIVE" | "RESOLVED" | "ABSENT",
@@ -279,4 +381,83 @@ export async function reconcileReportRiskProjection(
     return run(tx);
   }
   return withTransaction(run);
+}
+
+/**
+ * Repair 2 Blocker D：举报审核的事务级入口（serialization boundary）。
+ *
+ * 顺序（Report row 是 domain lock；本路径不引入 USER subject locks，
+ * 因此不存在 "row lock → USER advisory" 反序）：
+ *   SELECT ... FOR UPDATE（锁定同一 Report 行）
+ *   → locked status 读取（不信任 pre-lock 读数）
+ *   → assertReportStatusTransition
+ *   → canonical Report update（status/handledBy/handledNote/handledAt）
+ *   → reconcileReportRiskProjection（同一 locked transaction）
+ *   → AdminLog + reporter notification（举报提交/处理确认属既有事务性合同，
+ *     见 §35/§36——不与 enforcement notification 的 post-commit 规则混淆）
+ *
+ * racePoint 为测试 seam（行锁取得之后、transition 断言之前），生产路径不传。
+ */
+export type ApplyReportReviewInput = {
+  reportId: string;
+  actorId: string;
+  status: ReportStatus;
+  handledNote?: string | null;
+  racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
+};
+
+export async function applyReportReviewTx(
+  tx: Prisma.TransactionClient,
+  input: ApplyReportReviewInput,
+): Promise<{ reportId: string; status: ReportStatus; reporterId: string }> {
+  // ---- 步骤 1：行锁下读取 canonical status（TOCTOU 关闭点） ----
+  const locked = await tx.$queryRaw<{ id: string; status: ReportStatus; reporterId: string }[]>`
+    SELECT id, status, "reporterId"
+    FROM "Report"
+    WHERE id = ${input.reportId}
+    FOR UPDATE`;
+
+  const report = locked[0];
+  if (!report) {
+    throw new Error(`REPORT_NOT_FOUND:${input.reportId}`);
+  }
+
+  // ---- 步骤 2：测试 seam（winner 已持行锁） ----
+  if (input.racePoint) {
+    await input.racePoint(tx);
+  }
+
+  // ---- 步骤 3：锁定状态上的 transition 断言 ----
+  assertReportStatusTransition(report.status, input.status);
+
+  const handled = input.status === "RESOLVED" || input.status === "REJECTED";
+
+  // ---- 步骤 4：canonical update + projection + AdminLog + notification ----
+  const updated = await tx.report.update({
+    where: { id: report.id },
+    data: {
+      status: input.status,
+      handledById: input.actorId,
+      handledNote: input.handledNote || null,
+      handledAt: handled ? new Date() : null,
+    },
+    select: { reporterId: true },
+  });
+
+  await reconcileReportRiskProjection(
+    { reportId: report.id, actorId: input.actorId },
+    tx,
+  );
+
+  await tx.adminLog.create({
+    data: {
+      adminId: input.actorId,
+      action: `REPORT_${input.status}`,
+      targetType: "REPORT",
+      targetId: report.id,
+      detail: input.handledNote || null,
+    },
+  });
+
+  return { reportId: report.id, status: input.status, reporterId: updated.reporterId };
 }

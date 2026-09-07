@@ -1,5 +1,11 @@
-import type { CampusMembershipStatus, Prisma, VerificationStatus } from "@prisma/client";
+import type {
+  CampusMembershipStatus,
+  Prisma,
+  RiskStateLevel,
+  VerificationStatus,
+} from "@prisma/client";
 
+import { enforcementError } from "@/lib/enforcement/errors";
 import { prisma } from "@/lib/prisma";
 import { rbacError } from "@/lib/rbac/errors";
 import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
@@ -14,15 +20,18 @@ import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
  *   语义之前，绝不作为 enforcement source）
  * - NO_OPAQUE_SCORING：结构不含任何综合分数或自动判定结论
  *
- * Repair 1 Blocker B：public / internal 两个 API 严格分离——
+ * Repair 1 Blocker B：public / internal 严格分离——
  * - getPublicTrustSnapshot：可公开的安全信号（与今日公开 profile 一致）；
  *   绝不包含 RiskState/RiskFlag/举报计数/reasonCode/enforcement 数据
- * - getInternalTrustSnapshot：server-side authorization（actorId +
- *   loadAuthorizationContext + audit.read permission 判定；GLOBAL 快照
- *   要求 GLOBAL audit.read，campus 快照要求该校区 audit.read）；
- *   举报相关数据以 RiskFlag 归一化信号为准（覆盖全部 targetType，
- *   不依赖 Report.targetUserId 猜测归属），并区分 submitted
- *   （SIGNAL_NOT_ADIJUDICATED_FACT）与 confirmed（CONFIRMED_AFTER_REVIEW）
+ *
+ * Repair 2 Blocker A：internal 视图按 campus 真正隔离（discriminated union）：
+ * - GLOBAL 视图（campusId=null，要求 GLOBAL audit.read）：全部 membership、
+ *   全部 risk states、全平台 RiskFlag 举报信号
+ * - CAMPUS 视图（campusId=A，要求 audit.read@A 且 target 与 A 有合法领域
+ *   关联：membership 存在且 ∈ {ACTIVE, SUSPENDED}）：仅 Campus A membership
+ *   status、Campus A 风险态、Campus A 本地举报信号；绝不返回其他 campus /
+ *   GLOBAL / 全平台聚合数据。GLOBAL admin 请求 campusId=A 同样受 target
+ *   relationship 约束。
  */
 
 export type PublicTrustSnapshot = {
@@ -42,13 +51,25 @@ export type PublicTrustSnapshot = {
   legacyCreditScore: { value: number; policy: "LEGACY_DISPLAY_SIGNAL" };
 };
 
-export type InternalTrustSnapshot = PublicTrustSnapshot & {
-  membership: { activeCampusCount: number; activeCampusIds: string[]; statuses: CampusMembershipStatus[] };
-  /** 信号，非裁决事实（来自 RiskFlag 归一化投影，覆盖全部举报 targetType） */
+export type GlobalInternalTrustSnapshot = {
+  view: "GLOBAL";
+  userId: string;
+  identity: { userId: string };
+  membership: { activeCampusIds: string[]; statuses: CampusMembershipStatus[] };
+  verification: { status: VerificationStatus };
+  transactionHistory: { completedOrdersCount: number };
+  reviewSignals: { positiveReviewRate: number; receivedReviewsCount: number };
+  rentalSignals: {
+    rentalOwnerCount: number;
+    rentalRenterCount: number;
+    onTimeReturnRate: number;
+    rentalPositiveRate: number;
+    rentalDisputeCount: number;
+  };
+  legacyCreditScore: { value: number; policy: "LEGACY_DISPLAY_SIGNAL" };
+  /** 信号，非裁决事实（来自 RiskFlag 归一化投影，全平台） */
   reportSignals: {
-    /** 未裁决举报信号（ACTIVE REPORT_SUBMITTED） */
     submittedReportSignals: number;
-    /** 经人工核查成立的举报信号（ACTIVE REPORT_CONFIRMED） */
     confirmedReportSignals: number;
     submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT";
     confirmedSignalNote: "CONFIRMED_AFTER_REVIEW";
@@ -58,6 +79,32 @@ export type InternalTrustSnapshot = PublicTrustSnapshot & {
     activeRestrictions: string[];
   };
 };
+
+export type CampusInternalTrustSnapshot = {
+  view: "CAMPUS";
+  campusId: string;
+  userId: string;
+  identity: { userId: string };
+  /** 目标在本校区的 membership status（本视图唯一可见的成员信息） */
+  membership: { status: CampusMembershipStatus };
+  verification: { status: VerificationStatus };
+  /** 仅本校区的举报信号（RiskFlag.campusId = campusId） */
+  reportSignals: {
+    submittedReportSignals: number;
+    confirmedReportSignals: number;
+    submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT";
+    confirmedSignalNote: "CONFIRMED_AFTER_REVIEW";
+  };
+  /** 仅本校区（CAMPUS:<id>）的风险态；GLOBAL 行不属于 campus 视图 */
+  risk: {
+    state: RiskStateLevel;
+    reasonCode: string | null;
+  };
+};
+
+export type InternalTrustSnapshot =
+  | GlobalInternalTrustSnapshot
+  | CampusInternalTrustSnapshot;
 
 const trustUserSelect = {
   id: true,
@@ -77,10 +124,25 @@ const trustUserSelect = {
   _count: { select: { receivedReviews: true } },
 } satisfies Prisma.UserSelect;
 
-async function loadUserSnapshot(
+type UserTrustBase = {
+  userId: string;
+  verificationStatus: VerificationStatus;
+  creditScore: number;
+  completedOrdersCount: number;
+  positiveReviewRate: number;
+  rentalOwnerCount: number;
+  rentalRenterCount: number;
+  onTimeReturnRate: number;
+  rentalPositiveRate: number;
+  rentalDisputeCount: number;
+  memberships: Array<{ campusId: string; status: CampusMembershipStatus }>;
+  receivedReviewsCount: number;
+};
+
+async function loadUserTrustBase(
   userId: string,
   tx?: Prisma.TransactionClient,
-): Promise<Omit<InternalTrustSnapshot, "reportSignals" | "risk"> | null> {
+): Promise<UserTrustBase | null> {
   const user = tx
     ? await tx.user.findUnique({ where: { id: userId }, select: trustUserSelect })
     : await prisma.user.findUnique({ where: { id: userId }, select: trustUserSelect });
@@ -89,120 +151,81 @@ async function loadUserSnapshot(
     return null;
   }
 
-  const activeMemberships = user.memberships.filter((m) => m.status === "ACTIVE");
-
   return {
     userId: user.id,
-    identity: { userId: user.id },
-    membership: {
-      activeCampusCount: activeMemberships.length,
-      activeCampusIds: activeMemberships.map((m) => m.campusId),
-      statuses: user.memberships.map((m) => m.status),
-    },
-    verification: { status: user.verificationStatus },
-    transactionHistory: { completedOrdersCount: user.completedOrdersCount },
+    verificationStatus: user.verificationStatus,
+    creditScore: user.creditScore,
+    completedOrdersCount: user.completedOrdersCount,
+    positiveReviewRate: user.positiveReviewRate,
+    rentalOwnerCount: user.rentalOwnerCount,
+    rentalRenterCount: user.rentalRenterCount,
+    onTimeReturnRate: user.onTimeReturnRate,
+    rentalPositiveRate: user.rentalPositiveRate,
+    rentalDisputeCount: user.rentalDisputeCount,
+    memberships: user.memberships,
+    receivedReviewsCount: user._count.receivedReviews,
+  };
+}
+
+function toPublicTrustSignals(base: UserTrustBase) {
+  return {
+    transactionHistory: { completedOrdersCount: base.completedOrdersCount },
     reviewSignals: {
-      positiveReviewRate: user.positiveReviewRate,
-      receivedReviewsCount: user._count.receivedReviews,
+      positiveReviewRate: base.positiveReviewRate,
+      receivedReviewsCount: base.receivedReviewsCount,
     },
     rentalSignals: {
-      rentalOwnerCount: user.rentalOwnerCount,
-      rentalRenterCount: user.rentalRenterCount,
-      onTimeReturnRate: user.onTimeReturnRate,
-      rentalPositiveRate: user.rentalPositiveRate,
-      rentalDisputeCount: user.rentalDisputeCount,
+      rentalOwnerCount: base.rentalOwnerCount,
+      rentalRenterCount: base.rentalRenterCount,
+      onTimeReturnRate: base.onTimeReturnRate,
+      rentalPositiveRate: base.rentalPositiveRate,
+      rentalDisputeCount: base.rentalDisputeCount,
     },
-    legacyCreditScore: { value: user.creditScore, policy: "LEGACY_DISPLAY_SIGNAL" },
+    legacyCreditScore: { value: base.creditScore, policy: "LEGACY_DISPLAY_SIGNAL" as const },
   };
 }
 
 /**
  * 公开 trust 快照：仅含今日公开 profile 已展示的安全信号。
  * 绝不返回 RiskState / activeRestrictions / RiskFlag 计数 / 举报计数 /
- * enforcement reasons / notes / internal reasonCode / risk scope（Repair 1 #39/#40）。
+ * enforcement reasons / notes / internal reasonCode / risk scope（#39/#40）。
  */
 export async function getPublicTrustSnapshot(
   userId: string,
   tx?: Prisma.TransactionClient,
 ): Promise<PublicTrustSnapshot | null> {
-  const base = await loadUserSnapshot(userId, tx);
+  const base = await loadUserTrustBase(userId, tx);
   if (!base) {
     return null;
   }
 
-  const { membership, ...rest } = base;
   return {
-    ...rest,
-    membership: { activeCampusCount: membership.activeCampusCount },
+    userId: base.userId,
+    identity: { userId: base.userId },
+    membership: {
+      activeCampusCount: base.memberships.filter((m) => m.status === "ACTIVE").length,
+    },
+    verification: { status: base.verificationStatus },
+    ...toPublicTrustSignals(base),
   };
 }
 
 /**
- * 内部 trust 快照（admin 风控视图）：server-side authorization。
- * GLOBAL 快照要求 GLOBAL audit.read；campus 快照要求该校区 audit.read
- * （campus-scoped actor 自动要求其 ACTIVE membership 命中——6A 语义）。
- * 绝不依赖调用方自报的 includeRisk 布尔。
+ * 内部 trust 快照（admin 风控视图）：server-side authorization + campus 隔离。
+ *
+ * - GLOBAL 视图（campusId 缺省）：要求 GLOBAL audit.read；返回全部
+ *   membership / 全部 risk states / 全平台 RiskFlag 举报信号
+ * - CAMPUS 视图（campusId=A）：要求 audit.read@A 且 target 与 A 有合法
+ *   领域关联（membership 存在且 ∈ {ACTIVE, SUSPENDED}，与 setRiskState
+ *   同一规则）；只返回 Campus A membership status / A 风险态 / A 本地
+ *   举报信号（RiskFlag.campusId = A，不含 null 与其他 campus）
  */
 export async function getInternalTrustSnapshot(input: {
   actorId: string;
   targetUserId: string;
-  /** 提供时限定 campus 视角（campus-scoped 授权路径） */
   campusId?: string | null;
   tx?: Prisma.TransactionClient;
 }): Promise<InternalTrustSnapshot | null> {
-  return withInternalAuthorization(input, async (tx) => {
-    const client = (tx ?? prisma) as Prisma.TransactionClient;
-    const base = await loadUserSnapshot(input.targetUserId, client);
-    if (!base) {
-      return null;
-    }
-
-    const riskWhere = {
-      userId: input.targetUserId,
-      ...(input.campusId != null ? { scopeKey: { in: ["GLOBAL", `CAMPUS:${input.campusId}`] } } : {}),
-    };
-
-    const [riskRows, submittedFlags, confirmedFlags] = await Promise.all([
-      client.riskState.findMany({
-        where: riskWhere,
-        select: { scopeKey: true, campusId: true, state: true, reasonCode: true },
-        orderBy: [{ scopeKey: "asc" }],
-      }),
-      client.riskFlag.count({
-        where: { userId: input.targetUserId, kind: "REPORT_SUBMITTED", status: "ACTIVE" },
-      }),
-      client.riskFlag.count({
-        where: { userId: input.targetUserId, kind: "REPORT_CONFIRMED", status: "ACTIVE" },
-      }),
-    ]);
-
-    return {
-      ...base,
-      reportSignals: {
-        submittedReportSignals: submittedFlags,
-        confirmedReportSignals: confirmedFlags,
-        submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
-        confirmedSignalNote: "CONFIRMED_AFTER_REVIEW",
-      },
-      risk: {
-        states: riskRows.map((row) => ({
-          scopeKey: row.scopeKey,
-          campusId: row.campusId,
-          state: row.state,
-          reasonCode: row.reasonCode,
-        })),
-        activeRestrictions: riskRows
-          .filter((row) => row.state === "RESTRICTED")
-          .map((row) => row.scopeKey),
-      },
-    };
-  });
-}
-
-async function withInternalAuthorization<T>(
-  input: { actorId: string; campusId?: string | null },
-  run: (tx?: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
   const actorContext = await loadAuthorizationContext(input.actorId);
   if (!actorContext || !actorContext.accountActive) {
     throw rbacError("AUTH_ACCOUNT_INACTIVE");
@@ -210,5 +233,128 @@ async function withInternalAuthorization<T>(
   if (!hasPermission(actorContext, "audit.read", input.campusId ?? null)) {
     throw rbacError("AUTH_PERMISSION_DENIED");
   }
-  return run();
+
+  if (input.campusId != null) {
+    return getCampusInternalTrustSnapshot(input.actorId, input.targetUserId, input.campusId, input.tx);
+  }
+  return getGlobalInternalTrustSnapshot(input.targetUserId, input.tx);
+}
+
+async function getGlobalInternalTrustSnapshot(
+  targetUserId: string,
+  tx?: Prisma.TransactionClient,
+): Promise<GlobalInternalTrustSnapshot | null> {
+  const client = (tx ?? prisma) as Prisma.TransactionClient;
+  const base = await loadUserTrustBase(targetUserId, client);
+  if (!base) {
+    return null;
+  }
+
+  const [riskRows, submittedFlags, confirmedFlags] = await Promise.all([
+    client.riskState.findMany({
+      where: { userId: targetUserId },
+      select: { scopeKey: true, campusId: true, state: true, reasonCode: true },
+      orderBy: [{ scopeKey: "asc" }],
+    }),
+    client.riskFlag.count({
+      where: { userId: targetUserId, kind: "REPORT_SUBMITTED", status: "ACTIVE" },
+    }),
+    client.riskFlag.count({
+      where: { userId: targetUserId, kind: "REPORT_CONFIRMED", status: "ACTIVE" },
+    }),
+  ]);
+
+  return {
+    view: "GLOBAL",
+    userId: base.userId,
+    identity: { userId: base.userId },
+    membership: {
+      activeCampusIds: base.memberships.filter((m) => m.status === "ACTIVE").map((m) => m.campusId),
+      statuses: base.memberships.map((m) => m.status),
+    },
+    verification: { status: base.verificationStatus },
+    ...toPublicTrustSignals(base),
+    reportSignals: {
+      submittedReportSignals: submittedFlags,
+      confirmedReportSignals: confirmedFlags,
+      submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
+      confirmedSignalNote: "CONFIRMED_AFTER_REVIEW",
+    },
+    risk: {
+      states: riskRows.map((row) => ({
+        scopeKey: row.scopeKey,
+        campusId: row.campusId,
+        state: row.state,
+        reasonCode: row.reasonCode,
+      })),
+      activeRestrictions: riskRows
+        .filter((row) => row.state === "RESTRICTED")
+        .map((row) => row.scopeKey),
+    },
+  };
+}
+
+async function getCampusInternalTrustSnapshot(
+  actorId: string,
+  targetUserId: string,
+  campusId: string,
+  tx?: Prisma.TransactionClient,
+): Promise<CampusInternalTrustSnapshot | null> {
+  const client = (tx ?? prisma) as Prisma.TransactionClient;
+
+  // Repair 2 Blocker A：target-campus relationship（与 setRiskState 同一规则，
+  // GLOBAL admin 请求 campus 视图同样受约束）
+  const targetMembership = await client.campusMembership.findUnique({
+    where: { userId_campusId: { userId: targetUserId, campusId } },
+    select: { status: true },
+  });
+
+  if (
+    !targetMembership ||
+    (targetMembership.status !== "ACTIVE" && targetMembership.status !== "SUSPENDED")
+  ) {
+    throw enforcementError("ENFORCEMENT_TARGET_SCOPE_MISMATCH");
+  }
+
+  const base = await loadUserTrustBase(targetUserId, client);
+  if (!base) {
+    return null;
+  }
+
+  // Repair 2 Blocker B/§8：campus 视图只看本校区本地信号
+  //（campusId=null 与其他 campus 的信号不在本视图）
+  const [riskRows, submittedFlags, confirmedFlags] = await Promise.all([
+    client.riskState.findMany({
+      where: { userId: targetUserId, scopeKey: `CAMPUS:${campusId}` },
+      select: { state: true, reasonCode: true },
+      orderBy: [{ scopeKey: "asc" }],
+    }),
+    client.riskFlag.count({
+      where: { userId: targetUserId, campusId, kind: "REPORT_SUBMITTED", status: "ACTIVE" },
+    }),
+    client.riskFlag.count({
+      where: { userId: targetUserId, campusId, kind: "REPORT_CONFIRMED", status: "ACTIVE" },
+    }),
+  ]);
+
+  const campusRisk = riskRows[0];
+
+  return {
+    view: "CAMPUS",
+    campusId,
+    userId: base.userId,
+    identity: { userId: base.userId },
+    membership: { status: targetMembership.status },
+    verification: { status: base.verificationStatus },
+    reportSignals: {
+      submittedReportSignals: submittedFlags,
+      confirmedReportSignals: confirmedFlags,
+      submittedSignalNote: "SIGNAL_NOT_ADIJUDICATED_FACT",
+      confirmedSignalNote: "CONFIRMED_AFTER_REVIEW",
+    },
+    risk: {
+      state: (campusRisk?.state ?? "NORMAL") as RiskStateLevel,
+      reasonCode: campusRisk?.reasonCode ?? null,
+    },
+  };
 }

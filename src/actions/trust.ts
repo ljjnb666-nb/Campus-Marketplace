@@ -4,7 +4,10 @@ import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
-import { recordRiskFlag } from "@/lib/enforcement/risk-service";
+import {
+  reconcileReportRiskProjection,
+  resolveReportTargetContext,
+} from "@/lib/enforcement/report-projection";
 import { createNotification } from "@/repositories/notification-repository";
 import { reportFormSchema, reviewFormSchema } from "@/validators/trust";
 
@@ -173,64 +176,24 @@ export async function createReport(
               ? { targetUserId: parsed.data.targetUserId || null }
               : { messageId: parsed.data.messageId || null };
 
-    let targetOwnerId: string | null = null;
+    // Repair 2 Blocker E：owner/campus 解析唯一来源（resolveReportTargetContext）
+    // ——本 action 不再维护任何 targetType → owner 的重复 switch
+    const targetContext = await withTransaction((tx) =>
+      resolveReportTargetContext(tx, {
+      targetType: parsed.data.targetType,
+      productId: parsed.data.productId || null,
+      errandTaskId: parsed.data.errandTaskId || null,
+      serviceListingId: parsed.data.serviceListingId || null,
+      targetUserId: parsed.data.targetUserId || null,
+        messageId: parsed.data.messageId || null,
+      }),
+    );
 
-    if (parsed.data.targetType === "PRODUCT") {
-      const targetRecord = await prisma.product.findFirst({
-        where: { id: parsed.data.productId, deletedAt: null },
-        select: { id: true, sellerId: true },
-      });
-
-      if (!targetRecord) {
-        return { ...initialState, message: "举报目标不存在" };
-      }
-
-      targetOwnerId = targetRecord.sellerId;
-    } else if (parsed.data.targetType === "ERRAND_TASK") {
-      const targetRecord = await prisma.errandTask.findFirst({
-        where: { id: parsed.data.errandTaskId, deletedAt: null },
-        select: { id: true, publisherId: true },
-      });
-
-      if (!targetRecord) {
-        return { ...initialState, message: "举报目标不存在" };
-      }
-
-      targetOwnerId = targetRecord.publisherId;
-    } else if (parsed.data.targetType === "SERVICE_LISTING") {
-      const targetRecord = await prisma.serviceListing.findFirst({
-        where: { id: parsed.data.serviceListingId, deletedAt: null },
-        select: { id: true, providerId: true },
-      });
-
-      if (!targetRecord) {
-        return { ...initialState, message: "举报目标不存在" };
-      }
-
-      targetOwnerId = targetRecord.providerId;
-    } else if (parsed.data.targetType === "USER") {
-      const targetRecord = await prisma.user.findFirst({
-        where: { id: parsed.data.targetUserId, deletedAt: null },
-        select: { id: true },
-      });
-
-      if (!targetRecord) {
-        return { ...initialState, message: "举报目标不存在" };
-      }
-
-      targetOwnerId = targetRecord.id;
-    } else {
-      const targetRecord = await prisma.message.findUnique({
-        where: { id: parsed.data.messageId },
-        select: { id: true, senderId: true },
-      });
-
-      if (!targetRecord) {
-        return { ...initialState, message: "举报目标不存在" };
-      }
-
-      targetOwnerId = targetRecord.senderId;
+    if (!targetContext.targetExists) {
+      return { ...initialState, message: "举报目标不存在" };
     }
+
+    const targetOwnerId = targetContext.ownerUserId;
 
     if (targetOwnerId && targetOwnerId === user.id) {
       return { ...initialState, message: "不能举报自己发布或发送的内容" };
@@ -265,22 +228,11 @@ export async function createReport(
         },
       });
 
-      // Phase 6B：举报创建仅记录未裁决风险信号（REPORT_SUBMITTED，signal 而
-      //非 adjudicated fact）。绝不在此同步 restrict/suspend/扣分——处罚只能
-      // 来自显式 enforcement 决策（见 src/lib/enforcement/*）。同一举报来源
-      // 幂等去重（(kind, sourceType, sourceId) 唯一）。
-      if (targetOwnerId) {
-        await recordRiskFlag(
-          {
-            userId: targetOwnerId,
-            kind: "REPORT_SUBMITTED",
-            severity: "INFO",
-            sourceType: "REPORT",
-            sourceId: report.id,
-          },
-          tx,
-        );
-      }
+      // Phase 6B + Repair 2：举报创建经中央 projection 收敛产生
+      // REPORT_SUBMITTED 未裁决信号（signal 而非 adjudicated fact，携带
+      // campus provenance）。绝不在此同步 restrict/suspend/扣分——处罚只能
+      // 来自显式 enforcement 决策（见 src/lib/enforcement/*）。
+      await reconcileReportRiskProjection({ reportId: report.id }, tx);
 
       await createNotification(tx, {
         userId: user.id,
