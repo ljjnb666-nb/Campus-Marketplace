@@ -34,6 +34,14 @@ import { rbacError } from "@/lib/rbac/errors";
  *   campus-scoped actor 自动要求其 ACTIVE membership 命中——6A 语义）
  *
  * SELF_ENFORCEMENT = DENY；privileged target（full-admin 等价）保护 = DENY。
+ *
+ * Phase 6C-1A：setRiskStateTxLocked 为 authoritative seam——承载完整安全链
+ * （self-deny / 授权复核 / target 复核 / campus 绑定 / privileged 保护 /
+ * 状态机 / mutation / previousState 捕获 / EnforcementAction / AdminAudit），
+ * 但绝不取得治理 subject 锁；公共 wrapper 负责完整 sorted 锁集 + racePoint。
+ * 进入/离开 RESTRICTED 的 EnforcementAction 现携带 previousState（无 RiskState
+ * 行的 canonical pre-state = NORMAL，显式编码 RISK_STATE:NORMAL@<scope>）；
+ * enforcementSeq 由 DB sequence 分配（因果序），createdAt 仅展示。
  */
 
 export type RiskScopeState = {
@@ -113,13 +121,167 @@ export type SetRiskStateResult = {
   changed: boolean;
 };
 
+/**
+ * Phase 6C-1A TxLocked seam：setRiskState 的 authoritative 核。
+ *
+ * 前置条件：调用方已取得完整 sorted {USER:actor, USER:target} subject 锁集。
+ * 本 seam 不取治理锁；保留完整安全链（self-deny → 授权复核 → target 存在 →
+ * CAMPUS membership 绑定 → privileged 保护 → 幂等/状态机 → mutation →
+ * previousState → EnforcementAction → AdminAudit）。
+ */
+export async function setRiskStateTxLocked(
+  tx: Prisma.TransactionClient,
+  input: SetRiskStateInput,
+): Promise<SetRiskStateResult> {
+  // SELF_ENFORCEMENT = DENY（fail closed；非探测通道）
+  if (input.actorId === input.targetUserId) {
+    throw enforcementError("ENFORCEMENT_SELF_DENIED");
+  }
+
+  // ---- Repair 1 Blocker G：授权顺序收紧 ----
+  // actor 授权必须先于任何 target 探测：未授权 actor 对 missing/normal/
+  // privileged/cross-campus target 一律得到统一的 AUTH_* denial family，
+  // 无法通过错误路径差异推断目标状态。
+  const actorContext = await loadAuthorizationContext(input.actorId, tx);
+  if (!actorContext || !actorContext.accountActive) {
+    throw rbacError("AUTH_ACCOUNT_INACTIVE");
+  }
+  const allowed =
+    input.campusId == null
+      ? hasPermission(actorContext, "user.suspend")
+      : hasPermission(actorContext, "campus.manage", input.campusId);
+  if (!allowed) {
+    throw rbacError("AUTH_PERMISSION_DENIED");
+  }
+
+  // ---- target 存在性（已授权 actor 才可达） ----
+  const target = await tx.user.findUnique({
+    where: { id: input.targetUserId },
+    select: { id: true, status: true, deletedAt: true, erasedAt: true },
+  });
+  if (!target || target.deletedAt || target.erasedAt) {
+    throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
+  }
+
+  // ---- Repair 1 Blocker A：CAMPUS 风险态必须绑定真实 target membership ----
+  // campus 作用域变更要求 target 对该校区存在 membership 且
+  // status ∈ {ACTIVE, SUSPENDED}：ACTIVE 正常成员；SUSPENDED 管理员仍须
+  // 能维护/恢复其风险态；missing/PENDING/REJECTED/LEFT 一律 DENY
+  // （LEFT 已离校不再新增校区处罚；PENDING/REJECTED 尚非有效成员）。
+  // GLOBAL 权限不能绕过 "target 与 campus 无关系" 这一领域不变量。
+  if (input.campusId != null) {
+    const targetMembership = await tx.campusMembership.findUnique({
+      where: {
+        userId_campusId: { userId: input.targetUserId, campusId: input.campusId },
+      },
+      select: { status: true },
+    });
+    if (
+      !targetMembership ||
+      (targetMembership.status !== "ACTIVE" && targetMembership.status !== "SUSPENDED")
+    ) {
+      throw enforcementError("ENFORCEMENT_TARGET_SCOPE_MISMATCH");
+    }
+  }
+
+  // ---- privileged target 保护（full-admin 等价） ----
+  if (await hasFullAdminSurfaceAccess(await loadAuthorizationContext(input.targetUserId, tx))) {
+    throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
+  }
+
+  const scopeKey = riskScopeKey(input.campusId);
+
+  const existing = await tx.riskState.findUnique({
+    where: { userId_scopeKey: { userId: input.targetUserId, scopeKey } },
+  });
+
+  const previousState = existing?.state ?? null;
+
+  // 幂等：同状态重复设置为 no-op（不产生执法记录）
+  if ((previousState ?? "NORMAL") === input.state) {
+    return { scopeKey, state: input.state as RiskStateLevel, previousState, changed: false };
+  }
+
+  assertRiskStateTransition(previousState, input.state);
+
+  const row = await tx.riskState.upsert({
+    where: { userId_scopeKey: { userId: input.targetUserId, scopeKey } },
+    update: { state: input.state, reasonCode: input.reasonCode, updatedById: input.actorId, campusId: input.campusId },
+    create: {
+      userId: input.targetUserId,
+      campusId: input.campusId,
+      scopeKey,
+      state: input.state,
+      reasonCode: input.reasonCode,
+      updatedById: input.actorId,
+    },
+  });
+
+  // EnforcementAction 仅记录进入/离开 RESTRICTED 的执法决策（历史/溯源表）；
+  // WATCH 变更仅记录管理审计。
+  // previousState：动作前精确状态（canonical：无行 = NORMAL，显式编码不存 null）
+  const enteredRestriction = input.state === "RESTRICTED";
+  const leftRestriction = previousState === "RESTRICTED" && input.state !== "RESTRICTED";
+
+  if (enteredRestriction || leftRestriction) {
+    const previousStateSnapshot = resultStateFor(
+      "RISK_STATE",
+      previousState ?? "NORMAL",
+      input.campusId,
+    );
+    await tx.enforcementAction.create({
+      data: {
+        type: enteredRestriction ? "MARKETPLACE_RESTRICT" : "MARKETPLACE_RESTORE",
+        actorId: input.actorId,
+        targetId: input.targetUserId,
+        campusId: input.campusId,
+        scopeKey,
+        reasonCode: input.reasonCode as never,
+        note: input.note || null,
+        sourceType: input.sourceType || null,
+        sourceId: input.sourceId || null,
+        previousState: previousStateSnapshot,
+        resultState: resultStateFor("RISK_STATE", input.state, input.campusId),
+      },
+    });
+  }
+
+  await recordAdminAudit(
+    {
+      actorId: input.actorId,
+      action: enteredRestriction
+        ? "MARKETPLACE_RESTRICTED"
+        : leftRestriction
+          ? "MARKETPLACE_RESTORED"
+          : input.state === "WATCH"
+            ? "RISK_WATCH_SET"
+            : "RISK_WATCH_CLEARED",
+      targetType: "USER",
+      targetId: input.targetUserId,
+      campusId: input.campusId,
+      detail: input.note || null,
+      metadata: {
+        riskState: input.state,
+        scopeKey,
+        reasonCode: input.reasonCode,
+        sourceType: input.sourceType || null,
+        sourceId: input.sourceId || null,
+      },
+    },
+    tx,
+  );
+
+  return {
+    scopeKey,
+    state: row.state as RiskStateLevel,
+    previousState,
+    changed: true,
+  };
+}
+
 export async function setRiskState(input: SetRiskStateInput): Promise<SetRiskStateResult> {
   return withTransaction(async (tx) => {
-    // SELF_ENFORCEMENT = DENY（锁前 fail closed；非探测通道）
-    if (input.actorId === input.targetUserId) {
-      throw enforcementError("ENFORCEMENT_SELF_DENIED");
-    }
-
+    // ONE COMPLETE SORTED SET：actor+target 一次性取得（禁止部分取锁）；
     // actor serialization（Phase 6B #36：禁止无锁读→写）
     await acquireGovernanceSubjectLocks(tx, [
       { subjectType: "USER", subjectId: input.actorId },
@@ -130,138 +292,7 @@ export async function setRiskState(input: SetRiskStateInput): Promise<SetRiskSta
       await input.racePoint(tx);
     }
 
-    // ---- Repair 1 Blocker G：授权顺序收紧 ----
-    // actor 授权必须先于任何 target 探测：未授权 actor 对 missing/normal/
-    // privileged/cross-campus target 一律得到统一的 AUTH_* denial family，
-    // 无法通过错误路径差异推断目标状态。
-    const actorContext = await loadAuthorizationContext(input.actorId, tx);
-    if (!actorContext || !actorContext.accountActive) {
-      throw rbacError("AUTH_ACCOUNT_INACTIVE");
-    }
-    const allowed =
-      input.campusId == null
-        ? hasPermission(actorContext, "user.suspend")
-        : hasPermission(actorContext, "campus.manage", input.campusId);
-    if (!allowed) {
-      throw rbacError("AUTH_PERMISSION_DENIED");
-    }
-
-    // ---- target 存在性（已授权 actor 才可达） ----
-    const target = await tx.user.findUnique({
-      where: { id: input.targetUserId },
-      select: { id: true, status: true, deletedAt: true, erasedAt: true },
-    });
-    if (!target || target.deletedAt || target.erasedAt) {
-      throw enforcementError("ENFORCEMENT_TARGET_NOT_FOUND");
-    }
-
-    // ---- Repair 1 Blocker A：CAMPUS 风险态必须绑定真实 target membership ----
-    // campus 作用域变更要求 target 对该校区存在 membership 且
-    // status ∈ {ACTIVE, SUSPENDED}：ACTIVE 正常成员；SUSPENDED 管理员仍须
-    // 能维护/恢复其风险态；missing/PENDING/REJECTED/LEFT 一律 DENY
-    // （LEFT 已离校不再新增校区处罚；PENDING/REJECTED 尚非有效成员）。
-    // GLOBAL 权限不能绕过 "target 与 campus 无关系" 这一领域不变量。
-    if (input.campusId != null) {
-      const targetMembership = await tx.campusMembership.findUnique({
-        where: {
-          userId_campusId: { userId: input.targetUserId, campusId: input.campusId },
-        },
-        select: { status: true },
-      });
-      if (
-        !targetMembership ||
-        (targetMembership.status !== "ACTIVE" && targetMembership.status !== "SUSPENDED")
-      ) {
-        throw enforcementError("ENFORCEMENT_TARGET_SCOPE_MISMATCH");
-      }
-    }
-
-    // ---- privileged target 保护（full-admin 等价） ----
-    if (await hasFullAdminSurfaceAccess(await loadAuthorizationContext(input.targetUserId, tx))) {
-      throw enforcementError("ENFORCEMENT_PRIVILEGED_TARGET");
-    }
-
-    const scopeKey = riskScopeKey(input.campusId);
-
-    const existing = await tx.riskState.findUnique({
-      where: { userId_scopeKey: { userId: input.targetUserId, scopeKey } },
-    });
-
-    const previousState = existing?.state ?? null;
-
-    // 幂等：同状态重复设置为 no-op（不产生执法记录）
-    if ((previousState ?? "NORMAL") === input.state) {
-      return { scopeKey, state: input.state as RiskStateLevel, previousState, changed: false };
-    }
-
-    assertRiskStateTransition(previousState, input.state);
-
-    const row = await tx.riskState.upsert({
-      where: { userId_scopeKey: { userId: input.targetUserId, scopeKey } },
-      update: { state: input.state, reasonCode: input.reasonCode, updatedById: input.actorId, campusId: input.campusId },
-      create: {
-        userId: input.targetUserId,
-        campusId: input.campusId,
-        scopeKey,
-        state: input.state,
-        reasonCode: input.reasonCode,
-        updatedById: input.actorId,
-      },
-    });
-
-    // EnforcementAction 仅记录进入/离开 RESTRICTED 的执法决策（历史/溯源表）；
-    // WATCH 变更仅记录管理审计
-    const enteredRestriction = input.state === "RESTRICTED";
-    const leftRestriction = previousState === "RESTRICTED" && input.state !== "RESTRICTED";
-
-    if (enteredRestriction || leftRestriction) {
-      await tx.enforcementAction.create({
-        data: {
-          type: enteredRestriction ? "MARKETPLACE_RESTRICT" : "MARKETPLACE_RESTORE",
-          actorId: input.actorId,
-          targetId: input.targetUserId,
-          campusId: input.campusId,
-          scopeKey,
-          reasonCode: input.reasonCode as never,
-          note: input.note || null,
-          sourceType: input.sourceType || null,
-          sourceId: input.sourceId || null,
-          resultState: resultStateFor("RISK_STATE", input.state, input.campusId),
-        },
-      });
-    }
-
-    await recordAdminAudit(
-      {
-        actorId: input.actorId,
-        action: enteredRestriction
-          ? "MARKETPLACE_RESTRICTED"
-          : leftRestriction
-            ? "MARKETPLACE_RESTORED"
-            : input.state === "WATCH"
-              ? "RISK_WATCH_SET"
-              : "RISK_WATCH_CLEARED",
-        targetType: "USER",
-        targetId: input.targetUserId,
-        campusId: input.campusId,
-        detail: input.note || null,
-        metadata: {
-          riskState: input.state,
-          scopeKey,
-          reasonCode: input.reasonCode,
-          sourceType: input.sourceType || null,
-          sourceId: input.sourceId || null,
-        },
-      },
-      tx,
-    );
-
-    return {
-      scopeKey,
-      state: row.state as RiskStateLevel,
-      previousState,
-      changed: true,
-    };
+    return setRiskStateTxLocked(tx, input);
   });
 }
 

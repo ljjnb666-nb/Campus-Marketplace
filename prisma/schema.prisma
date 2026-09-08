@@ -1498,25 +1498,33 @@ enum EnforcementReasonCode {
 // 成员状态仍是 CampusMembership.status，限制态仍是 RiskState——
 // 本表只记录"谁在何时依据什么对谁做了什么"，append-only。
 model EnforcementAction {
-  id          String                @id @default(cuid())
-  type        EnforcementActionType
-  actorId     String
-  targetId    String
+  id             String                @id @default(cuid())
+  type           EnforcementActionType
+  actorId        String
+  targetId       String
   // campus-scoped 动作的目标校区（GLOBAL 动作为 null）
-  campusId    String?
-  scopeKey    String
-  reasonCode  EnforcementReasonCode
-  note        String?
+  campusId       String?
+  scopeKey       String
+  reasonCode     EnforcementReasonCode
+  note           String?
   // 来源追溯（如 Report / RiskFlag / MANUAL）
-  sourceType  String?
-  sourceId    String?
+  sourceType     String?
+  sourceId       String?
   // 动作生效后的状态快照（如 "USER:SUSPENDED" / "CAMPUS_MEMBERSHIP:SUSPENDED" /
   // "RISK_STATE:RESTRICTED@CAMPUS:<id>"），仅作历史证据
-  resultState String
-  createdAt   DateTime              @default(now())
-  actor       User                  @relation("EnforcementActor", fields: [actorId], references: [id])
-  target      User                  @relation("EnforcementTarget", fields: [targetId], references: [id])
-  campus      Campus?               @relation(fields: [campusId], references: [id])
+  resultState    String
+  // Phase 6C-1A：动作生效前的精确状态快照（与 resultState 同一编码）。
+  // null = 迁移前 legacy 行或 rollback-image 写入（reversal provenance 不完整）；
+  // 历史 before-state 不可可靠重建，禁止回填，禁止按 type/resultState 推断
+  previousState  String?
+  // Phase 6C-1A：post-migration enforcement epoch 的因果序（DB sequence 分配，
+  // LEGACY_SEQ_BOUNDARY = 1_000_000_000 之前为 legacy epoch）。
+  // createdAt / id 仅作展示与 wall-clock 审计用途，绝不是因果序
+  enforcementSeq BigInt                @unique @default(autoincrement())
+  createdAt      DateTime              @default(now())
+  actor          User                  @relation("EnforcementActor", fields: [actorId], references: [id])
+  target         User                  @relation("EnforcementTarget", fields: [targetId], references: [id])
+  campus         Campus?               @relation(fields: [campusId], references: [id])
 
   @@index([targetId, createdAt])
   @@index([actorId, createdAt])

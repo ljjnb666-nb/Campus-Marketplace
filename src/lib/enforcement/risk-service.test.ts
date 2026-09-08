@@ -57,6 +57,7 @@ import {
   recordRiskFlag,
   resolveRiskFlag,
   setRiskState,
+  setRiskStateTxLocked,
 } from "@/lib/enforcement/risk-service";
 
 const txStub = {
@@ -128,6 +129,8 @@ describe("setRiskState（显式可解释风险状态）", () => {
         targetId: "target-1",
         scopeKey: "GLOBAL",
         reasonCode: "FRAUD_CONFIRMED",
+        // 无 RiskState 行的 canonical pre-state = NORMAL（显式编码，不存 null）
+        previousState: "RISK_STATE:NORMAL@GLOBAL",
         resultState: "RISK_STATE:RESTRICTED@GLOBAL",
       }),
     });
@@ -150,7 +153,31 @@ describe("setRiskState（显式可解释风险状态）", () => {
 
     expect(result.changed).toBe(true);
     expect(txEnforcementActionCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ type: "MARKETPLACE_RESTORE" }),
+      data: expect.objectContaining({
+        type: "MARKETPLACE_RESTORE",
+        previousState: "RISK_STATE:RESTRICTED@GLOBAL",
+        resultState: "RISK_STATE:NORMAL@GLOBAL",
+      }),
+    });
+  });
+
+  it("encodes WATCH → RESTRICTED previousState precisely（不能降级为 NORMAL）", async () => {
+    txRiskStateFindUnique.mockResolvedValue({ state: "WATCH" });
+
+    await setRiskState({
+      actorId: "actor-1",
+      targetUserId: "target-1",
+      campusId: null,
+      state: "RESTRICTED",
+      reasonCode: "FRAUD_CONFIRMED",
+    });
+
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "MARKETPLACE_RESTRICT",
+        previousState: "RISK_STATE:WATCH@GLOBAL",
+        resultState: "RISK_STATE:RESTRICTED@GLOBAL",
+      }),
     });
   });
 
@@ -388,6 +415,48 @@ describe("setRiskState（显式可解释风险状态）", () => {
       { subjectType: "USER", subjectId: "actor-1" },
       { subjectType: "USER", subjectId: "target-1" },
     ]);
+  });
+});
+
+describe("TxLocked seam（Phase 6C-1A：不取治理锁的 authoritative 核）", () => {
+  const seamTx = txStub as unknown as Prisma.TransactionClient;
+
+  it("seam restricts without acquiring governance subject locks", async () => {
+    const result = await setRiskStateTxLocked(seamTx, {
+      actorId: "actor-1",
+      targetUserId: "target-1",
+      campusId: null,
+      state: "RESTRICTED",
+      reasonCode: "FRAUD_CONFIRMED",
+    });
+
+    expect(result).toMatchObject({ state: "RESTRICTED", changed: true });
+    // 核心不变量：seam 绝不取得治理 subject 锁（调用方负责完整 sorted 锁集）
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        previousState: "RISK_STATE:NORMAL@GLOBAL",
+        resultState: "RISK_STATE:RESTRICTED@GLOBAL",
+      }),
+    });
+  });
+
+  it("seam keeps authorization recheck before any target probing", async () => {
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([]));
+    txUserFindUnique.mockResolvedValue(null);
+
+    await expect(
+      setRiskStateTxLocked(seamTx, {
+        actorId: "actor-1",
+        targetUserId: "missing-1",
+        campusId: null,
+        state: "RESTRICTED",
+        reasonCode: "MANUAL_REVIEW",
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_PERMISSION_DENIED" });
+
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txUserFindUnique).not.toHaveBeenCalled();
   });
 });
 

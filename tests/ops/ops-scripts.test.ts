@@ -31,15 +31,18 @@ describe("rollback / restore shell-level regression（tests/ops/rollback-restore
     "safe rollback 不碰 DB；hard 失败阻断回滚；SHA/确认缺失全部 fail",
     async () => {
       // 长耗时命令必须走异步 execFile：execSync 会阻塞 vitest worker 事件循环，
-      // 导致 worker RPC（onTaskUpdate）超时误报 unhandled error
+      // 导致 worker RPC（onTaskUpdate）超时误报 unhandled error。
+      // 脚本在本机（Windows MSYS fork/exec 慢）隔离运行即需 ~118s，120s 子进程
+      // 超时零余量，全量并行下必然误杀——放宽到 300s 只影响等待上限，
+      // 脚本内部 32 项断言与 FAIL=0 语义不变（CI Linux ~40s 不受影响）。
       const { stdout } = await execFileAsync("bash", ["tests/ops/rollback-restore.test.sh"], {
         cwd: repoRoot,
-        timeout: 120_000,
+        timeout: 300_000,
         maxBuffer: 10 * 1024 * 1024,
       });
       expect(stdout).toMatch(/FAIL=0/);
     },
-    150_000,
+    330_000,
   );
 });
 
@@ -49,12 +52,12 @@ describe("backup status artifact shell-level regression（tests/ops/backup-statu
     async () => {
       const { stdout } = await execFileAsync("bash", ["tests/ops/backup-status.test.sh"], {
         cwd: repoRoot,
-        timeout: 120_000,
+        timeout: 300_000,
         maxBuffer: 10 * 1024 * 1024,
       });
       expect(stdout).toMatch(/FAIL=0/);
     },
-    150_000,
+    330_000,
   );
 });
 

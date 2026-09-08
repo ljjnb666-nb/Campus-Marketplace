@@ -51,13 +51,22 @@ vi.mock("@/lib/rbac/service", async (importOriginal) => {
   };
 });
 
+import type { Prisma } from "@prisma/client";
 import type { AuthorizationContext } from "@/lib/rbac/service";
-import { reinstateAccount, suspendAccount } from "@/lib/enforcement/account-enforcement-service";
+import {
+  reinstateAccount,
+  reinstateAccountTxLocked,
+  suspendAccount,
+  suspendAccountTxLocked,
+} from "@/lib/enforcement/account-enforcement-service";
 
 const txStub = {
   user: { findUnique: txUserFindUnique, update: txUserUpdate },
   enforcementAction: { create: txEnforcementActionCreate },
 };
+
+// seam 直调用 tx stub（测试桩不需要完整 TransactionClient 形状）
+const seamTx = txStub as unknown as Prisma.TransactionClient;
 
 const ACTIVE_TARGET = { id: "target-1", status: "ACTIVE", deletedAt: null, erasedAt: null };
 
@@ -129,6 +138,7 @@ describe("suspendAccount（中央账号停用服务）", () => {
         actorId: "actor-1",
         targetId: "target-1",
         reasonCode: "MANUAL_REVIEW",
+        previousState: "USER:ACTIVE",
         resultState: "USER:SUSPENDED",
       }),
     });
@@ -286,7 +296,12 @@ describe("reinstateAccount（中央账号恢复服务）", () => {
       data: { status: "ACTIVE" },
     });
     expect(txEnforcementActionCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ type: "ACCOUNT_REINSTATE", reasonCode: "FALSE_POSITIVE_CORRECTION" }),
+      data: expect.objectContaining({
+        type: "ACCOUNT_REINSTATE",
+        reasonCode: "FALSE_POSITIVE_CORRECTION",
+        previousState: "USER:SUSPENDED",
+        resultState: "USER:ACTIVE",
+      }),
     });
   });
 
@@ -301,5 +316,57 @@ describe("reinstateAccount（中央账号恢复服务）", () => {
     await expect(reinstateAccount({ ...BASE_INPUT, targetUserId: "actor-1" })).rejects.toMatchObject({
       code: "ENFORCEMENT_SELF_DENIED",
     });
+  });
+});
+
+describe("TxLocked seam（Phase 6C-1A：不取治理锁的 authoritative 核）", () => {
+  it("seam suspends without acquiring governance subject locks", async () => {
+    const result = await suspendAccountTxLocked(seamTx, BASE_INPUT);
+
+    expect(result).toEqual({ status: "SUSPENDED", alreadyInState: false });
+    // 核心不变量：seam 绝不取得治理 subject 锁（调用方负责完整 sorted 锁集）
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "ACCOUNT_SUSPEND",
+        previousState: "USER:ACTIVE",
+        resultState: "USER:SUSPENDED",
+      }),
+    });
+  });
+
+  it("seam reinstates without acquiring governance subject locks", async () => {
+    txUserFindUnique.mockResolvedValue({ ...ACTIVE_TARGET, status: "SUSPENDED" });
+
+    const result = await reinstateAccountTxLocked(seamTx, BASE_INPUT);
+
+    expect(result).toEqual({ status: "ACTIVE", alreadyInState: false });
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "ACCOUNT_REINSTATE",
+        previousState: "USER:SUSPENDED",
+        resultState: "USER:ACTIVE",
+      }),
+    });
+  });
+
+  it("seam keeps authorization recheck（self-deny / 无授权拒绝）", async () => {
+    await expect(
+      suspendAccountTxLocked(seamTx, { ...BASE_INPUT, targetUserId: "actor-1" }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_SELF_DENIED" });
+
+    loadAuthorizationContextMock.mockImplementation(async (userId: string) => ({
+      userId,
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [],
+    }));
+    await expect(suspendAccountTxLocked(seamTx, BASE_INPUT)).rejects.toMatchObject({
+      code: "AUTH_PERMISSION_DENIED",
+    });
+
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txUserUpdate).not.toHaveBeenCalled();
   });
 });
