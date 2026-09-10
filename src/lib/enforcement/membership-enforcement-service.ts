@@ -177,7 +177,6 @@ export async function suspendCampusMembershipTxLocked(
       detail: input.note || null,
       metadata: {
         reasonCode: input.reasonCode,
-        previousState,
         resultState: resultStateFor("CAMPUS_MEMBERSHIP", "SUSPENDED"),
         sourceType: input.sourceType || null,
         sourceId: input.sourceId || null,
@@ -243,7 +242,6 @@ export async function reinstateCampusMembershipTxLocked(
       detail: input.note || null,
       metadata: {
         reasonCode: input.reasonCode,
-        previousState,
         resultState: resultStateFor("CAMPUS_MEMBERSHIP", "ACTIVE"),
         sourceType: input.sourceType || null,
         sourceId: input.sourceId || null,

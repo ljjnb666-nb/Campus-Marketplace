@@ -197,7 +197,6 @@ export async function suspendAccountTxLocked(
       detail: input.note || null,
       metadata: {
         reasonCode: input.reasonCode,
-        previousState,
         resultState: resultStateFor("USER", "SUSPENDED"),
         sourceType: input.sourceType || null,
         sourceId: input.sourceId || null,
@@ -269,7 +268,6 @@ export async function reinstateAccountTxLocked(
       detail: input.note || null,
       metadata: {
         reasonCode: input.reasonCode,
-        previousState,
         resultState: resultStateFor("USER", "ACTIVE"),
         sourceType: input.sourceType || null,
         sourceId: input.sourceId || null,

@@ -11,9 +11,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * 覆盖：
  *  1. sequence/column 数据库合同：CACHE 1 / START 1e9 / OWNED BY / NOT NULL /
  *     UNIQUE / previousState 保持 nullable（rollback 兼容，绝不自动 ALTER 修正）
- *  2. REQUIRED RACE：真实 PG transaction timestamp 反转 —— Tx B 先开事务捕获
- *     transaction timestamp（barrier 在 target subject lock 之前），Tx A 随后
- *     完成完整 ACCOUNT_SUSPEND；释放 B 后 B 完成完整 ACCOUNT_REINSTATE。
+ *  2. DB_DEFAULT_TIMESTAMP_INVERSION_PROOF：真实 PostgreSQL transaction
+ *     timestamp 反转 —— Tx B 先开事务捕获 transaction timestamp（barrier 在
+ *     target subject lock 之前），Tx A 随后完成完整 ACCOUNT_SUSPEND；释放 B
+ *     后 B 完成完整 ACCOUNT_REINSTATE。注意：B 的 EA 行经 raw INSERT 省略
+ *     createdAt，由数据库 DEFAULT CURRENT_TIMESTAMP（事务开始时间）赋值——
+ *     这是 DB-default 时间戳反转证明，不是 canonical Prisma EA create 路径
+ *     （Prisma create 对 @default(now()) 在客户端填充语句墙钟时间）。
  *     断言 B.createdAt <= A.createdAt（相等亦 PASS）同时 A.seq < B.seq ——
  *     createdAt 不是因果序，enforcementSeq 才是。
  *  3. sequence 唯一性（多 target 并行）+ rollback 烧号 gap（禁止 gapless 断言）
@@ -279,10 +283,12 @@ describe.skipIf(!integrationDatabaseUrl)(
     });
 
     // ------------------------------------------------------------------
-    // 2. 真实 PG transaction timestamp 反转（REQUIRED RACE）
+    // 2. DB_DEFAULT_TIMESTAMP_INVERSION_PROOF（REQUIRED RACE）
+    //    B 行经 raw INSERT 省略 createdAt → DB DEFAULT CURRENT_TIMESTAMP
+    //    （事务开始时间）；非 canonical Prisma EA create 路径。
     // ------------------------------------------------------------------
 
-    it("timestamp 反转：B 先开事务（DB 默认 createdAt 更早）晚提交，因果序仍由 enforcementSeq 决定", async () => {
+    it("DB-default transaction timestamp 反转：B 先开事务（更早 createdAt）晚提交，因果序仍由 enforcementSeq 决定", async () => {
       const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
       const { acquireGovernanceSubjectLocks } = await import("@/lib/governance/governance-lock");
 
@@ -298,9 +304,10 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
 
       // ---- Tx B：先开事务并捕获 transaction timestamp，barrier 在 target 锁之前 ----
-      // 注：Prisma create 对 @default(now()) 走客户端填充（语句墙钟时间）；
-      // 要拿到「真实 PostgreSQL database default timestamp」（事务开始时间，
-      // DEFAULT CURRENT_TIMESTAMP），EA INSERT 必须经 raw SQL 省略 createdAt 列。
+      // Prisma create 对 @default(now()) 在客户端填充语句墙钟时间；要拿到
+      // 「真实 PostgreSQL database default timestamp」（DEFAULT CURRENT_TIMESTAMP
+      // = 事务开始时间），B 的 EA INSERT 必须经 raw SQL 省略 createdAt 列——
+      // 因此本证明是 DB-default 时间戳反转证明，非 canonical create 路径。
       const txBPromise = rawClient!
         .$transaction(
           async (tx) => {
@@ -901,7 +908,6 @@ describe.skipIf(!integrationDatabaseUrl)(
 
         // 两行既有数据（backfill 相对顺序 NON_AUTHORITATIVE，绝不按 backfill
         // 顺序断言历史因果——只断言 epoch 范围 / 唯一 / 非空）
-        const upgRun = randomUUID().slice(0, 8);
         await tempClient.$executeRawUnsafe(
           `INSERT INTO "EnforcementAction"
              ("id","type","actorId","targetId","campusId","scopeKey","reasonCode","note","sourceType","sourceId","resultState","createdAt")

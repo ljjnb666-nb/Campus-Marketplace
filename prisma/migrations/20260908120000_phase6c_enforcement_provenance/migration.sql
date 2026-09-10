@@ -16,6 +16,11 @@
 --
 -- createdAt / id remain DISPLAY / WALL-CLOCK AUDIT ONLY — they are never a
 -- causal order source.
+--
+-- MIGRATION_ATOMICITY = EXPLICIT_POSTGRES_TRANSACTION：整个迁移显式包在
+-- BEGIN/COMMIT 中，不依赖 Prisma Migrate 的自动事务包装。
+
+BEGIN;
 
 ALTER TABLE "EnforcementAction" ADD COLUMN "previousState" TEXT;
 
@@ -64,3 +69,5 @@ ALTER TABLE "EnforcementAction"
   ALTER COLUMN "enforcementSeq" SET NOT NULL;
 
 CREATE UNIQUE INDEX "EnforcementAction_enforcementSeq_key" ON "EnforcementAction"("enforcementSeq");
+
+COMMIT;
