@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -55,7 +56,9 @@ vi.mock("@/lib/rbac/service", async (importOriginal) => {
 import type { AuthorizationContext } from "@/lib/rbac/service";
 import {
   reinstateCampusMembership,
+  reinstateCampusMembershipTxLocked,
   suspendCampusMembership,
+  suspendCampusMembershipTxLocked,
 } from "@/lib/enforcement/membership-enforcement-service";
 
 const txStub = {
@@ -63,6 +66,9 @@ const txStub = {
   campusMembership: { findUnique: txMembershipFindUnique, update: txMembershipUpdate },
   enforcementAction: { create: txEnforcementActionCreate },
 };
+
+// seam 直调用 tx stub（测试桩不需要完整 TransactionClient 形状）
+const seamTx = txStub as unknown as Prisma.TransactionClient;
 
 const ACTIVE_TARGET = { id: "target-1", deletedAt: null, erasedAt: null };
 
@@ -118,6 +124,7 @@ describe("suspendCampusMembership（校园成员停用）", () => {
         type: "MEMBERSHIP_SUSPEND",
         campusId: "campus-a",
         scopeKey: "CAMPUS:campus-a",
+        previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
         resultState: "CAMPUS_MEMBERSHIP:SUSPENDED",
       }),
     });
@@ -244,7 +251,12 @@ describe("reinstateCampusMembership（校园成员恢复）", () => {
 
     expect(result).toEqual({ status: "ACTIVE", alreadyInState: false });
     expect(txEnforcementActionCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ type: "MEMBERSHIP_REINSTATE", reasonCode: "FALSE_POSITIVE_CORRECTION" }),
+      data: expect.objectContaining({
+        type: "MEMBERSHIP_REINSTATE",
+        reasonCode: "FALSE_POSITIVE_CORRECTION",
+        previousState: "CAMPUS_MEMBERSHIP:SUSPENDED",
+        resultState: "CAMPUS_MEMBERSHIP:ACTIVE",
+      }),
     });
   });
 
@@ -271,5 +283,53 @@ describe("reinstateCampusMembership（校园成员恢复）", () => {
     await expect(reinstateCampusMembership(BASE_INPUT)).rejects.toMatchObject({
       code: "AUTH_CAMPUS_SCOPE_MISMATCH",
     });
+  });
+});
+
+describe("TxLocked seam（Phase 6C-1A：不取治理锁的 authoritative 核）", () => {
+  it("seam suspends without acquiring governance subject locks", async () => {
+    const result = await suspendCampusMembershipTxLocked(seamTx, BASE_INPUT);
+
+    expect(result).toEqual({ status: "SUSPENDED", alreadyInState: false });
+    // 核心不变量：seam 绝不取得治理 subject 锁（调用方负责锁集）
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "MEMBERSHIP_SUSPEND",
+        previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
+      }),
+    });
+  });
+
+  it("seam reinstates without acquiring governance subject locks", async () => {
+    txMembershipFindUnique.mockResolvedValue({ id: "m-1", status: "SUSPENDED" });
+
+    const result = await reinstateCampusMembershipTxLocked(seamTx, {
+      ...BASE_INPUT,
+      reasonCode: "FALSE_POSITIVE_CORRECTION",
+    });
+
+    expect(result).toEqual({ status: "ACTIVE", alreadyInState: false });
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txEnforcementActionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "MEMBERSHIP_REINSTATE",
+        previousState: "CAMPUS_MEMBERSHIP:SUSPENDED",
+      }),
+    });
+  });
+
+  it("seam preserves the full safety chain（self-deny / state machine fail closed）", async () => {
+    await expect(
+      suspendCampusMembershipTxLocked(seamTx, { ...BASE_INPUT, targetUserId: "actor-1" }),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_SELF_DENIED" });
+
+    txMembershipFindUnique.mockResolvedValue({ id: "m-1", status: "LEFT" });
+    await expect(
+      reinstateCampusMembershipTxLocked(seamTx, BASE_INPUT),
+    ).rejects.toMatchObject({ code: "ENFORCEMENT_INVALID_TRANSITION" });
+
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txMembershipUpdate).not.toHaveBeenCalled();
   });
 });
