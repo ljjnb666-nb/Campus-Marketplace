@@ -52,6 +52,7 @@ vi.mock("@/lib/rbac/service", async (importOriginal) => {
 });
 
 import type { AuthorizationContext } from "@/lib/rbac/service";
+import { PERMISSION_KEYS } from "@/lib/rbac/permissions";
 import {
   isMarketplaceRestricted,
   recordRiskFlag,
@@ -247,7 +248,9 @@ describe("setRiskState（显式可解释风险状态）", () => {
               roleKey: "PLATFORM_ADMIN",
               scope: "GLOBAL",
               campusId: null,
-              permissionKeys: ["user.suspend", "campus.manage", "verification.review", "report.review", "listing.moderate", "category.manage", "moderation.keyword.manage", "asset.sensitive.read", "rbac.role.assign", "audit.read"],
+              // full-admin 等价 = 完整覆盖 admin surface（与 roles.ts 同源派生，
+              // 避免 permission set 演进时 fixture 漂移）
+              permissionKeys: [...PERMISSION_KEYS],
             },
           ])
         : globalEnforcer(),

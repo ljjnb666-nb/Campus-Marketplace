@@ -24,12 +24,28 @@ describe("数据分类 registry（DATA_CLASSIFICATION_TEST）", () => {
       "UPLOADED_ASSET_METADATA",
       "POLICY_ACCEPTANCE_EVIDENCE",
       "PRIVACY_REQUESTS",
+      "APPEAL_RECORDS",
       "FUTURE_PAYMENT_DATA",
     ];
 
     for (const category of requiredCategories) {
       expect(DATA_CLASSIFICATION_REGISTRY[category], `缺少类别 ${category}`).toBeTruthy();
     }
+  });
+
+  it("APPEAL_RECORDS 分类合同（Phase 6C-1B 冻结）", () => {
+    const appeal = DATA_CLASSIFICATION_REGISTRY.APPEAL_RECORDS;
+    expect(appeal.classification).toBe("CONFIDENTIAL");
+    // appellant self + appeal.review 授权 reviewer 双向可读
+    expect(appeal.visibility).toBe("SELF_AND_AUTHORIZED_ROLES");
+    expect(appeal.retentionDuration).toMatchObject({ kind: "PENDING_LEGAL_REVIEW" });
+    expect(appeal.disposition).toBe("KEEP");
+    expect(appeal.holdBehavior).toBe("HOLD_BLOCKS");
+    expect(appeal.exportable).toBe(true);
+    expect(appeal.logSafe).toBe(false);
+    expect(appeal.legalReviewRequired).toBe(true);
+    expect(canIncludeInExport("APPEAL_RECORDS")).toBe(true);
+    expect(isSensitiveDataCategory("APPEAL_RECORDS")).toBe(true);
   });
 
   it("keeps credentials and verification materials out of exports and logs", () => {

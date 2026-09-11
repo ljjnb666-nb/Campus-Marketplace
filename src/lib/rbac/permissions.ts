@@ -14,6 +14,9 @@ export const PERMISSIONS = {
   "category.manage": "管理商品/跑腿/服务分类",
   "moderation.keyword.manage": "管理敏感词规则",
   "user.suspend": "停用/恢复用户账号",
+  // Phase 6C-1B：申诉审核（review scope 流转/UPHELD/DISMISSED；GRANT 另需
+  // 通过 canonical enforcement seam 自身的权限复核，appeal.review 不构成 bypass）
+  "appeal.review": "审核用户对执法处罚提交的申诉",
   "asset.sensitive.read": "因治理/审核目的访问敏感私有材料（认证材料等）",
   "campus.manage": "管理校区与校园认证策略版本",
   "rbac.role.assign": "授予/撤回用户角色",
