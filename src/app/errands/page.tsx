@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { PageContainer } from "@/components/ui/page-container";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -58,7 +58,9 @@ export default async function ErrandsPage({
   }>;
 }) {
   const params = await searchParams;
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：接单 CTA 按 ACTIVE 账号解析；
+  // SUSPENDED 会话 → null → 匿名语义，公开跑腿列表照常渲染
+  const viewerId = await getActiveViewerId();
   const page = parsePageParam(params.page);
   const result = await getErrandList({
     q: params.q?.trim(),
@@ -95,7 +97,7 @@ export default async function ErrandsPage({
         title="跑腿求助大厅"
         description="校内代取快递、代购、帮送物品，同校互帮互助"
         action={
-          session?.user ? (
+          viewerId ? (
             <Link
               href="/errands/new"
               className="inline-flex items-center gap-1.5 rounded-2xl bg-gradient-to-r from-indigo-600 to-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-indigo-600/20 transition hover:from-indigo-700 hover:to-indigo-800 hover:shadow-lg active:scale-95"

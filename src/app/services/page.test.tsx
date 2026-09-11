@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getServiceList } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getServiceList } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getServiceList: vi.fn(),
 }));
 
@@ -21,8 +21,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/service-repository", () => ({
@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("ServicesPage", () => {
   it("renders public browsing and login call-to-action for guests", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getServiceList.mockResolvedValue({
       items: [],
       total: 0,
@@ -78,7 +78,7 @@ describe("ServicesPage", () => {
   });
 
   it("renders active filters, category shortcuts, and results", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getServiceList.mockResolvedValue({
       items: [
         {

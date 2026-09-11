@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getMyServiceFavorites } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getVerifiedSession, getMyServiceFavorites } = vi.hoisted(() => ({
+  getVerifiedSession: vi.fn(),
   getMyServiceFavorites: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({ auth }));
+vi.mock("@/lib/server-auth", () => ({ getVerifiedSession }));
 vi.mock("@/actions/service-favorite", () => ({ getMyServiceFavorites }));
 
 import { GET } from "@/app/api/favorites/services/route";
@@ -16,7 +16,7 @@ describe("GET /api/favorites/services", () => {
   });
 
   it("returns 401 without a session", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await GET(new Request("http://localhost/api/favorites/services"));
 
@@ -26,7 +26,7 @@ describe("GET /api/favorites/services", () => {
   });
 
   it("returns favorites for the signed-in user", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getMyServiceFavorites.mockResolvedValue([{ id: "fav-1" }]);
 
     const response = await GET(new Request("http://localhost/api/favorites/services"));
@@ -37,7 +37,7 @@ describe("GET /api/favorites/services", () => {
   });
 
   it("maps repository errors to a 500 response", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getMyServiceFavorites.mockRejectedValue(new Error("db down"));
 
     const response = await GET(new Request("http://localhost/api/favorites/services"));

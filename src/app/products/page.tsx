@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { PageContainer } from "@/components/ui/page-container";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -45,7 +45,9 @@ export default async function ProductsPage({
   }>;
 }) {
   const params = await searchParams;
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：私有个性化（currentUserId/发布 CTA）按
+  // ACTIVE 账号解析；SUSPENDED 会话 → null → 匿名语义，公开列表照常渲染
+  const viewerId = await getActiveViewerId();
   const page = parsePageParam(params.page);
   const [result, meta] = await Promise.all([
     getProductList({
@@ -56,7 +58,7 @@ export default async function ProductsPage({
       maxPrice: params.maxPrice,
       sort: params.sort ?? "latest",
       page,
-      currentUserId: session?.user?.id,
+      currentUserId: viewerId ?? undefined,
     }).catch(() => ({ items: [], total: 0, page: 1, pageSize: 12, totalPages: 1 })),
     getProductFormMeta(),
   ]);
@@ -89,7 +91,7 @@ export default async function ProductsPage({
         title="二手商品广场"
         description="浏览同校区闲置二手商品，同校面对面交易，省心又安全"
         action={
-          session?.user ? (
+          viewerId ? (
             <Link
               href="/products/new"
               className="inline-flex items-center gap-1.5 rounded-2xl bg-gradient-to-r from-indigo-600 to-indigo-700 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-indigo-600/20 transition hover:from-indigo-700 hover:to-indigo-800 hover:shadow-lg active:scale-95"

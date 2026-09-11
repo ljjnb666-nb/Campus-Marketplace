@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getVerifiedSession,
   getUnreadConversationCount,
   getUnreadNotificationCount,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   getUnreadConversationCount: vi.fn(),
   getUnreadNotificationCount: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -26,13 +26,13 @@ import { GET } from "@/app/api/user/live-summary/route";
 
 describe("GET /api/user/live-summary", () => {
   beforeEach(() => {
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     getUnreadConversationCount.mockReset();
     getUnreadNotificationCount.mockReset();
   });
 
   it("returns 401 with zero counts when the user is not logged in", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await GET(new Request("http://localhost/api/user/live-summary"));
     const body = await response.json();
@@ -44,10 +44,23 @@ describe("GET /api/user/live-summary", () => {
     });
   });
 
-  it("returns unread counts for the logged-in user", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
+  it("AUTH-3E: denies private unread counts for a suspended session", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "ACCOUNT_INELIGIBLE" });
+
+    const response = await GET(new Request("http://localhost/api/user/live-summary"));
+    const body = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(body).toEqual({
+      unreadNotifications: 0,
+      unreadConversations: 0,
     });
+    expect(getUnreadNotificationCount).not.toHaveBeenCalled();
+    expect(getUnreadConversationCount).not.toHaveBeenCalled();
+  });
+
+  it("returns unread counts for the logged-in user", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getUnreadNotificationCount.mockResolvedValue(3);
     getUnreadConversationCount.mockResolvedValue(5);
 

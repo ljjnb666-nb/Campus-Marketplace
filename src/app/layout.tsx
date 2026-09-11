@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
 import { AppSessionProvider } from "@/components/providers/session-provider";
@@ -30,12 +30,14 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await auth();
-  // 未登录时跳过按用户维度的数据库查询，头部徽标按 0 渲染。
-  const [unreadNotificationCount, unreadConversationCount] = session?.user?.id
+  // Phase 6C-2 raw-auth hardening：未读徽标是私有计数，必须 ACTIVE 账号 DB
+  // 复查（getActiveViewerId）。未登录 / SUSPENDED / deleted / erased → 按 0
+  // 渲染（私有个性化抑制）；匿名路径仍跳过按用户维度的数据库查询。
+  const viewerId = await getActiveViewerId();
+  const [unreadNotificationCount, unreadConversationCount] = viewerId
     ? await Promise.all([
-        getUnreadNotificationCount(session.user.id),
-        getUnreadConversationCount(session.user.id),
+        getUnreadNotificationCount(viewerId),
+        getUnreadConversationCount(viewerId),
       ])
     : [0, 0];
 

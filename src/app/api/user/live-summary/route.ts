@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getVerifiedSession } from "@/lib/server-auth";
 import { handleError } from "@/lib/error-handler";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
@@ -9,9 +9,11 @@ export const dynamic = "force-dynamic";
 
 async function getHandler() {
   try {
-    const session = await auth();
+    // Phase 6C-2 raw-auth hardening：私有未读计数必须 ACTIVE 账号 DB 复查
+    //（401 零计数体契约保持原状）
+    const verified = await getVerifiedSession();
 
-    if (!session?.user?.id) {
+    if (!verified.ok) {
       return NextResponse.json(
         {
           unreadNotifications: 0,
@@ -22,8 +24,8 @@ async function getHandler() {
     }
 
     const [unreadNotifications, unreadConversations] = await Promise.all([
-      getUnreadNotificationCount(session.user.id),
-      getUnreadConversationCount(session.user.id),
+      getUnreadNotificationCount(verified.user.id),
+      getUnreadConversationCount(verified.user.id),
     ]);
 
     return NextResponse.json({

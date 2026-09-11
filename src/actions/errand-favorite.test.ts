@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   revalidatePath,
   requireUser,
-  auth,
+  getVerifiedSession,
   errandFavoriteFindUnique,
   errandFavoriteFindMany,
   errandFavoriteCreate,
@@ -13,7 +13,7 @@ const {
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireUser: vi.fn(),
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   errandFavoriteFindUnique: vi.fn(),
   errandFavoriteFindMany: vi.fn(),
   errandFavoriteCreate: vi.fn(),
@@ -28,10 +28,7 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  auth,
+  getVerifiedSession,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -67,7 +64,7 @@ describe("errand favorite actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     errandFavoriteFindUnique.mockReset();
     errandFavoriteFindMany.mockReset();
     errandFavoriteCreate.mockReset();
@@ -76,7 +73,7 @@ describe("errand favorite actions", () => {
     transactionMock.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     errandFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     errandFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
     errandTaskUpdate.mockResolvedValue({});
@@ -192,7 +189,7 @@ describe("errand favorite actions", () => {
     });
 
     it("returns an empty list for guests", async () => {
-      auth.mockResolvedValue(null);
+      getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
       const result = await getMyErrandFavorites("user-1");
 
@@ -201,7 +198,7 @@ describe("errand favorite actions", () => {
     });
 
     it("returns an empty list when the session user does not match the parameter", async () => {
-      auth.mockResolvedValue({ user: { id: "user-1" } });
+      getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
 
       const result = await getMyErrandFavorites("user-2");
 
@@ -228,7 +225,7 @@ describe("errand favorite actions", () => {
     });
 
     it("returns false for guests", async () => {
-      auth.mockResolvedValue(null);
+      getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
       const result = await checkErrandFavorited("user-1", "errand-1");
 
@@ -237,7 +234,7 @@ describe("errand favorite actions", () => {
     });
 
     it("returns false when the session user does not match the parameter", async () => {
-      auth.mockResolvedValue({ user: { id: "user-1" } });
+      getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
 
       const result = await checkErrandFavorited("user-2", "errand-1");
 

@@ -2,7 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getActiveViewerId,
   getProductDetail,
   createOrOpenProductConversation,
   createProductOrder,
@@ -11,7 +11,7 @@ const {
   toggleFavorite,
   updateProductStatus,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getActiveViewerId: vi.fn(),
   getProductDetail: vi.fn(),
   createOrOpenProductConversation: vi.fn(),
   createProductOrder: vi.fn(),
@@ -36,8 +36,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/product-repository", () => ({
@@ -118,7 +118,7 @@ function buildProductDetail() {
 
 describe("ProductDetailPage Comprehensive Test Suite", () => {
   it("renders owner management controls, price breakdown, seller card and related products", async () => {
-    auth.mockResolvedValue({ user: { id: "seller-1" } });
+    getActiveViewerId.mockResolvedValue("seller-1");
     getProductDetail.mockResolvedValue(buildProductDetail());
 
     render(
@@ -151,7 +151,7 @@ describe("ProductDetailPage Comprehensive Test Suite", () => {
   it("renders buyer actions, favorite button, and conversation entry for logged-in buyers", async () => {
     const detail = buildProductDetail();
     detail.product.favorites = [{ userId: "buyer-1" }];
-    auth.mockResolvedValue({ user: { id: "buyer-1" } });
+    getActiveViewerId.mockResolvedValue("buyer-1");
     getProductDetail.mockResolvedValue(detail);
 
     render(

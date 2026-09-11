@@ -24,6 +24,7 @@ vi.mock("@/lib/logger", () => ({
 }));
 
 import { actionErrorMessage, handleError } from "@/lib/error-handler";
+import { appealError } from "@/lib/appeals/errors";
 
 describe("handleError", () => {
   beforeEach(() => {
@@ -32,6 +33,30 @@ describe("handleError", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("maps AppealError to its frozen status and safe user message", () => {
+    const notAllowed = appealError("APPEAL_NOT_ALLOWED");
+    expect(handleError(notAllowed, "test")).toEqual({
+      message: notAllowed.message,
+      statusCode: 409,
+    });
+  });
+
+  it("maps APPEAL_NOT_OWNED to 404 with the same outward message as NOT_FOUND", () => {
+    // 防枚举：两个 code 的 status 与 userMessage 必须对外不可区分
+    const notFound = handleError(appealError("APPEAL_NOT_FOUND"), "test");
+    const notOwned = handleError(appealError("APPEAL_NOT_OWNED"), "test");
+
+    expect(notFound.statusCode).toBe(404);
+    expect(notOwned.statusCode).toBe(404);
+    expect(notOwned.message).toBe(notFound.message);
+  });
+
+  it("does not log appeal business errors as server faults", () => {
+    handleError(appealError("APPEAL_ALREADY_EXISTS"), "test");
+
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 
   it("maps ZodError to 400 with the first issue message", () => {

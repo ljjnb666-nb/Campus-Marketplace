@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getErrandList } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getErrandList } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getErrandList: vi.fn(),
 }));
 
@@ -21,8 +21,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/errand-repository", () => ({
@@ -54,7 +54,7 @@ afterEach(() => {
 
 describe("ErrandsPage", () => {
   it("renders public browsing and login call-to-action for guests", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getErrandList.mockResolvedValue({
       items: [],
       total: 0,
@@ -78,7 +78,7 @@ describe("ErrandsPage", () => {
   });
 
   it("renders personal actions for authenticated users", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getErrandList.mockResolvedValue({
       items: [],
       total: 0,
@@ -100,7 +100,7 @@ describe("ErrandsPage", () => {
   });
 
   it("renders filters and errand results", async () => {
-    auth.mockResolvedValue({ user: { id: "user-2" } });
+    getActiveViewerId.mockResolvedValue("user-2");
     getErrandList.mockResolvedValue({
       items: [
         {

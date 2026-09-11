@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getMyRentalFavorites } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getVerifiedSession, getMyRentalFavorites } = vi.hoisted(() => ({
+  getVerifiedSession: vi.fn(),
   getMyRentalFavorites: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({ auth }));
+vi.mock("@/lib/server-auth", () => ({ getVerifiedSession }));
 vi.mock("@/actions/rental-favorite", () => ({ getMyRentalFavorites }));
 
 import { GET } from "@/app/api/favorites/rentals/route";
@@ -16,7 +16,7 @@ describe("GET /api/favorites/rentals", () => {
   });
 
   it("returns 401 without a session", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await GET(new Request("http://localhost/api/favorites/rentals"));
 
@@ -26,7 +26,7 @@ describe("GET /api/favorites/rentals", () => {
   });
 
   it("returns favorites for the signed-in user", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getMyRentalFavorites.mockResolvedValue([{ id: "fav-1" }]);
 
     const response = await GET(new Request("http://localhost/api/favorites/rentals"));
@@ -37,7 +37,7 @@ describe("GET /api/favorites/rentals", () => {
   });
 
   it("maps repository errors to a 500 response", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getMyRentalFavorites.mockRejectedValue(new Error("db down"));
 
     const response = await GET(new Request("http://localhost/api/favorites/rentals"));

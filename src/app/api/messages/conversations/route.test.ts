@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getVerifiedSession,
   getConversationListItems,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   getConversationListItems: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -20,12 +20,12 @@ import { GET } from "@/app/api/messages/conversations/route";
 
 describe("GET /api/messages/conversations", () => {
   beforeEach(() => {
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     getConversationListItems.mockReset();
   });
 
   it("returns 401 with an empty list when the user is not logged in", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await GET(new Request("http://localhost/api/messages/conversations"));
     const body = await response.json();
@@ -34,10 +34,19 @@ describe("GET /api/messages/conversations", () => {
     expect(body).toEqual({ items: [] });
   });
 
+  it("AUTH-3C: denies the private conversation list for a suspended session", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "ACCOUNT_INELIGIBLE" });
+
+    const response = await GET(new Request("http://localhost/api/messages/conversations"));
+    const body = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(body).toEqual({ items: [] });
+    expect(getConversationListItems).not.toHaveBeenCalled();
+  });
+
   it("returns conversation list items for the logged-in user", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
-    });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getConversationListItems.mockResolvedValue([
       {
         id: "conversation-1",
@@ -74,9 +83,7 @@ describe("GET /api/messages/conversations", () => {
   });
 
   it("threads a valid limit query param into the repository call", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
-    });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getConversationListItems.mockResolvedValue([]);
 
     const response = await GET(
@@ -90,9 +97,7 @@ describe("GET /api/messages/conversations", () => {
   });
 
   it("ignores an invalid limit query param", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
-    });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getConversationListItems.mockResolvedValue([]);
 
     const response = await GET(

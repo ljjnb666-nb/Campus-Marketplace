@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { getVerifiedSession } from "@/lib/server-auth";
 import { withHttpMetrics } from "@/lib/http-metrics";
 import { handleError } from "@/lib/error-handler";
 import { getConversationDetailPayload } from "@/repositories/conversation-repository";
@@ -11,14 +11,15 @@ async function getHandler(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const session = await auth();
+    // Phase 6C-2 raw-auth hardening：私有会话详情必须 ACTIVE 账号 DB 复查
+    const verified = await getVerifiedSession();
 
-    if (!session?.user?.id) {
+    if (!verified.ok) {
       return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
     }
 
     const { id } = await params;
-    const payload = await getConversationDetailPayload(id, session.user.id);
+    const payload = await getConversationDetailPayload(id, verified.user.id);
 
     if (!payload) {
       return NextResponse.json({ message: "会话不存在或无权访问" }, { status: 404 });
