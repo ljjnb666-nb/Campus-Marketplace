@@ -108,6 +108,15 @@ describe("GET /api/appeals/eligible-actions", () => {
     expect(listEligibleAppealActions).not.toHaveBeenCalled();
   });
 
+  it("returns 400 for an empty ?cursor= (present-but-malformed, Repair 1 §9)", async () => {
+    getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
+
+    const response = await GET(request("?cursor=") as never);
+
+    expect(response.status).toBe(400);
+    expect(listEligibleAppealActions).not.toHaveBeenCalled();
+  });
+
   it("DISCOVERY-5B: a well-formed client-crafted cursor is an untrusted position, never an ownership change", async () => {
     getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
     // 客户端自构造"指向他人 EA"的合法 cursor——路由照常进入 keyset 条件，

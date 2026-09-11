@@ -146,7 +146,7 @@ describe("POST /api/appeals", () => {
     expect(submitAppeal).not.toHaveBeenCalled();
   });
 
-  it("rejects an oversized body with 413", async () => {
+  it("BODY-1: Content-Length > 8192 → early 413 before reading the body", async () => {
     getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
 
     const response = await POST(
@@ -154,6 +154,96 @@ describe("POST /api/appeals", () => {
         method: "POST",
         headers: { "content-type": "application/json", "content-length": String(9 * 1024) },
         body: "{}",
+      }) as never,
+    );
+
+    expect(response.status).toBe(413);
+    expect(submitAppeal).not.toHaveBeenCalled();
+  });
+
+  it("BODY-2 (blocker reproduction): Content-Length absent + actual body > 8192 bytes → 413, submitAppeal NOT called", async () => {
+    getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
+    // 不带 content-length 头：header fast-path 被跳过，必须由流式字节计数拦截
+    const oversized = JSON.stringify({
+      enforcementActionId: "ea-1",
+      statement: "a".repeat(9000),
+    });
+    expect(new TextEncoder().encode(oversized).length).toBeGreaterThan(8192);
+
+    const response = await POST(
+      new Request("http://localhost/api/appeals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: oversized,
+      }) as never,
+    );
+
+    expect(response.status).toBe(413);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(submitAppeal).not.toHaveBeenCalled();
+  });
+
+  it("BODY-3: Content-Length claims small while actual body > 8192 bytes → still 413", async () => {
+    getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
+    const oversized = JSON.stringify({
+      enforcementActionId: "ea-1",
+      statement: "a".repeat(9000),
+    });
+
+    const response = await POST(
+      new Request("http://localhost/api/appeals", {
+        method: "POST",
+        headers: { "content-type": "application/json", "content-length": "16" },
+        body: oversized,
+      }) as never,
+    );
+
+    expect(response.status).toBe(413);
+    expect(submitAppeal).not.toHaveBeenCalled();
+  });
+
+  it("BODY-4: actual body <= 8192 with valid JSON keeps the normal submit flow (201)", async () => {
+    getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
+    submitAppeal.mockResolvedValue({
+      appeal: { id: "ap-1", enforcementActionId: "ea-1", status: "SUBMITTED", createdAt: new Date() },
+    });
+    const nearBoundary = JSON.stringify({
+      enforcementActionId: "ea-1",
+      statement: "a".repeat(2000),
+    });
+    expect(new TextEncoder().encode(nearBoundary).length).toBeLessThanOrEqual(8192);
+
+    const response = await POST(
+      new Request("http://localhost/api/appeals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: nearBoundary,
+      }) as never,
+    );
+
+    expect(response.status).toBe(201);
+    expect(submitAppeal).toHaveBeenCalledWith({
+      callerUserId: "user-1",
+      enforcementActionId: "ea-1",
+      statement: "a".repeat(2000),
+    });
+  });
+
+  it("BODY-5: multibyte UTF-8 body counted by BYTES not characters（9000 bytes / 3000+ chars）→ 413", async () => {
+    getAppealEligibleSession.mockResolvedValue(ELIGIBLE);
+    // "中" = 3 UTF-8 bytes：3000 个字符远小于 8192 字符，但实际传输 > 8192 字节
+    const multibyte = JSON.stringify({
+      enforcementActionId: "ea-1",
+      statement: "中".repeat(3000),
+    });
+    expect(multibyte.length).toBeLessThan(8192); // JS 字符数视角"未超限"
+    expect(new TextEncoder().encode(multibyte).length).toBeGreaterThan(8192); // 字节视角超限
+
+    const response = await POST(
+      new Request("http://localhost/api/appeals", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: multibyte,
       }) as never,
     );
 

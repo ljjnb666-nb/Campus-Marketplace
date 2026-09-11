@@ -21,6 +21,51 @@ function privateCache(): Record<string, string> {
   return { "Cache-Control": "private, no-store" };
 }
 
+type BoundedBodyResult =
+  | { ok: true; bytes: Uint8Array }
+  | { ok: false; reason: "TOO_LARGE" };
+
+/**
+ * Repair 1（ACTUAL_REQUEST_BODY_SIZE_NOT_BOUNDED）：按**实际传输的 UTF-8
+ * 字节**执行 8KB 上限——Content-Length 只是 fast-path，header 缺失/谎报时
+ * 必须对 body stream 做累计字节计数；超限立即 cancel reader 并 413，
+ * 绝不把无界 body 先读进内存。多字节字符（中文/emoji）按其全部字节计。
+ */
+async function readBoundedBody(request: NextRequest): Promise<BoundedBodyResult> {
+  const reader = request.body?.getReader();
+
+  if (!reader) {
+    return { ok: true, bytes: new Uint8Array(0) };
+  }
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (value) {
+      totalBytes += value.byteLength;
+      if (totalBytes > APPEAL_SUBMIT_BODY_MAX_BYTES) {
+        await reader.cancel();
+        return { ok: false, reason: "TOO_LARGE" };
+      }
+      chunks.push(value);
+    }
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return { ok: true, bytes };
+}
+
 /**
  * POST /api/appeals —— appellant 提交申诉（Phase 6C-2）。
  *
@@ -72,9 +117,18 @@ async function postHandler(request: NextRequest) {
       );
     }
 
+    // header 之上对实际 body 字节流再执行一次有界读取（fake bound 禁止）
+    const bodyResult = await readBoundedBody(request);
+    if (!bodyResult.ok) {
+      return NextResponse.json(
+        { error: "请求体过大" },
+        { status: 413, headers: privateCache() },
+      );
+    }
+
     let rawBody: unknown;
     try {
-      rawBody = await request.json();
+      rawBody = JSON.parse(new TextDecoder().decode(bodyResult.bytes));
     } catch {
       return NextResponse.json(
         { error: "请求体必须是合法 JSON" },

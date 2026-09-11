@@ -76,8 +76,10 @@ async function getHandler(request: NextRequest) {
     }
 
     const cursorParam = url.searchParams.get("cursor");
+    // Repair 1 §9：空串 `?cursor=` 也算 present → 进入 decoder → 400
+    //（Planning 合同：malformed cursor → 400，不静默当作无 cursor）
     let cursor: AppealCursor | undefined;
-    if (cursorParam) {
+    if (cursorParam !== null) {
       const decoded = decodeAppealCursor(cursorParam);
       if (!decoded) {
         return NextResponse.json(
