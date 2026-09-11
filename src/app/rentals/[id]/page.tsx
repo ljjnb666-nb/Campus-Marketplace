@@ -5,7 +5,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { RentalDetailConsole } from "@/components/rental/rental-detail-console";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { getRentalListingDetail } from "@/repositories/rental-listing-repository";
 import { FileText, ShieldAlert, Star } from "lucide-react";
 
@@ -52,15 +52,17 @@ export async function generateMetadata({
 
 export default async function RentalDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = await auth();
-  const result = await getRentalListingDetail(id, session?.user?.id).catch(() => null);
+  // Phase 6C-2 raw-auth hardening：收藏状态/owner 个性化按 ACTIVE 账号解析；
+  // SUSPENDED 会话 → null → 匿名语义（isFavorited/isOwner 抑制），公开详情照常
+  const viewerId = await getActiveViewerId();
+  const result = await getRentalListingDetail(id, viewerId ?? undefined).catch(() => null);
 
   if (!result) {
     notFound();
   }
 
   const { listing, reviews, isFavorited } = result;
-  const isOwner = session?.user?.id === listing.ownerId;
+  const isOwner = viewerId === listing.ownerId;
 
   return (
     <PageContainer maxWidth="standard">
@@ -201,7 +203,7 @@ export default async function RentalDetailPage({ params }: { params: Promise<{ i
           }}
           isOwner={isOwner}
           isFavorited={isFavorited}
-          isLoggedIn={!!session?.user}
+          isLoggedIn={!!viewerId}
         />
       </div>
     </PageContainer>

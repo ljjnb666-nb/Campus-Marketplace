@@ -84,8 +84,15 @@ export const authOptions: NextAuthOptions = {
           where: { email: parsed.data.email },
         });
 
-        // 已注销（erasedAt）/软删除/停用账号一律拒绝认证
-        if (!user || user.deletedAt || user.erasedAt || user.status !== "ACTIVE") {
+        // Phase 6C-2：SUSPENDED 允许重建"身份会话"（credential-authenticated
+        // identity），但绝不代表业务权限恢复——普通业务边界仍由 server-auth
+        // 中央 resolver 强制 ACTIVE-only。永久拒绝：missing / deleted / erased。
+        if (
+          !user ||
+          user.deletedAt ||
+          user.erasedAt ||
+          (user.status !== "ACTIVE" && user.status !== "SUSPENDED")
+        ) {
           return null;
         }
 

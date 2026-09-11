@@ -4,7 +4,7 @@ import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ErrandCard } from "@/components/errand/errand-card";
 import { ErrandDetailConsole } from "@/components/errand/errand-detail-console";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { getErrandDetail } from "@/repositories/errand-repository";
 import { MapPin, Navigation, Info, ShieldAlert } from "lucide-react";
 
@@ -46,10 +46,12 @@ export default async function ErrandDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：发布者/接单者个性化按 ACTIVE 账号解析；
+  // SUSPENDED 会话 → null → 匿名语义（操作入口抑制），公开详情照常
+  const viewerId = await getActiveViewerId();
   const { errand, relatedErrands } = await getErrandDetail(id);
-  const isPublisher = session?.user?.id === errand.publisherId;
-  const isAccepter = session?.user?.id === errand.accepterId;
+  const isPublisher = viewerId === errand.publisherId;
+  const isAccepter = viewerId === errand.accepterId;
 
   const availableActions = isPublisher
     ? [
@@ -198,7 +200,7 @@ export default async function ErrandDetailPage({
           }}
           isPublisher={isPublisher}
           isAccepter={isAccepter}
-          isLoggedIn={!!session?.user}
+          isLoggedIn={!!viewerId}
           availableActions={availableActions}
         />
       </div>

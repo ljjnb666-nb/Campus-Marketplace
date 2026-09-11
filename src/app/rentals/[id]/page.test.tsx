@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getRentalListingDetail, RentalDetailConsole, notFound } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getRentalListingDetail, RentalDetailConsole, notFound } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getRentalListingDetail: vi.fn(),
   RentalDetailConsole: vi.fn(() => <div data-testid="rental-detail-console" />),
   notFound: vi.fn(() => {
@@ -10,8 +10,8 @@ const { auth, getRentalListingDetail, RentalDetailConsole, notFound } = vi.hoist
   }),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/rental-listing-repository", () => ({
@@ -104,7 +104,7 @@ describe("RentalDetailPage generateMetadata", () => {
 
 describe("RentalDetailPage 渲染", () => {
   it("renders condition, locations, policies and reviews", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getRentalListingDetail.mockResolvedValue(
       buildRentalListingDetail({
         brand: "捷安特",
@@ -133,7 +133,7 @@ describe("RentalDetailPage 渲染", () => {
   });
 
   it("falls back to default usage rules and hides optional blocks", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListingDetail.mockResolvedValue(buildRentalListingDetail());
 
     render(await RentalDetailPage({ params: Promise.resolve({ id: "rental-1" }) }));
@@ -149,7 +149,7 @@ describe("RentalDetailPage 渲染", () => {
   });
 
   it("marks the owner view and forwards favorite state", async () => {
-    auth.mockResolvedValue({ user: { id: "owner-1" } });
+    getActiveViewerId.mockResolvedValue("owner-1");
     getRentalListingDetail.mockResolvedValue({
       ...buildRentalListingDetail(),
       isFavorited: true,
@@ -164,7 +164,7 @@ describe("RentalDetailPage 渲染", () => {
   });
 
   it("renders notFound when the listing is missing", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListingDetail.mockResolvedValue(null);
 
     await expect(
@@ -173,7 +173,7 @@ describe("RentalDetailPage 渲染", () => {
   });
 
   it("lists reviews with author and rating", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListingDetail.mockResolvedValue({
       ...buildRentalListingDetail(),
       reviews: [

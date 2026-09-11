@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  getActiveViewerId,
+  getAppealEligibleSession,
   getVerifiedSession,
   requireAdmin,
   requireUser,
@@ -301,5 +303,115 @@ describe("getVerifiedSession（API 路由会话校验）", () => {
       ok: true,
       user: { id: "user-1", email: "lin@example.com", name: "小林", role: "STUDENT" },
     });
+  });
+});
+
+describe("getAppealEligibleSession（Phase 6C-2 唯一 ACTIVE|SUSPENDED allowlist）", () => {
+  it("returns UNAUTHENTICATED without a session", async () => {
+    mockAuth.mockResolvedValue(null);
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: false,
+      reason: "UNAUTHENTICATED",
+    });
+    expect(mockFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("allows an ACTIVE account", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: true,
+      user: { id: "user-1" },
+    });
+  });
+
+  it("allows a SUSPENDED account（appeal self-service 资格）", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, status: "SUSPENDED" });
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: true,
+      user: { id: "user-1" },
+    });
+  });
+
+  it("returns ACCOUNT_INELIGIBLE for a missing DB user", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "stale-user" } });
+    mockFindUnique.mockResolvedValue(null);
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: false,
+      reason: "ACCOUNT_INELIGIBLE",
+    });
+  });
+
+  it("returns ACCOUNT_INELIGIBLE for an erased account", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, erasedAt: new Date() });
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: false,
+      reason: "ACCOUNT_INELIGIBLE",
+    });
+  });
+
+  it("returns ACCOUNT_INELIGIBLE for a deleted account", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, deletedAt: new Date() });
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: false,
+      reason: "ACCOUNT_INELIGIBLE",
+    });
+  });
+
+  it("never consults the consent gate（APPEAL_REQUIRE_CONSENT = NO）", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, status: "SUSPENDED" });
+    mockGetUserAcceptanceStatus.mockResolvedValue({ compliant: false, required: [], pending: [] });
+
+    await expect(getAppealEligibleSession()).resolves.toEqual({
+      ok: true,
+      user: { id: "user-1" },
+    });
+    expect(mockGetUserAcceptanceStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("getActiveViewerId（公开页私有个性化抑制）", () => {
+  it("returns null without a session", async () => {
+    mockAuth.mockResolvedValue(null);
+
+    await expect(getActiveViewerId()).resolves.toBeNull();
+  });
+
+  it("returns the user id for an ACTIVE account", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
+
+    await expect(getActiveViewerId()).resolves.toBe("user-1");
+  });
+
+  it("returns null for a SUSPENDED account（匿名语义）", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, status: "SUSPENDED" });
+
+    await expect(getActiveViewerId()).resolves.toBeNull();
+  });
+
+  it("returns null for an erased account", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, erasedAt: new Date() });
+
+    await expect(getActiveViewerId()).resolves.toBeNull();
+  });
+
+  it("returns null when the DB user is missing", async () => {
+    mockAuth.mockResolvedValue({ user: { id: "stale-user" } });
+    mockFindUnique.mockResolvedValue(null);
+
+    await expect(getActiveViewerId()).resolves.toBeNull();
   });
 });

@@ -92,6 +92,13 @@ Phase 7 运营后台落地后，发布入口应迁移为后台操作 + AdminAudi
 - **隐私自助豁免（设计决定）**：数据导出与账号注销是用户基本权利，
   **不要求先同意新协议**（退出权优先）。`/my/privacy`、
   `/api/privacy/*`、`/api/legal/acceptances` 使用身份校验但跳过 consent gate。
+- **申诉救济豁免（Phase 6C-2 设计决定，`APPEAL_REQUIRE_CONSENT = NO`）**：
+  申诉是针对平台处罚的救济入口，**不得因未接受新版协议而阻断用户挑战
+  处罚**。`/api/appeals/*`（`POST /api/appeals`、
+  `GET /api/appeals/eligible-actions`、`POST /api/appeals/[id]/withdraw`）
+  经 `getAppealEligibleSession()` 做身份校验（全仓唯一允许
+  `status ∈ {ACTIVE, SUSPENDED}` 的入口）并跳过 consent gate；
+  其余一切业务边界保持 ACTIVE-only。
 
 ## 5. 重新同意（Reconsent）
 

@@ -187,3 +187,80 @@ export const VERIFIED_SESSION_HTTP_STATUS: Record<
   ACCOUNT_INACTIVE: 401,
   LEGAL_ACCEPTANCE_REQUIRED: 403,
 };
+
+export type AppealEligibleSession =
+  | { ok: true; user: { id: string } }
+  | { ok: false; reason: "UNAUTHENTICATED" | "ACCOUNT_INELIGIBLE" };
+
+export const APPEAL_ELIGIBLE_SESSION_HTTP_STATUS: Record<
+  Exclude<AppealEligibleSession, { ok: true }>["reason"],
+  number
+> = {
+  // ACCOUNT_INELIGIBLE（missing/deleted/erased/其它状态）与 UNAUTHENTICATED 同为
+  // 401：不向 outsider 区分"账号存在与否/为何不可用"，与 ACCOUNT_INACTIVE→401
+  // 的既有防枚举语义一致。响应体不得出现 ACCOUNT_ERASED/ACCOUNT_DELETED 等状态词。
+  UNAUTHENTICATED: 401,
+  ACCOUNT_INELIGIBLE: 401,
+};
+
+/**
+ * Phase 6C-2 Appeal self-service 专用身份 resolver——全仓唯一允许
+ * status ∈ {ACTIVE, SUSPENDED} 的会话入口（APPEAL_ALLOWLIST）。
+ *
+ * 调用方硬性限定为 /api/appeals/** 三条 route；任何其它路径一律使用
+ * 上方 ACTIVE-only 中央合同。APPEAL_REQUIRE_CONSENT = NO（申诉是针对
+ * 处罚的救济入口，consent gate 不得阻断）：
+ *   - session 缺失 → UNAUTHENTICATED
+ *   - DB User missing / deletedAt != null / erasedAt != null /
+ *     status ∉ {ACTIVE, SUSPENDED} → ACCOUNT_INELIGIBLE（单一不透明原因）
+ *   - ACTIVE | SUSPENDED → OK（返回 id 来自 DB 复查，绝不信客户端输入）
+ */
+function isAppealEligibleUser(user: {
+  status: string;
+  deletedAt: Date | null;
+  erasedAt: Date | null;
+}): boolean {
+  return (
+    !user.deletedAt &&
+    !user.erasedAt &&
+    (user.status === "ACTIVE" || user.status === "SUSPENDED")
+  );
+}
+
+export async function getAppealEligibleSession(): Promise<AppealEligibleSession> {
+  const session = await auth();
+
+  if (!session?.user?.id) {
+    return { ok: false, reason: "UNAUTHENTICATED" };
+  }
+
+  const dbUser = await loadActiveUser(session.user.id);
+
+  if (!dbUser || !isAppealEligibleUser(dbUser)) {
+    return { ok: false, reason: "ACCOUNT_INELIGIBLE" };
+  }
+
+  return { ok: true, user: { id: dbUser.id } };
+}
+
+/**
+ * Phase 6C-2 ACTIVE viewer helper：仅供公开 Server Component 的私有个性化
+ * 抑制（RAW-AUTH HARDENING）。ACTIVE → user id；unauthenticated / SUSPENDED /
+ * deleted / erased / missing → null（公开页对 suspended 会话退化为匿名语义，
+ * 绝不因此 403/redirect 公开内容）。不检查 legal consent。
+ */
+export async function getActiveViewerId(): Promise<string | null> {
+  const session = await auth();
+
+  if (!session?.user?.id) {
+    return null;
+  }
+
+  const dbUser = await loadActiveUser(session.user.id);
+
+  if (!dbUser || !isActiveUser(dbUser)) {
+    return null;
+  }
+
+  return dbUser.id;
+}

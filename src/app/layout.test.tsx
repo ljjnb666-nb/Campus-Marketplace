@@ -2,8 +2,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import RootLayout, { metadata } from "@/app/layout";
 
-const { auth, getUnreadConversationCount, getUnreadNotificationCount } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getUnreadConversationCount, getUnreadNotificationCount } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getUnreadConversationCount: vi.fn(),
   getUnreadNotificationCount: vi.fn(),
 }));
@@ -13,8 +13,8 @@ vi.mock("next/font/google", () => ({
   Geist_Mono: () => ({ variable: "font-geist-mono" }),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -68,7 +68,7 @@ describe("RootLayout", () => {
   });
 
   it("renders header, footer, and children inside the session provider shell", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getUnreadNotificationCount.mockResolvedValue(0);
     getUnreadConversationCount.mockResolvedValue(0);
 
@@ -85,7 +85,24 @@ describe("RootLayout", () => {
   });
 
   it("skips per-user repository queries when there is no session", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
+    getUnreadNotificationCount.mockReset();
+    getUnreadConversationCount.mockReset();
+
+    render(
+      await RootLayout({
+        children: <div>页面内容</div>,
+      }),
+    );
+
+    expect(getUnreadNotificationCount).not.toHaveBeenCalled();
+    expect(getUnreadConversationCount).not.toHaveBeenCalled();
+    expect(screen.getByText("站点头部 未读通知 0 未读会话 0")).toBeTruthy();
+  });
+
+  it("suppresses private unread badges for a SUSPENDED session（AUTH-3E：匿名语义）", async () => {
+    // SUSPENDED 会话经 getActiveViewerId 得到 null → 私有计数被抑制
+    getActiveViewerId.mockResolvedValue(null);
     getUnreadNotificationCount.mockReset();
     getUnreadConversationCount.mockReset();
 
@@ -101,9 +118,7 @@ describe("RootLayout", () => {
   });
 
   it("passes repository counts to the header for a signed-in user", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1", name: "张三", role: "STUDENT" },
-    });
+    getActiveViewerId.mockResolvedValue("user-1");
     getUnreadNotificationCount.mockResolvedValue(6);
     getUnreadConversationCount.mockResolvedValue(4);
 

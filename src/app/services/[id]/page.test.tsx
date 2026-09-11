@@ -2,7 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getActiveViewerId,
   getServiceDetail,
   createOrOpenServiceConversation,
   createServiceOrder,
@@ -10,7 +10,7 @@ const {
   updateServiceStatus,
   createReport,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getActiveViewerId: vi.fn(),
   getServiceDetail: vi.fn(),
   createOrOpenServiceConversation: vi.fn(),
   createServiceOrder: vi.fn(),
@@ -34,8 +34,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/service-repository", () => ({
@@ -113,7 +113,7 @@ function buildServiceDetail() {
 
 describe("ServiceDetailPage Test Suite", () => {
   it("renders service owner controls, pricing unit and provider card", async () => {
-    auth.mockResolvedValue({ user: { id: "provider-1" } });
+    getActiveViewerId.mockResolvedValue("provider-1");
     getServiceDetail.mockResolvedValue(buildServiceDetail());
 
     render(
@@ -136,7 +136,7 @@ describe("ServiceDetailPage Test Suite", () => {
   });
 
   it("renders booking button and chat entry for potential clients", async () => {
-    auth.mockResolvedValue({ user: { id: "buyer-1" } });
+    getActiveViewerId.mockResolvedValue("buyer-1");
     getServiceDetail.mockResolvedValue(buildServiceDetail());
 
     render(

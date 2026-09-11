@@ -2,14 +2,14 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getActiveViewerId,
   getErrandDetail,
   createOrOpenErrandConversation,
   claimErrand,
   deleteErrand,
   createReport,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getActiveViewerId: vi.fn(),
   getErrandDetail: vi.fn(),
   createOrOpenErrandConversation: vi.fn(),
   claimErrand: vi.fn(),
@@ -32,8 +32,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/errand-repository", () => ({
@@ -139,7 +139,7 @@ function buildErrandDetail() {
 
 describe("ErrandDetailPage", () => {
   it("renders publisher controls and status actions", async () => {
-    auth.mockResolvedValue({ user: { id: "publisher-1" } });
+    getActiveViewerId.mockResolvedValue("publisher-1");
     getErrandDetail.mockResolvedValue(buildErrandDetail());
 
     render(
@@ -163,7 +163,7 @@ describe("ErrandDetailPage", () => {
   });
 
   it("renders claim, contact, and report actions for other users", async () => {
-    auth.mockResolvedValue({ user: { id: "runner-1" } });
+    getActiveViewerId.mockResolvedValue("runner-1");
     getErrandDetail.mockResolvedValue(buildErrandDetail());
 
     render(

@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getProductList, getProductFormMeta } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getProductList, getProductFormMeta } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getProductList: vi.fn(),
   getProductFormMeta: vi.fn(),
 }));
@@ -22,8 +22,8 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/product-repository", () => ({
@@ -56,7 +56,7 @@ afterEach(() => {
 
 describe("ProductsPage", () => {
   it("renders public browsing and login call-to-action for guests", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getProductFormMeta.mockResolvedValue({
       categories: [],
     });
@@ -80,7 +80,7 @@ describe("ProductsPage", () => {
   });
 
   it("renders personal actions for authenticated users", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getProductFormMeta.mockResolvedValue({
       categories: [],
     });
@@ -102,7 +102,7 @@ describe("ProductsPage", () => {
   });
 
   it("renders filters, results summary, and cards", async () => {
-    auth.mockResolvedValue({ user: { id: "user-2" } });
+    getActiveViewerId.mockResolvedValue("user-2");
     getProductFormMeta.mockResolvedValue({
       categories: [{ id: "category-1", name: "教材资料" }],
     });

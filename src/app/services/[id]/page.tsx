@@ -5,7 +5,7 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { ServiceCard } from "@/components/service/service-card";
 import { ServiceDetailConsole } from "@/components/service/service-detail-console";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { getServiceDetail } from "@/repositories/service-repository";
 import { CheckCircle2 } from "lucide-react";
 
@@ -47,9 +47,11 @@ export default async function ServiceDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：owner 个性化按 ACTIVE 账号解析；
+  // SUSPENDED 会话 → null → 匿名语义（isOwner 抑制），公开详情照常
+  const viewerId = await getActiveViewerId();
   const { service, relatedServices } = await getServiceDetail(id);
-  const isOwner = session?.user?.id === service.providerId;
+  const isOwner = viewerId === service.providerId;
 
   const images = service.coverImageUrl ? [service.coverImageUrl] : [];
 
@@ -134,7 +136,7 @@ export default async function ServiceDetailPage({
             price: service.price.toString(),
           }}
           isOwner={isOwner}
-          isLoggedIn={!!session?.user}
+          isLoggedIn={!!viewerId}
         />
       </div>
     </PageContainer>

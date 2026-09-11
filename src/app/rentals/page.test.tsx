@@ -1,8 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getRentalListings, getRentalFormMeta, RentalCard, Pagination } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getRentalListings, getRentalFormMeta, RentalCard, Pagination } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getRentalListings: vi.fn(),
   getRentalFormMeta: vi.fn(),
   RentalCard: vi.fn(() => <div data-testid="rental-card" />),
@@ -24,7 +24,7 @@ vi.mock("next/link", () => ({
   ),
 }));
 
-vi.mock("@/lib/auth", () => ({ auth }));
+vi.mock("@/lib/server-auth", () => ({ getActiveViewerId }));
 vi.mock("@/repositories/rental-listing-repository", () => ({
   getRentalListings,
   getRentalFormMeta,
@@ -57,7 +57,7 @@ afterEach(() => {
 
 describe("RentalsPage", () => {
   it("renders listings with filters and passes query params to the repository", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getRentalListings.mockResolvedValue({
       items: [buildItem("r1"), buildItem("r2")],
       total: 2,
@@ -98,7 +98,7 @@ describe("RentalsPage", () => {
   });
 
   it("shows the login prompt for anonymous visitors", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListings.mockResolvedValue({
       items: [],
       total: 0,
@@ -115,7 +115,7 @@ describe("RentalsPage", () => {
   });
 
   it("shows the empty state when no listings match", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListings.mockResolvedValue({
       items: [],
       total: 0,
@@ -133,7 +133,7 @@ describe("RentalsPage", () => {
   });
 
   it("falls back to an empty result when the repository query fails", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getRentalListings.mockRejectedValue(new Error("db down"));
     getRentalFormMeta.mockResolvedValue({ categories: [], campuses: [] });
 

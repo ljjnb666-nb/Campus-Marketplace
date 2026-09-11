@@ -92,16 +92,80 @@ describe("auth options", () => {
     expect(userFindUnique).not.toHaveBeenCalled();
   });
 
-  it("rejects inactive or deleted users", async () => {
+  it("AUTH-2: SUSPENDED credentials establish an identity session", async () => {
     const authorize = getCredentialsAuthorize();
     userFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      status: "SUSPENDED",
+    });
+    compare.mockResolvedValue(true);
+
+    const result = await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    // 身份认证成功；业务权限恢复与否由 server-auth 中央 resolver 决定
+    expect(compare).toHaveBeenCalledWith(TEST_PASSWORD, "hashed-password");
+    expect(result).toEqual({
       id: "user-1",
       email: "student1@campus.local",
       name: "测试同学",
       role: "STUDENT",
-      status: "SUSPENDED",
-      deletedAt: null,
-      passwordHash: "hashed-password",
+    });
+  });
+
+  it("AUTH-4: erased user credentials are denied", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      erasedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    const result = await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result).toBeNull();
+    expect(compare).not.toHaveBeenCalled();
+  });
+
+  it("AUTH-5: deleted (soft-removed) user credentials are denied", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      deletedAt: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    const result = await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result).toBeNull();
+    expect(compare).not.toHaveBeenCalled();
+  });
+
+  it("AUTH-6: missing user credentials are denied", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue(null);
+    compare.mockResolvedValue(true);
+
+    const result = await authorize?.({
+      email: "ghost@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result).toBeNull();
+    expect(compare).not.toHaveBeenCalled();
+  });
+
+  it("rejects users whose status is neither ACTIVE nor SUSPENDED", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue({
+      ...ACTIVE_USER,
+      status: "SOME_FUTURE_STATUS",
     });
 
     const result = await authorize?.({

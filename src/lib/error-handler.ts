@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 
+import { isAppealError } from "@/lib/appeals/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isRbacError } from "@/lib/rbac/errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
@@ -34,8 +35,13 @@ export function handleError(error: unknown, context: string): HandledError {
     };
   }
 
-  // 治理域 / RBAC / 执法域业务错误：message 已是可直接展示的用户文案（无内部细节），
-  // status 为预期 4xx（不触发 server-fault 告警语义）
+  // 申诉域 / 治理域 / RBAC / 执法域业务错误：message 已是可直接展示的用户文案
+  // （无内部细节），status 为预期 4xx（不触发 server-fault 告警语义）。
+  // NOT_FOUND 与 NOT_OWNED 共用同一 userMessage，向外不暴露 machine code 差异。
+  if (isAppealError(error)) {
+    return { message: error.message, statusCode: error.status };
+  }
+
   if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
     return { message: error.message, statusCode: error.status };
   }

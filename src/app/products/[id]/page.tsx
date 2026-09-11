@@ -5,7 +5,7 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { ProductCard } from "@/components/product/product-card";
 import { ProductDetailConsole } from "@/components/product/product-detail-console";
-import { auth } from "@/lib/auth";
+import { getActiveViewerId } from "@/lib/server-auth";
 import { getProductDetail } from "@/repositories/product-repository";
 
 export const dynamic = "force-dynamic";
@@ -57,9 +57,11 @@ export default async function ProductDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const session = await auth();
-  const { product, relatedProducts } = await getProductDetail(id, session?.user?.id);
-  const isOwner = session?.user?.id === product.sellerId;
+  // Phase 6C-2 raw-auth hardening：收藏状态/owner 个性化按 ACTIVE 账号解析；
+  // SUSPENDED 会话 → null → 匿名语义（收藏态与 isOwner 抑制），公开详情照常
+  const viewerId = await getActiveViewerId();
+  const { product, relatedProducts } = await getProductDetail(id, viewerId ?? undefined);
+  const isOwner = viewerId === product.sellerId;
   const isFavorited = Array.isArray(product.favorites) && product.favorites.length > 0;
 
   return (
@@ -135,7 +137,7 @@ export default async function ProductDetailPage({
           }}
           isSeller={isOwner}
           isFavorited={isFavorited}
-          isLoggedIn={!!session?.user}
+          isLoggedIn={!!viewerId}
         />
       </div>
     </PageContainer>

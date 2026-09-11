@@ -1,13 +1,13 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { auth, getHomepageSummary } = vi.hoisted(() => ({
-  auth: vi.fn(),
+const { getActiveViewerId, getHomepageSummary } = vi.hoisted(() => ({
+  getActiveViewerId: vi.fn(),
   getHomepageSummary: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getActiveViewerId,
 }));
 
 vi.mock("@/repositories/home-repository", () => ({
@@ -39,7 +39,7 @@ afterEach(() => {
 
 describe("HomeHeroSummary", () => {
   it("renders the hero with session-aware summary data", async () => {
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getActiveViewerId.mockResolvedValue("user-1");
     getHomepageSummary.mockResolvedValue({
       productCount: 21,
       errandCount: 9,
@@ -55,7 +55,7 @@ describe("HomeHeroSummary", () => {
 
     render(await HomeHeroSummary({ campusId: "campus-1" }));
 
-    expect(auth).toHaveBeenCalledTimes(1);
+    expect(getActiveViewerId).toHaveBeenCalledTimes(1);
     expect(getHomepageSummary).toHaveBeenCalledWith({
       userId: "user-1",
       campusId: "campus-1",
@@ -65,7 +65,7 @@ describe("HomeHeroSummary", () => {
   });
 
   it("keeps the hero working for anonymous visitors", async () => {
-    auth.mockResolvedValue(null);
+    getActiveViewerId.mockResolvedValue(null);
     getHomepageSummary.mockResolvedValue({
       productCount: 0,
       errandCount: 0,
@@ -81,6 +81,28 @@ describe("HomeHeroSummary", () => {
       userId: undefined,
       campusId: undefined,
     });
+    expect(screen.getByText("未读通知 未登录")).toBeTruthy();
+  });
+
+  it("suppresses private personalization for a SUSPENDED session（AUTH-3F：匿名语义）", async () => {
+    getActiveViewerId.mockResolvedValue(null);
+    getHomepageSummary.mockResolvedValue({
+      productCount: 21,
+      errandCount: 9,
+      serviceCount: 6,
+      campuses: [],
+      selectedCampusId: null,
+      userSummary: null,
+    });
+
+    render(await HomeHeroSummary({}));
+
+    // SUSPENDED 会话与匿名访客同语义：个人看板（userSummary）被抑制
+    expect(getHomepageSummary).toHaveBeenCalledWith({
+      userId: undefined,
+      campusId: undefined,
+    });
+    expect(screen.getByText("商品数量 21")).toBeTruthy();
     expect(screen.getByText("未读通知 未登录")).toBeTruthy();
   });
 });

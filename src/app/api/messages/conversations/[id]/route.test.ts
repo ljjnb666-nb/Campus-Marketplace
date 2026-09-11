@@ -1,15 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
-  auth,
+  getVerifiedSession,
   getConversationDetailPayload,
 } = vi.hoisted(() => ({
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   getConversationDetailPayload: vi.fn(),
 }));
 
-vi.mock("@/lib/auth", () => ({
-  auth,
+vi.mock("@/lib/server-auth", () => ({
+  getVerifiedSession,
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -20,12 +20,12 @@ import { GET } from "@/app/api/messages/conversations/[id]/route";
 
 describe("GET /api/messages/conversations/[id]", () => {
   beforeEach(() => {
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     getConversationDetailPayload.mockReset();
   });
 
   it("returns 401 when the user is not logged in", async () => {
-    auth.mockResolvedValue(null);
+    getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
     const response = await GET(new Request("http://localhost"), {
       params: Promise.resolve({ id: "conversation-1" }),
@@ -37,9 +37,7 @@ describe("GET /api/messages/conversations/[id]", () => {
   });
 
   it("returns 404 (not a crash) when the conversation does not exist or is inaccessible", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
-    });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getConversationDetailPayload.mockResolvedValue(null);
 
     const response = await GET(new Request("http://localhost"), {
@@ -53,9 +51,7 @@ describe("GET /api/messages/conversations/[id]", () => {
   });
 
   it("returns the conversation detail payload for the logged-in user", async () => {
-    auth.mockResolvedValue({
-      user: { id: "user-1" },
-    });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     getConversationDetailPayload.mockResolvedValue({
       id: "conversation-1",
       title: "商品咨询：高数教材",

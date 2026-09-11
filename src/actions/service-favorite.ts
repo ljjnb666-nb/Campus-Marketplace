@@ -3,8 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
-import { requireUser } from "@/lib/server-auth";
-import { auth } from "@/lib/auth";
+import { requireUser, getVerifiedSession } from "@/lib/server-auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
 
 export async function toggleServiceFavorite(serviceListingId: string) {
@@ -46,10 +45,12 @@ export async function toggleServiceFavorite(serviceListingId: string) {
 }
 
 export async function getMyServiceFavorites(userId: string) {
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：私有收藏读必须 ACTIVE 账号 DB 复查；
+  // 非本人或账号非 ACTIVE（含 SUSPENDED）→ 既有抑制形状（[]）
+  const verified = await getVerifiedSession();
 
-  // 未登录或会话用户与传入 userId 不一致时，仅返回空结果
-  if (!session?.user?.id || session.user.id !== userId) {
+  // 未登录/账号不可用或会话用户与传入 userId 不一致时，仅返回空结果
+  if (!verified.ok || verified.user.id !== userId) {
     return [];
   }
 
@@ -77,10 +78,11 @@ export async function getMyServiceFavorites(userId: string) {
 }
 
 export async function checkServiceFavorited(userId: string, serviceListingId: string) {
-  const session = await auth();
+  // Phase 6C-2 raw-auth hardening：私有收藏状态必须 ACTIVE 账号 DB 复查
+  const verified = await getVerifiedSession();
 
-  // 未登录或会话用户与传入 userId 不一致时，视为未收藏
-  if (!session?.user?.id || session.user.id !== userId) {
+  // 未登录/账号不可用或会话用户与传入 userId 不一致时，视为未收藏
+  if (!verified.ok || verified.user.id !== userId) {
     return false;
   }
 

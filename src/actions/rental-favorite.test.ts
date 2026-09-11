@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   revalidatePath,
   requireUser,
-  auth,
+  getVerifiedSession,
   rentalListingFindFirst,
   rentalListingUpdate,
   rentalFavoriteFindUnique,
@@ -14,7 +14,7 @@ const {
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireUser: vi.fn(),
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   rentalListingFindFirst: vi.fn(),
   rentalListingUpdate: vi.fn(),
   rentalFavoriteFindUnique: vi.fn(),
@@ -30,10 +30,7 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  auth,
+  getVerifiedSession,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -77,7 +74,7 @@ describe("rental favorite actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     rentalListingFindFirst.mockReset();
     rentalListingUpdate.mockReset();
     rentalFavoriteFindUnique.mockReset();
@@ -87,7 +84,7 @@ describe("rental favorite actions", () => {
     transactionMock.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     rentalListingFindFirst.mockResolvedValue({ id: "rental-1" });
     rentalFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     rentalFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
@@ -213,7 +210,7 @@ describe("rental favorite actions", () => {
     });
 
     it("returns an empty list for guests", async () => {
-      auth.mockResolvedValue(null);
+      getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
       const result = await getMyRentalFavorites("user-1");
 
@@ -222,7 +219,7 @@ describe("rental favorite actions", () => {
     });
 
     it("returns an empty list when the session user does not match the parameter", async () => {
-      auth.mockResolvedValue({ user: { id: "user-1" } });
+      getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
 
       const result = await getMyRentalFavorites("user-2");
 

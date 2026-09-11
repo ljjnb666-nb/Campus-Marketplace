@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   revalidatePath,
   requireUser,
-  auth,
+  getVerifiedSession,
   serviceFavoriteFindUnique,
   serviceFavoriteFindMany,
   serviceFavoriteCreate,
@@ -13,7 +13,7 @@ const {
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireUser: vi.fn(),
-  auth: vi.fn(),
+  getVerifiedSession: vi.fn(),
   serviceFavoriteFindUnique: vi.fn(),
   serviceFavoriteFindMany: vi.fn(),
   serviceFavoriteCreate: vi.fn(),
@@ -28,10 +28,7 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/lib/auth", () => ({
-  auth,
+  getVerifiedSession,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -69,7 +66,7 @@ describe("service favorite actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    auth.mockReset();
+    getVerifiedSession.mockReset();
     serviceFavoriteFindUnique.mockReset();
     serviceFavoriteFindMany.mockReset();
     serviceFavoriteCreate.mockReset();
@@ -78,7 +75,7 @@ describe("service favorite actions", () => {
     transactionMock.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
-    auth.mockResolvedValue({ user: { id: "user-1" } });
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
     serviceFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     serviceFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
     serviceListingUpdate.mockResolvedValue({});
@@ -194,7 +191,7 @@ describe("service favorite actions", () => {
     });
 
     it("returns an empty list for guests", async () => {
-      auth.mockResolvedValue(null);
+      getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
       const result = await getMyServiceFavorites("user-1");
 
@@ -203,7 +200,7 @@ describe("service favorite actions", () => {
     });
 
     it("returns an empty list when the session user does not match the parameter", async () => {
-      auth.mockResolvedValue({ user: { id: "user-1" } });
+      getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
 
       const result = await getMyServiceFavorites("user-2");
 
@@ -230,7 +227,7 @@ describe("service favorite actions", () => {
     });
 
     it("returns false for guests", async () => {
-      auth.mockResolvedValue(null);
+      getVerifiedSession.mockResolvedValue({ ok: false, reason: "UNAUTHENTICATED" });
 
       const result = await checkServiceFavorited("user-1", "service-1");
 
@@ -239,7 +236,7 @@ describe("service favorite actions", () => {
     });
 
     it("returns false when the session user does not match the parameter", async () => {
-      auth.mockResolvedValue({ user: { id: "user-1" } });
+      getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
 
       const result = await checkServiceFavorited("user-2", "service-1");
 
