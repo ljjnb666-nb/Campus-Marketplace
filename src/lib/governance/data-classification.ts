@@ -22,8 +22,10 @@ export type RetentionDurationStatus =
 export type DataCategoryDefinition = {
   category: string;
   classification: DataClassification;
-  /** 谁可以看：public=任何人；self=仅本人；authorized roles=业务授权角色 */
-  visibility: "PUBLIC" | "SELF_ONLY" | "AUTHORIZED_ROLES_ONLY";
+  /** 谁可以看：public=任何人；self=仅本人；authorized roles=业务授权角色；
+   *  self+authorized=本人与业务授权角色均可（如申诉记录： appellant self +
+   *  appeal.review 授权 reviewer） */
+  visibility: "PUBLIC" | "SELF_ONLY" | "AUTHORIZED_ROLES_ONLY" | "SELF_AND_AUTHORIZED_ROLES";
   retentionTrigger: string;
   retentionDuration: RetentionDurationStatus;
   disposition: RetentionDisposition;
@@ -218,6 +220,27 @@ export const DATA_CLASSIFICATION_REGISTRY: Record<string, DataCategoryDefinition
     reason: "隐私请求历史是用户权利行使证据；仅本人与授权处理角色可见",
     exportable: true,
     logSafe: true,
+    legalReviewRequired: true,
+  },
+  // Phase 6C-1B：申诉记录（statement 为用户自由文本，decisionNote 为内部审核备注）。
+  // exportable = true 仅指按 Appellant DTO 域导出本人数据（statement/status/
+  // decisionReasonCode/reviewedAt 等）；decisionNote / reviewedById 等
+  // 内部字段不在导出白名单（FORBIDDEN_EXPORT_KEYS 结构性拦截）。
+  APPEAL_RECORDS: {
+    category: "APPEAL_RECORDS",
+    classification: "CONFIDENTIAL",
+    visibility: "SELF_AND_AUTHORIZED_ROLES",
+    retentionTrigger: "申诉创建（Appeal 行创建）",
+    retentionDuration: {
+      kind: "PENDING_LEGAL_REVIEW",
+      note: "治理证据链（punitive EA → Appeal → decision → restorative EA）一环；处置年限待法律审查",
+    },
+    disposition: "KEEP",
+    holdBehavior: "HOLD_BLOCKS",
+    reason:
+      "申诉与审核决定是治理证据；statement 为用户自由文本、decisionNote 为内部审核备注，均不得进入日志/AdminAudit 全文",
+    exportable: true,
+    logSafe: false,
     legalReviewRequired: true,
   },
   FUTURE_PAYMENT_DATA: {

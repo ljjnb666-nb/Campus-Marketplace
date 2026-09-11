@@ -236,6 +236,8 @@ model User {
   riskFlags             RiskFlag[]
   enforcementAsActor    EnforcementAction[]       @relation("EnforcementActor")
   enforcementAsTarget   EnforcementAction[]       @relation("EnforcementTarget")
+  // Phase 6C-1B：本用户作为 terminal decision reviewer 的申诉记录
+  reviewedAppeals       Appeal[]                  @relation("AppealReviewer")
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
@@ -1491,6 +1493,9 @@ enum EnforcementReasonCode {
   MANUAL_REVIEW
   FALSE_POSITIVE_CORRECTION
   OTHER
+  // Phase 6C-1B：Appeal GRANT 触发的恢复动作专用（与 AppealDecisionReasonCode
+  // 是两个独立 taxonomy，禁止 cast/复用）。
+  APPEAL_GRANTED
 }
 
 // 执法历史 / provenance（who/what/whom/where/why/when/source）。
@@ -1525,8 +1530,69 @@ model EnforcementAction {
   actor          User                  @relation("EnforcementActor", fields: [actorId], references: [id])
   target         User                  @relation("EnforcementTarget", fields: [targetId], references: [id])
   campus         Campus?               @relation(fields: [campusId], references: [id])
+  // Phase 6C-1B：针对本执法动作的申诉（永久至多一条，enforcementActionId @unique）
+  appeal         Appeal?
 
   @@index([targetId, createdAt])
   @@index([actorId, createdAt])
   @@index([type, createdAt])
+}
+
+// ============================================================
+// Phase 6C-1B：Appeal（申诉域，challenges EnforcementAction）
+// ============================================================
+
+// 申诉状态机：SUBMITTED → IN_REVIEW → { GRANTED | UPHELD | DISMISSED }；
+// SUBMITTED → WITHDRAWN（appellant 主动撤回；IN_REVIEW 起不可撤回）；
+// 四个 terminal 态不可变。允许 SUBMITTED → terminal（atomic claim + decision）。
+// IN_REVIEW 仅是 workflow 状态（无 claimant/assignment 语义）：
+// reviewedById / reviewedAt 只在 terminal decision 时写入实际决策者。
+enum AppealStatus {
+  SUBMITTED
+  IN_REVIEW
+  GRANTED
+  UPHELD
+  DISMISSED
+  WITHDRAWN
+}
+
+// 申诉决定原因码。与 EnforcementReasonCode 是两个独立 taxonomy，禁止 cast/复用：
+// - 四个程序性码仅可用于 DISMISSED（成功提交的 workflow 结局，不是异常）；
+// - MERIT_APPEAL_JUSTIFIED 仅可用于 GRANTED；MERIT_VIOLATION_CONFIRMED 仅可用于 UPHELD；
+// - WITHDRAWN 恒为 null。合法组合由 appeal review service 在锁内强制。
+enum AppealDecisionReasonCode {
+  STALE_ENFORCEMENT
+  ENFORCEMENT_ALREADY_REVERSED
+  LEGACY_PROVENANCE_INSUFFICIENT
+  APPELLANT_ERASED
+  MERIT_APPEAL_JUSTIFIED
+  MERIT_VIOLATION_CONFIRMED
+}
+
+// 申诉（who challenges which enforcement decision）。
+// - owner 唯一来源 = EnforcementAction.targetId（不冗余 appellantId），
+//   仅 target 本人可提交/撤回；
+// - 一个 EnforcementAction 永久至多一条 Appeal（enforcementActionId @unique，
+//   WITHDRAWN/UPHELD/DISMISSED 也不释放槽位，禁止 delete + recreate 绕过）；
+// - scope / target / type 全部从 immutable EnforcementAction 读取，不冗余列；
+// - reviewedById nullable 只服务于非 terminal 状态：terminal provenance
+//   不得因 reviewer 被删而清空 → 两个 FK 均显式 onDelete: Restrict
+//   （optional relation 的 Prisma 默认是 SetNull，必须显式覆盖）；
+// - decisionNote = 内部审核备注，唯一来源是本列（禁止进入审计/日志/导出）。
+model Appeal {
+  id                  String                    @id @default(cuid())
+  enforcementActionId String                    @unique
+  status              AppealStatus              @default(SUBMITTED)
+  statement           String                    @db.Text
+  reviewedById        String?
+  reviewedAt          DateTime?
+  decisionReasonCode  AppealDecisionReasonCode?
+  decisionNote        String?
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
+
+  enforcementAction EnforcementAction @relation(fields: [enforcementActionId], references: [id], onDelete: Restrict)
+  reviewedBy        User?             @relation("AppealReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
 }

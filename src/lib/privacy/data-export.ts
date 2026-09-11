@@ -37,6 +37,11 @@ export const FORBIDDEN_EXPORT_KEYS = [
   "presignedUrl",
   "reviewNote",
   "handledNote",
+  // Phase 6C-1B：Appeal 内部字段——decisionNote 是内部审核自由文本、
+  // reviewedById 是 reviewer 内部标识，均不进入任何用户导出
+  // （APPEAL_RECORDS exportable 仅覆盖 Appellant DTO 域）
+  "decisionNote",
+  "reviewedById",
   "adminLog",
   "studentCardImage",
   "NEXTAUTH_SECRET",
@@ -72,7 +77,9 @@ function pickCounterparty(
 
 export type UserExportPayload = {
   exportedAt: string;
-  format: "campus-marketplace.user-export/v1";
+  // Phase 6C-1B：新增 appeals 段改变 payload shape → 升 v2
+  //（不静默变更 v1 契约）
+  format: "campus-marketplace.user-export/v2";
   account: {
     id: string;
     name: string;
@@ -157,6 +164,23 @@ export type UserExportPayload = {
     requestedAt: string;
     completedAt: string | null;
   }>;
+  // Phase 6C-1B：appellant-owned 申诉（APPEAL_RECORDS exportable=true 的
+  // Appellant DTO 域）。owner 唯一条件 = enforcementAction.targetId ==
+  // exportingUserId（reviewedById 不是 ownership 条件——reviewer 审过的
+  // 他人申诉绝不进入 reviewer 自己的导出）。
+  // 内部字段（decisionNote / reviewedById / 审计 metadata）不导出；
+  // enforcementType 是唯一附带的 appellant-safe 机器 context 字段。
+  appeals: Array<{
+    id: string;
+    enforcementActionId: string;
+    enforcementType: string;
+    status: string;
+    statement: string;
+    decisionReasonCode: string | null;
+    createdAt: string;
+    updatedAt: string;
+    reviewedAt: string | null;
+  }>;
 };
 
 /**
@@ -205,6 +229,7 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
     messagesSent,
     uploadedAssets,
     privacyRequests,
+    appeals,
   ] = await Promise.all([
     prisma.policyAcceptance.findMany({
       where: { userId },
@@ -344,11 +369,27 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         completedAt: true,
       },
     }),
+    // Phase 6C-1B：appellant-owned 申诉（owner = enforcementAction.targetId）
+    prisma.appeal.findMany({
+      where: { enforcementAction: { targetId: userId } },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        enforcementActionId: true,
+        status: true,
+        statement: true,
+        decisionReasonCode: true,
+        createdAt: true,
+        updatedAt: true,
+        reviewedAt: true,
+        enforcementAction: { select: { type: true } },
+      },
+    }),
   ]);
 
   const payload: UserExportPayload = {
     exportedAt: new Date().toISOString(),
-    format: "campus-marketplace.user-export/v1",
+    format: "campus-marketplace.user-export/v2",
     account: {
       id: user.id,
       name: user.name,
@@ -471,6 +512,17 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       reasonCode: request.reasonCode,
       requestedAt: request.requestedAt.toISOString(),
       completedAt: request.completedAt?.toISOString() ?? null,
+    })),
+    appeals: appeals.map((appeal) => ({
+      id: appeal.id,
+      enforcementActionId: appeal.enforcementActionId,
+      enforcementType: appeal.enforcementAction.type,
+      status: appeal.status,
+      statement: appeal.statement,
+      decisionReasonCode: appeal.decisionReasonCode,
+      createdAt: appeal.createdAt.toISOString(),
+      updatedAt: appeal.updatedAt.toISOString(),
+      reviewedAt: appeal.reviewedAt?.toISOString() ?? null,
     })),
   };
 

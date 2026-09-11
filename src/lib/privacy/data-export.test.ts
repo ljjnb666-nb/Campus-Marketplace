@@ -24,6 +24,7 @@ const {
       message: { findMany: fn() },
       uploadedAsset: { findMany: fn() },
       privacyRequest: { findMany: fn() },
+      appeal: { findMany: fn() },
     },
     privacyRequestCreate: fn(),
     privacyRequestUpdate: fn(),
@@ -165,6 +166,8 @@ beforeEach(() => {
 
   restModels.rentalOrder.findMany.mockResolvedValue([]);
   restModels.review.findMany.mockResolvedValue([]);
+  // Phase 6C-1B：默认无申诉
+  restModels.appeal.findMany.mockResolvedValue([]);
   restModels.report.findMany.mockResolvedValue([]);
   restModels.message.findMany.mockResolvedValue([]);
   restModels.uploadedAsset.findMany.mockResolvedValue([]);
@@ -268,6 +271,81 @@ describe("buildUserExport（EXPORT_EXCLUDES_* / NO_CROSS_USER_EXPORT）", () => 
     expect(FORBIDDEN_EXPORT_KEYS).toContain("passwordHash");
     expect(FORBIDDEN_EXPORT_KEYS).toContain("objectKey");
     expect(FORBIDDEN_EXPORT_KEYS).toContain("bucket");
+    // Phase 6C-1B：Appeal 内部字段结构性禁止进入任何导出
+    expect(FORBIDDEN_EXPORT_KEYS).toContain("decisionNote");
+    expect(FORBIDDEN_EXPORT_KEYS).toContain("reviewedById");
+  });
+});
+
+describe("Phase 6C-1B appeal export（USER_EXPORT_FORMAT v2 + APPEAL_EXPORT contract）", () => {
+  const CANARY = "APPEAL_EXPORT_INTERNAL_CANARY";
+
+  beforeEach(() => {
+    // 带 decisionNote/reviewedById 的完整行：导出 DTO 必须只映射 Appellant 域
+    restModels.appeal.findMany.mockResolvedValue([
+      {
+        id: "appeal-1",
+        enforcementActionId: "ea-1",
+        status: "GRANTED",
+        statement: "我认为处罚有误",
+        decisionReasonCode: "MERIT_APPEAL_JUSTIFIED",
+        decisionNote: CANARY,
+        reviewedById: "reviewer-internal-id",
+        reviewedAt: new Date("2026-09-10T00:00:00Z"),
+        createdAt: new Date("2026-09-09T00:00:00Z"),
+        updatedAt: new Date("2026-09-10T00:00:00Z"),
+        enforcementAction: { type: "ACCOUNT_SUSPEND" },
+      },
+    ]);
+  });
+
+  it("export schema version 精确为 campus-marketplace.user-export/v2", async () => {
+    const payload = await buildUserExport(SELF_USER_ID);
+    expect(payload.format).toBe("campus-marketplace.user-export/v2");
+  });
+
+  it("export ownership = enforcementAction.targetId（reviewedById 不是 ownership 条件）", async () => {
+    await buildUserExport(SELF_USER_ID);
+    expect(restModels.appeal.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { enforcementAction: { targetId: SELF_USER_ID } },
+      }),
+    );
+  });
+
+  it("appellant-owned Appeal 按 Appellant DTO 域导出（含唯一 context 字段 enforcementType）", async () => {
+    const payload = await buildUserExport(SELF_USER_ID);
+
+    expect(payload.appeals).toHaveLength(1);
+    expect(payload.appeals[0]).toEqual({
+      id: "appeal-1",
+      enforcementActionId: "ea-1",
+      enforcementType: "ACCOUNT_SUSPEND",
+      status: "GRANTED",
+      statement: "我认为处罚有误",
+      decisionReasonCode: "MERIT_APPEAL_JUSTIFIED",
+      createdAt: "2026-09-09T00:00:00.000Z",
+      updatedAt: "2026-09-10T00:00:00.000Z",
+      reviewedAt: "2026-09-10T00:00:00.000Z",
+    });
+
+    // 内部字段绝不序列化进导出（T27）
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(CANARY);
+    expect(serialized).not.toContain("reviewedById");
+    expect(serialized).not.toContain("reviewer-internal-id");
+  });
+
+  it("assertNoForbiddenExportFields 对 decisionNote/reviewedById 键 fail closed（T28）", async () => {
+    const payload = await buildUserExport(SELF_USER_ID);
+    expect(() => assertNoForbiddenExportFields(payload)).not.toThrow();
+
+    expect(() =>
+      assertNoForbiddenExportFields({ appeals: [{ decisionNote: "internal" }] }),
+    ).toThrow(/decisionNote/);
+    expect(() =>
+      assertNoForbiddenExportFields({ appeals: [{ reviewedById: "r1" }] }),
+    ).toThrow(/reviewedById/);
   });
 });
 

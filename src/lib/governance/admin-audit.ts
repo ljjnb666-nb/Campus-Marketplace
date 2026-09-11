@@ -30,6 +30,14 @@ const ALLOWED_METADATA_KEYS = new Set([
   "resultState",
   "sourceType",
   "sourceId",
+  // Phase 6C-1B：appeal 机器字段（appealId/status/decisionReasonCode/selfReview/
+  // enforcementActionId 全部为机器可读值；statement / decisionNote 等自由文本
+  // 因白名单结构而结构性不可进入审计 metadata，detail 由 appeal service 恒置 null）
+  "appealId",
+  "appealStatus",
+  "decisionReasonCode",
+  "selfReview",
+  "enforcementActionId",
 ]);
 
 function sanitizeMetadata(
