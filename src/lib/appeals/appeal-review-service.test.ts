@@ -281,6 +281,49 @@ describe("beginAppealReview（行锁 → sorted 锁 → 锁后授权重读；wor
   });
 });
 
+describe("resolveAppealReviewScope（Repair 1 A4：malformed 行 fail closed）", () => {
+  it("ACCOUNT_SUSPEND campusId 非空 + scopeKey=GLOBAL（malformed）→ 即使 campus reviewer 也 DENY", async () => {
+    installAppeal(submittedAppeal(accountAction({ campusId: "campus-a", scopeKey: "GLOBAL" })));
+    loadAuthorizationContextMock.mockResolvedValue(reviewerContext(["CAMPUS"]));
+    await expect(
+      beginAppealReview({ reviewerId: "reviewer-1", appealId: "ap-1" }),
+    ).rejects.toMatchObject({ code: "APPEAL_REVIEW_FORBIDDEN" });
+    expect(txAppealUpdate).not.toHaveBeenCalled();
+  });
+
+  it("MARKETPLACE_RESTRICT campusId/scopeKey 跨 campus（malformed）→ GLOBAL reviewer 亦 DENY", async () => {
+    installAppeal(submittedAppeal(accountAction({
+      type: "MARKETPLACE_RESTRICT",
+      campusId: "campus-a",
+      scopeKey: "CAMPUS:campus-b",
+      previousState: "RISK_STATE:NORMAL@CAMPUS:campus-b",
+    })));
+    await expect(
+      decideAppeal({ reviewerId: "reviewer-1", appealId: "ap-1", decision: "GRANTED" }),
+    ).rejects.toMatchObject({ code: "APPEAL_REVIEW_FORBIDDEN" });
+    expect(restoreFromAppealTxLocked).not.toHaveBeenCalled();
+  });
+
+  it("GLOBAL reviewer 对 well-formed campus/global appeal 行为不变（auth 通过进入后续流程）", async () => {
+    installAppeal(submittedAppeal(accountAction({
+      type: "MARKETPLACE_RESTRICT",
+      campusId: "campus-a",
+      scopeKey: "CAMPUS:campus-a",
+      previousState: "RISK_STATE:NORMAL@CAMPUS:campus-a",
+    })));
+    txRiskStateFindUnique.mockResolvedValue({ state: "RESTRICTED" });
+    const result = await decideAppeal({
+      reviewerId: "reviewer-1",
+      appealId: "ap-1",
+      decision: "GRANTED",
+    });
+    expect(result.outcome).toBe("GRANTED");
+    expect(restoreFromAppealTxLocked).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      target: { kind: "RISK", state: "NORMAL", campusId: "campus-a" },
+    }));
+  });
+});
+
 describe("decideAppeal（程序性 DISMISSED = 提交成功；GRANT 经 canonical seam）", () => {
   it("GRANTED：恢复目标精确解析 + canonical seam（note=null）+ terminal provenance 写入", async () => {
     installAppeal();

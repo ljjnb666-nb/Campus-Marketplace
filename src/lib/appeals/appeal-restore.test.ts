@@ -50,25 +50,56 @@ beforeEach(() => {
 });
 
 describe("resolveRestorationTarget（恢复目标精确解析，禁止猜测）", () => {
-  it("ACCOUNT_SUSPEND → ACCOUNT（canonical reinstate 状态机决定目标）", () => {
+  it("ACCOUNT：仅 USER:ACTIVE + GLOBAL + campusId=null 可恢复（Repair 1 A1 fail-closed 矩阵）", () => {
     expect(resolveRestorationTarget(appealed())).toEqual({ kind: "ACCOUNT" });
+
+    // previousState 非法形状
+    expect(resolveRestorationTarget(appealed({ previousState: "garbage" }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({ previousState: "USER:SUSPENDED" }))).toBeNull();
+    expect(
+      resolveRestorationTarget(appealed({ previousState: "CAMPUS_MEMBERSHIP:ACTIVE" })),
+    ).toBeNull();
+    // scope 形状非法
+    expect(resolveRestorationTarget(appealed({ campusId: "campus-a" }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({ scopeKey: "CAMPUS:campus-a" }))).toBeNull();
   });
 
-  it("MEMBERSHIP_SUSPEND → 同 campus；缺 campusId / scopeKey 不一致 → null（fail closed）", () => {
+  it("MEMBERSHIP：仅 CAMPUS_MEMBERSHIP:ACTIVE + exact campus 可恢复（Repair 1 A2 fail-closed 矩阵）", () => {
+    expect(
+      resolveRestorationTarget(appealed({
+        type: "MEMBERSHIP_SUSPEND",
+        campusId: "campus-a",
+        scopeKey: "CAMPUS:campus-a",
+        previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
+      })),
+    ).toEqual({ kind: "MEMBERSHIP", campusId: "campus-a" });
+
+    // previousState 非法形状
     expect(resolveRestorationTarget(appealed({
       type: "MEMBERSHIP_SUSPEND",
       campusId: "campus-a",
       scopeKey: "CAMPUS:campus-a",
-      previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
-    }))).toEqual({ kind: "MEMBERSHIP", campusId: "campus-a" });
-
+      previousState: "garbage",
+    }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({
+      type: "MEMBERSHIP_SUSPEND",
+      campusId: "campus-a",
+      scopeKey: "CAMPUS:campus-a",
+      previousState: "USER:ACTIVE",
+    }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({
+      type: "MEMBERSHIP_SUSPEND",
+      campusId: "campus-a",
+      scopeKey: "CAMPUS:campus-a",
+      previousState: "CAMPUS_MEMBERSHIP:SUSPENDED",
+    }))).toBeNull();
+    // scope 形状非法
     expect(resolveRestorationTarget(appealed({
       type: "MEMBERSHIP_SUSPEND",
       campusId: null,
       scopeKey: "GLOBAL",
       previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
     }))).toBeNull();
-
     expect(resolveRestorationTarget(appealed({
       type: "MEMBERSHIP_SUSPEND",
       campusId: "campus-a",
@@ -87,21 +118,36 @@ describe("resolveRestorationTarget（恢复目标精确解析，禁止猜测）"
     expect(resolveRestorationTarget(appealed({
       type: "MARKETPLACE_RESTRICT",
       scopeKey: "CAMPUS:c1",
+      campusId: "c1",
       previousState: "RISK_STATE:NORMAL@CAMPUS:c1",
     }))).toEqual({ kind: "RISK", state: "NORMAL", campusId: "c1" });
   });
 
-  it("RISK：RESTRICTED 目标 / scope 不一致 / 无法解析的编码 → null（LEGACY_PROVENANCE）", () => {
+  it("RISK：RESTRICTED 目标 / campusId+scopeKey 不一致 / 无法解析的编码 → null（Repair 1 A3）", () => {
     expect(resolveRestorationTarget(appealed({
       type: "MARKETPLACE_RESTRICT",
       scopeKey: "GLOBAL",
       previousState: "RISK_STATE:RESTRICTED@GLOBAL",
     }))).toBeNull();
 
+    // campusId 与 scopeKey/编码双向不一致一律 fail closed
     expect(resolveRestorationTarget(appealed({
       type: "MARKETPLACE_RESTRICT",
+      campusId: "campus-a",
       scopeKey: "GLOBAL",
-      previousState: "RISK_STATE:NORMAL@CAMPUS:other",
+      previousState: "RISK_STATE:NORMAL@GLOBAL",
+    }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({
+      type: "MARKETPLACE_RESTRICT",
+      campusId: "campus-a",
+      scopeKey: "CAMPUS:campus-b",
+      previousState: "RISK_STATE:NORMAL@CAMPUS:campus-b",
+    }))).toBeNull();
+    expect(resolveRestorationTarget(appealed({
+      type: "MARKETPLACE_RESTRICT",
+      campusId: null,
+      scopeKey: "CAMPUS:campus-a",
+      previousState: "RISK_STATE:NORMAL@CAMPUS:campus-a",
     }))).toBeNull();
 
     expect(resolveRestorationTarget(appealed({

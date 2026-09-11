@@ -161,6 +161,29 @@ describe("submitAppeal（USER target 锁先于最终资格读；唯一约束为�
     })).rejects.toMatchObject({ code: "APPEAL_NOT_ALLOWED" });
   });
 
+  it("T41 submit 防枚举：outsider 对 active/erased/deleted target 结果完全一致（404）", async () => {
+    const outsider = "outsider-user";
+    const targetStates = [
+      { deletedAt: null, erasedAt: null },
+      { deletedAt: null, erasedAt: new Date() },
+      { deletedAt: new Date(), erasedAt: null },
+    ];
+    for (const targetState of targetStates) {
+      txEnforcementActionFindUnique
+        .mockResolvedValueOnce({ targetId: TARGET_ID })
+        .mockResolvedValue({ id: EA_ID, type: "ACCOUNT_SUSPEND", targetId: TARGET_ID });
+      txUserFindUnique.mockResolvedValue(targetState);
+
+      await expect(submitAppeal({
+        callerUserId: outsider,
+        enforcementActionId: EA_ID,
+        statement: "ok",
+      })).rejects.toMatchObject({ code: "APPEAL_NOT_OWNED", status: 404 });
+    }
+    // ownership 检查先于 target 状态读取：outsider 路径从未产生写入
+    expect(txAppealCreate).not.toHaveBeenCalled();
+  });
+
   it("target erased/deleted → APPEAL_NOT_ALLOWED（不产生申诉行）", async () => {
     txEnforcementActionFindUnique
       .mockResolvedValueOnce({ targetId: TARGET_ID })
@@ -305,6 +328,31 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       code: "APPEAL_NOT_OWNED",
       status: 404,
     });
+  });
+
+  it("T41 withdraw 防枚举：outsider 对 active/erased/deleted target 结果完全一致（404）", async () => {
+    const outsider = "outsider-user";
+    txAppealFindUnique.mockResolvedValue({
+      id: "ap-1",
+      status: "SUBMITTED",
+      enforcementActionId: EA_ID,
+    });
+    txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
+    const targetStates = [
+      { deletedAt: null, erasedAt: null },
+      { deletedAt: null, erasedAt: new Date() },
+      { deletedAt: new Date(), erasedAt: null },
+    ];
+    for (const targetState of targetStates) {
+      txUserFindUnique.mockResolvedValue(targetState);
+
+      await expect(withdrawAppeal({ callerUserId: outsider, appealId: "ap-1" })).rejects.toMatchObject({
+        code: "APPEAL_NOT_OWNED",
+        status: 404,
+      });
+    }
+    // ownership 检查先于 erased/deleted 判定：outsider 路径零 mutation
+    expect(txAppealUpdate).not.toHaveBeenCalled();
   });
 
   it("IN_REVIEW / terminal → APPEAL_INVALID_TRANSITION", async () => {

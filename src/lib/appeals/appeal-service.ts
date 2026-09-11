@@ -146,19 +146,21 @@ export async function submitAppeal(
       throw appealError("APPEAL_NOT_FOUND");
     }
 
-    // 4. target 存在且未 erased/deleted（合法 appellant 本身可为 SUSPENDED——
-    //    User.status 不参与判定）
+    // 4. ownership 先于 target 状态读取（Repair 1 B1 防枚举）：
+    // outsider 对 active/erased/deleted target 一律得到相同的 APPEAL_NOT_OWNED/404，
+    // 不得通过错误码差异推断 target 当前状态
+    if (input.callerUserId !== action.targetId) {
+      throw appealError("APPEAL_NOT_OWNED");
+    }
+
+    // 5. 仅 owner 可达：target 存在且未 erased/deleted（合法 appellant 本身可为
+    //    SUSPENDED——User.status 不参与判定）
     const targetUser = await tx.user.findUnique({
       where: { id: action.targetId },
       select: { deletedAt: true, erasedAt: true },
     });
     if (!targetUser || targetUser.deletedAt || targetUser.erasedAt) {
       throw appealError("APPEAL_NOT_ALLOWED", { userMessage: "账号状态不允许提交申诉" });
-    }
-
-    // 5. ownership：仅 EA target 本人可提交（防枚举 404）
-    if (input.callerUserId !== action.targetId) {
-      throw appealError("APPEAL_NOT_OWNED");
     }
 
     // 6. 仅 punitive 可申诉（restorative = 别人的恢复记录，不是申诉对象）
@@ -231,7 +233,15 @@ export async function withdrawAppeal(
       await input.racePoint(tx);
     }
 
-    // 4/5. 锁内重读 target：post-erasure 用户不得再产生任何 user-originated mutation
+    // 4. ownership 先于 target 状态读取（Repair 1 B2 防枚举）：
+    // outsider 不得通过 withdraw 错误码推断 appellant 是否已注销——
+    // active/erased/deleted target 对非本人一律 APPEAL_NOT_OWNED/404
+    if (input.callerUserId !== action.targetId) {
+      throw appealError("APPEAL_NOT_OWNED");
+    }
+
+    // 5. 仅 owner 可达：锁内重读 target——post-erasure/deleted 用户不得再产生
+    //    任何 user-originated mutation（保持 SUBMITTED 交给 reviewer dismissal）
     const targetUser = await tx.user.findUnique({
       where: { id: action.targetId },
       select: { deletedAt: true, erasedAt: true },
@@ -240,12 +250,7 @@ export async function withdrawAppeal(
       throw appealError("APPEAL_NOT_ALLOWED", { userMessage: "账号状态不允许该操作" });
     }
 
-    // 6. ownership（caller 必须就是 EA target）
-    if (input.callerUserId !== action.targetId) {
-      throw appealError("APPEAL_NOT_OWNED");
-    }
-
-    // 7. 仅 SUBMITTED 可撤回（IN_REVIEW / terminal 一律 DENY）
+    // 6. 仅 SUBMITTED 可撤回（IN_REVIEW / terminal 一律 DENY）
     if (appeal.status !== "SUBMITTED") {
       throw appealError("APPEAL_INVALID_TRANSITION");
     }

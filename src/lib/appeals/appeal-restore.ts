@@ -31,12 +31,21 @@ export type AppealRestorationTarget =
 /**
  * 从 appealed EnforcementAction 精确解析恢复目标。
  *
+ * 自动恢复资格要求 previousState 不但非空、还必须**完整解析为该动作族的
+ * 唯一合法 pre-state 形状**（Repair 1 Blocker A：fail closed）：
+ * - ACCOUNT_SUSPEND：campusId=null + scopeKey=GLOBAL + previousState=USER:ACTIVE；
+ * - MEMBERSHIP_SUSPEND：campusId 非空 + scopeKey=CAMPUS:<campusId> +
+ *   previousState=CAMPUS_MEMBERSHIP:ACTIVE；
+ * - MARKETPLACE_RESTRICT：RISK_STATE:NORMAL|WATCH@<scope>，且 scope 与
+ *   campusId/scopeKey 双向一致（GLOBAL ↔ campusId=null@GLOBAL；
+ *   CAMPUS:<id> ↔ campusId=<id>@CAMPUS:<id>）。
+ *
  * 返回 null = 溯源不足以安全恢复（调用方按程序性
  * DISMISSED(LEGACY_PROVENANCE_INSUFFICIENT) 处理，禁止猜测）：
- * - previousState 为空 / 编码不可解析；
- * - RISK 恢复目标解析出 RESTRICTED（把限制恢复成限制 = 无意义）；
- * - previousState 编码的 scope 与 appealed.scopeKey 不一致；
- * - MEMBERSHIP 动作缺 campusId 或 scopeKey 编码与 campusId 不一致。
+ * previousState 为空 / 值不属于该族的合法 pre-state / 编码不可解析 /
+ * campusId 与 scopeKey 不一致 / RISK 恢复目标为 RESTRICTED。
+ * canonical 产生方只会写出合法形状；任何偏离都意味着数据损坏或
+ * 非 canonical 写入——绝不猜恢复目标。
  */
 export function resolveRestorationTarget(appealed: {
   type: EnforcementActionType;
@@ -49,15 +58,23 @@ export function resolveRestorationTarget(appealed: {
   }
 
   switch (appealed.type) {
-    case "ACCOUNT_SUSPEND":
-      // canonical reinstate 的恢复目标固定 ACTIVE（seam 状态机决定），无需解析
+    case "ACCOUNT_SUSPEND": {
+      if (appealed.campusId !== null || appealed.scopeKey !== "GLOBAL") {
+        return null;
+      }
+      if (appealed.previousState !== "USER:ACTIVE") {
+        return null;
+      }
       return { kind: "ACCOUNT" };
+    }
     case "MEMBERSHIP_SUSPEND": {
-      // 同一 campus 才能恢复：campusId 缺失或与 scopeKey 编码不一致 = fail closed
-      if (
-        appealed.campusId === null ||
-        appealed.scopeKey !== `CAMPUS:${appealed.campusId}`
-      ) {
+      if (appealed.campusId === null) {
+        return null;
+      }
+      if (appealed.scopeKey !== `CAMPUS:${appealed.campusId}`) {
+        return null;
+      }
+      if (appealed.previousState !== "CAMPUS_MEMBERSHIP:ACTIVE") {
         return null;
       }
       return { kind: "MEMBERSHIP", campusId: appealed.campusId };
@@ -71,14 +88,25 @@ export function resolveRestorationTarget(appealed: {
       }
       const level = match[1] as "NORMAL" | "WATCH" | "RESTRICTED";
       const scope = match[2] as string;
-      if (level === "RESTRICTED" || scope !== appealed.scopeKey) {
+      if (level === "RESTRICTED") {
         return null;
       }
       if (scope === "GLOBAL") {
+        if (appealed.campusId !== null || appealed.scopeKey !== "GLOBAL") {
+          return null;
+        }
         return { kind: "RISK", state: level, campusId: null };
       }
       if (scope.startsWith("CAMPUS:")) {
-        return { kind: "RISK", state: level, campusId: scope.slice("CAMPUS:".length) };
+        const campusId = scope.slice("CAMPUS:".length);
+        if (
+          appealed.campusId === null ||
+          appealed.scopeKey !== `CAMPUS:${appealed.campusId}` ||
+          campusId !== appealed.campusId
+        ) {
+          return null;
+        }
+        return { kind: "RISK", state: level, campusId };
       }
       return null;
     }

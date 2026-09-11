@@ -51,11 +51,15 @@ const SYNTHETIC_LEGACY_SEQ = BOUNDARY - BigInt(1002);
 const SYNTHETIC_T24_LEGACY_SEQ = BOUNDARY - BigInt(1004);
 const SYNTHETIC_EARLIER_AUTH_SEQ = BOUNDARY + BigInt(5_000_008);
 const SYNTHETIC_ROLLBACK_COMPAT_SEQ = BOUNDARY + BigInt(5_000_010);
+const SYNTHETIC_T40_MALFORMED_ACCOUNT_SEQ = BOUNDARY + BigInt(5_000_012);
+const SYNTHETIC_T40_MALFORMED_RISK_SEQ = BOUNDARY + BigInt(5_000_014);
 const ALL_SYNTHETIC_SEQS = [
   SYNTHETIC_LEGACY_SEQ,
   SYNTHETIC_T24_LEGACY_SEQ,
   SYNTHETIC_EARLIER_AUTH_SEQ,
   SYNTHETIC_ROLLBACK_COMPAT_SEQ,
+  SYNTHETIC_T40_MALFORMED_ACCOUNT_SEQ,
+  SYNTHETIC_T40_MALFORMED_RISK_SEQ,
 ];
 
 async function createFixtureCampus(name: string) {
@@ -1445,6 +1449,239 @@ describe.skipIf(!integrationDatabaseUrl)(
     });
 
     // ------------------------------------------------------------------
+    // T39 malformed non-null provenance → DISMISSED(LEGACY_PROVENANCE_INSUFFICIENT)
+    // （seq >= boundary 但 previousState 不是该族合法 pre-state 形状）
+    // ------------------------------------------------------------------
+    it("T39 ACCOUNT/MEMBERSHIP 损坏的非空 previousState：零恢复 fail closed", async () => {
+      const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+      const { suspendCampusMembership } = await import(
+        "@/lib/enforcement/membership-enforcement-service"
+      );
+
+      // ACCOUNT：canonical 行 + previousState 损坏为 garbage（非 null、非法形状）
+      const accountTarget = await createFixtureUser("T39账号目标", campusA.id);
+      await suspendAccount({
+        actorId: enforcerA.id,
+        targetUserId: accountTarget.id,
+        reasonCode: "POLICY_VIOLATION",
+      });
+      const accountEA = (await latestActionFor(accountTarget.id, "ACCOUNT_SUSPEND"))!;
+      await rawClient!.$executeRaw`
+        UPDATE "EnforcementAction" SET "previousState" = 'garbage' WHERE "id" = ${accountEA.id}`;
+      const accountAppeal = await submitFor(accountEA.id, accountTarget.id);
+
+      const { decideAppeal } = await import("@/lib/appeals/appeal-review-service");
+      const accountResult = await decideAppeal({
+        reviewerId: reviewerFull.id,
+        appealId: accountAppeal.appeal.id,
+        decision: "GRANTED",
+      });
+      expect(accountResult).toMatchObject({
+        outcome: "DISMISSED",
+        reasonCode: "LEGACY_PROVENANCE_INSUFFICIENT",
+      });
+      expect(
+        (await rawClient!.user.findUniqueOrThrow({ where: { id: accountTarget.id } })).status,
+      ).toBe("SUSPENDED");
+      expect(
+        await rawClient!.enforcementAction.count({
+          where: { targetId: accountTarget.id, type: "ACCOUNT_REINSTATE" },
+        }),
+      ).toBe(0);
+
+      // MEMBERSHIP：previousState 损坏为 SUSPENDED（同族但非合法 pre-state）
+      const memberTarget = await createFixtureUser("T39成员目标", campusA.id);
+      await suspendCampusMembership({
+        actorId: enforcerA.id,
+        targetUserId: memberTarget.id,
+        campusId: campusA.id,
+        reasonCode: "POLICY_VIOLATION",
+      });
+      const memberEA = (await latestActionFor(memberTarget.id, "MEMBERSHIP_SUSPEND"))!;
+      await rawClient!.$executeRaw`
+        UPDATE "EnforcementAction" SET "previousState" = 'CAMPUS_MEMBERSHIP:SUSPENDED'
+        WHERE "id" = ${memberEA.id}`;
+      const memberAppeal = await submitFor(memberEA.id, memberTarget.id);
+
+      const memberResult = await decideAppeal({
+        reviewerId: reviewerFull.id,
+        appealId: memberAppeal.appeal.id,
+        decision: "GRANTED",
+      });
+      expect(memberResult).toMatchObject({
+        outcome: "DISMISSED",
+        reasonCode: "LEGACY_PROVENANCE_INSUFFICIENT",
+      });
+      const membership = await rawClient!.campusMembership.findUniqueOrThrow({
+        where: { userId_campusId: { userId: memberTarget.id, campusId: campusA.id } },
+      });
+      expect(membership.status).toBe("SUSPENDED");
+      expect(
+        await rawClient!.enforcementAction.count({
+          where: { targetId: memberTarget.id, type: "MEMBERSHIP_REINSTATE" },
+        }),
+      ).toBe(0);
+    });
+
+    // ------------------------------------------------------------------
+    // T40 enforcement scope coherence fail closed（malformed 行无法确立 review scope）
+    // ------------------------------------------------------------------
+    it("T40 malformed campusId/scopeKey：campus 与 GLOBAL reviewer 一律 DENY；well-formed 不受影响", async () => {
+      const campusReviewerA = await createFixtureUser("T40校区审核员", campusA.id);
+      await grantRole(campusReviewerA.id, "T40_REVIEWER_A", ["appeal.review"], "CAMPUS", campusA.id);
+      const eaTarget = await createFixtureUser("T40目标", campusA.id);
+
+      // malformed ACCOUNT_SUSPEND：campusId 非空 + scopeKey=GLOBAL
+      await insertRawAction({
+        id: `${RUN_TAG}-t40-account`,
+        type: "ACCOUNT_SUSPEND",
+        actorId: enforcerA.id,
+        targetId: eaTarget.id,
+        campusId: campusA.id,
+        scopeKey: "GLOBAL",
+        previousState: "USER:ACTIVE",
+        resultState: "USER:SUSPENDED",
+        enforcementSeq: SYNTHETIC_T40_MALFORMED_ACCOUNT_SEQ,
+      });
+      const malformedAccountAppeal = await submitFor(`${RUN_TAG}-t40-account`, eaTarget.id);
+
+      const { beginAppealReview, decideAppeal } = await import("@/lib/appeals/appeal-review-service");
+      await expect(
+        beginAppealReview({
+          reviewerId: campusReviewerA.id,
+          appealId: malformedAccountAppeal.appeal.id,
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_REVIEW_FORBIDDEN" });
+      await expect(
+        decideAppeal({
+          reviewerId: reviewerFull.id,
+          appealId: malformedAccountAppeal.appeal.id,
+          decision: "GRANTED",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_REVIEW_FORBIDDEN" });
+
+      // malformed MARKETPLACE_RESTRICT：campusId=campus-A + scopeKey=CAMPUS:campus-B
+      await insertRawAction({
+        id: `${RUN_TAG}-t40-risk`,
+        type: "MARKETPLACE_RESTRICT",
+        actorId: enforcerA.id,
+        targetId: eaTarget.id,
+        campusId: campusA.id,
+        scopeKey: `CAMPUS:${campusB.id}`,
+        previousState: `RISK_STATE:NORMAL@CAMPUS:${campusB.id}`,
+        resultState: `RISK_STATE:RESTRICTED@CAMPUS:${campusB.id}`,
+        enforcementSeq: SYNTHETIC_T40_MALFORMED_RISK_SEQ,
+      });
+      const malformedRiskAppeal = await submitFor(`${RUN_TAG}-t40-risk`, eaTarget.id);
+      await expect(
+        decideAppeal({
+          reviewerId: reviewerFull.id,
+          appealId: malformedRiskAppeal.appeal.id,
+          decision: "GRANTED",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_REVIEW_FORBIDDEN" });
+
+      // GLOBAL reviewer 对 well-formed campus appeal 行为不变
+      const wellFormedTarget = await createFixtureUser("T40well目标", campusA.id);
+      const { suspendCampusMembership } = await import(
+        "@/lib/enforcement/membership-enforcement-service"
+      );
+      await suspendCampusMembership({
+        actorId: enforcerA.id,
+        targetUserId: wellFormedTarget.id,
+        campusId: campusA.id,
+        reasonCode: "POLICY_VIOLATION",
+      });
+      const wellFormedEA = (await latestActionFor(wellFormedTarget.id, "MEMBERSHIP_SUSPEND"))!;
+      const wellFormedAppeal = await submitFor(wellFormedEA.id, wellFormedTarget.id);
+      await beginAppealReview({ reviewerId: reviewerFull.id, appealId: wellFormedAppeal.appeal.id });
+      expect(
+        (
+          await rawClient!.appeal.findUniqueOrThrow({
+            where: { id: wellFormedAppeal.appeal.id },
+          })
+        ).status,
+      ).toBe("IN_REVIEW");
+    });
+
+    // ------------------------------------------------------------------
+    // T41 ownership anti-enumeration：outsider 无法通过错误码推断 target 状态
+    // ------------------------------------------------------------------
+    it("T41 outsider 对 active/erased/deleted target 全部 APPEAL_NOT_OWNED/404；owner erased → NOT_ALLOWED", async () => {
+      const outsider = await createFixtureUser("T41旁人", campusA.id);
+      const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+      const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+      const { submitAppeal, withdrawAppeal } = await import("@/lib/appeals/appeal-service");
+
+      // active target：outsider submit → NOT_OWNED
+      const activeTarget = await createFixtureUser("T41active", campusA.id);
+      await suspendAccount({ actorId: enforcerA.id, targetUserId: activeTarget.id, reasonCode: "POLICY_VIOLATION" });
+      const activeEA = (await latestActionFor(activeTarget.id, "ACCOUNT_SUSPEND"))!;
+      await expect(
+        submitAppeal({
+          callerUserId: outsider.id,
+          enforcementActionId: activeEA.id,
+          statement: "T41",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_OWNED", status: 404 });
+
+      // erased target：outsider submit → 同样 NOT_OWNED（非 NOT_ALLOWED）
+      const erasedTarget = await createFixtureUser("T41erased", campusA.id);
+      await suspendAccount({ actorId: enforcerA.id, targetUserId: erasedTarget.id, reasonCode: "POLICY_VIOLATION" });
+      const erasedEA = (await latestActionFor(erasedTarget.id, "ACCOUNT_SUSPEND"))!;
+      await eraseAccount(erasedTarget.id);
+      await expect(
+        submitAppeal({
+          callerUserId: outsider.id,
+          enforcementActionId: erasedEA.id,
+          statement: "T41",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_OWNED", status: 404 });
+      // owner 本人 erased 后提交 → NOT_ALLOWED（语义区分仅对 owner 存在）
+      await expect(
+        submitAppeal({
+          callerUserId: erasedTarget.id,
+          enforcementActionId: erasedEA.id,
+          statement: "T41",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_ALLOWED" });
+
+      // deleted target：outsider submit → 同样 NOT_OWNED
+      const deletedTarget = await createFixtureUser("T41deleted", campusA.id);
+      await suspendAccount({ actorId: enforcerA.id, targetUserId: deletedTarget.id, reasonCode: "POLICY_VIOLATION" });
+      const deletedEA = (await latestActionFor(deletedTarget.id, "ACCOUNT_SUSPEND"))!;
+      await rawClient!.$executeRaw`
+        UPDATE "User" SET "deletedAt" = NOW() WHERE "id" = ${deletedTarget.id}`;
+      await expect(
+        submitAppeal({
+          callerUserId: outsider.id,
+          enforcementActionId: deletedEA.id,
+          statement: "T41",
+        }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_OWNED", status: 404 });
+
+      // withdraw 同合同：owner 的 SUBMITTED appeal 在 target 被 deleted 后，
+      // outsider withdraw → NOT_OWNED（不得泄露注销状态）；owner withdraw → NOT_ALLOWED
+      const ownerAppeal = await submitFor(deletedEA.id, deletedTarget.id).catch(() => null);
+      expect(ownerAppeal).toBeNull(); // deleted target 上 owner 也无法新建
+      const liveTarget = await createFixtureUser("T41live", campusA.id);
+      await suspendAccount({ actorId: enforcerA.id, targetUserId: liveTarget.id, reasonCode: "POLICY_VIOLATION" });
+      const liveEA = (await latestActionFor(liveTarget.id, "ACCOUNT_SUSPEND"))!;
+      const liveAppeal = await submitFor(liveEA.id, liveTarget.id);
+      await rawClient!.$executeRaw`
+        UPDATE "User" SET "deletedAt" = NOW() WHERE "id" = ${liveTarget.id}`;
+      await expect(
+        withdrawAppeal({ callerUserId: outsider.id, appealId: liveAppeal.appeal.id }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_OWNED", status: 404 });
+      await expect(
+        withdrawAppeal({ callerUserId: liveTarget.id, appealId: liveAppeal.appeal.id }),
+      ).rejects.toMatchObject({ code: "APPEAL_NOT_ALLOWED" });
+      expect(
+        (await rawClient!.appeal.findUniqueOrThrow({ where: { id: liveAppeal.appeal.id } })).status,
+      ).toBe("SUBMITTED");
+    });
+
+    // ------------------------------------------------------------------
     // T38 FK referential action contract（catalog + 破坏性 DELETE）
     // ------------------------------------------------------------------
     it("T38-A/T38-D FK catalog RESTRICT + Prisma/DB drift NONE", async () => {
@@ -1623,23 +1860,31 @@ describe.skipIf(!integrationDatabaseUrl)(
         runPrismaDbExecute(preSql, tempUrl);
 
         // 失败注入：COMMIT 之前插入违反 FK 的语句
+        // （updatedAt 显式提供——确保触发的是真正的 FK violation 而非 NOT NULL violation）
         const newSql = readFileSync(
           path.resolve("prisma", "migrations", NEW_MIGRATION, "migration.sql"),
           "utf8",
         );
         const injected = newSql.replace(
           "COMMIT;",
-          `INSERT INTO "Appeal" ("id", "enforcementActionId", "statement") VALUES ('d4-inject-fail', 'missing-ea', 'x');\nCOMMIT;`,
+          `INSERT INTO "Appeal" ("id", "enforcementActionId", "statement", "updatedAt") VALUES ('d4-inject-fail', 'missing-ea', 'x', CURRENT_TIMESTAMP);\nCOMMIT;`,
         );
         expect(injected).not.toBe(newSql);
 
         let failed = false;
+        let failureOutput = "";
         try {
           runPrismaDbExecute(injected, tempUrl);
-        } catch {
+        } catch (error) {
           failed = true;
+          failureOutput = String(error);
         }
         expect(failed).toBe(true);
+        // 真实 FK violation 证据：Prisma CLI 输出不含原始 SQLSTATE（23503），
+        // 但给出精确约束名——断言命中的正是我们的 Appeal_enforcementActionId_fkey
+        expect(failureOutput).toContain(
+          'violates foreign key constraint "Appeal_enforcementActionId_fkey"',
+        );
 
         // 零 partial state：Appeal 表 / permission / RolePermission / enum 值全部不存在
         const tempClient = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });

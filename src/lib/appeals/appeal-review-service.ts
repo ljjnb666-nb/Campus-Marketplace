@@ -101,6 +101,46 @@ type LockedAppeal = {
   };
 };
 
+/** canonical review scope（由 immutable EA 的 type/campusId/scopeKey 解析）。 */
+type AppealReviewScope = { kind: "GLOBAL" } | { kind: "CAMPUS"; campusId: string };
+
+/**
+ * 从 EnforcementAction 解析并校验 canonical review scope（Repair 1 A4，fail closed）：
+ * - ACCOUNT_SUSPEND：campusId=null + scopeKey=GLOBAL → GLOBAL；
+ * - MEMBERSHIP_SUSPEND：campusId 非空 + scopeKey=CAMPUS:<campusId> → CAMPUS(campusId)；
+ * - MARKETPLACE_RESTRICT：GLOBAL 形状（campusId=null + GLOBAL）或 CAMPUS 形状
+ *   （campusId 非空 + CAMPUS:<campusId>）。
+ * type/campusId/scopeKey 三者不一致（malformed 行）→ null：无法确立审核 scope，
+ * 一律 APPEAL_REVIEW_FORBIDDEN——绝不允许 campus reviewer 借 malformed campusId
+ * 审核 GLOBAL appeal，也不允许审核 scope 与恢复 scope 分叉。
+ */
+function resolveAppealReviewScope(action: {
+  type: EnforcementActionType;
+  campusId: string | null;
+  scopeKey: string;
+}): AppealReviewScope | null {
+  switch (action.type) {
+    case "ACCOUNT_SUSPEND":
+      return action.campusId === null && action.scopeKey === "GLOBAL"
+        ? { kind: "GLOBAL" }
+        : null;
+    case "MEMBERSHIP_SUSPEND":
+      return action.campusId !== null && action.scopeKey === `CAMPUS:${action.campusId}`
+        ? { kind: "CAMPUS", campusId: action.campusId }
+        : null;
+    case "MARKETPLACE_RESTRICT":
+      if (action.campusId === null && action.scopeKey === "GLOBAL") {
+        return { kind: "GLOBAL" };
+      }
+      if (action.campusId !== null && action.scopeKey === `CAMPUS:${action.campusId}`) {
+        return { kind: "CAMPUS", campusId: action.campusId };
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
 /** Appeal 行锁（全局 Appeal-row 锁序第一步，参数化 raw SQL）+ 锁内全读。 */
 async function lockAppealRow(
   tx: Prisma.TransactionClient,
@@ -285,8 +325,15 @@ export async function beginAppealReview(input: AppealReviewInput): Promise<void>
     }
 
     // 4. AFTER locks：重读授权上下文（角色撤销/账号停用竞态关闭点）
+    const reviewScope = resolveAppealReviewScope(action);
+    if (!reviewScope) {
+      throw appealError("APPEAL_REVIEW_FORBIDDEN");
+    }
     const context = await loadAuthorizationContext(input.reviewerId, tx);
-    requireAppealReviewAuthorization(context, action.campusId);
+    requireAppealReviewAuthorization(
+      context,
+      reviewScope.kind === "CAMPUS" ? reviewScope.campusId : null,
+    );
 
     // 5. reviewer != appellant（零例外）
     if (input.reviewerId === action.targetId) {
@@ -370,9 +417,16 @@ export async function decideAppeal(input: DecideAppealInput): Promise<AppealRevi
       await input.racePoint(tx);
     }
 
-    // 4. AFTER locks：授权重读
+    // 4. AFTER locks：授权重读（scope 由 immutable EA 严格解析，malformed → FORBIDDEN）
+    const reviewScope = resolveAppealReviewScope(action);
+    if (!reviewScope) {
+      throw appealError("APPEAL_REVIEW_FORBIDDEN");
+    }
     const context = await loadAuthorizationContext(input.reviewerId, tx);
-    requireAppealReviewAuthorization(context, action.campusId);
+    requireAppealReviewAuthorization(
+      context,
+      reviewScope.kind === "CAMPUS" ? reviewScope.campusId : null,
+    );
 
     // reviewer != appellant（零例外）
     if (input.reviewerId === targetId) {
