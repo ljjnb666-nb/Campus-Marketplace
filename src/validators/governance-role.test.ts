@@ -34,14 +34,14 @@ describe("strict validators", () => {
     }
   });
 
-  it("email trim + lowercase 规范化；空/非法形态拒绝", () => {
+  it("FR01-B：email 仅 trim，大小写逐字保留（不得发明 lowercase 身份键）", () => {
     const parsed = governanceRoleGrantSchema.safeParse({
       campusId: "campus-a",
-      email: "  User@Campus.Edu  ",
+      email: "  Mixed.Case@Campus.Edu  ",
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
-      expect(parsed.data.email).toBe("user@campus.edu");
+      expect(parsed.data.email).toBe("Mixed.Case@Campus.Edu");
     }
     expect(
       governanceRoleGrantSchema.safeParse({ campusId: "c", email: "" }).success,

@@ -50,6 +50,15 @@ type RoleGrantContext = {
   campusId?: string | null;
   /** 测试 seam：subject 锁取得之后、全部复核之前的受控暂停点（并发测试用） */
   racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /**
+   * Phase 7B FR-02：assignment 身份守卫（仅 revokeRole 消费；assignRole 忽略）。
+   * assignmentId 可经 revoke→re-grant 轮换（ABA）：调用方解析 assignment 后、
+   * canonical 元组撤回前，同一 (userId, roleKey, scopeKey) 元组可能已被删除并
+   * 重建为新 id。提供本字段时，锁内 existing.id 与其不一致 → 幂等 no-op
+   * （removed=false，不删除、不写 ROLE_REVOKED 审计）。省略 = canonical 既有
+   * 语义零变化（CLI/内部路径不受影响）。锁序/授权/membership 例外均不变。
+   */
+  expectedAssignmentId?: string;
 };
 
 /** 排序取得 {USER:actor, USER:target} subject 锁（自指时去重为单锁）。 */
@@ -306,6 +315,16 @@ export async function revokeRole(input: RoleGrantContext): Promise<{ removed: bo
     });
 
     if (!existing) {
+      return { removed: false };
+    }
+
+    // Phase 7B FR-02（ABA 身份守卫）：expectedAssignmentId 与锁内 existing.id
+    // 不一致 = 元组已被删除并重建（assignmentId 轮换），本行不是调用方请求的
+    // 那一行 → 幂等 no-op：不删除、不写 ROLE_REVOKED 审计。
+    if (
+      input.expectedAssignmentId !== undefined &&
+      existing.id !== input.expectedAssignmentId
+    ) {
       return { removed: false };
     }
 

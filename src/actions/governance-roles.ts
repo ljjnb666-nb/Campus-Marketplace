@@ -230,6 +230,9 @@ export async function revokeGovernanceRole(
       targetUserId: assignment.userId,
       roleKey: assignment.roleKey,
       campusId: assignment.campusId,
+      // FR-02（ABA 身份守卫）：撤回的必须正是客户端提交 assignmentId 所指的
+      // 那一行——元组在解析后被 revoke→re-grant 轮换时 canonical 幂等 no-op。
+      expectedAssignmentId: assignment.id,
     });
 
     revalidatePath("/governance/roles");

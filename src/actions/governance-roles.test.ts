@@ -310,7 +310,7 @@ describe("revokeGovernanceRole", () => {
     roleKey: "CAMPUS_APPEAL_REVIEWER",
   };
 
-  it("happy path：canonical revokeRole 收服务器解析字段 → revalidate", async () => {
+  it("happy path：canonical revokeRole 收服务器解析字段 + expectedAssignmentId（FR-02）→ revalidate", async () => {
     resolveRevocableAssignmentMock.mockResolvedValue(revocable);
     revokeRoleMock.mockResolvedValue({ removed: true });
 
@@ -322,6 +322,7 @@ describe("revokeGovernanceRole", () => {
       targetUserId: "target-1",
       roleKey: "CAMPUS_APPEAL_REVIEWER",
       campusId: "campus-a",
+      expectedAssignmentId: "asg-1",
     });
     expect(revalidatePathMock).toHaveBeenCalledWith("/governance/roles");
   });

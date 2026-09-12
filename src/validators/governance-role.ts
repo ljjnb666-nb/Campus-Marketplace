@@ -8,8 +8,9 @@ import { z } from "zod";
  *   与 6C-2 appealSubmit 同约定）；
  * - grant/lookup 不接收 roleKey：v1 服务器固定授予
  *   CAMPUS_APPEAL_REVIEWER（P1 security boundary，非 UI convenience）；
- * - email 规范化 = trim + lowercase（与登录约定一致），exact 匹配；
- *   未命中 → action 层统一 deny（无存在性 oracle）；
+ * - email = trim + 语法校验后 exact 匹配 stored email（FR-01：注册侧不做
+ *   lowercase 归一，本层不得发明 lowercase 身份键）；未命中 → action 层
+ *   统一 deny（无存在性 oracle）；
  * - cursor 是 base64url(JSON) 的 UNTRUSTED 分页位置（assignedAt+id），
  *   解析失败 → null（调用方安全失败态）；scope 授权独立于 cursor，
  *   伪造 cursor 只能改变位置，永远改变不了授权范围。
@@ -19,13 +20,16 @@ import { z } from "zod";
 export const GOVERNANCE_ROLE_DEFAULT_PAGE_SIZE = 25;
 export const GOVERNANCE_ROLE_MAX_PAGE_SIZE = 50;
 
+// FR-01（Final Review）：trim → email 语法校验 → exact stored-email lookup。
+// 注册侧存库不做 lowercase 归一，7B 不得发明 lowercase 身份键——大小写
+// 逐字保留后精确匹配；未命中 → action 层统一 deny（无存在性 oracle）。
+// 注册/登录/schema（citext）/迁移/回填等全仓归一是独立未来工作，本层禁动。
 const governanceRoleEmailSchema = z
   .string()
   .trim()
   .min(3, "请输入用户邮箱")
   .max(254, "邮箱长度不合法")
-  .email("请输入正确邮箱")
-  .transform((value) => value.toLowerCase());
+  .email("请输入正确邮箱");
 
 export const governanceRoleLookupSchema = z
   .object({

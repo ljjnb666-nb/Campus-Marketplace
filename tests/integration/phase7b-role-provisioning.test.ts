@@ -938,5 +938,213 @@ describe.skipIf(!integrationDatabaseUrl)(
         expect(await auditCount("ROLE_REVOKED", globalManager.id, target.id)).toBe(1);
       });
     });
+
+    // ======================================================================
+    // FR01/FR02：Final Review 修复（邮箱身份不重写 + ABA assignment 身份守卫）
+    // ======================================================================
+
+    describe("Final Review 修复（FR01/FR02）", () => {
+      const MIXED_EMAIL = "Mixed.Case@Campus.edu";
+      const LOWER_EMAIL = "mixed.case@campus.edu";
+
+      /** FR01-C 前置：同名夹具残留（同 fixture 密码哈希）安全清除；非夹具行 → false。 */
+      async function purgeOwnedFixtureRows(emails: string[]): Promise<boolean> {
+        for (const email of emails) {
+          const stale = await rawClient!.user.findUnique({ where: { email } });
+          if (!stale) {
+            continue;
+          }
+          if (stale.passwordHash !== FIXTURE_PASSWORD_HASH) {
+            return false;
+          }
+          await rawClient!.adminLog.deleteMany({
+            where: { OR: [{ adminId: stale.id }, { targetId: stale.id }] },
+          });
+          await rawClient!.userRoleAssignment.deleteMany({ where: { userId: stale.id } });
+          await rawClient!.campusMembership.deleteMany({ where: { userId: stale.id } });
+          await rawClient!.user.delete({ where: { id: stale.id } });
+        }
+        return true;
+      }
+
+      it("FR01-A：exact stored-email lookup——mixed-case 输入仅解析到逐字相同行", async () => {
+        const target = await createFixtureUser("FR01A目标", campusA.id, {
+          email: MIXED_EMAIL,
+        });
+
+        const { resolveGrantCandidate } = await import("@/lib/rbac/role-assignment-query");
+
+        expect(
+          await resolveGrantCandidate({ campusId: campusA.id, email: MIXED_EMAIL }),
+        ).toMatchObject({ id: target.id, name: "FR01A目标" });
+
+        // 大小写变体查询：仅当 DB 恰无该行时断言 null（exact 语义；
+        // 若存在同名行则其必为另一用户，精确匹配语义仍被首断言证明）
+        const lowerRow = await rawClient!.user.findUnique({ where: { email: LOWER_EMAIL } });
+        const lowerLookup = await resolveGrantCandidate({
+          campusId: campusA.id,
+          email: LOWER_EMAIL,
+        });
+        if (!lowerRow) {
+          expect(lowerLookup).toBeNull();
+        } else {
+          expect(lowerLookup!.id).toBe(lowerRow.id);
+        }
+      });
+
+      it("FR01-C：case-variant 双行并存时，grant 仅授予 exact mixed-case 行", async () => {
+        // DB 拒绝 case-variant 夹具（同名非夹具行）→ 记录事实并跳过 C；A/B 仍强制
+        if (!(await purgeOwnedFixtureRows([MIXED_EMAIL, LOWER_EMAIL]))) {
+          console.warn(
+            "FR01-C：DB 已存在同名非夹具行，case-variant 夹具被拒绝——记录该事实，FR01-A/B 仍强制",
+          );
+          return;
+        }
+
+        const mixed = await createFixtureUser("FR01C混合大小写", campusA.id, {
+          email: MIXED_EMAIL,
+        });
+        const lower = await createFixtureUser("FR01C小写", campusA.id, {
+          email: LOWER_EMAIL,
+        });
+
+        // 真实 grant action（mock 仅 session/cache）：Mixed.Case@Campus.edu
+        const { grantGovernanceRole } = await import("@/actions/governance-roles");
+        actionSession.current = {
+          id: globalManager.id,
+          email: globalManager.email,
+          name: globalManager.name,
+        };
+        const fd = new FormData();
+        fd.append("campusId", campusA.id);
+        fd.append("email", MIXED_EMAIL);
+
+        const state = await grantGovernanceRole(fd);
+        expect(state.success).toBe(true);
+
+        // 角色仅授予 exact mixed-case 行；lowercase 行零 assignment 零审计
+        expect(
+          await rawClient!.userRoleAssignment.count({
+            where: { userId: mixed.id, role: { key: REVIEWER_ROLE_KEY } },
+          }),
+        ).toBe(1);
+        expect(
+          await rawClient!.userRoleAssignment.count({ where: { userId: lower.id } }),
+        ).toBe(0);
+        expect(
+          await rawClient!.adminLog.count({
+            where: { action: "ROLE_ASSIGNED", targetId: mixed.id },
+          }),
+        ).toBe(1);
+        expect(
+          await rawClient!.adminLog.count({
+            where: { action: "ROLE_ASSIGNED", targetId: lower.id },
+          }),
+        ).toBe(0);
+      });
+
+      it("FR02-ABA：旧 assignmentId 在 revoke→re-grant 轮换后不再删除新 assignment；匹配 expectedAssignmentId 才撤回；省略字段保持 legacy 语义", async () => {
+        const target = await createFixtureUser("FR02目标", campusA.id);
+        const { assignRole, revokeRole } = await import("@/lib/rbac/assignment-service");
+        const { resolveRevocableAssignment } = await import("@/lib/rbac/role-assignment-query");
+        const { access } = await roleManageAccessOf(globalManager.id);
+
+        const grant = () =>
+          assignRole({
+            actorId: globalManager.id,
+            targetUserId: target.id,
+            roleKey: REVIEWER_ROLE_KEY,
+            campusId: campusA.id,
+          });
+
+        // 1. grant → A1
+        await grant();
+        const a1 = await rawClient!.userRoleAssignment.findFirstOrThrow({
+          where: { userId: target.id, roleId: reviewerRoleId },
+        });
+
+        // 2. 按 7B action 的方式解析 A1
+        const resolvedA1 = await resolveRevocableAssignment({
+          access,
+          assignmentId: a1.id,
+        });
+        expect(resolvedA1).toMatchObject({ id: a1.id, userId: target.id });
+
+        // 3. revoke A1（canonical legacy 调用）
+        expect(
+          (
+            await revokeRole({
+              actorId: globalManager.id,
+              targetUserId: target.id,
+              roleKey: REVIEWER_ROLE_KEY,
+              campusId: campusA.id,
+            })
+          ).removed,
+        ).toBe(true);
+
+        // 4. re-grant → A2
+        expect((await grant()).created).toBe(true);
+        const a2 = await rawClient!.userRoleAssignment.findFirstOrThrow({
+          where: { userId: target.id, roleId: reviewerRoleId },
+        });
+
+        // 5. A2 != A1（assignmentId 已轮换；stale 解析仍指向 A1）
+        expect(a2.id).not.toBe(a1.id);
+        expect(resolvedA1!.id).toBe(a1.id);
+
+        // 6. 用 A1 元组 + expectedAssignmentId=A1.id 调 canonical revoke
+        const staleAttempt = await revokeRole({
+          actorId: globalManager.id,
+          targetUserId: resolvedA1!.userId,
+          roleKey: resolvedA1!.roleKey,
+          campusId: resolvedA1!.campusId,
+          expectedAssignmentId: resolvedA1!.id,
+        });
+
+        // 7. removed=false；A2 仍在、计数 1、step 6 零新增 ROLE_REVOKED 审计
+        expect(staleAttempt.removed).toBe(false);
+        expect(
+          await rawClient!.userRoleAssignment.findUnique({ where: { id: a2.id } }),
+        ).not.toBeNull();
+        expect(
+          await rawClient!.userRoleAssignment.count({
+            where: { userId: target.id, roleId: reviewerRoleId },
+          }),
+        ).toBe(1);
+        expect(await auditCount("ROLE_REVOKED", globalManager.id, target.id)).toBe(1);
+
+        // expectedAssignmentId 匹配 → removed=true、恰删该行、恰多一条审计
+        const match = await revokeRole({
+          actorId: globalManager.id,
+          targetUserId: a2.userId,
+          roleKey: REVIEWER_ROLE_KEY,
+          campusId: campusA.id,
+          expectedAssignmentId: a2.id,
+        });
+        expect(match.removed).toBe(true);
+        expect(
+          await rawClient!.userRoleAssignment.count({
+            where: { userId: target.id, roleId: reviewerRoleId },
+          }),
+        ).toBe(0);
+        expect(await auditCount("ROLE_REVOKED", globalManager.id, target.id)).toBe(2);
+
+        // legacy 兼容：省略 expectedAssignmentId → 既有 revoke 语义不变
+        await grant();
+        const legacy = await revokeRole({
+          actorId: globalManager.id,
+          targetUserId: target.id,
+          roleKey: REVIEWER_ROLE_KEY,
+          campusId: campusA.id,
+        });
+        expect(legacy.removed).toBe(true);
+        expect(
+          await rawClient!.userRoleAssignment.count({
+            where: { userId: target.id, roleId: reviewerRoleId },
+          }),
+        ).toBe(0);
+        expect(await auditCount("ROLE_REVOKED", globalManager.id, target.id)).toBe(3);
+      });
+    });
   },
 );
