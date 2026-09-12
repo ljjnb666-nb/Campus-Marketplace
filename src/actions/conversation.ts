@@ -7,7 +7,7 @@ import { isEnforcementError } from "@/lib/enforcement/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { getOrCreateConversationSafe } from "@/lib/conversation-creation";
 import type { ConversationBizType } from "@/lib/conversation-key";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -449,7 +449,9 @@ export async function sendMessage(
   }
 
   // 4. 发送消息并更新会话更新时间
-  await prisma.$transaction(async (tx) => {
+  // 项目标准交互事务包装（TRANSACTION_TIMEOUT_MS 超时保护）；既有义务沟通
+  // 路径不做 marketplace 能力门（Phase 6C-3 冻结语义）
+  await withTransaction(async (tx) => {
     await tx.message.create({
       data: {
         conversationId,
