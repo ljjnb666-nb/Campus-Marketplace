@@ -57,13 +57,15 @@ jobs:
       # GitHub Actions 的 service container 不支持 command 覆盖，
       # minio/minio 无参启动只会打印 usage 后退出（run 33133052499 的根因）。
       # 因此 MinIO 改为步骤内显式 docker run server，并在 runner 侧等待健康端点。
+      # 镜像取 MinIO 官方 quay.io 渠道：Docker Hub 匿名拉取在共享 runner IP 池上
+      # 会被限流拒绝（run 34668960928 attempt=1..3 的根因）。
       - name: Start MinIO (S3 compatible storage)
         run: |
           docker run -d --name minio \
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data --console-address ":9001"
+            quay.io/minio/minio server /data --console-address ":9001"
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
               echo "MinIO ready after ${i} probe(s)"
@@ -79,7 +81,7 @@ jobs:
         # 幂等创建 public/private bucket 并设置匿名策略：
         # public = 允许匿名读（禁止写）；private = 完全禁止匿名访问
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc -c "
+          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
             mc mb --ignore-existing local/campus-private &&
@@ -192,7 +194,7 @@ jobs:
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data --console-address ":9001"
+            quay.io/minio/minio server /data --console-address ":9001"
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
               echo "MinIO ready after ${i} probe(s)"
@@ -206,7 +208,7 @@ jobs:
 
       - name: Bootstrap MinIO buckets
         run: |
-          docker run --rm --network host --entrypoint /bin/sh minio/mc -c "
+          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
             mc mb --ignore-existing local/campus-private &&
