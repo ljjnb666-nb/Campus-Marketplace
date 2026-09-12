@@ -2,11 +2,14 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { computeConversationKey } from "@/lib/conversation-key";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { isEnforcementError } from "@/lib/enforcement/errors";
+import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { getOrCreateConversationSafe } from "@/lib/conversation-creation";
+import type { ConversationBizType } from "@/lib/conversation-key";
 import { prisma, withTransaction } from "@/lib/prisma";
+import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
-import { createNotification } from "@/repositories/notification-repository";
 import {
   errandConversationSchema,
   orderConversationSchema,
@@ -30,99 +33,16 @@ function revalidateConversationPages(conversationId?: string) {
   }
 }
 
-// 统一并发安全的防重查找与创建
-async function getOrCreateConversationSafe(
-  bizType: "PRODUCT" | "ERRAND" | "SERVICE" | "RENTAL" | "PRODUCT_ORDER" | "RENTAL_ORDER",
-  bizKeyField: "productId" | "errandTaskId" | "serviceListingId" | "rentalListingId" | "orderId" | "rentalOrderId",
-  bizId: string,
-  participantIds: string[],
-  initialData: {
-    title: string;
-    initialMessageContent: string;
-    notificationTitle: string;
-    notificationContent: string;
-    counterpartId: string;
-    currentUserId: string;
-  },
-) {
-  // 0. 验证参与者用户账号合法性
-  const validUsers = await prisma.user.findMany({
-    where: { id: { in: participantIds } },
-    select: { id: true },
-  });
-  const validUserIds = new Set(validUsers.map((u) => u.id));
-
-  if (!validUserIds.has(initialData.currentUserId)) {
-    redirect("/login");
-  }
-
-  if (!validUserIds.has(initialData.counterpartId)) {
-    return null;
-  }
-
-  const conversationKey = await computeConversationKey(bizType, bizId, participantIds);
-
-  // 1. 优先根据数据库 UNIQUE 键检索
-  const existing = await prisma.conversation.findUnique({
-    where: { conversationKey },
-    select: { id: true },
-  });
-
-  if (existing) {
-    return existing;
-  }
-
-  // 2. 数据库事务并发创建
-  try {
-    const created = await withTransaction(async (tx) => {
-      const conv = await tx.conversation.create({
-        data: {
-          title: initialData.title,
-          conversationKey,
-          [bizKeyField]: bizId,
-          participants: {
-            create: participantIds.map((pid) => ({
-              userId: pid,
-              lastReadAt: pid === initialData.currentUserId ? new Date() : null,
-            })),
-          },
-          messages: {
-            create: {
-              senderId: initialData.currentUserId,
-              type: "DIRECT",
-              content: initialData.initialMessageContent,
-            },
-          },
-        },
-        select: { id: true },
-      });
-
-      await createNotification(tx, {
-        userId: initialData.counterpartId,
-        type: "MESSAGE",
-        title: initialData.notificationTitle,
-        content: initialData.notificationContent,
-      });
-
-      return conv;
-    });
-
-    return created;
-  } catch (error: unknown) {
-    // 捕获并发产生的 P2002 唯一键冲突，Fallback 获取先建立的会话
-    if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") {
-      const fallback = await prisma.conversation.findUnique({
-        where: { conversationKey },
-        select: { id: true },
-      });
-      if (fallback) return fallback;
-    }
-    throw error;
-  }
+/** Phase 6C-3：会话 gate 的域错误（actor 专用 403 族 + 对手方统一 409 + governance）归类。 */
+function isMarketplaceGateError(error: unknown): boolean {
+  return isEnforcementError(error) || isRbacError(error) || isGovernanceError(error);
 }
 
 // 1. 二手商品沟通
-export async function createOrOpenProductConversation(formData: FormData) {
+export async function createOrOpenProductConversation(
+  _prevState: ConversationActionState | null,
+  formData: FormData,
+): Promise<ConversationActionState> {
   const user = await requireUser();
 
   const parsed = productConversationSchema.safeParse({
@@ -142,21 +62,42 @@ export async function createOrOpenProductConversation(formData: FormData) {
     redirect(`/products/${parsed.data.productId}`);
   }
 
-  const participantIds = [user.id, product.sellerId];
-  const conversation = await getOrCreateConversationSafe(
-    "PRODUCT",
-    "productId",
-    product.id,
-    participantIds,
-    {
-      title: `商品咨询：${product.title}`,
-      initialMessageContent: `你好，我想咨询一下“${product.title}”。`,
-      notificationTitle: "收到新的商品咨询",
-      notificationContent: `有同学就“${product.title}”向你发起了会话，快去看看。`,
-      counterpartId: product.sellerId,
-      currentUserId: user.id,
-    },
-  );
+  let conversation: { id: string } | null;
+  try {
+    conversation = await getOrCreateConversationSafe({
+      bizType: "PRODUCT",
+      bizKeyField: "productId",
+      bizId: product.id,
+      participantIds: [user.id, product.sellerId],
+      initialData: {
+        title: `商品咨询：${product.title}`,
+        initialMessageContent: `你好，我想咨询一下“${product.title}”。`,
+        notificationTitle: "收到新的商品咨询",
+        notificationContent: `有同学就“${product.title}”向你发起了会话，快去看看。`,
+        counterpartId: product.sellerId,
+        currentUserId: user.id,
+      },
+      gate: {
+        kind: "MARKETPLACE_LISTING",
+        rereadResource: async (tx) => {
+          const fresh = await tx.product.findFirst({
+            where: { id: product.id, deletedAt: null },
+            select: { campusId: true, sellerId: true },
+          });
+          if (!fresh) return null;
+          return { campusId: fresh.campusId, participantIds: [user.id, fresh.sellerId] };
+        },
+      },
+    });
+  } catch (error) {
+    if (isMarketplaceGateError(error)) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "操作失败",
+      };
+    }
+    throw error;
+  }
 
   if (!conversation) {
     redirect(`/products/${parsed.data.productId}`);
@@ -167,7 +108,10 @@ export async function createOrOpenProductConversation(formData: FormData) {
 }
 
 // 2. 跑腿任务沟通
-export async function createOrOpenErrandConversation(formData: FormData) {
+export async function createOrOpenErrandConversation(
+  _prevState: ConversationActionState | null,
+  formData: FormData,
+): Promise<ConversationActionState> {
   const user = await requireUser();
 
   const parsed = errandConversationSchema.safeParse({
@@ -192,21 +136,47 @@ export async function createOrOpenErrandConversation(formData: FormData) {
     redirect(`/errands/${errand.id}`);
   }
 
-  const participantIds = [user.id, counterpartId];
-  const conversation = await getOrCreateConversationSafe(
-    "ERRAND",
-    "errandTaskId",
-    errand.id,
-    participantIds,
-    {
-      title: `跑腿沟通：${errand.title}`,
-      initialMessageContent: `你好，关于跑腿任务“${errand.title}”与你沟通一下。`,
-      notificationTitle: "收到跑腿任务沟通",
-      notificationContent: `有同学就“${errand.title}”向你发起了沟通。`,
-      counterpartId,
-      currentUserId: user.id,
-    },
-  );
+  let conversation: { id: string } | null;
+  try {
+    conversation = await getOrCreateConversationSafe({
+      bizType: "ERRAND",
+      bizKeyField: "errandTaskId",
+      bizId: errand.id,
+      participantIds: [user.id, counterpartId],
+      initialData: {
+        title: `跑腿沟通：${errand.title}`,
+        initialMessageContent: `你好，关于跑腿任务“${errand.title}”与你沟通一下。`,
+        notificationTitle: "收到跑腿任务沟通",
+        notificationContent: `有同学就“${errand.title}”向你发起了沟通。`,
+        counterpartId,
+        currentUserId: user.id,
+      },
+      gate: {
+        kind: "MARKETPLACE_LISTING",
+        rereadResource: async (tx) => {
+          // ERRAND 参与关系是动态的（publisher/accepter），锁后必须从权威行
+          // 重新推导 counterpart，禁止沿用事务外 snapshot
+          const fresh = await tx.errandTask.findFirst({
+            where: { id: errand.id, deletedAt: null },
+            select: { campusId: true, publisherId: true, accepterId: true },
+          });
+          if (!fresh) return null;
+          const freshCounterpart =
+            fresh.publisherId === user.id ? fresh.accepterId : fresh.publisherId;
+          if (!freshCounterpart || freshCounterpart === user.id) return null;
+          return { campusId: fresh.campusId, participantIds: [user.id, freshCounterpart] };
+        },
+      },
+    });
+  } catch (error) {
+    if (isMarketplaceGateError(error)) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "操作失败",
+      };
+    }
+    throw error;
+  }
 
   if (!conversation) {
     redirect(`/errands/${errand.id}`);
@@ -217,7 +187,10 @@ export async function createOrOpenErrandConversation(formData: FormData) {
 }
 
 // 3. 技能服务沟通
-export async function createOrOpenServiceConversation(formData: FormData) {
+export async function createOrOpenServiceConversation(
+  _prevState: ConversationActionState | null,
+  formData: FormData,
+): Promise<ConversationActionState> {
   const user = await requireUser();
 
   const parsed = serviceConversationSchema.safeParse({
@@ -237,21 +210,42 @@ export async function createOrOpenServiceConversation(formData: FormData) {
     redirect(`/services/${parsed.data.serviceId}`);
   }
 
-  const participantIds = [user.id, service.providerId];
-  const conversation = await getOrCreateConversationSafe(
-    "SERVICE",
-    "serviceListingId",
-    service.id,
-    participantIds,
-    {
-      title: `服务咨询：${service.title}`,
-      initialMessageContent: `你好，我想预约咨询你的“${service.title}”服务。`,
-      notificationTitle: "收到新的服务预约咨询",
-      notificationContent: `有同学就“${service.title}”向你发起了会话。`,
-      counterpartId: service.providerId,
-      currentUserId: user.id,
-    },
-  );
+  let conversation: { id: string } | null;
+  try {
+    conversation = await getOrCreateConversationSafe({
+      bizType: "SERVICE",
+      bizKeyField: "serviceListingId",
+      bizId: service.id,
+      participantIds: [user.id, service.providerId],
+      initialData: {
+        title: `服务咨询：${service.title}`,
+        initialMessageContent: `你好，我想预约咨询你的“${service.title}”服务。`,
+        notificationTitle: "收到新的服务预约咨询",
+        notificationContent: `有同学向你发起了会话。`,
+        counterpartId: service.providerId,
+        currentUserId: user.id,
+      },
+      gate: {
+        kind: "MARKETPLACE_LISTING",
+        rereadResource: async (tx) => {
+          const fresh = await tx.serviceListing.findFirst({
+            where: { id: service.id, deletedAt: null },
+            select: { campusId: true, providerId: true },
+          });
+          if (!fresh) return null;
+          return { campusId: fresh.campusId, participantIds: [user.id, fresh.providerId] };
+        },
+      },
+    });
+  } catch (error) {
+    if (isMarketplaceGateError(error)) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "操作失败",
+      };
+    }
+    throw error;
+  }
 
   if (!conversation) {
     redirect(`/services/${parsed.data.serviceId}`);
@@ -262,7 +256,10 @@ export async function createOrOpenServiceConversation(formData: FormData) {
 }
 
 // 4. 租赁物品沟通
-export async function createOrOpenRentalConversation(formData: FormData) {
+export async function createOrOpenRentalConversation(
+  _prevState: ConversationActionState | null,
+  formData: FormData,
+): Promise<ConversationActionState> {
   const user = await requireUser();
 
   const parsed = rentalConversationSchema.safeParse({
@@ -282,21 +279,42 @@ export async function createOrOpenRentalConversation(formData: FormData) {
     redirect(`/rentals/${parsed.data.rentalListingId}`);
   }
 
-  const participantIds = [user.id, rental.ownerId];
-  const conversation = await getOrCreateConversationSafe(
-    "RENTAL",
-    "rentalListingId",
-    rental.id,
-    participantIds,
-    {
-      title: `租赁咨询：${rental.title}`,
-      initialMessageContent: `你好，我想咨询租用“${rental.title}”。`,
-      notificationTitle: "收到物品租赁咨询",
-      notificationContent: `有同学向你咨询“${rental.title}”的出租详情。`,
-      counterpartId: rental.ownerId,
-      currentUserId: user.id,
-    },
-  );
+  let conversation: { id: string } | null;
+  try {
+    conversation = await getOrCreateConversationSafe({
+      bizType: "RENTAL",
+      bizKeyField: "rentalListingId",
+      bizId: rental.id,
+      participantIds: [user.id, rental.ownerId],
+      initialData: {
+        title: `租赁咨询：${rental.title}`,
+        initialMessageContent: `你好，我想咨询租用“${rental.title}”。`,
+        notificationTitle: "收到物品租赁咨询",
+        notificationContent: `有同学向你咨询“${rental.title}”的出租详情。`,
+        counterpartId: rental.ownerId,
+        currentUserId: user.id,
+      },
+      gate: {
+        kind: "MARKETPLACE_LISTING",
+        rereadResource: async (tx) => {
+          const fresh = await tx.rentalListing.findFirst({
+            where: { id: rental.id, deletedAt: null },
+            select: { campusId: true, ownerId: true },
+          });
+          if (!fresh) return null;
+          return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
+        },
+      },
+    });
+  } catch (error) {
+    if (isMarketplaceGateError(error)) {
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : "操作失败",
+      };
+    }
+    throw error;
+  }
 
   if (!conversation) {
     redirect(`/rentals/${parsed.data.rentalListingId}`);
@@ -306,7 +324,7 @@ export async function createOrOpenRentalConversation(formData: FormData) {
   redirect(`/messages/${conversation.id}`);
 }
 
-// 5. 订单直接联系对方沟通
+// 5. 订单直接联系对方沟通（既有义务沟通，不做 marketplace gate）
 export async function createOrOpenOrderConversation(formData: FormData) {
   const user = await requireUser();
 
@@ -322,7 +340,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
   let counterpartId = "";
   let orderTitle = "";
   let orderKey: "orderId" | "rentalOrderId" = "orderId";
-  let bizType: "PRODUCT_ORDER" | "RENTAL_ORDER" = "PRODUCT_ORDER";
+  let bizType: ConversationBizType = "PRODUCT_ORDER";
 
   if (parsed.data.orderType === "RENTAL") {
     const rentalOrder = await prisma.rentalOrder.findFirst({
@@ -352,13 +370,12 @@ export async function createOrOpenOrderConversation(formData: FormData) {
     bizType = "PRODUCT_ORDER";
   }
 
-  const participantIds = [user.id, counterpartId];
-  const conversation = await getOrCreateConversationSafe(
+  const conversation = await getOrCreateConversationSafe({
     bizType,
-    orderKey,
-    parsed.data.orderId,
-    participantIds,
-    {
+    bizKeyField: orderKey,
+    bizId: parsed.data.orderId,
+    participantIds: [user.id, counterpartId],
+    initialData: {
       title: orderTitle,
       initialMessageContent: `你好，关于“${orderTitle}”想和你沟通一下交接事宜。`,
       notificationTitle: "收到订单交易联系",
@@ -366,7 +383,8 @@ export async function createOrOpenOrderConversation(formData: FormData) {
       counterpartId,
       currentUserId: user.id,
     },
-  );
+    gate: { kind: "EXISTING_OBLIGATION" },
+  });
 
   if (!conversation) {
     redirect("/my/orders");
@@ -376,7 +394,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
   redirect(`/messages/${conversation.id}`);
 }
 
-// 6. 发送文本消息 Action
+// 6. 发送文本消息 Action（既有会话回复，不做 marketplace gate）
 export async function sendMessage(
   _prevState: ConversationActionState,
   formData: FormData,
@@ -431,6 +449,8 @@ export async function sendMessage(
   }
 
   // 4. 发送消息并更新会话更新时间
+  // 项目标准交互事务包装（TRANSACTION_TIMEOUT_MS 超时保护）；既有义务沟通
+  // 路径不做 marketplace 能力门（Phase 6C-3 冻结语义）
   await withTransaction(async (tx) => {
     await tx.message.create({
       data: {

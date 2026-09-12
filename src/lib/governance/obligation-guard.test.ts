@@ -76,53 +76,45 @@ describe("assertActiveGovernanceSubjects（participant active guard）", () => {
   });
 });
 
-describe("withObligationGuard（锁序 + 复核 + seam 次序）", () => {
-  it("acquires deduped subject locks before the participant recheck", async () => {
-    userFindMany.mockResolvedValue([
-      { id: "user-b", ...ACTIVE },
-      { id: "user-a", ...ACTIVE },
-    ]);
-
+describe("withObligationGuard（Phase 6C-3 Repair 2：锁 → validateLocked → racePoint → run）", () => {
+  it("acquires deduped subject locks before invoking the locked validator", async () => {
     const tx = { $executeRaw: executeRaw, user: { findMany: userFindMany } };
     const callOrder: string[] = [];
     executeRaw.mockImplementation(() => {
       callOrder.push("lock");
       return Promise.resolve(0);
     });
-    userFindMany.mockImplementation(() => {
-      callOrder.push("recheck");
-      return Promise.resolve([
-        { id: "user-b", ...ACTIVE },
-        { id: "user-a", ...ACTIVE },
-      ]);
+
+    const validateLocked = vi.fn(async () => {
+      callOrder.push("validate");
     });
+    const run = vi.fn(async () => "ok");
 
     const result = await withObligationGuard(
       tx as never,
       ["user-b", "user-a", "user-b"],
-      async () => "ok",
+      validateLocked,
+      run,
     );
 
     expect(result).toBe("ok");
-    // 去重后恰好两把锁（user-a / user-b），且锁先于复核
+    // 去重后恰好两把锁（user-a / user-b），且锁先于锁内校验
     expect(callOrder.filter((entry) => entry === "lock")).toHaveLength(2);
-    expect(callOrder.indexOf("recheck")).toBeGreaterThan(1);
-    // 复核查询收到去重后的参与方集合
-    expect(userFindMany).toHaveBeenCalledWith({
-      where: { id: { in: ["user-b", "user-a"] } },
-      select: { id: true, status: true, deletedAt: true, erasedAt: true },
-    });
+    expect(callOrder.indexOf("validate")).toBeGreaterThan(1);
+    expect(validateLocked).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 
-  it("runs the race point after the guard and before the domain callback", async () => {
-    userFindMany.mockResolvedValue([{ id: "user-a", ...ACTIVE }]);
-
-    const order: string[] = [];
+  it("runs the race point after validation and before the domain callback", async () => {
     const tx = { $executeRaw: executeRaw, user: { findMany: userFindMany } };
+    const order: string[] = [];
 
     await withObligationGuard(
       tx as never,
       ["user-a"],
+      async () => {
+        order.push("validate");
+      },
       async () => {
         order.push("domain");
         return "ok";
@@ -132,20 +124,27 @@ describe("withObligationGuard（锁序 + 复核 + seam 次序）", () => {
       },
     );
 
-    expect(order).toEqual(["racePoint", "domain"]);
+    // 冻结序列：校验 → racePoint → 业务写
+    expect(order).toEqual(["validate", "racePoint", "domain"]);
   });
 
-  it("never runs the domain callback when a participant is inactive", async () => {
-    userFindMany.mockResolvedValue([
-      { id: "user-a", ...ACTIVE, erasedAt: new Date() },
-    ]);
-
+  it("never runs the race point or domain callback when the locked validation fails", async () => {
     const tx = { $executeRaw: executeRaw, user: { findMany: userFindMany } };
     const domain = vi.fn();
+    const racePoint = vi.fn();
 
     await expect(
-      withObligationGuard(tx as never, ["user-a"], domain),
-    ).rejects.toMatchObject({ code: "GOVERNANCE_SUBJECT_INACTIVE" });
+      withObligationGuard(
+        tx as never,
+        ["user-a"],
+        async () => {
+          throw Object.assign(new Error("counterparty unavailable"), { code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
+        },
+        domain,
+        racePoint,
+      ),
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE" });
+    expect(racePoint).not.toHaveBeenCalled();
     expect(domain).not.toHaveBeenCalled();
   });
 });

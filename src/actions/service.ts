@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
+import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -103,9 +103,9 @@ export async function createService(
       return { ...initialState, message: "服务分类不存在或已停用" };
     }
 
-    // Phase 6B：subject 治理锁 + marketplace 能力门与服务创建同事务
+    // Phase 6B/6C-3：subject 治理锁 + marketplace 能力门与服务创建同事务
     const service = await withTransaction(async (tx) => {
-      await enforceMarketplaceCreationGate(tx, user.id, provider.campusId);
+      await enforceMarketplaceCapability(tx, user.id, provider.campusId);
 
       return tx.serviceListing.create({
         data: {
@@ -197,7 +197,7 @@ export async function updateService(
           providerId: user.id,
           deletedAt: null,
         },
-        select: { id: true, coverImageUrl: true },
+        select: { id: true, coverImageUrl: true, campusId: true },
       }),
       ensureActiveServiceCategory(parsed.data.categoryId),
     ]);
@@ -217,18 +217,30 @@ export async function updateService(
       target: { type: "serviceListing", id: serviceId },
     });
 
-    await prisma.serviceListing.update({
-      where: { id: serviceId },
-      data: {
-        title: parsed.data.title,
-        description: parsed.data.description,
-        categoryId: parsed.data.categoryId,
-        price: decimalValue(parsed.data.price),
-        pricingUnit: parsed.data.pricingUnit,
-        locationText: parsed.data.locationText,
-        availableSchedule: parsed.data.availableSchedule || null,
-        coverImageUrl: coverImageUrl || null,
-      },
+    // Phase 6C-3：编辑自己服务内容 = MODIFY_PUBLIC_LISTING_CONTENT 能力；
+    // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
+    // ServiceListing 权威行，客户端不可伪造）
+    await withTransaction(async (tx) => {
+      await enforceMarketplaceCapability(
+        tx,
+        user.id,
+        service.campusId,
+        "MODIFY_PUBLIC_LISTING_CONTENT",
+      );
+
+      await tx.serviceListing.update({
+        where: { id: serviceId },
+        data: {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          categoryId: parsed.data.categoryId,
+          price: decimalValue(parsed.data.price),
+          pricingUnit: parsed.data.pricingUnit,
+          locationText: parsed.data.locationText,
+          availableSchedule: parsed.data.availableSchedule || null,
+          coverImageUrl: coverImageUrl || null,
+        },
+      });
     });
 
     // 封面被替换时标记旧资源待删除
@@ -268,17 +280,29 @@ export async function updateServiceStatus(formData: FormData) {
         providerId: user.id,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, campusId: true },
     });
 
     if (!service) {
       return;
     }
 
-    await prisma.serviceListing.update({
-      where: { id: parsed.data.serviceId },
-      data: { status: parsed.data.status },
-    });
+    if (parsed.data.status === "ACTIVE") {
+      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
+      // START_NEW_MARKETPLACE_ACTIVITY（PAUSED/OFFLINE wind-down 不 gate）
+      await withTransaction(async (tx) => {
+        await enforceMarketplaceCapability(tx, user.id, service.campusId);
+        await tx.serviceListing.update({
+          where: { id: parsed.data.serviceId },
+          data: { status: parsed.data.status },
+        });
+      });
+    } else {
+      await prisma.serviceListing.update({
+        where: { id: parsed.data.serviceId },
+        data: { status: parsed.data.status },
+      });
+    }
 
     revalidateServiceViews(parsed.data.serviceId);
   } catch (error) {

@@ -6,7 +6,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
+import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -109,10 +109,10 @@ export async function createRentalListing(
 
     if (!owner) return { ...initialState, message: "用户不存在" };
 
-    // 事务内完成：subject 治理锁 + marketplace 能力门（Phase 6B）→
+    // 事务内完成：subject 治理锁 + marketplace 能力门（Phase 6B/6C-3）→
     // listing 落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库
     const listing = await withTransaction(async (tx) => {
-      await enforceMarketplaceCreationGate(tx, user.id, owner.campusId);
+      await enforceMarketplaceCapability(tx, user.id, owner.campusId);
 
       const created = await tx.rentalListing.create({
         data: {
@@ -223,7 +223,7 @@ export async function updateRentalListing(
     const [existingListing, category, previousImages] = await Promise.all([
       prisma.rentalListing.findFirst({
         where: { id: listingId, ownerId: user.id, deletedAt: null },
-        select: { id: true, status: true },
+        select: { id: true, status: true, campusId: true },
       }),
       prisma.rentalCategory.findUnique({
         where: { id: data.categoryId },
@@ -239,6 +239,15 @@ export async function updateRentalListing(
     if (!category || !category.isActive) return { ...initialState, message: "分类不存在或已停用" };
 
     const imageUrls = await withTransaction(async (tx) => {
+      // Phase 6C-3：编辑自己租赁物品内容 = MODIFY_PUBLIC_LISTING_CONTENT
+      // 能力（campus 取 RentalListing 权威行，客户端不可伪造）
+      await enforceMarketplaceCapability(
+        tx,
+        user.id,
+        existingListing.campusId,
+        "MODIFY_PUBLIC_LISTING_CONTENT",
+      );
+
       await tx.rentalListing.update({
         where: { id: listingId },
         data: {
@@ -310,16 +319,28 @@ export async function updateRentalListingStatus(formData: FormData) {
 
     const listing = await prisma.rentalListing.findFirst({
       where: { id: listingId, ownerId: user.id, deletedAt: null },
-      select: { id: true, status: true },
+      select: { id: true, status: true, campusId: true },
     });
 
     if (!listing) return;
     if (listing.status === "BANNED" || listing.status === "PENDING_REVIEW") return;
 
-    await prisma.rentalListing.update({
-      where: { id: listingId },
-      data: { status: status as RentalListingStatus },
-    });
+    if (status === "AVAILABLE") {
+      // Phase 6C-3：重新上架（→AVAILABLE）= 重新产生市场暴露，属
+      // START_NEW_MARKETPLACE_ACTIVITY（PAUSED/OFFLINE wind-down 不 gate）
+      await withTransaction(async (tx) => {
+        await enforceMarketplaceCapability(tx, user.id, listing.campusId);
+        await tx.rentalListing.update({
+          where: { id: listingId },
+          data: { status: status as RentalListingStatus },
+        });
+      });
+    } else {
+      await prisma.rentalListing.update({
+        where: { id: listingId },
+        data: { status: status as RentalListingStatus },
+      });
+    }
 
     revalidatePath('/rentals');
     revalidatePath(`/rentals/${listingId}`);

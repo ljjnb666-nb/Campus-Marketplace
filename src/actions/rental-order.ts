@@ -3,6 +3,8 @@
 import { withTransaction, prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { isEnforcementError } from "@/lib/enforcement/errors";
+import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
 import {
   revalidateRentalOrderCreationViews,
@@ -145,8 +147,10 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
 
     return { success: true, message: '租赁申请已提交', redirectTo: `/rental-orders/${result.orderId}` };
   } catch (error) {
-    // participant guard（GOVERNANCE_SUBJECT_INACTIVE）返回可解释文案
-    if (isGovernanceError(error)) {
+    // 参与方/能力门域错误（Phase 5/6A/6B/6C-3）返回安全 userMessage：
+    // GOVERNANCE_SUBJECT_INACTIVE / AUTH_ACCOUNT_INACTIVE / MEMBERSHIP_NOT_ACTIVE /
+    // MARKETPLACE_RESTRICTED / MARKETPLACE_COUNTERPARTY_UNAVAILABLE
+    if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
       return { success: false, message: error.message };
     }
 

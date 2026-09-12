@@ -34,7 +34,9 @@ export async function waitForAdvisoryLockWaiter(
         AND EXISTS (
           SELECT 1
           FROM unnest(${subjectKeys}::text[]) AS expected(key)
-          WHERE hashtext(expected.key) = locks.objid
+          -- hashtext 是有符号 int4，pg_locks.objid 是无符号 oid：
+          -- 必须经 bit(32) 重解释到同一无符号域，负 hash 键才能匹配
+          WHERE hashtext(expected.key)::bit(32)::bigint = locks.objid
         )`;
 
     if (rows.length > 0) {

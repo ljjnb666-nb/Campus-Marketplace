@@ -5,7 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
+import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { claimErrandTx } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateErrandViews } from "@/lib/revalidate";
@@ -110,10 +110,10 @@ export async function createErrand(
       return { ...initialState, message: "任务分类不存在或已停用" };
     }
 
-    // Phase 6B：subject 治理锁 + marketplace 能力门（account/membership/risk）
+    // Phase 6B/6C-3：subject 治理锁 + marketplace 能力门（account/membership/risk）
     // 与任务创建同事务——membership 停用 vs 任务发布严格先后线性化
     const errand = await withTransaction(async (tx) => {
-      await enforceMarketplaceCreationGate(tx, user.id, publisher.campusId);
+      await enforceMarketplaceCapability(tx, user.id, publisher.campusId);
 
       return tx.errandTask.create({
         data: {
@@ -191,7 +191,7 @@ export async function updateErrand(
         publisherId: user.id,
         deletedAt: null,
       },
-      select: { id: true, status: true },
+      select: { id: true, status: true, campusId: true },
     });
 
     if (!errand) {
@@ -222,23 +222,35 @@ export async function updateErrand(
       };
     }
 
-    await prisma.errandTask.update({
-      where: { id: errandId },
-      data: {
-        title: parsed.data.title,
-        description: parsed.data.description,
-        categoryId: parsed.data.categoryId,
-        reward: decimalValue(parsed.data.reward),
-        pickupLocation: parsed.data.pickupLocation,
-        deliveryLocation: parsed.data.deliveryLocation,
-        deadline,
-        contactNote: parsed.data.contactNote || null,
-        needsAdvancePay: parsed.data.needsAdvancePay === "true",
-        advanceAmount:
-          parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
-            ? decimalValue(parsed.data.advanceAmount)
-            : null,
-      },
+    // Phase 6C-3：编辑自己任务内容 = MODIFY_PUBLIC_LISTING_CONTENT 能力；
+    // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
+    // ErrandTask 权威行，客户端不可伪造）
+    await withTransaction(async (tx) => {
+      await enforceMarketplaceCapability(
+        tx,
+        user.id,
+        errand.campusId,
+        "MODIFY_PUBLIC_LISTING_CONTENT",
+      );
+
+      await tx.errandTask.update({
+        where: { id: errandId },
+        data: {
+          title: parsed.data.title,
+          description: parsed.data.description,
+          categoryId: parsed.data.categoryId,
+          reward: decimalValue(parsed.data.reward),
+          pickupLocation: parsed.data.pickupLocation,
+          deliveryLocation: parsed.data.deliveryLocation,
+          deadline,
+          contactNote: parsed.data.contactNote || null,
+          needsAdvancePay: parsed.data.needsAdvancePay === "true",
+          advanceAmount:
+            parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
+              ? decimalValue(parsed.data.advanceAmount)
+              : null,
+        },
+      });
     });
 
     revalidateErrandViews(errandId);
@@ -321,6 +333,7 @@ export async function updateErrandStatus(formData: FormData) {
         publisherId: true,
         accepterId: true,
         status: true,
+        campusId: true,
       },
     });
 
@@ -347,6 +360,13 @@ export async function updateErrandStatus(formData: FormData) {
     }
 
     await withTransaction(async (tx) => {
+      // Phase 6C-3：→OPEN（CLAIMED 撤销接单）会把任务重新暴露为可接单，
+      // 属 START_NEW_MARKETPLACE_ACTIVITY；其余转换（IN_PROGRESS/
+      // PENDING_CONFIRMATION/COMPLETED/CANCELLED）为既有义务 wind-down，不 gate
+      if (parsed.data.status === "OPEN") {
+        await enforceMarketplaceCapability(tx, user.id, errand.campusId);
+      }
+
       // COMPLETED 走唯一权威实现（completeErrandOrderTx）：硬性要求
       // Order IN_PROGRESS + ErrandTask PENDING_CONFIRMATION，exactly-once
       // 副作用与完成通知都在 canonical 事务内，此处不得再叠加完成副作用

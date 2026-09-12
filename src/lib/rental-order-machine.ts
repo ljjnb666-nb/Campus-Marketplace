@@ -1,8 +1,5 @@
 import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
-import {
-  requireMarketplaceCapability,
-  requireParticipantsMembership,
-} from "@/lib/enforcement/capability-gate";
+import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
 import { createNotifications } from "@/repositories/notification-repository";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
@@ -135,17 +132,19 @@ export async function createRentalOrderTx(
   if (!candidate) return { error: '出租物品不存在或已下架' };
   if (candidate.ownerId === userId) return { error: '不能租用自己的物品' };
 
-  // ---- 步骤 2/3：participant governance 锁 + 活跃复核（racePoint seam）----
+  // ---- 步骤 2/3：participant governance 锁 + 锁内校验（racePoint seam）----
+  // Phase 6C-3：校验由 marketplaceObligationValidator 统一组装——renter 三门
+  // 专用校验（403 族）+ 全参与方（renter+owner）资格校验（对手方失效统一
+  // 409 MARKETPLACE_COUNTERPARTY_UNAVAILABLE，不区分哪一方/哪一维）。
   return withObligationGuard(
     tx,
     [userId, candidate.ownerId],
+    marketplaceObligationValidator({
+      initiatorId: userId,
+      participantUserIds: [userId, candidate.ownerId],
+      campusId: candidate.campusId,
+    }),
     async () => {
-      // ---- Phase 6B：renter 的新活动能力门（participant 锁已取得；
-      //      listing 的 campus 归属在创建后不可变，pre-read 值可靠）----
-      await requireMarketplaceCapability(tx, userId, candidate.campusId);
-      // ---- Repair 1 Blocker E：全部参与方 membership integrity ----
-      await requireParticipantsMembership(tx, [userId, candidate.ownerId], candidate.campusId);
-
       // ---- 步骤 4：取得 subject locks 后再 FOR UPDATE 同一行 ----
     // ⚠️ 维护注意：此处使用 $queryRaw + FOR UPDATE 绕过 Prisma 类型化查询以获取行锁。
     // 代价是字段列表、返回类型需与 prisma/schema.prisma 的 RentalListing 模型手动同步。

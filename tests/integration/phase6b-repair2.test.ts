@@ -419,7 +419,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
           note: null,
         }),
       ),
-    ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    // Phase 6C-3：对手方维度失效统一 MARKETPLACE_COUNTERPARTY_UNAVAILABLE(409)，
+    // 不区分哪一方/哪一维（membership 维度不再单独外泄）
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
 
     expect(await rawClient!.order.count({ where: { serviceListingId: listing.id } })).toBe(0);
     expect(
@@ -464,7 +466,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
           reward: errand.reward,
         }),
       ),
-    ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    // Phase 6C-3：对手方 membership 失效 → 统一 409
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
 
     const row = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
     expect(row.status).toBe("OPEN");
@@ -515,7 +518,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
           quantity: 1,
         }),
       ),
-    ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    // Phase 6C-3：对手方 membership 失效 → 统一 409
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
 
     expect(await rawClient!.rentalOrder.count({ where: { rentalListingId: listing.id } })).toBe(0);
     expect(
@@ -523,7 +527,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
     ).toBe("AVAILABLE");
   });
 
-  it("Repair 2 §26：counterparty RESTRICTED（membership ACTIVE）不阻断 incoming order", async () => {
+  it("Repair 2 §26（Phase 6C-3 反转）：counterparty RESTRICTED → 新义务 DENY（#44 defer 已关闭）", async () => {
     const { createProductOrderTx } = await import("@/lib/order-creation");
     const { setRiskState } = await import("@/lib/enforcement/risk-service");
     const { withTransaction } = await import("@/lib/prisma");
@@ -553,20 +557,26 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
       },
     });
 
-    const order = await withTransaction((tx) =>
-      createProductOrderTx(tx, {
-        buyerId: buyer.id,
-        product: {
-          id: product.id,
-          price: "12.00",
-          sellerId: seller.id,
-          campusId: campusA.id,
-        },
-        meetingLocation: "IT",
-        note: null,
-      }),
-    );
-    expect(order?.id).toBeTruthy();
+    // Phase 6C-3：受限对手方仍可被浏览（listing 不下架），但其新义务被统一 409 拒绝
+    await expect(
+      withTransaction((tx) =>
+        createProductOrderTx(tx, {
+          buyerId: buyer.id,
+          product: {
+            id: product.id,
+            price: "12.00",
+            sellerId: seller.id,
+            campusId: campusA.id,
+          },
+          meetingLocation: "IT",
+          note: null,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
+    expect(await rawClient!.order.count({ where: { productId: product.id } })).toBe(0);
+    expect(
+      (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
+    ).toBe("ACTIVE");
   });
 
   // ============================================================

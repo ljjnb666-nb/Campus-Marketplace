@@ -28,6 +28,10 @@ const ALLOWED_LABEL_KEYS = new Set([
   "dependency",
   "category",
   "outcome",
+  // Phase 6C-3：marketplace capability 拒绝指标（能力枚举值 + 限制 scope
+  // 类别，均为低基数稳定枚举；绝不使用 userId/counterpartyId/reasonCode）
+  "capability",
+  "scope_kind",
 ]);
 
 function sanitizeLabels(labels: MetricLabels): MetricLabels {

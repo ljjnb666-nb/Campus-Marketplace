@@ -54,7 +54,7 @@ vi.mock("@/lib/upload", () => ({
 }));
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
-  enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
+  enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
 }));
 
