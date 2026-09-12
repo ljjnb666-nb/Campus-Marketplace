@@ -11,10 +11,13 @@ describe("rbac permission keys（机器可读稳定标识）", () => {
   });
 
   it("derives the platform admin grant set from the full permission list", () => {
-    expect(SYSTEM_ROLES).toHaveLength(1);
-    expect(SYSTEM_ROLES[0]!.key).toBe(PLATFORM_ADMIN_ROLE_KEY);
-    expect(SYSTEM_ROLES[0]!.scope).toBe("GLOBAL");
-    expect(new Set(SYSTEM_ROLES[0]!.permissionKeys)).toEqual(new Set(PERMISSION_KEYS));
+    // Phase 7A：新增 CAMPUS_APPEAL_REVIEWER（scope=CAMPUS，仅 appeal.review），
+    // PLATFORM_ADMIN 仍是唯一全量 GLOBAL 角色（定义合同见 roles.test.ts）
+    expect(SYSTEM_ROLES).toHaveLength(2);
+    const platformAdmin = SYSTEM_ROLES.find((role) => role.key === PLATFORM_ADMIN_ROLE_KEY);
+    expect(platformAdmin).toBeDefined();
+    expect(platformAdmin!.scope).toBe("GLOBAL");
+    expect(new Set(platformAdmin!.permissionKeys)).toEqual(new Set(PERMISSION_KEYS));
   });
 
   it("exposes exactly one description per permission", () => {

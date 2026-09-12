@@ -7,6 +7,8 @@ import {
 } from "@/lib/appeals/appeal-restore";
 import { APPEAL_DECISION_NOTE_MAX_LENGTH } from "@/lib/appeals/appeal-service";
 import { appealError } from "@/lib/appeals/errors";
+// Phase 7A：canonical review scope 解析的 SSOT（队列/详情读面共用同一实现，禁止复制）
+import { resolveAppealReviewScope } from "@/lib/appeals/review-scope";
 import {
   hasCompleteReversalProvenance,
   isCausallyOrdered,
@@ -100,46 +102,6 @@ type LockedAppeal = {
     enforcementSeq: bigint;
   };
 };
-
-/** canonical review scope（由 immutable EA 的 type/campusId/scopeKey 解析）。 */
-type AppealReviewScope = { kind: "GLOBAL" } | { kind: "CAMPUS"; campusId: string };
-
-/**
- * 从 EnforcementAction 解析并校验 canonical review scope（Repair 1 A4，fail closed）：
- * - ACCOUNT_SUSPEND：campusId=null + scopeKey=GLOBAL → GLOBAL；
- * - MEMBERSHIP_SUSPEND：campusId 非空 + scopeKey=CAMPUS:<campusId> → CAMPUS(campusId)；
- * - MARKETPLACE_RESTRICT：GLOBAL 形状（campusId=null + GLOBAL）或 CAMPUS 形状
- *   （campusId 非空 + CAMPUS:<campusId>）。
- * type/campusId/scopeKey 三者不一致（malformed 行）→ null：无法确立审核 scope，
- * 一律 APPEAL_REVIEW_FORBIDDEN——绝不允许 campus reviewer 借 malformed campusId
- * 审核 GLOBAL appeal，也不允许审核 scope 与恢复 scope 分叉。
- */
-function resolveAppealReviewScope(action: {
-  type: EnforcementActionType;
-  campusId: string | null;
-  scopeKey: string;
-}): AppealReviewScope | null {
-  switch (action.type) {
-    case "ACCOUNT_SUSPEND":
-      return action.campusId === null && action.scopeKey === "GLOBAL"
-        ? { kind: "GLOBAL" }
-        : null;
-    case "MEMBERSHIP_SUSPEND":
-      return action.campusId !== null && action.scopeKey === `CAMPUS:${action.campusId}`
-        ? { kind: "CAMPUS", campusId: action.campusId }
-        : null;
-    case "MARKETPLACE_RESTRICT":
-      if (action.campusId === null && action.scopeKey === "GLOBAL") {
-        return { kind: "GLOBAL" };
-      }
-      if (action.campusId !== null && action.scopeKey === `CAMPUS:${action.campusId}`) {
-        return { kind: "CAMPUS", campusId: action.campusId };
-      }
-      return null;
-    default:
-      return null;
-  }
-}
 
 /** Appeal 行锁（全局 Appeal-row 锁序第一步，参数化 raw SQL）+ 锁内全读。 */
 async function lockAppealRow(

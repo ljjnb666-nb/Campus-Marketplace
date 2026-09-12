@@ -13,6 +13,11 @@ import { PERMISSION_KEYS, type PermissionKey } from "./permissions";
 
 export const PLATFORM_ADMIN_ROLE_KEY = "PLATFORM_ADMIN";
 
+// Phase 7A：校区申诉审核员（仅 appeal.review 的 campus-scoped 窄角色）。
+// 生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）；
+// 角色授予/撤回走 canonical assignment service，管理 UI 属 Phase 7B。
+export const CAMPUS_APPEAL_REVIEWER_ROLE_KEY = "CAMPUS_APPEAL_REVIEWER";
+
 export const GLOBAL_SCOPE_KEY = "GLOBAL";
 
 /** CAMPUS 角色授予行的 scopeKey 编码（assignment service 维护与 campusId 一致）。 */
@@ -33,5 +38,11 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "平台管理员",
     scope: "GLOBAL",
     permissionKeys: [...PERMISSION_KEYS],
+  },
+  {
+    key: CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
+    name: "校区申诉审核员",
+    scope: "CAMPUS",
+    permissionKeys: ["appeal.review"],
   },
 ];

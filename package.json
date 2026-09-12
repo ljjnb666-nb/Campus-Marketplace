@@ -24,6 +24,7 @@
     "ops:check": "tsx scripts/ops/ops-check.ts",
     "ops:backup-health": "tsx scripts/ops/backup-health-check.ts",
     "ops:observability-drill": "bash scripts/ops/observability-drill.sh",
+    "ops:provision-appeal-reviewer": "tsx scripts/ops/provision-campus-appeal-reviewer.ts",
     "e2e:setup": "tsx scripts/e2e-setup.ts",
     "e2e:teardown": "tsx scripts/e2e-teardown.ts",
     "e2e:prepare": "npm run build && npm run e2e:setup",

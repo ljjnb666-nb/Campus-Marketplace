@@ -72,6 +72,7 @@ import {
   ensureRbacFoundation,
   syncLegacyAdminRoles,
 } from "@/lib/rbac/bootstrap";
+import { SYSTEM_ROLES } from "@/lib/rbac/roles";
 
 beforeEach(() => {
   permissionUpsert.mockReset().mockResolvedValue({});
@@ -95,14 +96,20 @@ beforeEach(() => {
 });
 
 describe("ensureRbacFoundation（幂等 bootstrap）", () => {
-  it("upserts every permission and the platform admin role with full grants", async () => {
+  it("upserts every permission and every system role（7A：PLATFORM_ADMIN + CAMPUS_APPEAL_REVIEWER）", async () => {
     await ensureRbacFoundation(buildClient());
 
-    expect(roleUpsert).toHaveBeenCalledTimes(1);
+    expect(roleUpsert).toHaveBeenCalledTimes(SYSTEM_ROLES.length);
     expect(roleUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { key: "PLATFORM_ADMIN" },
         update: expect.objectContaining({ scope: "GLOBAL", isSystem: true }),
+      }),
+    );
+    expect(roleUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { key: "CAMPUS_APPEAL_REVIEWER" },
+        update: expect.objectContaining({ scope: "CAMPUS", isSystem: true }),
       }),
     );
     // 全量 permission 授权
