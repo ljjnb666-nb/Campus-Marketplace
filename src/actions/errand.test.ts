@@ -86,9 +86,10 @@ const {
 });
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
-  enforceMarketplaceCreationGate: vi.fn().mockResolvedValue(undefined),
+  enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
-  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMarketplaceEligible: vi.fn().mockResolvedValue(undefined),
+  marketplaceObligationValidator: vi.fn(() => async () => undefined),
 }));
 
 vi.mock("next/cache", () => ({
@@ -690,7 +691,8 @@ describe("errand actions", () => {
       message: "任务已更新",
       redirectTo: "/errands/errand-1",
     });
-    expect(errandTaskUpdate).toHaveBeenCalledWith({
+    // Phase 6C-3：编辑已最小事务化，update 走事务客户端
+    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
       where: { id: "errand-1" },
       data: expect.objectContaining({ title: "帮我取顺丰快递" }),
     });

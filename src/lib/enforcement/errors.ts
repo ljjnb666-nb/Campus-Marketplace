@@ -14,6 +14,9 @@ export const ENFORCEMENT_ERROR_CODES = [
   "ENFORCEMENT_TARGET_NOT_FOUND",
   "ENFORCEMENT_TARGET_SCOPE_MISMATCH",
   "MARKETPLACE_RESTRICTED",
+  // Phase 6C-3：新义务/新会话的对手方不可用。account / membership / risk
+  // 任一维失效统一对外同形——绝不区分是哪一方、哪一维（no-oracle 合同）
+  "MARKETPLACE_COUNTERPARTY_UNAVAILABLE",
 ] as const;
 
 export type EnforcementErrorCode = (typeof ENFORCEMENT_ERROR_CODES)[number];
@@ -25,6 +28,7 @@ const STATUS_BY_CODE: Record<EnforcementErrorCode, number> = {
   ENFORCEMENT_TARGET_NOT_FOUND: 404,
   ENFORCEMENT_TARGET_SCOPE_MISMATCH: 409,
   MARKETPLACE_RESTRICTED: 403,
+  MARKETPLACE_COUNTERPARTY_UNAVAILABLE: 409,
 };
 
 export class EnforcementError extends Error {
@@ -59,6 +63,9 @@ export function enforcementError(
     // MARKETPLACE_RESTRICTED 对用户呈现为统一的能力限制提示：
     // 不区分 membership / risk 细节，不暴露风控内部状态
     MARKETPLACE_RESTRICTED: "当前无法开始新的交易活动，如有疑问请联系平台管理员",
+    // 对手方不可用统一提示（Phase 6C-3 Repair 2）：不指明是哪一方、
+    // 是账号/成员身份/风控哪一维，杜绝状态 oracle
+    MARKETPLACE_COUNTERPARTY_UNAVAILABLE: "对方当前无法开始新的交易，请稍后再试",
   };
 
   const userMessage =

@@ -89,7 +89,8 @@ vi.mock("@/repositories/notification-repository", () => ({
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
-  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMarketplaceEligible: vi.fn().mockResolvedValue(undefined),
+  marketplaceObligationValidator: vi.fn(() => async () => undefined),
 }));
 
 vi.mock("@/lib/prisma", () => ({

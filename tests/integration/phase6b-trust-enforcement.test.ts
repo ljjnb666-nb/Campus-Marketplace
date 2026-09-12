@@ -691,7 +691,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
   });
 
   it("RACE D：membership suspension vs listing creation（双方向，无 40P01）", async () => {
-    const { enforceMarketplaceCreationGate, requireMarketplaceCapability } = await import(
+    const { enforceMarketplaceCapability, requireMarketplaceCapability } = await import(
       "@/lib/enforcement/capability-gate"
     );
     const { suspendCampusMembership } = await import(
@@ -710,7 +710,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
     type CreationTx = Parameters<Parameters<typeof withTransaction>[0]>[0];
     const createListing = (racePoint?: (tx: CreationTx) => Promise<void>) =>
       withTransaction(async (tx) => {
-        await enforceMarketplaceCreationGate(tx, owner.id, campusA.id);
+        await enforceMarketplaceCapability(tx, owner.id, campusA.id);
         if (racePoint) {
           await racePoint(tx);
         }
@@ -992,7 +992,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
           note: null,
         }),
       ),
-    ).rejects.toMatchObject({ code: "MEMBERSHIP_NOT_ACTIVE" });
+    // Phase 6C-3：对手方 membership 缺失 → 统一 MARKETPLACE_COUNTERPARTY_UNAVAILABLE(409)
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
 
     expect(await rawClient!.order.count({ where: { productId: product.id } })).toBe(0);
     expect((await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status).toBe("ACTIVE");

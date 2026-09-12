@@ -12,6 +12,7 @@ import { ReportDialog } from "@/components/ui/report-dialog";
 import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ProductStatusActions } from "@/components/product/product-status-actions";
 import { PRODUCT_CONDITION_LABELS, PRODUCT_STATUS_LABELS } from "@/constants/product";
+import { ListingContactForm } from "@/components/conversation/listing-contact-form";
 import { createOrOpenProductConversation } from "@/actions/conversation";
 import { createProductOrder } from "@/actions/order";
 import { deleteProduct } from "@/actions/product";
@@ -159,16 +160,16 @@ export function ProductDetailConsole({
 
                 {/* 私聊卖家 */}
                 {isLoggedIn && (
-                  <form action={createOrOpenProductConversation} className="flex-1">
-                    <input type="hidden" name="productId" value={product.id} />
-                    <button
-                      type="submit"
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-full border border-slate-200/90 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-xs transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
-                    >
-                      <MessageSquare className="size-4 text-indigo-600 dark:text-indigo-400" />
-                      <span>私聊卖家</span>
-                    </button>
-                  </form>
+                  <ListingContactForm
+                    action={createOrOpenProductConversation}
+                    fieldName="productId"
+                    fieldValue={product.id}
+                    className="flex-1"
+                    buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-full border border-slate-200/90 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-xs transition hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200"
+                  >
+                    <MessageSquare className="size-4 text-indigo-600 dark:text-indigo-400" />
+                    <span>私聊卖家</span>
+                  </ListingContactForm>
                 )}
 
                 {/* 举报悬浮 */}
@@ -223,16 +224,15 @@ export function ProductDetailConsole({
               count={product.favoriteCount}
             />
             {isLoggedIn && (
-              <form action={createOrOpenProductConversation}>
-                <input type="hidden" name="productId" value={product.id} />
-                <button
-                  type="submit"
-                  className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
-                >
-                  <MessageSquare className="size-3.5 text-indigo-600" />
-                  <span>私聊</span>
-                </button>
-              </form>
+              <ListingContactForm
+                action={createOrOpenProductConversation}
+                fieldName="productId"
+                fieldValue={product.id}
+                buttonClassName="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+              >
+                <MessageSquare className="size-3.5 text-indigo-600" />
+                <span>私聊</span>
+              </ListingContactForm>
             )}
           </div>
 

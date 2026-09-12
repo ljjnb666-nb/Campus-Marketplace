@@ -1060,9 +1060,15 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await erasePromise;
 
     // 订单事务醒来 → participant 复核失败 → 创建被拒
+    // （Phase 6C-3：buyer 为发起方 → actor 专用 AUTH_ACCOUNT_INACTIVE；
+    //   若被注销方为对手方则统一 MARKETPLACE_COUNTERPARTY_UNAVAILABLE）
     const orderResult = await orderOutcome;
     expect(orderResult.ok).toBe(false);
-    expect((orderResult as { error: unknown }).error).toBeInstanceOf(GovernanceError);
+    const orderError = (orderResult as { error: { code?: string } }).error;
+    expect(
+      typeof orderError === "object" && orderError !== null && "code" in orderError,
+    ).toBe(true);
+    expect((orderError as { code?: string }).code).toBe("AUTH_ACCOUNT_INACTIVE");
 
     // 不变量：账号已注销 + 零 active 订单
     const buyerRow = await rawClient!.user.findUniqueOrThrow({ where: { id: buyer.id } });
@@ -1250,7 +1256,12 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     const rentalResult = await rentalOutcome;
     expect(rentalResult.ok).toBe(false);
-    expect((rentalResult as { error: unknown }).error).toBeInstanceOf(GovernanceError);
+    // Phase 6C-3：renter 为发起方 → actor 专用 AUTH_ACCOUNT_INACTIVE
+    const rentalError = (rentalResult as { error: { code?: string } }).error;
+    expect(
+      typeof rentalError === "object" && rentalError !== null && "code" in rentalError,
+    ).toBe(true);
+    expect((rentalError as { code?: string }).code).toBe("AUTH_ACCOUNT_INACTIVE");
 
     const renterRow = await rawClient!.user.findUniqueOrThrow({ where: { id: renter.id } });
     expect(renterRow.erasedAt).toBeTruthy();
@@ -1449,14 +1460,17 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     });
     expect(listingRow.status).toBe("OFFLINE");
 
-    // rental 醒来 → participant active recheck 失败 → GOVERNANCE_SUBJECT_INACTIVE
+    // rental 醒来 → participant 复核失败。Phase 6C-3：owner 为对手方 →
+    // 统一 MARKETPLACE_COUNTERPARTY_UNAVAILABLE（不暴露被注销状态，无 oracle）
     const rentalResult = await rentalOutcome;
     expect(rentalResult.ok).toBe(false);
-    const rejection = (rentalResult as { error: unknown }).error;
-    expect(rejection).toBeInstanceOf(GovernanceError);
-    expect((rejection as { code?: string }).code).toBe("GOVERNANCE_SUBJECT_INACTIVE");
+    const rejection = (rentalResult as { error: { code?: string; message?: string } }).error;
+    expect(
+      typeof rejection === "object" && rejection !== null && "code" in rejection,
+    ).toBe(true);
+    expect(rejection.code).toBe("MARKETPLACE_COUNTERPARTY_UNAVAILABLE");
     // 不得出现 SQLSTATE 40P01 / deadlock detected
-    expect(String((rejection as { message?: string })?.message ?? "")).not.toMatch(
+    expect(String(rejection?.message ?? "")).not.toMatch(
       /deadlock|40P01/i,
     );
 
@@ -1497,6 +1511,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     // 先注销 provider
     await eraseAccountPublic(provider.id);
 
+    // Phase 6C-3：已注销 provider（对手方）→ 统一 MARKETPLACE_COUNTERPARTY_UNAVAILABLE
     await expect(
       withTransaction((tx) =>
         createServiceOrderTx(tx, {
@@ -1506,7 +1521,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
           note: null,
         }),
       ),
-    ).rejects.toBeInstanceOf(GovernanceError);
+    ).rejects.toMatchObject({ code: "MARKETPLACE_COUNTERPARTY_UNAVAILABLE", status: 409 });
 
     const orders = await rawClient!.order.findMany({ where: { sellerId: provider.id } });
     expect(orders).toHaveLength(0);
@@ -1543,6 +1558,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     // 先注销 runner
     await eraseAccountPublic(runner.id);
 
+    // Phase 6C-3：runner 是接单发起方（claimer）→ 被注销后命中 actor 专用 403；
+    // counterparty 维度才统一 409
     await expect(
       withTransaction((tx) =>
         claimErrandTx(tx, {
@@ -1553,7 +1570,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
           reward: errand.reward,
         }),
       ),
-    ).rejects.toBeInstanceOf(GovernanceError);
+    ).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE", status: 403 });
 
     // 零新义务：无 ACCEPTED 订单、任务保持 OPEN、无 accepter
     const orders = await rawClient!.order.findMany({ where: { sellerId: runner.id } });

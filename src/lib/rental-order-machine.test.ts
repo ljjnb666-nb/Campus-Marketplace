@@ -10,9 +10,14 @@ vi.mock("@/repositories/notification-repository", () => ({
   createNotifications,
 }));
 
+const { marketplaceObligationValidator } = vi.hoisted(() => ({
+  marketplaceObligationValidator: vi.fn(() => async () => undefined),
+}));
+
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
-  requireParticipantsMembership: vi.fn().mockResolvedValue(undefined),
+  requireParticipantsMarketplaceEligible: vi.fn().mockResolvedValue(undefined),
+  marketplaceObligationValidator,
 }));
 
 vi.mock("@/repositories/rental-order-repository", () => ({
@@ -306,8 +311,15 @@ describe("rental-order-machine", () => {
   // eraseAccount(owner) 的 subject lock → RentalListing updateMany 形成
   // row lock ↔ advisory lock 交叉死锁（SQLSTATE 40P01）。此测试以调用顺序
   // spy 锁定该结构；真实行为证明见集成 OWNER_CREATION_ERASURE_RACE_TEST 双向。
-  it("锁序回归：pre-read → subject locks → recheck → FOR UPDATE（结构锁定）", async () => {
+  it("锁序回归：pre-read → subject locks → validate → FOR UPDATE（结构锁定）", async () => {
     const calls: string[] = [];
+    // 真实 validator 的锁内校验位于 subject locks 与 FOR UPDATE 之间：
+    // 以 spy 复现该位置（校验内容本身由 capability-gate.test.ts 覆盖）
+    marketplaceObligationValidator.mockImplementationOnce(
+      () => async () => {
+        calls.push("validate");
+      },
+    );
     const listingRow = {
       id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
       minimumDuration: 1, maximumDuration: 30,
@@ -356,12 +368,13 @@ describe("rental-order-machine", () => {
 
     expect(result).toEqual({ orderId: "order-1" });
 
-    // 精确调用序列：pre-read（无锁）→ 两把 subject 锁 → 活跃复核 → FOR UPDATE
+    // 精确调用序列（Phase 6C-3 Repair 2）：pre-read（无锁）→ 两把 subject 锁
+    // → 锁内校验（validateLocked；真实实现=actor 三门+全参与方资格）→ FOR UPDATE
     expect(calls).toEqual([
       "pre-read",
       "subject-lock",
       "subject-lock",
-      "recheck",
+      "validate",
       "for-update",
     ]);
     // FOR UPDATE 必须是最后一次行锁请求，且严格晚于 governance 锁

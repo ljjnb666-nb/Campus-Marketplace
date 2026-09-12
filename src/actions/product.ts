@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
-import { enforceMarketplaceCreationGate } from "@/lib/enforcement/capability-gate";
+import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -109,10 +109,10 @@ export async function createProduct(
     }
 
     // 事务内完成：subject 治理锁 + marketplace 能力门（account/membership/risk，
-    // Phase 6B）→ 商品落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库。
+    // Phase 6B/6C-3）→ 商品落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库。
     // token 中的 asset: 引用被规范化为公开 URL 后才写入 ProductImage。
     const product = await withTransaction(async (tx) => {
-      await enforceMarketplaceCreationGate(tx, user.id, seller.campusId);
+      await enforceMarketplaceCapability(tx, user.id, seller.campusId);
 
       const created = await tx.product.create({
         data: {
@@ -211,7 +211,7 @@ export async function updateProduct(
           sellerId: user.id,
           deletedAt: null,
         },
-        select: { id: true },
+        select: { id: true, campusId: true },
       }),
       prisma.productCategory.findUnique({
         where: { id: parsed.data.categoryId },
@@ -232,6 +232,15 @@ export async function updateProduct(
     }
 
     const imageUrls = await withTransaction(async (tx) => {
+      // Phase 6C-3：编辑自己 listing 的公开内容 = MODIFY_PUBLIC_LISTING_CONTENT
+      // 能力（RESTRICTED 拒绝；campus 取既有 Product 权威行，客户端不可伪造）
+      await enforceMarketplaceCapability(
+        tx,
+        user.id,
+        existingProduct.campusId,
+        "MODIFY_PUBLIC_LISTING_CONTENT",
+      );
+
       await tx.product.update({
         where: { id: productId },
         data: {
@@ -306,17 +315,29 @@ export async function updateProductStatus(formData: FormData) {
         sellerId: user.id,
         deletedAt: null,
       },
-      select: { id: true },
+      select: { id: true, campusId: true },
     });
 
     if (!product) {
       return;
     }
 
-    await prisma.product.update({
-      where: { id: parsed.data.productId },
-      data: { status: parsed.data.status },
-    });
+    if (parsed.data.status === "ACTIVE") {
+      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
+      // START_NEW_MARKETPLACE_ACTIVITY（下架/RESERVED/SOLD 等 wind-down 不 gate）
+      await withTransaction(async (tx) => {
+        await enforceMarketplaceCapability(tx, user.id, product.campusId);
+        await tx.product.update({
+          where: { id: parsed.data.productId },
+          data: { status: parsed.data.status },
+        });
+      });
+    } else {
+      await prisma.product.update({
+        where: { id: parsed.data.productId },
+        data: { status: parsed.data.status },
+      });
+    }
 
     revalidateProductViews(parsed.data.productId);
   } catch (error) {
