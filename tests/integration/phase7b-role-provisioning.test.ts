@@ -715,7 +715,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         expect(removed.filter((value) => value === false)).toHaveLength(1);
       });
 
-      it("C02：revoke vs re-grant（barrier 串行化）→ 终态合法单行、无 duplicate", async () => {
+      it("C02：revoke vs re-grant（两阶段 gate 固定获锁序）→ 终态合法单行、无 duplicate", async () => {
         const target = await createFixtureUser("C02目标", campusA.id);
         const { assignRole, revokeRole } = await import("@/lib/rbac/assignment-service");
 
@@ -726,6 +726,12 @@ describe.skipIf(!integrationDatabaseUrl)(
           campusId: campusA.id,
         });
 
+        // 两阶段 gate（ROLE_ASSIGN_07 模式）：racePoint 入口 = revoke 已持有
+        // 全部 subject 锁（确定性）；此后才启动 grant → grant 必然进入锁等待。
+        let revokeHoldingLocks!: () => void;
+        const lockHeld = new Promise<void>((resolve) => {
+          revokeHoldingLocks = resolve;
+        });
         let releaseGate!: () => void;
         const gate = new Promise<void>((resolve) => {
           releaseGate = resolve;
@@ -736,10 +742,15 @@ describe.skipIf(!integrationDatabaseUrl)(
           targetUserId: target.id,
           roleKey: REVIEWER_ROLE_KEY,
           campusId: campusA.id,
-          racePoint: () => gate,
+          racePoint: async () => {
+            revokeHoldingLocks();
+            await gate;
+          },
         });
 
-        // grant 与 revoke 争用同 subject 锁集合 → grant 进入等待队列
+        await lockHeld;
+
+        // revoke 持锁窗口内启动 re-grant → 它必然阻塞在 advisory 锁上
         const grantPromise = assignRole({
           actorId: globalManager.id,
           targetUserId: target.id,
@@ -757,6 +768,7 @@ describe.skipIf(!integrationDatabaseUrl)(
           grantPromise,
         ]);
         expect(revokeResult.removed).toBe(true);
+        // 获锁序确定（revoke 先）：删除提交后 re-grant 重建 → 单行
         expect(grantResult.created).toBe(true);
 
         const rows = await rawClient!.userRoleAssignment.count({

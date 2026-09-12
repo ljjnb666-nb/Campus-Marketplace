@@ -56,8 +56,17 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
   await managerPage.goto("/governance/roles");
   await expect(managerPage.getByRole("heading", { name: "角色管理" })).toBeVisible();
 
+  // 等待客户端 hydration 收敛（瞬态双挂载期间 labeled form 内 select 数 >1），
+  // 之后所有表单交互才可安全定位（确定性等待，非 sleep）
+  await managerPage.waitForFunction(
+    () =>
+      document.querySelectorAll(
+        'form[aria-label="查找候选用户"] select[name="campusId"]',
+      ).length === 1,
+  );
+
   // 第一步：exact-email 查找候选 → displayName 呈现
-  const lookupForm = managerPage.locator("form", { hasText: "第一步" });
+  const lookupForm = managerPage.locator("form[aria-label=\"查找候选用户\"]");
   await lookupForm.locator("select[name=\"campusId\"]").selectOption({ label: campus.name });
   await lookupForm.locator("input[name=\"email\"]").fill(candidateEmail);
   await lookupForm.getByRole("button", { name: "查找用户" }).click();
@@ -66,7 +75,7 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
   });
 
   // 第二步：确认授予 → assignment 出现在列表（含授予人 display name）
-  const grantForm = managerPage.locator("form", { hasText: "第二步" });
+  const grantForm = managerPage.locator("form[aria-label=\"确认授予角色\"]");
   await grantForm.locator("select[name=\"campusId\"]").selectOption({ label: campus.name });
   await grantForm.locator("input[name=\"email\"]").fill(candidateEmail);
   await grantForm.getByRole("button", { name: "确认授予" }).click();
@@ -93,10 +102,9 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
 
   // ---------- 管理者按 assignmentId 撤回 ----------
   await assignmentRow.getByRole("button", { name: "撤回" }).click();
-  await expect(assignmentRow.getByText("已撤回该角色授予")).toBeVisible({
-    timeout: 15_000,
-  });
 
+  // revalidatePath 会替换列表 DOM（行内反馈随旧树消失）——先 poll DB 权威，
+  // 再断言 revalidate 后列表更新（7A 同款约定）
   await expect
     .poll(async () =>
       db.userRoleAssignment.count({ where: { id: assignment.id } }),
@@ -107,6 +115,10 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
     where: { action: "ROLE_REVOKED", targetId: candidate.id },
   });
   expect(revokeAudits).toHaveLength(1);
+
+  await expect(
+    managerPage.locator("article", { hasText: candidateName }),
+  ).toHaveCount(0, { timeout: 15_000 });
 
   // ---------- 被授予者再访问：/governance/appeals → 用户可见 404 ----------
   await candidatePage.goto("/governance/appeals");

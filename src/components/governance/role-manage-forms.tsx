@@ -122,7 +122,11 @@ export function CampusRoleGrantForm({
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <form action={lookupFormAction} className="space-y-3 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <form
+        action={lookupFormAction}
+        aria-label="查找候选用户"
+        className="space-y-3 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm"
+      >
         <h3 className="text-sm font-semibold text-slate-900">第一步：查找候选用户</h3>
         <CampusSelect campuses={campuses} />
         <EmailInput />
@@ -138,7 +142,11 @@ export function CampusRoleGrantForm({
           </p>
         ) : null}
       </form>
-      <form action={grantFormAction} className="space-y-3 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm">
+      <form
+        action={grantFormAction}
+        aria-label="确认授予角色"
+        className="space-y-3 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm"
+      >
         <h3 className="text-sm font-semibold text-slate-900">第二步：确认授予</h3>
         <CampusSelect campuses={campuses} />
         <EmailInput />
