@@ -85,10 +85,16 @@ function assertActorMayManageRoles(
 }
 
 /**
- * 角色授予 scope 精确判定（Repair 1）：
- * - GLOBAL 角色：须存在 GLOBAL 授予权
- * - CAMPUS 角色：须存在该 campus 的 CAMPUS 授予权，且 actor 当前持有
- *   该校区的 ACTIVE membership（activeCampusIds 命中）
+ * 角色授予 scope 精确判定（Phase 7A 窄修：解除首个校区审核员的
+ * provisioning chicken-and-egg）：
+ * - GLOBAL rbac.role.assign：可管理 GLOBAL 角色，也可管理任意校区的
+ *   CAMPUS 角色（不要求 actor membership——与全仓 hasPermission 的
+ *   GLOBAL-supersedes-campus 语义一致：GLOBAL grant 对任意 targetCampusId
+ *   放行且不要求 membership）；
+ * - CAMPUS rbac.role.assign@A：仅可管理 CAMPUS 角色且仅 @A，且 actor 当前
+ *   持有该校区的 ACTIVE membership（activeCampusIds 命中）；
+ *   永不可管理 GLOBAL 角色（防跨校区/全局提权）。
+ * target 侧规则（ACTIVE/membership/self-deny/锁序/审计）不在本函数，零变更。
  */
 function assertRoleAssignScope(
   context: AuthorizationContext,
@@ -98,19 +104,24 @@ function assertRoleAssignScope(
   const holdsAssign = (grant: { permissionKeys: string[] }) =>
     grant.permissionKeys.includes("rbac.role.assign");
 
-  const scopeMatched =
-    roleScope === "GLOBAL"
-      ? context.grants.some((grant) => grant.scope === "GLOBAL" && holdsAssign(grant))
-      : targetCampusId != null &&
-        context.grants.some(
-          (grant) =>
-            grant.scope === "CAMPUS" &&
-            grant.campusId === targetCampusId &&
-            holdsAssign(grant),
-        ) &&
-        context.activeCampusIds.includes(targetCampusId);
+  // GLOBAL 授予权：任意目标（GLOBAL 角色或任意校区 CAMPUS 角色）
+  if (context.grants.some((grant) => grant.scope === "GLOBAL" && holdsAssign(grant))) {
+    return;
+  }
 
-  if (!scopeMatched) {
+  // CAMPUS 授予权：仅同校区 CAMPUS 角色
+  const campusMatched =
+    roleScope === "CAMPUS" &&
+    targetCampusId != null &&
+    context.grants.some(
+      (grant) =>
+        grant.scope === "CAMPUS" &&
+        grant.campusId === targetCampusId &&
+        holdsAssign(grant),
+    ) &&
+    context.activeCampusIds.includes(targetCampusId);
+
+  if (!campusMatched) {
     throw rbacError("ROLE_ASSIGNMENT_CAMPUS_MISMATCH");
   }
 }
