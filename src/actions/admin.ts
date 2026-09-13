@@ -12,7 +12,6 @@ import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
   categoryStatusSchema,
-  moderateListingSchema,
   moderationKeywordSchema,
   moderationKeywordStatusSchema,
   reportReviewSchema,
@@ -341,59 +340,10 @@ export async function toggleUserStatus(
   }
 }
 
-export async function moderateListing(
-  formData: FormData,
-): Promise<AdminActionState | undefined> {
-  try {
-    const admin = await requireAdmin();
-    const parsed = moderateListingSchema.safeParse({
-      targetType: formData.get("targetType"),
-      targetId: formData.get("targetId"),
-    });
-
-    if (!parsed.success) {
-      return invalidFormState();
-    }
-
-    await withTransaction(async (tx) => {
-      if (parsed.data.targetType === "PRODUCT") {
-        await tx.product.update({
-          where: { id: parsed.data.targetId },
-          data: { status: "OFFLINE" },
-        });
-      }
-
-      if (parsed.data.targetType === "ERRAND") {
-        await tx.errandTask.update({
-          where: { id: parsed.data.targetId },
-          data: { status: "CANCELLED" },
-        });
-      }
-
-      if (parsed.data.targetType === "SERVICE") {
-        await tx.serviceListing.update({
-          where: { id: parsed.data.targetId },
-          data: { status: "OFFLINE" },
-        });
-      }
-
-      await tx.adminLog.create({
-        data: {
-          adminId: admin.id,
-          action: "MODERATE_LISTING",
-          targetType: parsed.data.targetType,
-          targetId: parsed.data.targetId,
-        },
-      });
-    });
-
-    revalidatePath("/admin/products");
-    revalidatePath("/admin/errands");
-    revalidatePath("/admin/services");
-  } catch (error) {
-    return { success: false, error: actionErrorMessage(error, "moderateListing") };
-  }
-}
+// Phase 7C：legacy moderateListing 已移除——listing 治理唯一入口是
+// /governance/listings canonical moderation service（raw status moderation
+// 写入口普查必须为零；本文件保留的 toggleUserStatus 走 canonical
+// enforcement seam，不属于 listing moderation）。
 
 export async function upsertModerationKeyword(
   formData: FormData,

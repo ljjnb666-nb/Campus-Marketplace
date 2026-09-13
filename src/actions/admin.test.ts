@@ -128,7 +128,6 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import {
-  moderateListing,
   reviewReport,
   reviewVerification,
   toggleErrandCategoryStatus,
@@ -633,54 +632,9 @@ describe("admin actions", () => {
     expect(result).toEqual({ success: false, error: "账号已处于该状态" });
   });
 
-  it("takes products offline through moderation", async () => {
-    const formData = new FormData();
-    formData.set("targetType", "PRODUCT");
-    formData.set("targetId", "product-1");
-
-    await moderateListing(formData);
-
-    expect(productUpdate).toHaveBeenCalledWith({
-      where: { id: "product-1" },
-      data: { status: "OFFLINE" },
-    });
-    expect(errandTaskUpdate).not.toHaveBeenCalled();
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ action: "MODERATE_LISTING", targetId: "product-1" }),
-    });
-    expect(revalidatePath).toHaveBeenCalledWith("/admin/products");
-  });
-
-  it("cancels errand tasks and offlines services through moderation", async () => {
-    let formData = new FormData();
-    formData.set("targetType", "ERRAND");
-    formData.set("targetId", "errand-1");
-    await moderateListing(formData);
-    expect(errandTaskUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-1" },
-      data: { status: "CANCELLED" },
-    });
-
-    formData = new FormData();
-    formData.set("targetType", "SERVICE");
-    formData.set("targetId", "service-1");
-    await moderateListing(formData);
-    expect(serviceListingUpdate).toHaveBeenCalledWith({
-      where: { id: "service-1" },
-      data: { status: "OFFLINE" },
-    });
-  });
-
-  it("returns an error state for invalid moderation input", async () => {
-    const formData = new FormData();
-    formData.set("targetType", "MESSAGE");
-    formData.set("targetId", "message-1");
-
-    const result = await moderateListing(formData);
-
-    expect(result).toEqual({ success: false, error: "参数无效" });
-    expect(transactionMock).not.toHaveBeenCalled();
-  });
+  // Phase 7C：legacy moderateListing 已删除（治理唯一入口 =
+  // /governance/listings canonical moderation service；raw 写入口普查为零，
+  // 相关回归移至 src/lib/moderation 与 tests/integration/phase7c-*）。
 
   it("notifies the reporter with resolved and rejected report copy", async () => {
     reportUpdate.mockResolvedValue({ reporterId: "user-2" });
@@ -735,12 +689,6 @@ describe("admin actions", () => {
     const reportResult = await reviewReport(formData);
     expect(reportResult?.success).toBe(false);
 
-    formData.delete("reportId");
-    formData.delete("status");
-    formData.set("targetType", "PRODUCT");
-    formData.set("targetId", "product-1");
-    const moderateResult = await moderateListing(formData);
-    expect(moderateResult?.success).toBe(false);
   });
 
   it("returns an error state when toggle user status input is invalid", async () => {
