@@ -1032,15 +1032,25 @@ describe.skipIf(!integrationDatabaseUrl)(
       // → order 提交 → restrict 随后生效（绝无 post-restriction commit）
       {
         const gate = controllableGate();
+        // Phase 7C CI-stability：先等 order 真实取得 subject 锁（racePoint
+        // 在锁后触发）再启动 restrict——消除高负载下 restrict 先行完成、
+        // order validateLocked 直接 409 的起跑竞态（不移动 seam、不弱化
+        // barrier 证明：restrict 仍必须真实等待 USER:seller 锁）。
+        let signalOrderLocksAcquired!: () => void;
+        const orderLocksAcquired = new Promise<void>((resolve) => {
+          signalOrderLocksAcquired = resolve;
+        });
         const orderPromise = createProductOrder({
           buyerId: buyer.id,
           productId: product.id,
           sellerId: seller.id,
           campusId: campusA.id,
           racePoint: async () => {
+            signalOrderLocksAcquired();
             await gate.promise;
           },
         });
+        await orderLocksAcquired;
         // restrict 需要 seller 锁（order tx 已持有）→ 进入等待队列
         const restrictPromise = restrict(seller.id);
         await waitForAdvisoryLockWaiter(rawClient!, [`USER:${seller.id}`]);
