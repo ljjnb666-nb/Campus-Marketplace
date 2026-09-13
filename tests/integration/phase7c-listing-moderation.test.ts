@@ -387,11 +387,9 @@ describe.skipIf(!integrationDatabaseUrl)(
         rawClient!.$executeRawUnsafe(
           `INSERT INTO "ListingModeration"
            ("id","targetType","productId","serviceListingId","campusId","observedStatus","reasonCode","moderatorId")
-           SELECT '${RUN_TAG}-m03', 'PRODUCT', p.id, s.id, '${campusA.id}', 'ACTIVE', 'OTHER', '${moderator.id}'
-           FROM "Product" p, "ServiceListing" s
-           WHERE p.id = '${productFixture.id}' LIMIT 1`,
-        ).then((rows) => rows),
-      ).rejects.toThrow();
+           VALUES ('${RUN_TAG}-m03', 'PRODUCT', '${productFixture.id}', '${RUN_TAG}-m03-fake-service', '${campusA.id}', 'ACTIVE', 'OTHER', '${moderator.id}')`,
+        ),
+      ).rejects.toMatchObject({ code: "P2010", message: expect.stringContaining("23514") });
     }, 15_000);
 
     it("M04/M05：同一 listing 重复活跃行 → partial unique 拒绝；resolved 历史 + 新活跃行 → 允许", async () => {
