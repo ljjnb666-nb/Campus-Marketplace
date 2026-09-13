@@ -1,4 +1,5 @@
 "use server";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 
 import { revalidatePath } from "next/cache";
 import { prisma, withTransaction } from "@/lib/prisma";
@@ -55,7 +56,15 @@ export async function getMyServiceFavorites(userId: string) {
   }
 
   const favorites = await prisma.serviceFavorite.findMany({
-    where: { userId },
+    where: {
+      userId,
+      // Phase 7C：PUBLIC 面——被治理隐藏的服务不再出现在收藏列表；
+      // 同时收口既有缺陷（nested include 不受软删扩展拦截）
+      serviceListing: {
+        deletedAt: null,
+        ...listingModerationPublicFilter(),
+      },
+    },
     include: {
       serviceListing: {
         include: {

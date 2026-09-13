@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
 
@@ -108,9 +109,9 @@ export async function getHomepageSummary(query: HomepageQuery = {}) {
           schoolName: true,
         },
       }),
-      prisma.product.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere } }),
-      prisma.errandTask.count({ where: { deletedAt: null, status: "OPEN", ...campusWhere } }),
-      prisma.serviceListing.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere } }),
+      prisma.product.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
+      prisma.errandTask.count({ where: { deletedAt: null, status: "OPEN", ...campusWhere, ...listingModerationPublicFilter() } }),
+      prisma.serviceListing.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
       query.userId
         ? Promise.all([
             getUnreadNotificationCount(query.userId),
@@ -144,7 +145,7 @@ export async function getHomepageProducts(query: { campusId?: string } = {}) {
 
   const [latestProducts, trendingProducts, budgetProducts] = await Promise.all([
     prisma.product.findMany({
-      where: { deletedAt: null, status: "ACTIVE", ...campusWhere },
+      where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: { createdAt: "desc" },
       take: 6,
       include: {
@@ -155,7 +156,7 @@ export async function getHomepageProducts(query: { campusId?: string } = {}) {
       },
     }),
     prisma.product.findMany({
-      where: { deletedAt: null, status: "ACTIVE", ...campusWhere },
+      where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: [{ favoriteCount: "desc" }, { viewCount: "desc" }, { createdAt: "desc" }],
       take: 6,
       include: {
@@ -166,7 +167,7 @@ export async function getHomepageProducts(query: { campusId?: string } = {}) {
       },
     }),
     prisma.product.findMany({
-      where: { deletedAt: null, status: "ACTIVE", ...campusWhere },
+      where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: [{ price: "asc" }, { favoriteCount: "desc" }, { createdAt: "desc" }],
       take: 6,
       include: {
@@ -191,12 +192,12 @@ export async function getHomepageErrands(query: { campusId?: string } = {}) {
 
   const [urgentErrands, highRewardErrands] = await Promise.all([
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere },
+      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: [{ deadline: "asc" }, { reward: "desc" }],
       take: 6,
     }),
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere },
+      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: [{ reward: "desc" }, { deadline: "asc" }],
       take: 6,
     }),
@@ -217,6 +218,7 @@ export async function getHomepageServices(query: { campusId?: string } = {}) {
         deletedAt: null,
         status: "ACTIVE",
         ...campusWhere,
+        ...listingModerationPublicFilter(),
         provider: {
           verificationStatus: "VERIFIED",
         },
@@ -232,7 +234,7 @@ export async function getHomepageServices(query: { campusId?: string } = {}) {
       },
     }),
     prisma.serviceListing.findMany({
-      where: { deletedAt: null, status: "ACTIVE", ...campusWhere },
+      where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() },
       orderBy: [{ completedOrderCount: "desc" }, { createdAt: "desc" }],
       take: 6,
       select: {

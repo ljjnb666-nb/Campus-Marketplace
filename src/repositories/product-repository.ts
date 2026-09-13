@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { notFound } from "next/navigation";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
 export type ProductListQuery = {
@@ -130,6 +131,8 @@ export async function getProductList(query: ProductListQuery = {}) {
   const priceFilter = getPriceFilter(query.minPrice, query.maxPrice);
   const where = {
     deletedAt: null,
+    // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
+    ...listingModerationPublicFilter(),
     ...(query.q
       ? {
           OR: [
@@ -253,6 +256,7 @@ export async function getProductDetail(
       deletedAt: null,
       status: "ACTIVE",
       id: { not: product.id },
+      ...listingModerationPublicFilter(),
       OR: [{ campusId: product.campusId }, { categoryId: product.categoryId }],
     },
     take: 18,
@@ -339,13 +343,28 @@ export async function getMyProducts(userId: string) {
         orderBy: { sortOrder: "asc" },
         take: 1,
       },
+      // Phase 7C OWNER 面：不过滤，但携带活跃治理状态供安全 badge 呈现
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
+      },
     },
   });
 }
 
 export async function getMyFavoriteProducts(userId: string) {
   return prisma.favorite.findMany({
-    where: { userId },
+    where: {
+      userId,
+      // Phase 7C：PUBLIC 面——被治理隐藏的商品不再出现在收藏列表；
+      // 同时收口既有缺陷（nested include 不受软删扩展拦截）：
+      // 已软删商品同样不再出现。
+      product: {
+        deletedAt: null,
+        ...listingModerationPublicFilter(),
+      },
+    },
     orderBy: { createdAt: "desc" },
     // 收藏列表仅保留最近 100 条，避免无界查询
     take: 100,

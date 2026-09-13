@@ -84,6 +84,7 @@ describe("MyServicesPage", () => {
         coverImageUrl: "/uploads/services/ppt.jpg",
         category: { name: "设计制作" },
         campus: { name: "主校区" },
+        moderations: [],
       },
     ]);
 

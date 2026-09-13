@@ -6,6 +6,8 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { RentalDetailConsole } from "@/components/rental/rental-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
 import { getRentalListingDetail } from "@/repositories/rental-listing-repository";
 import { FileText, ShieldAlert, Star } from "lucide-react";
 
@@ -62,10 +64,21 @@ export default async function RentalDetailPage({ params }: { params: Promise<{ i
   }
 
   const { listing, reviews, isFavorited } = result;
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）
+  const moderationGate = await resolvePublicDetailModerationGate({
+    viewerId,
+    ownerId: listing.ownerId,
+    targetType: "RENTAL",
+    listingId: listing.id,
+  });
+  if (moderationGate === "HIDDEN") {
+    notFound();
+  }
   const isOwner = viewerId === listing.ownerId;
 
   return (
     <PageContainer maxWidth="standard">
+      {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
       {/* 面包屑 */}
       <Breadcrumbs
         items={[

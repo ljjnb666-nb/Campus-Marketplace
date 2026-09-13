@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { deleteErrand } from "@/actions/errand";
+import { ModerationPendingBadge } from "@/components/listing/moderation-state";
 import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -48,7 +49,10 @@ export default async function MyErrandsPage() {
                   className="rounded-[24px] border border-slate-200 bg-white p-5"
                 >
                   <div className="flex items-center justify-between gap-3 text-sm text-slate-500">
-                    <span>{ERRAND_STATUS_LABELS[errand.status]}</span>
+                    <span className="flex items-center gap-2">
+                      {ERRAND_STATUS_LABELS[errand.status]}
+                      {errand.moderations.length > 0 && <ModerationPendingBadge />}
+                    </span>
                     <span>{errand.accepter?.name ?? "暂无接单人"}</span>
                   </div>
                   <h3 className="mt-2 text-lg font-semibold text-slate-950">{errand.title}</h3>
@@ -107,7 +111,10 @@ export default async function MyErrandsPage() {
                   className="rounded-[24px] border border-slate-200 bg-white p-5"
                 >
                   <div className="flex items-center justify-between gap-3 text-sm text-slate-500">
-                    <span>{ERRAND_STATUS_LABELS[errand.status]}</span>
+                    <span className="flex items-center gap-2">
+                      {ERRAND_STATUS_LABELS[errand.status]}
+                      {errand.moderations.length > 0 && <ModerationPendingBadge />}
+                    </span>
                     <span>{errand.publisher.name}</span>
                   </div>
                   <h3 className="mt-2 text-lg font-semibold text-slate-950">{errand.title}</h3>

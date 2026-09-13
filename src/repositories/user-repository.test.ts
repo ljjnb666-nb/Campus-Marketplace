@@ -166,6 +166,7 @@ describe("user repository", () => {
           where: {
             deletedAt: null,
             status: "ACTIVE",
+            moderations: { none: { resolvedAt: null } },
           },
           orderBy: { createdAt: "desc" },
           take: 6,
@@ -181,6 +182,7 @@ describe("user repository", () => {
           where: {
             deletedAt: null,
             status: "ACTIVE",
+            moderations: { none: { resolvedAt: null } },
           },
           orderBy: { createdAt: "desc" },
           take: 6,
@@ -192,6 +194,7 @@ describe("user repository", () => {
           where: {
             deletedAt: null,
             status: "OPEN",
+            moderations: { none: { resolvedAt: null } },
           },
           orderBy: { createdAt: "desc" },
           take: 6,
@@ -206,6 +209,7 @@ describe("user repository", () => {
         sellerId: "user-2",
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
       },
     });
     expect(errandTaskCount).toHaveBeenCalledWith({
@@ -213,6 +217,7 @@ describe("user repository", () => {
         publisherId: "user-2",
         deletedAt: null,
         status: "OPEN",
+        moderations: { none: { resolvedAt: null } },
       },
     });
     expect(serviceListingCount).toHaveBeenCalledWith({
@@ -220,6 +225,7 @@ describe("user repository", () => {
         providerId: "user-2",
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
       },
     });
     expect(result).toEqual({

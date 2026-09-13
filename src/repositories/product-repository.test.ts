@@ -53,6 +53,7 @@ describe("product repository", () => {
     expect(productFindMany).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: { contains: "教材", mode: "insensitive" } },
           { description: { contains: "教材", mode: "insensitive" } },
@@ -96,6 +97,7 @@ describe("product repository", () => {
     expect(productCount).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: { contains: "教材", mode: "insensitive" } },
           { description: { contains: "教材", mode: "insensitive" } },
@@ -136,6 +138,11 @@ describe("product repository", () => {
           orderBy: { sortOrder: "asc" },
           take: 1,
         },
+        moderations: {
+          where: { resolvedAt: null },
+          take: 1,
+          select: { id: true, createdAt: true },
+        },
       },
     });
   });
@@ -146,7 +153,13 @@ describe("product repository", () => {
     await getMyFavoriteProducts("user-1");
 
     expect(favoriteFindMany).toHaveBeenCalledWith({
-      where: { userId: "user-1" },
+      where: {
+        userId: "user-1",
+        product: {
+          deletedAt: null,
+          moderations: { none: { resolvedAt: null } },
+        },
+      },
       orderBy: { createdAt: "desc" },
       take: 100,
       include: {

@@ -1,10 +1,13 @@
 import React from "react";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ErrandCard } from "@/components/errand/errand-card";
 import { ErrandDetailConsole } from "@/components/errand/errand-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
 import { getErrandDetail } from "@/repositories/errand-repository";
 import { MapPin, Navigation, Info, ShieldAlert } from "lucide-react";
 
@@ -50,6 +53,18 @@ export default async function ErrandDetailPage({
   // SUSPENDED 会话 → null → 匿名语义（操作入口抑制），公开详情照常
   const viewerId = await getActiveViewerId();
   const { errand, relatedErrands } = await getErrandDetail(id);
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）；EXISTING_OBLIGATION
+  // 语义：publisher/accepter 作为履约参与方放行（履约上下文保留）
+  const moderationGate = await resolvePublicDetailModerationGate({
+    viewerId,
+    ownerId: errand.publisherId,
+    additionalAllowedViewerIds: [errand.accepterId],
+    targetType: "ERRAND",
+    listingId: errand.id,
+  });
+  if (moderationGate === "HIDDEN") {
+    notFound();
+  }
   const isPublisher = viewerId === errand.publisherId;
   const isAccepter = viewerId === errand.accepterId;
 
@@ -76,6 +91,7 @@ export default async function ErrandDetailPage({
 
   return (
     <PageContainer maxWidth="standard">
+      {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

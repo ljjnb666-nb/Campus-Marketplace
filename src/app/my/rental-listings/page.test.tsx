@@ -52,6 +52,7 @@ function buildListing(overrides: Record<string, unknown> = {}) {
     pricingUnit: "PER_DAY",
     availableQuantity: 1,
     totalQuantity: 2,
+    moderations: [],
     ...overrides,
   };
 }

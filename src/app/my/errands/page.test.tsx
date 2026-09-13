@@ -74,6 +74,7 @@ describe("MyErrandsPage", () => {
         reward: 8,
         status: "OPEN",
         accepter: null,
+        moderations: [],
       },
     ]);
     getMyAcceptedErrands.mockResolvedValue([
@@ -85,6 +86,7 @@ describe("MyErrandsPage", () => {
         reward: 4,
         status: "IN_PROGRESS",
         publisher: { name: "李同学" },
+        moderations: [],
       },
     ]);
 

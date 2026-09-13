@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
@@ -76,6 +77,7 @@ export async function getPublicUserProfile(userId: string) {
         where: {
           deletedAt: null,
           status: "ACTIVE",
+          ...listingModerationPublicFilter(),
         },
         orderBy: { createdAt: "desc" },
         take: 6,
@@ -91,6 +93,7 @@ export async function getPublicUserProfile(userId: string) {
         where: {
           deletedAt: null,
           status: "ACTIVE",
+          ...listingModerationPublicFilter(),
         },
         orderBy: { createdAt: "desc" },
         take: 6,
@@ -102,6 +105,7 @@ export async function getPublicUserProfile(userId: string) {
         where: {
           deletedAt: null,
           status: "OPEN",
+          ...listingModerationPublicFilter(),
         },
         orderBy: { createdAt: "desc" },
         take: 6,
@@ -122,6 +126,7 @@ export async function getPublicUserProfile(userId: string) {
         sellerId: userId,
         deletedAt: null,
         status: "ACTIVE",
+        ...listingModerationPublicFilter(),
       },
     }),
     prisma.errandTask.count({
@@ -129,6 +134,7 @@ export async function getPublicUserProfile(userId: string) {
         publisherId: userId,
         deletedAt: null,
         status: "OPEN",
+        ...listingModerationPublicFilter(),
       },
     }),
     prisma.serviceListing.count({
@@ -136,6 +142,7 @@ export async function getPublicUserProfile(userId: string) {
         providerId: userId,
         deletedAt: null,
         status: "ACTIVE",
+        ...listingModerationPublicFilter(),
       },
     }),
   ]);

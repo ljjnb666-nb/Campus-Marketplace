@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
 export type ServiceListQuery = {
@@ -125,6 +126,8 @@ export async function getServiceFormMeta() {
 export async function getServiceList(query: ServiceListQuery = {}) {
   const where = {
     deletedAt: null,
+    // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
+    ...listingModerationPublicFilter(),
     ...(query.q
       ? {
           OR: [
@@ -216,6 +219,7 @@ export async function getServiceDetail(serviceId: string) {
       deletedAt: null,
       status: "ACTIVE",
       id: { not: service.id },
+      ...listingModerationPublicFilter(),
       OR: [
         { campusId: service.campusId },
         { categoryId: service.categoryId },
@@ -315,6 +319,12 @@ export async function getMyServices(userId: string) {
     include: {
       campus: true,
       category: true,
+      // Phase 7C OWNER 面：不过滤，但携带活跃治理状态供安全 badge 呈现
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
+      },
     },
   });
 }

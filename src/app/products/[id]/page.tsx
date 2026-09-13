@@ -1,11 +1,14 @@
 import React from "react";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { ProductCard } from "@/components/product/product-card";
 import { ProductDetailConsole } from "@/components/product/product-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
 import { getProductDetail } from "@/repositories/product-repository";
 
 export const dynamic = "force-dynamic";
@@ -61,11 +64,23 @@ export default async function ProductDetailPage({
   // SUSPENDED 会话 → null → 匿名语义（收藏态与 isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
   const { product, relatedProducts } = await getProductDetail(id, viewerId ?? undefined);
+  // Phase 7C PUBLIC detail 治理特例：活跃 moderation ∧ 非 owner → notFound()；
+  // owner → 渲染 + 安全横幅（OWNER_EDIT_WHILE_HIDDEN = ALLOWED_V1）
+  const moderationGate = await resolvePublicDetailModerationGate({
+    viewerId,
+    ownerId: product.sellerId,
+    targetType: "PRODUCT",
+    listingId: product.id,
+  });
+  if (moderationGate === "HIDDEN") {
+    notFound();
+  }
   const isOwner = viewerId === product.sellerId;
   const isFavorited = Array.isArray(product.favorites) && product.favorites.length > 0;
 
   return (
     <PageContainer maxWidth="standard">
+      {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

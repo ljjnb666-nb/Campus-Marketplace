@@ -1,11 +1,14 @@
 import React from "react";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { PageContainer } from "@/components/ui/page-container";
 import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { ServiceCard } from "@/components/service/service-card";
 import { ServiceDetailConsole } from "@/components/service/service-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
 import { getServiceDetail } from "@/repositories/service-repository";
 import { CheckCircle2 } from "lucide-react";
 
@@ -51,12 +54,23 @@ export default async function ServiceDetailPage({
   // SUSPENDED 会话 → null → 匿名语义（isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
   const { service, relatedServices } = await getServiceDetail(id);
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）
+  const moderationGate = await resolvePublicDetailModerationGate({
+    viewerId,
+    ownerId: service.providerId,
+    targetType: "SERVICE",
+    listingId: service.id,
+  });
+  if (moderationGate === "HIDDEN") {
+    notFound();
+  }
   const isOwner = viewerId === service.providerId;
 
   const images = service.coverImageUrl ? [service.coverImageUrl] : [];
 
   return (
     <PageContainer maxWidth="standard">
+      {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

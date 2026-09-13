@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { deleteProduct } from "@/actions/product";
 import { ProductStatusActions } from "@/components/product/product-status-actions";
+import { ModerationPendingBadge } from "@/components/listing/moderation-state";
 import { PRODUCT_STATUS_LABELS } from "@/constants/product";
 import { requireUser } from "@/lib/server-auth";
 import { getMyProducts } from "@/repositories/product-repository";
@@ -50,6 +51,7 @@ export default async function MyProductsPage() {
                   <span>{product.category.name}</span>
                   <span>·</span>
                   <span>{PRODUCT_STATUS_LABELS[product.status]}</span>
+                  {product.moderations.length > 0 && <ModerationPendingBadge />}
                 </div>
                 <h2 className="text-xl font-semibold text-slate-950">{product.title}</h2>
                 <p className="line-clamp-2 text-sm text-slate-600">{product.description}</p>
