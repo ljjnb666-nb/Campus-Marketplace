@@ -184,7 +184,7 @@ describe("errand favorite actions", () => {
 
       expect(result).toBe(favorites);
       expect(errandFavoriteFindMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { userId: "user-1" } }),
+        expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
     });
 

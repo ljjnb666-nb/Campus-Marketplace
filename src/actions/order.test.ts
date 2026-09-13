@@ -49,7 +49,38 @@ const {
       findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] }; campusId: string } }) =>
         where.userId.in.map((userId: string) => ({ userId })),
       ),
-    },    $executeRaw: txExecuteRaw,
+    },
+    $executeRaw: txExecuteRaw,
+    // Phase 7C：listing 行锁（FOR UPDATE）+ 活跃 moderation 复查
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      // 按锁内 SELECT 的目标表分流返回行（PRODUCT/SERVICE 各自形状）
+      const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      if (sql.includes("ServiceListing")) {
+        return [
+          {
+            id: "service-1",
+            campusId: "campus-1",
+            status: "ACTIVE",
+            price: "50",
+            providerId: "provider-1",
+            deletedAt: null,
+          },
+        ];
+      }
+      return [
+        {
+          id: "product-1",
+          campusId: "campus-1",
+          status: "ACTIVE",
+          price: "100",
+          sellerId: "seller-1",
+          deletedAt: null,
+        },
+      ];
+    }),
+    listingModeration: {
+      findFirst: vi.fn(async () => null),
+    },
   };
 
   return {
@@ -177,6 +208,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue({ id: "order-1" });
 
@@ -197,6 +229,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
     txProductUpdateMany.mockResolvedValue({ count: 0 });
@@ -262,6 +295,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
 
@@ -325,6 +359,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
     txProductUpdateMany.mockRejectedValue(new Error("db down"));
@@ -343,6 +378,7 @@ describe("order actions", () => {
       id: "service-1",
       price: { toString: () => "50" },
       providerId: "provider-1",
+      campusId: "campus-1",
     });
 
     const formData = new FormData();

@@ -56,6 +56,8 @@ const {
   const transactionClient = {
     $queryRaw: txQueryRaw,
     $executeRaw: txExecuteRaw,
+    // Phase 7C：活跃 moderation 复查（默认无活跃行）
+    listingModeration: { findFirst: vi.fn(async () => null) },
     user: { findMany: txUserFindMany, update: txUserUpdate },
     campusMembership: {
       findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] } } }) =>

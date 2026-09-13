@@ -58,6 +58,57 @@ const {
     rentalListing: {
       findFirst: vi.fn(),
     },
+    // Phase 7C：rereadListingForConversation——listing 行锁 + 活跃 moderation 复查。
+    // 锁内 SELECT 行由各域既有 findFirst mock 派生（场景可控）。
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      const withDeleted = (row: Record<string, unknown> | null) =>
+        row ? [{ ...row, deletedAt: row.deletedAt ?? null }] : [];
+      if (sql.includes("ErrandTask")) {
+        const row = (await transactionClient.errandTask.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row
+            ? {
+                id: "errand-1",
+                campusId: row.campusId,
+                ownerId: row.publisherId,
+                counterpartId: row.accepterId ?? null,
+              }
+            : null,
+        );
+      }
+      if (sql.includes("ServiceListing")) {
+        const row = (await transactionClient.serviceListing.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row ? { id: "service-1", campusId: row.campusId, ownerId: row.providerId } : null,
+        );
+      }
+      if (sql.includes("RentalListing")) {
+        const row = (await transactionClient.rentalListing.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row ? { id: "rental-1", campusId: row.campusId, ownerId: row.ownerId } : null,
+        );
+      }
+      const row = (await transactionClient.product.findFirst({} as never)) as Record<
+        string,
+        unknown
+      > | null;
+      return withDeleted(
+        row ? { id: "product-1", campusId: row.campusId, ownerId: row.sellerId } : null,
+      );
+    }),
+    listingModeration: {
+      findFirst: vi.fn(async () => null),
+    },
   };
 
   return {
