@@ -14,7 +14,11 @@ import {
   deriveRoleManageAccess,
   isManageableGovernanceRoleKey,
 } from "@/lib/rbac/role-manage-access";
-import { CAMPUS_APPEAL_REVIEWER_ROLE_KEY } from "@/lib/rbac/roles";
+import {
+  CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
+  CAMPUS_CONTENT_MODERATOR_ROLE_KEY,
+  SYSTEM_ROLES,
+} from "@/lib/rbac/roles";
 import { isRbacError } from "@/lib/rbac/errors";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
@@ -56,7 +60,10 @@ export type GovernanceRoleActionState = {
 
 const UNIFORM_DENY_MESSAGE = "没有权限执行该角色管理操作";
 
-const GRANT_SUCCESS_MESSAGE = "已授予校区申诉审核员角色";
+const ROLE_GRANT_SUCCESS_MESSAGES: Record<string, string> = {
+  [CAMPUS_APPEAL_REVIEWER_ROLE_KEY]: "已授予校区申诉审核员角色",
+  [CAMPUS_CONTENT_MODERATOR_ROLE_KEY]: "已授予校区内容审核员角色",
+};
 const GRANT_IDEMPOTENT_MESSAGE = "该用户已持有该角色";
 const REVOKE_SUCCESS_MESSAGE = "已撤回该角色授予";
 const REVOKE_MISSING_MESSAGE = "该授予已不存在或已被撤回";
@@ -90,12 +97,71 @@ function roleActionError(error: unknown, context: string): GovernanceRoleActionS
 }
 
 /**
- * allowlist 结构校验（fail-closed 常量哨兵）：v1 服务器所有 roleKey 必须在
- * 显式 allowlist 内。这是恒真结构不变量——为 false 只可能意味着 allowlist
- * 配置被改动，此时整体 fail closed。
+ * allowlist 结构校验（fail-closed 常量哨兵）：服务器所有 roleKey 必须在
+ * 显式 allowlist 内，且 allowlist 定义的 scope 恒为 CAMPUS、角色恒为
+ * isSystem。这是恒真结构不变量——为 false 只可能意味着 allowlist /
+ * SYSTEM_ROLES 配置被改动，此时整体 fail closed。
  */
-function assertServerOwnedRoleAllowed(): boolean {
-  return isManageableGovernanceRoleKey(CAMPUS_APPEAL_REVIEWER_ROLE_KEY);
+function assertServerOwnedRoleAllowed(roleKey: string): boolean {
+  if (!isManageableGovernanceRoleKey(roleKey)) {
+    return false;
+  }
+  const definition = SYSTEM_ROLES.find((role) => role.key === roleKey);
+  return Boolean(definition && definition.scope === "CAMPUS");
+}
+
+interface GrantGovernanceRoleInternalArgs {
+  actorId: string;
+  campusId: string;
+  email: string;
+  /** 服务器所有：只允许代码常量传入，绝不来自客户端 */
+  serverOwnedRoleKey: string;
+}
+
+/**
+ * Phase 7C：grant 流程内部 helper（R2 Repair 4 冻结）——任意 server-owned
+ * roleKey 的授予共用同一条冻结链：validate → 身份 → access 派生 → campus
+ * manage 授权 → ACTIVE CAMPUS eligibility → allowlist/scope 结构哨兵 →
+ * exact-email candidate → canonical assignRole。外部入口各自传入代码常量
+ * roleKey，客户端永远不能控制角色身份（Phase 7B 硬合同保留）。
+ */
+async function grantGovernanceRoleInternal({
+  actorId,
+  campusId,
+  email,
+  serverOwnedRoleKey,
+}: GrantGovernanceRoleInternalArgs): Promise<
+  { ok: true; created: boolean; roleKey: string } | { ok: false; state: GovernanceRoleActionState }
+> {
+  if (!assertServerOwnedRoleAllowed(serverOwnedRoleKey)) {
+    return { ok: false, state: uniformDeny() };
+  }
+
+  const context = await loadAuthorizationContext(actorId);
+  const access = deriveRoleManageAccess(context);
+  if (!canManageCampus(access, campusId)) {
+    return { ok: false, state: uniformDeny() };
+  }
+
+  // P1 顺序：Campus eligibility gate 必须先于 User email lookup
+  const campus = await resolveGrantEligibleCampus({ access, campusId });
+  if (!campus) {
+    return { ok: false, state: uniformDeny() };
+  }
+
+  const candidate = await resolveGrantCandidate({ campusId, email });
+  if (!candidate) {
+    return { ok: false, state: uniformDeny() };
+  }
+
+  const result = await assignRole({
+    actorId,
+    targetUserId: candidate.id,
+    roleKey: serverOwnedRoleKey,
+    campusId,
+  });
+
+  return { ok: true, created: result.created, roleKey: serverOwnedRoleKey };
 }
 
 /** exact-email candidate 预查（仅 UX 便利；grant 不信任其结果）。 */
@@ -109,22 +175,23 @@ export async function lookupRoleGrantCandidate(
     }
 
     const actor = await requireUser();
+    if (!assertServerOwnedRoleAllowed(CAMPUS_APPEAL_REVIEWER_ROLE_KEY)) {
+      return uniformDeny();
+    }
+
+    // lookup 与 role 身份无关（共享 role-agnostic candidate 预查）；
+    // campus eligibility gate 恒先于 User email lookup（P1）。
     const context = await loadAuthorizationContext(actor.id);
     const access = deriveRoleManageAccess(context);
     if (!canManageCampus(access, parsed.data.campusId)) {
       return uniformDeny();
     }
 
-    // P1 顺序：Campus eligibility gate 必须先于 User email lookup
     const campus = await resolveGrantEligibleCampus({
       access,
       campusId: parsed.data.campusId,
     });
     if (!campus) {
-      return uniformDeny();
-    }
-
-    if (!assertServerOwnedRoleAllowed()) {
       return uniformDeny();
     }
 
@@ -143,11 +210,17 @@ export async function lookupRoleGrantCandidate(
 }
 
 /**
- * 授予 v1 唯一可管角色（CAMPUS_APPEAL_REVIEWER）。canonical assignRole
- * 锁后重验 actor / target 账号 / role / scope / target membership；
- * created=false 为幂等中性结局（原样成功，不作为错误）。
+ * 授予校区申诉审核员（server-owned roleKey = CAMPUS_APPEAL_REVIEWER）。
+ * canonical assignRole 锁后重验 actor / target 账号 / role / scope /
+ * target membership；created=false 为幂等中性结局（原样成功，不作为错误）。
  */
 export async function grantGovernanceRole(
+  formData: FormData,
+): Promise<GovernanceRoleActionState> {
+  return grantAppealReviewerRole(formData);
+}
+
+export async function grantAppealReviewerRole(
   formData: FormData,
 ): Promise<GovernanceRoleActionState> {
   try {
@@ -157,46 +230,62 @@ export async function grantGovernanceRole(
     }
 
     const actor = await requireUser();
-    const context = await loadAuthorizationContext(actor.id);
-    const access = deriveRoleManageAccess(context);
-    if (!canManageCampus(access, parsed.data.campusId)) {
-      return uniformDeny();
-    }
-
-    const campus = await resolveGrantEligibleCampus({
-      access,
-      campusId: parsed.data.campusId,
-    });
-    if (!campus) {
-      return uniformDeny();
-    }
-
-    if (!assertServerOwnedRoleAllowed()) {
-      return uniformDeny();
-    }
-
-    const candidate = await resolveGrantCandidate({
+    const granted = await grantGovernanceRoleInternal({
+      actorId: actor.id,
       campusId: parsed.data.campusId,
       email: parsed.data.email,
+      serverOwnedRoleKey: CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
     });
-    if (!candidate) {
-      return uniformDeny();
+    if (!granted.ok) {
+      return granted.state;
     }
-
-    const result = await assignRole({
-      actorId: actor.id,
-      targetUserId: candidate.id,
-      roleKey: CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
-      campusId: parsed.data.campusId,
-    });
 
     revalidatePath("/governance/roles");
     return {
       success: true,
-      message: result.created ? GRANT_SUCCESS_MESSAGE : GRANT_IDEMPOTENT_MESSAGE,
+      message: granted.created
+        ? ROLE_GRANT_SUCCESS_MESSAGES[granted.roleKey]
+        : GRANT_IDEMPOTENT_MESSAGE,
     };
   } catch (error) {
-    return roleActionError(error, "grantGovernanceRole");
+    return roleActionError(error, "grantAppealReviewerRole");
+  }
+}
+
+/**
+ * Phase 7C：授予校区内容审核员（server-owned roleKey =
+ * CAMPUS_CONTENT_MODERATOR）。与申诉审核员授予共用同一条内部冻结链；
+ * roleKey 永不出自客户端。
+ */
+export async function grantContentModeratorRole(
+  formData: FormData,
+): Promise<GovernanceRoleActionState> {
+  try {
+    const parsed = governanceRoleGrantSchema.safeParse(formEntries(formData));
+    if (!parsed.success) {
+      return uniformDeny();
+    }
+
+    const actor = await requireUser();
+    const granted = await grantGovernanceRoleInternal({
+      actorId: actor.id,
+      campusId: parsed.data.campusId,
+      email: parsed.data.email,
+      serverOwnedRoleKey: CAMPUS_CONTENT_MODERATOR_ROLE_KEY,
+    });
+    if (!granted.ok) {
+      return granted.state;
+    }
+
+    revalidatePath("/governance/roles");
+    return {
+      success: true,
+      message: granted.created
+        ? ROLE_GRANT_SUCCESS_MESSAGES[granted.roleKey]
+        : GRANT_IDEMPOTENT_MESSAGE,
+    };
+  } catch (error) {
+    return roleActionError(error, "grantContentModeratorRole");
   }
 }
 

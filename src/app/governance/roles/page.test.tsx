@@ -7,6 +7,7 @@ const {
   loadManageableRoleCampuses,
   loadManagedRoleAssignments,
   grantGovernanceRole,
+  grantContentModeratorRole,
   lookupRoleGrantCandidate,
   revokeGovernanceRole,
 } = vi.hoisted(() => ({
@@ -15,6 +16,7 @@ const {
   loadManageableRoleCampuses: vi.fn(),
   loadManagedRoleAssignments: vi.fn(),
   grantGovernanceRole: vi.fn(),
+  grantContentModeratorRole: vi.fn(),
   lookupRoleGrantCandidate: vi.fn(),
   revokeGovernanceRole: vi.fn(),
 }));
@@ -41,6 +43,7 @@ vi.mock("@/lib/rbac/role-assignment-query", () => ({
 
 vi.mock("@/actions/governance-roles", () => ({
   grantGovernanceRole,
+  grantContentModeratorRole,
   lookupRoleGrantCandidate,
   revokeGovernanceRole,
 }));
@@ -118,7 +121,8 @@ describe("GovernanceRolesPage（/governance/roles）", () => {
     expect(screen.getByText("将授予：校区申诉审核员")).toBeTruthy();
     expect(screen.getByText("用户：张审核员")).toBeTruthy();
     expect(screen.getByText("授予人：管理员")).toBeTruthy();
-    expect(screen.getByText("校区申诉审核员")).toBeTruthy();
+    // 角色种类选择器（Phase 7C）引入同名 option，改用多元素断言
+    expect(screen.getAllByText("校区申诉审核员").length).toBeGreaterThan(0);
     expect(screen.getByText("校区：主校区")).toBeTruthy();
     expect(screen.getByRole("button", { name: "撤回" })).toBeTruthy();
     // DTO 无内部 roleKey 回显

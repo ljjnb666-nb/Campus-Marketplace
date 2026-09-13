@@ -52,6 +52,7 @@ vi.mock("@/lib/rbac/assignment-service", () => ({
 }));
 
 import {
+  grantContentModeratorRole,
   grantGovernanceRole,
   lookupRoleGrantCandidate,
   revokeGovernanceRole,
@@ -374,5 +375,107 @@ describe("revokeGovernanceRole", () => {
     expect(missing).toEqual({ success: false, error: UNIFORM_DENY });
     expect(injected).toEqual({ success: false, error: UNIFORM_DENY });
     expect(revokeRoleMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── Phase 7C：CAMPUS_CONTENT_MODERATOR server-owned provisioning（R2 Repair 4 冻结）──
+
+describe("Phase 7C content moderator role provisioning", () => {
+  it("7C-R01：grantContentModeratorRole → assignRole 恒收服务器所有 CAMPUS_CONTENT_MODERATOR", async () => {
+    assignRoleMock.mockResolvedValue({ created: true, assignment: { id: "asg-cm-1" } });
+
+    const state = await grantContentModeratorRole(grantForm());
+
+    expect(state).toEqual({ success: true, message: "已授予校区内容审核员角色" });
+    expect(assignRoleMock).toHaveBeenCalledWith({
+      actorId: "manager-1",
+      targetUserId: "target-1",
+      roleKey: "CAMPUS_CONTENT_MODERATOR",
+      campusId: "campus-a",
+    });
+    expect(revalidatePathMock).toHaveBeenCalledWith("/governance/roles");
+  });
+
+  it("7C-R02：appeal-reviewer action 无法授予 content moderator（伪造 roleKey 被严格拒绝，授予角色不可改变）", async () => {
+    assignRoleMock.mockResolvedValue({ created: true, assignment: { id: "asg-1" } });
+
+    // 注入 roleKey → .strict() 拒绝整个请求（统一 deny），绝不按注入值授予
+    for (const injected of [
+      grantForm({ roleKey: "CAMPUS_CONTENT_MODERATOR" }),
+      grantForm({ roleKey: "PLATFORM_ADMIN" }),
+      grantForm({ roleKey: "" }),
+    ]) {
+      const state = await grantGovernanceRole(injected);
+      expect(state).toEqual({ success: false, error: UNIFORM_DENY });
+    }
+    expect(assignRoleMock).not.toHaveBeenCalled();
+
+    // 清洁提交 → 恒授予服务器所有的 appeal reviewer
+    const clean = await grantGovernanceRole(grantForm());
+    expect(clean.success).toBe(true);
+    const roleKeys = assignRoleMock.mock.calls.map(
+      (call) => (call[0] as { roleKey: string }).roleKey,
+    );
+    expect(roleKeys).toEqual(["CAMPUS_APPEAL_REVIEWER"]);
+  });
+
+  it("7C-R03：content-moderator action 同理无法授予 appeal reviewer（server-owned 对称性）", async () => {
+    assignRoleMock.mockResolvedValue({ created: true, assignment: { id: "asg-cm-1" } });
+
+    for (const injected of [
+      grantForm({ roleKey: "CAMPUS_APPEAL_REVIEWER" }),
+      grantForm({ roleKey: "PLATFORM_ADMIN" }),
+    ]) {
+      const state = await grantContentModeratorRole(injected);
+      expect(state).toEqual({ success: false, error: UNIFORM_DENY });
+    }
+    expect(assignRoleMock).not.toHaveBeenCalled();
+
+    const clean = await grantContentModeratorRole(grantForm());
+    expect(clean.success).toBe(true);
+    const roleKeys = assignRoleMock.mock.calls.map(
+      (call) => (call[0] as { roleKey: string }).roleKey,
+    );
+    expect(roleKeys).toEqual(["CAMPUS_CONTENT_MODERATOR"]);
+  });
+
+  it("7C-R04：PLATFORM_ADMIN 不可被授予（allowlist 结构哨兵 fail closed）", async () => {
+    // MANAGEABLE_GOVERNANCE_ROLE_KEYS 不含 PLATFORM_ADMIN：
+    // 两个入口的 assignRole 均不可能收到 GLOBAL 键（结构恒真断言）。
+    assignRoleMock.mockResolvedValue({ created: true, assignment: { id: "asg-x" } });
+    await grantGovernanceRole(grantForm());
+    await grantContentModeratorRole(grantForm());
+    const roleKeys = assignRoleMock.mock.calls.map(
+      (call) => (call[0] as { roleKey: string }).roleKey,
+    );
+    expect(roleKeys).toEqual(["CAMPUS_APPEAL_REVIEWER", "CAMPUS_CONTENT_MODERATOR"]);
+    expect(roleKeys).not.toContain("PLATFORM_ADMIN");
+  });
+
+  it("7C-R05：未来 CAMPUS 角色不自动进入 provisioning 面（allowlist 显式性）", async () => {
+    const { MANAGEABLE_GOVERNANCE_ROLE_KEYS } = await import("@/lib/rbac/role-manage-access");
+    const { SYSTEM_ROLES } = await import("@/lib/rbac/roles");
+    // allowlist 是显式枚举（不是 SYSTEM_ROLES.filter 派生）：
+    expect(MANAGEABLE_GOVERNANCE_ROLE_KEYS).toEqual([
+      "CAMPUS_APPEAL_REVIEWER",
+      "CAMPUS_CONTENT_MODERATOR",
+    ]);
+    // 结构不变量：allowlist 内角色 scope 恒 CAMPUS
+    for (const roleKey of MANAGEABLE_GOVERNANCE_ROLE_KEYS) {
+      const definition = SYSTEM_ROLES.find((role) => role.key === roleKey);
+      expect(definition?.scope).toBe("CAMPUS");
+    }
+  });
+
+  it("7C-R06：content moderator 授予幂等（created=false 中性成功）+ canonical RbacError 统一文案", async () => {
+    assignRoleMock.mockResolvedValue({ created: false, assignment: { id: "asg-cm-1" } });
+    const idempotent = await grantContentModeratorRole(grantForm());
+    expect(idempotent).toEqual({ success: true, message: "该用户已持有该角色" });
+
+    assignRoleMock.mockRejectedValue(
+      new RbacError("ROLE_ASSIGNMENT_SELF_DENIED", "不能变更自己的角色"),
+    );
+    const denied = await grantContentModeratorRole(grantForm());
+    expect(denied).toEqual({ success: false, error: UNIFORM_DENY });
   });
 });
