@@ -321,7 +321,7 @@ describe("rental-order-machine", () => {
       },
     );
     const listingRow = {
-      id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
+      id: "listing-1", ownerId: "user-owner", campusId: "campus-1", totalQuantity: 2,
       minimumDuration: 1, maximumDuration: 30,
       price: "20", pricingUnit: "PER_DAY", depositAmount: "50",
       pickupLocation: "南门", returnLocation: "南门",
@@ -353,6 +353,8 @@ describe("rental-order-machine", () => {
       rentalUnavailablePeriod: { findFirst: vi.fn().mockResolvedValue(null) },
       rentalOrder: { create: vi.fn().mockResolvedValue({ id: "order-1" }) },
       rentalOrderStatusLog: { create: vi.fn().mockResolvedValue({}) },
+      // Phase 7C：活跃 moderation 复查（无活跃行）
+      listingModeration: { findFirst: vi.fn().mockResolvedValue(null) },
     };
 
     createNotifications.mockResolvedValue(undefined);

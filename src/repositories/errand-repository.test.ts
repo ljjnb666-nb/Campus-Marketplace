@@ -65,6 +65,7 @@ describe("errand repository", () => {
     expect(errandTaskFindMany).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: { contains: "快递", mode: "insensitive" } },
           { description: { contains: "快递", mode: "insensitive" } },
@@ -125,7 +126,7 @@ describe("errand repository", () => {
     const result = await getErrandList();
 
     const findArgs = errandTaskFindMany.mock.calls[0][0];
-    expect(findArgs.where).toEqual({ deletedAt: null });
+    expect(findArgs.where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
     expect(findArgs.orderBy).toEqual([{ createdAt: "desc" }]);
     expect(findArgs.skip).toBe(0);
     expect(result.totalPages).toBe(1);
@@ -138,7 +139,7 @@ describe("errand repository", () => {
 
     await getErrandList({ status: "ALL" });
 
-    expect(errandTaskFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null });
+    expect(errandTaskFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
   });
 
   it("loads form meta with active categories only", async () => {
@@ -214,6 +215,11 @@ describe("errand repository", () => {
     expect(args.where).toEqual({ publisherId: "user-1", deletedAt: null });
     expect(args.orderBy).toEqual({ createdAt: "desc" });
     expect(args.include.accepter).toEqual({ select: { name: true } });
+    expect(args.include.moderations).toEqual({
+      where: { resolvedAt: null },
+      take: 1,
+      select: { id: true, createdAt: true },
+    });
   });
 
   it("lists accepted errands ordered by recent activity", async () => {
@@ -226,5 +232,10 @@ describe("errand repository", () => {
     expect(args.where).toEqual({ accepterId: "user-1", deletedAt: null });
     expect(args.orderBy).toEqual({ updatedAt: "desc" });
     expect(args.include.publisher).toEqual({ select: { name: true } });
+    expect(args.include.moderations).toEqual({
+      where: { resolvedAt: null },
+      take: 1,
+      select: { id: true, createdAt: true },
+    });
   });
 });

@@ -65,6 +65,7 @@ describe("service repository", () => {
     expect(serviceListingFindMany).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: { contains: "辅导", mode: "insensitive" } },
           { description: { contains: "辅导", mode: "insensitive" } },
@@ -99,6 +100,7 @@ describe("service repository", () => {
     expect(serviceListingCount).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: { contains: "辅导", mode: "insensitive" } },
           { description: { contains: "辅导", mode: "insensitive" } },
@@ -128,7 +130,7 @@ describe("service repository", () => {
     await getServiceList();
 
     const args = serviceListingFindMany.mock.calls[0][0];
-    expect(args.where).toEqual({ deletedAt: null });
+    expect(args.where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
     expect(args.orderBy).toEqual([{ createdAt: "desc" }]);
     expect(args.skip).toBe(0);
   });
@@ -140,7 +142,7 @@ describe("service repository", () => {
 
     await getServiceList({ status: "ALL", pricingUnit: "ALL" });
 
-    expect(serviceListingFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null });
+    expect(serviceListingFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
   });
 
   it("loads form meta with active categories", async () => {
@@ -214,6 +216,14 @@ describe("service repository", () => {
     const args = serviceListingFindMany.mock.calls[0][0];
     expect(args.where).toEqual({ providerId: "user-1", deletedAt: null });
     expect(args.orderBy).toEqual({ createdAt: "desc" });
-    expect(args.include).toEqual({ campus: true, category: true });
+    expect(args.include).toEqual({
+      campus: true,
+      category: true,
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
+      },
+    });
   });
 });

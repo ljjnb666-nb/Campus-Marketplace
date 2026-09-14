@@ -4,6 +4,7 @@ import Image from "next/image";
 import { requireUser } from "@/lib/server-auth";
 import { getMyRentalListings } from "@/repositories/rental-listing-repository";
 import { RentalListingStatusBadge } from "@/components/rental/rental-status-badge";
+import { ModerationPendingBadge } from "@/components/listing/moderation-state";
 import { updateRentalListingStatus } from "@/actions/rental-listing";
 import type { RentalListingStatus } from "@prisma/client";
 import type { Decimal } from "@prisma/client/runtime/library";
@@ -20,6 +21,7 @@ type RentalListing = {
   pricingUnit: string;
   availableQuantity: number;
   totalQuantity: number;
+  moderations: Array<{ id: string }>;
 };
 
 export default async function MyRentalListingsPage() {
@@ -77,6 +79,7 @@ export default async function MyRentalListingsPage() {
                   <span className="text-xs">/ {item.pricingUnit}</span>
                   <span className="mx-1 text-slate-300">|</span>
                   <span>库存: {item.availableQuantity}/{item.totalQuantity}</span>
+                  {item.moderations.length > 0 && <ModerationPendingBadge />}
                 </div>
               </div>
 

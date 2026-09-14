@@ -12,6 +12,7 @@ import {
   revalidateRentalOrderListViews,
   revalidateRentalOrderViews,
   revalidateServiceViews,
+  revalidateListingModerationViews,
 } from "@/lib/revalidate";
 
 function paths() {
@@ -125,5 +126,59 @@ describe("rental order revalidation helpers", () => {
     revalidateRentalOrderCreationViews();
 
     expect(paths()).toEqual(["/rentals", "/my/owner-orders", "/my/rental-orders"]);
+  });
+});
+
+describe("revalidateListingModerationViews（Phase 7C）", () => {
+  beforeEach(() => {
+    revalidatePath.mockClear();
+  });
+
+  it("PRODUCT：域 helper 扇出 + search/sitemap/governance 面", () => {
+    revalidateListingModerationViews("PRODUCT", "product-1");
+    const called = paths();
+    for (const expected of [
+      "/search",
+      "/sitemap.xml",
+      "/governance/listings",
+      "/governance/listings/product/product-1",
+      "/",
+      "/products",
+      "/my/products",
+      "/my/favorites",
+      "/products/product-1",
+      "/products/product-1/edit",
+    ]) {
+      expect(called).toContain(expected);
+    }
+  });
+
+  it("SERVICE：域 helper 扇出", () => {
+    revalidateListingModerationViews("SERVICE", "service-1");
+    const called = paths();
+    for (const expected of ["/services", "/my/services", "/services/service-1"]) {
+      expect(called).toContain(expected);
+    }
+  });
+
+  it("ERRAND：域 helper 扇出", () => {
+    revalidateListingModerationViews("ERRAND", "errand-1");
+    const called = paths();
+    for (const expected of ["/errands", "/my/errands", "/errands/errand-1"]) {
+      expect(called).toContain(expected);
+    }
+  });
+
+  it("RENTAL：独立扇出形态（repo 既有惯例，不走域 helper）", () => {
+    revalidateListingModerationViews("RENTAL", "rental-1");
+    const called = paths();
+    for (const expected of [
+      "/rentals",
+      "/my/rental-listings",
+      "/rentals/rental-1",
+      "/rentals/rental-1/edit",
+    ]) {
+      expect(called).toContain(expected);
+    }
   });
 });

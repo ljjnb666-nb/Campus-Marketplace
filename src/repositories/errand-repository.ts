@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
 export type ErrandListQuery = {
@@ -175,6 +176,8 @@ export async function getErrandList(query: ErrandListQuery = {}) {
   const deadlineFilter = getDeadlineFilter(query.deadline);
   const where = {
     deletedAt: null,
+    // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
+    ...listingModerationPublicFilter(),
     ...(query.q
       ? {
           OR: [
@@ -269,6 +272,7 @@ export async function getErrandDetail(errandId: string) {
       deletedAt: null,
       status: "OPEN",
       id: { not: errand.id },
+      ...listingModerationPublicFilter(),
       OR: [
         { campusId: errand.campusId },
         { categoryId: errand.categoryId },
@@ -347,6 +351,12 @@ export async function getMyPublishedErrands(userId: string) {
       accepter: {
         select: { name: true },
       },
+      // Phase 7C OWNER 面：不过滤，但携带活跃治理状态供安全 badge 呈现
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
+      },
     },
   });
 }
@@ -362,6 +372,12 @@ export async function getMyAcceptedErrands(userId: string) {
       category: true,
       publisher: {
         select: { name: true },
+      },
+      // Phase 7C OWNER 面：接单方同样可见治理状态（履约上下文保留）
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
       },
     },
   });

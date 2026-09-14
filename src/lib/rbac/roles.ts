@@ -18,6 +18,11 @@ export const PLATFORM_ADMIN_ROLE_KEY = "PLATFORM_ADMIN";
 // 角色授予/撤回走 canonical assignment service，管理 UI 属 Phase 7B。
 export const CAMPUS_APPEAL_REVIEWER_ROLE_KEY = "CAMPUS_APPEAL_REVIEWER";
 
+// Phase 7C：校区内容审核员（仅 listing.moderate 的 campus-scoped 窄角色）。
+// 生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）；
+// 授予/撤回走 /governance/roles server-owned action（roleKey 不出自客户端）。
+export const CAMPUS_CONTENT_MODERATOR_ROLE_KEY = "CAMPUS_CONTENT_MODERATOR";
+
 export const GLOBAL_SCOPE_KEY = "GLOBAL";
 
 /** CAMPUS 角色授予行的 scopeKey 编码（assignment service 维护与 campusId 一致）。 */
@@ -44,5 +49,11 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "校区申诉审核员",
     scope: "CAMPUS",
     permissionKeys: ["appeal.review"],
+  },
+  {
+    key: CAMPUS_CONTENT_MODERATOR_ROLE_KEY,
+    name: "校区内容审核员",
+    scope: "CAMPUS",
+    permissionKeys: ["listing.moderate"],
   },
 ];

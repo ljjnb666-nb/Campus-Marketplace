@@ -238,6 +238,9 @@ model User {
   enforcementAsTarget   EnforcementAction[]       @relation("EnforcementTarget")
   // Phase 6C-1B：本用户作为 terminal decision reviewer 的申诉记录
   reviewedAppeals       Appeal[]                  @relation("AppealReviewer")
+  // Phase 7C：listing 治理 overlay（provenance，Restrict：历史不可随账户删除丢失）
+  listingModerations    ListingModeration[]       @relation("ListingModerator")
+  listingRestorations   ListingModeration[]       @relation("ListingModerationResolver")
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
@@ -304,6 +307,8 @@ model Campus {
   riskStates           RiskState[]
   riskFlags            RiskFlag[]
   enforcementActions   EnforcementAction[]
+  // Phase 7C：listing 治理 overlay
+  listingModerations   ListingModeration[]
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
 }
@@ -405,6 +410,9 @@ model Product {
   updatedAt      DateTime         @updatedAt
   deletedAt      DateTime?
 
+  // Phase 7C：治理 overlay（活跃行 = 隐藏中；业务 status 零变更）
+  moderations ListingModeration[] @relation("ModerationTargetProduct")
+
   @@index([campusId, status, createdAt])
   @@index([sellerId, status])
   @@index([categoryId, status])
@@ -495,6 +503,9 @@ model ErrandTask {
   updatedAt        DateTime         @updatedAt
   deletedAt        DateTime?
 
+  // Phase 7C：治理 overlay（活跃行 = 隐藏中；workflow 状态零变更）
+  moderations ListingModeration[] @relation("ModerationTargetErrand")
+
   @@index([campusId, status, deadline])
   @@index([publisherId, status])
   @@index([categoryId, status])
@@ -527,6 +538,9 @@ model ServiceListing {
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
   deletedAt           DateTime?
+
+  // Phase 7C：治理 overlay（活跃行 = 隐藏中；业务 status 零变更）
+  moderations ListingModeration[] @relation("ModerationTargetService")
 
   @@index([campusId, status, createdAt])
   @@index([providerId, status])
@@ -949,6 +963,10 @@ model RentalListing {
   createdAt          DateTime                  @default(now())
   updatedAt          DateTime                  @updatedAt
   deletedAt          DateTime?
+
+  // Phase 7C：治理 overlay（活跃行 = 隐藏中；业务 status 零变更；
+  // PENDING_REVIEW / BANNED 为既有死枚举，Phase 7C 禁止启用）
+  moderations ListingModeration[] @relation("ModerationTargetRental")
 
   @@index([campusId, status, createdAt])
   @@index([ownerId, status])
@@ -1595,4 +1613,76 @@ model Appeal {
   reviewedBy        User?             @relation("AppealReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
 
   @@index([status, createdAt])
+}
+
+// ============================================================
+// Phase 7C：Listing Moderation Operations Surface（governance overlay）
+// ============================================================
+
+// 治理目标域（taxonomy 分立：与 ModerationTargetType / EnforcementActionType
+// 是独立 taxonomy，禁止 cast/复用——6C-1B appeal 先例）。
+enum ListingModerationTargetType {
+  PRODUCT
+  SERVICE
+  ERRAND
+  RENTAL
+}
+
+// 治理处置原因码（operator-facing 机器码；与 EnforcementReasonCode /
+// ReportReason 分立，禁止跨域 cast）。
+enum ListingModerationReasonCode {
+  PROHIBITED_ITEM
+  FRAUD_DECEPTION
+  SPAM_ADVERTISEMENT
+  CONTENT_VIOLATION
+  OTHER
+}
+
+// listing 治理 overlay（OPTION B 冻结：业务 listing status 一律不变）。
+// - 一次 takedown = 一行；restore = 原行 resolve（resolvedAt/resolvedById
+//   回填）。活跃行（resolvedAt IS NULL）承载"隐藏中"语义；同一 listing
+//   至多一个活跃行（四个 partial unique index，PostgreSQL 侧强制）。
+// - resolved 历史 = 治理历史（同一 listing 的全部行），不因 resolve 消失，
+//   不阻断未来再次 takedown。
+// - observedStatus = takedown 时刻业务状态快照，仅历史证据；restore 绝不
+//   以它回写业务 status。
+// - note = moderator 内部备注（≤500）：不返回 owner、不入审计 metadata、
+//   不入结构化日志（AdminAudit 仅以 moderationId 指针关联）。
+// - 四个 typed target FK 镜像 Report 先例；type↔FK 配对一致性由 DB CHECK
+//   （ListingModeration_target_consistency）强制；全部 FK 显式
+//   onDelete: Restrict（governance provenance 不可随 referent 删除静默
+//   消失；当前 soft-delete/erasure 契约不触发）。
+model ListingModeration {
+  id         String                      @id @default(cuid())
+  targetType ListingModerationTargetType
+
+  productId        String?
+  serviceListingId String?
+  errandTaskId     String?
+  rentalListingId  String?
+  product          Product?        @relation("ModerationTargetProduct", fields: [productId], references: [id], onDelete: Restrict)
+  serviceListing   ServiceListing? @relation("ModerationTargetService", fields: [serviceListingId], references: [id], onDelete: Restrict)
+  errandTask       ErrandTask?     @relation("ModerationTargetErrand", fields: [errandTaskId], references: [id], onDelete: Restrict)
+  rentalListing    RentalListing?  @relation("ModerationTargetRental", fields: [rentalListingId], references: [id], onDelete: Restrict)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  observedStatus String
+  reasonCode     ListingModerationReasonCode
+  note           String?
+
+  moderatorId String
+  moderator   User     @relation("ListingModerator", fields: [moderatorId], references: [id], onDelete: Restrict)
+  createdAt   DateTime @default(now())
+
+  resolvedAt   DateTime?
+  resolvedById String?
+  resolvedBy   User?     @relation("ListingModerationResolver", fields: [resolvedById], references: [id], onDelete: Restrict)
+
+  @@index([campusId, resolvedAt, createdAt])
+  @@index([productId])
+  @@index([serviceListingId])
+  @@index([errandTaskId])
+  @@index([rentalListingId])
 }

@@ -1,9 +1,10 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { getActiveViewerId, getRentalListingDetail, RentalDetailConsole, notFound } = vi.hoisted(() => ({
+const { getActiveViewerId, getRentalListingDetail, incrementRentalListingView, RentalDetailConsole, notFound } = vi.hoisted(() => ({
   getActiveViewerId: vi.fn(),
   getRentalListingDetail: vi.fn(),
+  incrementRentalListingView: vi.fn(),
   RentalDetailConsole: vi.fn(() => <div data-testid="rental-detail-console" />),
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
@@ -16,6 +17,7 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/repositories/rental-listing-repository", () => ({
   getRentalListingDetail,
+  incrementRentalListingView,
 }));
 
 vi.mock("@/components/rental/rental-detail-console", () => ({

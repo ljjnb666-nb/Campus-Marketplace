@@ -114,6 +114,7 @@ describe("getSearchResults", () => {
       where: {
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
       include: {
@@ -129,6 +130,7 @@ describe("getSearchResults", () => {
       where: {
         deletedAt: null,
         status: { in: ["OPEN", "CLAIMED", "IN_PROGRESS", "PENDING_CONFIRMATION"] },
+        moderations: { none: { resolvedAt: null } },
         OR: [
           { title: contains },
           { description: contains },
@@ -147,6 +149,7 @@ describe("getSearchResults", () => {
       where: {
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
       include: {
@@ -186,6 +189,7 @@ describe("getSearchResults", () => {
         sellerId: { in: ["user-1"] },
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
       },
       _count: {
         sellerId: true,
@@ -197,6 +201,7 @@ describe("getSearchResults", () => {
         publisherId: { in: ["user-1"] },
         deletedAt: null,
         status: "OPEN",
+        moderations: { none: { resolvedAt: null } },
       },
       _count: {
         publisherId: true,
@@ -208,6 +213,7 @@ describe("getSearchResults", () => {
         providerId: { in: ["user-1"] },
         deletedAt: null,
         status: "ACTIVE",
+        moderations: { none: { resolvedAt: null } },
       },
       _count: {
         providerId: true,

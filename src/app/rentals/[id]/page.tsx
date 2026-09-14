@@ -6,7 +6,13 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { RentalDetailConsole } from "@/components/rental/rental-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
-import { getRentalListingDetail } from "@/repositories/rental-listing-repository";
+import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
+import {
+  getRentalListingDetail,
+  incrementRentalListingView,
+} from "@/repositories/rental-listing-repository";
 import { FileText, ShieldAlert, Star } from "lucide-react";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +48,10 @@ export async function generateMetadata({
   }
 
   const { listing } = result;
+  // Phase 7C FR-03：metadata 属 PUBLIC surface（owner exception 不适用）
+  if (await hasActiveModerationForPublicSurface("RENTAL", listing.id)) {
+    return RENTAL_DETAIL_FALLBACK_METADATA;
+  }
   const title = `${listing.title} - 校园集市`;
   const description = truncateForMetadata(
     listing.description || `查看校园集市闲置租赁「${listing.title}」的租金、押金与租借规则。`,
@@ -55,17 +65,34 @@ export default async function RentalDetailPage({ params }: { params: Promise<{ i
   // Phase 6C-2 raw-auth hardening：收藏状态/owner 个性化按 ACTIVE 账号解析；
   // SUSPENDED 会话 → null → 匿名语义（isFavorited/isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
-  const result = await getRentalListingDetail(id, viewerId ?? undefined).catch(() => null);
+  // Phase 7C FR-03B：浏览计数移到治理门之后（hidden 请求零 RentalListing 写入）
+  const result = await getRentalListingDetail(id, viewerId ?? undefined, {
+    countView: false,
+  }).catch(() => null);
 
   if (!result) {
     notFound();
   }
 
   const { listing, reviews, isFavorited } = result;
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）
+  const moderationGate = await resolvePublicDetailModerationGate({
+    viewerId,
+    ownerId: listing.ownerId,
+    targetType: "RENTAL",
+    listingId: listing.id,
+  });
+  if (moderationGate === "HIDDEN") {
+    notFound();
+  }
+  if (moderationGate === "OPEN") {
+    await incrementRentalListingView(listing.id);
+  }
   const isOwner = viewerId === listing.ownerId;
 
   return (
     <PageContainer maxWidth="standard">
+      {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
       {/* 面包屑 */}
       <Breadcrumbs
         items={[

@@ -1,5 +1,7 @@
 import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
 import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
+import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
+import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { createNotifications } from "@/repositories/notification-repository";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
@@ -108,6 +110,8 @@ export async function createRentalOrderTx(
     renterNote?: string;
   },
   racePoint?: ObligationRacePoint,
+  /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
+  domainRacePoint?: ListingModerationRacePoint,
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
@@ -151,13 +155,13 @@ export async function createRentalOrderTx(
     // 如果 RentalListing 新增/重命名字段且此处遗漏，TypeScript 不会在编译期报错。
     // 修改 RentalListing schema 时请同步检查此处的 SELECT 列表。
     const listings = await tx.$queryRaw<Array<{
-      id: string; ownerId: string; totalQuantity: number;
+      id: string; ownerId: string; campusId: string; totalQuantity: number;
       minimumDuration: number; maximumDuration: number;
       price: unknown; pricingUnit: string; depositAmount: unknown;
       pickupLocation: string; returnLocation: string;
       requiresApproval: boolean; status: string; title: string; deletedAt: Date | null;
     }>>`
-      SELECT id, "ownerId", "totalQuantity", "minimumDuration", "maximumDuration",
+      SELECT id, "ownerId", "campusId", "totalQuantity", "minimumDuration", "maximumDuration",
              price, "pricingUnit", "depositAmount", "pickupLocation", "returnLocation",
              "requiresApproval", status, title, "deletedAt"
       FROM "RentalListing"
@@ -178,6 +182,17 @@ export async function createRentalOrderTx(
     // owner 创建租赁义务）。
     if (rawListing.ownerId !== candidate.ownerId) {
       return { error: '出租物品状态已变化，请重试' };
+    }
+    // Phase 7C（R2-02）：campusId 同样以锁内现势行为准（pre-read 仅 discovery）。
+    if (rawListing.campusId !== candidate.campusId) {
+      return { error: '出租物品状态已变化，请重试' };
+    }
+    // Phase 7C：活跃治理 moderation → 新租赁义务拒绝（既有义务不受影响）
+    if (await hasActiveListingModeration(tx, "RENTAL", rawListing.id)) {
+      return { error: '出租物品当前不可预约' };
+    }
+    if (domainRacePoint) {
+      await domainRacePoint(tx);
     }
 
     // ⚠️ $queryRaw 返回的 Decimal 列是原始类型（string/number），pricingUnit 是 string 而非枚举。

@@ -1,10 +1,10 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import type { GovernanceRoleActionState } from "@/actions/governance-roles";
-import { GOVERNANCE_ROLE_GRANT_HINT } from "@/constants/governance-roles";
+import { GOVERNANCE_ROLE_GRANT_HINT, GOVERNANCE_ROLE_GRANT_HINTS } from "@/constants/governance-roles";
 
 const initialState: GovernanceRoleActionState = { success: false };
 
@@ -93,24 +93,42 @@ function EmailInput() {
  * campus/email 字段为唯一客户端输入；roleKey/actorId/targetUserId 均为
  * 服务器所有——disabled/hidden 永远不是授权，伪造提交由 server action
  * 独立拒绝（§22）。
+ *
+ * Phase 7C：可选 contentModeratorAction——提供时呈现角色种类选择（纯 UX
+ * 路由：两个入口各自绑定 server-owned roleKey 常量，客户端选择哪个入口
+ * 都不能改变授予的角色身份；伪造只可能得到该入口自身的固定角色）。
  */
 export function CampusRoleGrantForm({
   campuses,
   grantAction,
   lookupAction,
+  contentModeratorAction,
 }: {
   campuses: { id: string; name: string }[];
   grantAction: (formData: FormData) => Promise<GovernanceRoleActionState>;
   lookupAction: (formData: FormData) => Promise<GovernanceRoleActionState>;
+  /** Phase 7C：校区内容审核员授予入口（server-owned roleKey 常量绑定） */
+  contentModeratorAction?: (formData: FormData) => Promise<GovernanceRoleActionState>;
 }) {
   const [lookupState, lookupFormAction] = useActionState(
     async (_prev: GovernanceRoleActionState, formData: FormData) => lookupAction(formData),
     initialState,
   );
-  const [grantState, grantFormAction] = useActionState(
-    async (_prev: GovernanceRoleActionState, formData: FormData) => grantAction(formData),
+  const [roleKind, setRoleKind] = useState<"APPEAL_REVIEWER" | "CONTENT_MODERATOR">(
+    "APPEAL_REVIEWER",
+  );
+  const activeGrantAction =
+    roleKind === "CONTENT_MODERATOR" && contentModeratorAction
+      ? contentModeratorAction
+      : grantAction;
+  const [activeGrantState, activeGrantFormAction] = useActionState(
+    async (_prev: GovernanceRoleActionState, formData: FormData) => activeGrantAction(formData),
     initialState,
   );
+  const activeHint =
+    roleKind === "CONTENT_MODERATOR" && contentModeratorAction
+      ? GOVERNANCE_ROLE_GRANT_HINTS["CAMPUS_CONTENT_MODERATOR"]
+      : GOVERNANCE_ROLE_GRANT_HINT;
 
   if (campuses.length === 0) {
     return (
@@ -143,16 +161,31 @@ export function CampusRoleGrantForm({
         ) : null}
       </form>
       <form
-        action={grantFormAction}
+        action={activeGrantFormAction}
         aria-label="确认授予角色"
         className="space-y-3 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm"
       >
         <h3 className="text-sm font-semibold text-slate-900">第二步：确认授予</h3>
+        {contentModeratorAction ? (
+          <label className="flex flex-col gap-2 text-sm">
+            角色种类
+            <select
+              value={roleKind}
+              onChange={(event) =>
+                setRoleKind(event.target.value as "APPEAL_REVIEWER" | "CONTENT_MODERATOR")
+              }
+              className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-slate-400"
+            >
+              <option value="APPEAL_REVIEWER">校区申诉审核员</option>
+              <option value="CONTENT_MODERATOR">校区内容审核员</option>
+            </select>
+          </label>
+        ) : null}
         <CampusSelect campuses={campuses} />
         <EmailInput />
-        <p className="text-xs text-slate-500">{GOVERNANCE_ROLE_GRANT_HINT}</p>
+        <p className="text-xs text-slate-500">{activeHint}</p>
         <SubmitButton label="确认授予" pendingLabel="提交中..." variant="primary" />
-        <StateFeedback state={grantState} />
+        <StateFeedback state={activeGrantState} />
       </form>
     </div>
   );

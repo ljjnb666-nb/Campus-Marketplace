@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { deleteService } from "@/actions/service";
 import { ServiceStatusActions } from "@/components/service/service-status-actions";
+import { ModerationPendingBadge } from "@/components/listing/moderation-state";
 import {
   SERVICE_PRICING_UNIT_LABELS,
   SERVICE_STATUS_LABELS,
@@ -64,6 +65,7 @@ export default async function MyServicesPage() {
                   </span>
                   <span>·</span>
                   <span>{service.campus.name}</span>
+                  {service.moderations.length > 0 && <ModerationPendingBadge />}
                 </div>
                 <h2 className="text-xl font-semibold text-slate-950">{service.title}</h2>
                 <p className="line-clamp-2 text-sm text-slate-600">{service.description}</p>

@@ -83,3 +83,36 @@ export function revalidateRentalOrderCreationViews() {
   revalidatePath("/my/owner-orders");
   revalidatePath("/my/rental-orders");
 }
+
+// Phase 7C：listing 治理状态变化（takedown/restore）后的缓存刷新。
+// 以各域既有 helper 的扇出为基础，另加 PUBLIC 检索/公开主页/收藏/站点地图
+// 与治理面自身；authority 恒为服务器重读（所有 PUBLIC 查询均带 overlay
+// 谓词），本扇出仅消除陈旧 UI 提示。
+export function revalidateListingModerationViews(
+  targetType: "PRODUCT" | "SERVICE" | "ERRAND" | "RENTAL",
+  listingId: string,
+) {
+  revalidatePath("/search");
+  revalidatePath("/sitemap.xml");
+  revalidatePath("/governance/listings");
+  revalidatePath(`/governance/listings/${targetType.toLowerCase()}/${listingId}`);
+
+  switch (targetType) {
+    case "PRODUCT":
+      revalidateProductViews(listingId);
+      break;
+    case "SERVICE":
+      revalidateServiceViews(listingId);
+      break;
+    case "ERRAND":
+      revalidateErrandViews(listingId);
+      break;
+    case "RENTAL":
+      revalidatePath("/");
+      revalidatePath("/rentals");
+      revalidatePath("/my/rental-listings");
+      revalidatePath(`/rentals/${listingId}`);
+      revalidatePath(`/rentals/${listingId}/edit`);
+      break;
+  }
+}

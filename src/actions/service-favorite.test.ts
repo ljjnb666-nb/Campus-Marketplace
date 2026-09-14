@@ -186,7 +186,7 @@ describe("service favorite actions", () => {
 
       expect(result).toBe(favorites);
       expect(serviceFavoriteFindMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { userId: "user-1" } }),
+        expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
     });
 

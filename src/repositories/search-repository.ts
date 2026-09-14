@@ -1,3 +1,4 @@
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
 export async function getSearchResults(keyword: string) {
@@ -19,6 +20,7 @@ export async function getSearchResults(keyword: string) {
       where: {
         deletedAt: null,
         status: "ACTIVE",
+        ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
       include: {
@@ -33,6 +35,7 @@ export async function getSearchResults(keyword: string) {
       where: {
         deletedAt: null,
         status: { in: ["OPEN", "CLAIMED", "IN_PROGRESS", "PENDING_CONFIRMATION"] },
+        ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { pickupLocation: contains }, { deliveryLocation: contains }],
       },
       include: {
@@ -45,6 +48,7 @@ export async function getSearchResults(keyword: string) {
       where: {
         deletedAt: null,
         status: "ACTIVE",
+        ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
       include: {
@@ -89,6 +93,7 @@ export async function getSearchResults(keyword: string) {
               sellerId: { in: userIds },
               deletedAt: null,
               status: "ACTIVE",
+              ...listingModerationPublicFilter(),
             },
             _count: {
               sellerId: true,
@@ -100,6 +105,7 @@ export async function getSearchResults(keyword: string) {
               publisherId: { in: userIds },
               deletedAt: null,
               status: "OPEN",
+              ...listingModerationPublicFilter(),
             },
             _count: {
               publisherId: true,
@@ -111,6 +117,7 @@ export async function getSearchResults(keyword: string) {
               providerId: { in: userIds },
               deletedAt: null,
               status: "ACTIVE",
+              ...listingModerationPublicFilter(),
             },
             _count: {
               providerId: true,

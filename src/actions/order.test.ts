@@ -49,7 +49,38 @@ const {
       findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] }; campusId: string } }) =>
         where.userId.in.map((userId: string) => ({ userId })),
       ),
-    },    $executeRaw: txExecuteRaw,
+    },
+    $executeRaw: txExecuteRaw,
+    // Phase 7C：listing 行锁（FOR UPDATE）+ 活跃 moderation 复查
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      // 按锁内 SELECT 的目标表分流返回行（PRODUCT/SERVICE 各自形状）
+      const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      if (sql.includes("ServiceListing")) {
+        return [
+          {
+            id: "service-1",
+            campusId: "campus-1",
+            status: "ACTIVE",
+            price: "50",
+            providerId: "provider-1",
+            deletedAt: null,
+          },
+        ];
+      }
+      return [
+        {
+          id: "product-1",
+          campusId: "campus-1",
+          status: "ACTIVE",
+          price: "100",
+          sellerId: "seller-1",
+          deletedAt: null,
+        },
+      ];
+    }),
+    listingModeration: {
+      findFirst: vi.fn(async () => null),
+    },
   };
 
   return {
@@ -85,6 +116,14 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/repositories/notification-repository", () => ({
   createNotifications,
+}));
+
+const { completeErrandOrderTxMock } = vi.hoisted(() => ({
+  completeErrandOrderTxMock: vi.fn(),
+}));
+
+vi.mock("@/lib/errand-completion", () => ({
+  completeErrandOrderTx: completeErrandOrderTxMock,
 }));
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
@@ -177,6 +216,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue({ id: "order-1" });
 
@@ -185,6 +225,8 @@ describe("order actions", () => {
       buildProductOrderFormData(),
     );
 
+    // 事务外 active-order 预检命中（orderFindFirst）→ 专用文案，
+    // 不经过 tx-null 泛化路径
     expect(result).toEqual({
       success: false,
       message: "该商品已有进行中的订单",
@@ -197,6 +239,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
     txProductUpdateMany.mockResolvedValue({ count: 0 });
@@ -206,9 +249,12 @@ describe("order actions", () => {
       buildProductOrderFormData(),
     );
 
+    // 事务外 active-order 预检命中（orderFindFirst）→ 专用文案，
+    // 不经过 tx-null 泛化路径
+    // Phase 7C FR-02：tx-null（含 updateMany 抢占失败）→ 统一 SAFE 文案
     expect(result).toEqual({
       success: false,
-      message: "该商品已有进行中的订单",
+      message: "商品不存在或当前不可购买",
     });
     expect(txProductUpdateMany).toHaveBeenCalledWith({
       where: {
@@ -262,6 +308,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
 
@@ -325,6 +372,7 @@ describe("order actions", () => {
       id: "product-1",
       price: { toString: () => "30" },
       sellerId: "seller-1",
+      campusId: "campus-1",
     });
     orderFindFirst.mockResolvedValue(null);
     txProductUpdateMany.mockRejectedValue(new Error("db down"));
@@ -343,6 +391,7 @@ describe("order actions", () => {
       id: "service-1",
       price: { toString: () => "50" },
       providerId: "provider-1",
+      campusId: "campus-1",
     });
 
     const formData = new FormData();
@@ -419,6 +468,55 @@ describe("order actions", () => {
         data: { status: "ACCEPTED", completedAt: null, cancelReason: null },
       });
       expect(createNotifications).toHaveBeenCalled();
+    });
+
+    it("routes ERRAND completion through completeErrandOrderTx（FR-05 branch 补全）", async () => {
+      completeErrandOrderTxMock.mockResolvedValue({ completed: true });
+      const completeMock = completeErrandOrderTxMock;
+      // 状态机：ERRAND COMPLETED 须 isBuyer（session user-1 = buyer）∧ IN_PROGRESS
+      orderFindUnique.mockResolvedValue(
+        orderFixture({
+          type: "ERRAND",
+          status: "IN_PROGRESS",
+          buyerId: "user-1",
+          sellerId: "runner-1",
+          productId: null,
+          errandTaskId: "errand-1",
+        }),
+      );
+
+      await updateOrderStatus(statusFormData("COMPLETED"));
+
+      expect(completeMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          orderId: "order-1",
+          errandTaskId: "errand-1",
+          buyerId: "user-1",
+          sellerId: "runner-1",
+        }),
+      );
+      expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
+    });
+
+    it("silently skips side effects when errand completion reports not-completed", async () => {
+      completeErrandOrderTxMock.mockResolvedValue({ completed: false });
+      const completeMock = completeErrandOrderTxMock;
+      orderFindUnique.mockResolvedValue(
+        orderFixture({
+          type: "ERRAND",
+          status: "IN_PROGRESS",
+          buyerId: "user-1",
+          productId: null,
+          errandTaskId: "errand-1",
+        }),
+      );
+
+      await updateOrderStatus(statusFormData("COMPLETED"));
+
+      expect(completeMock).toHaveBeenCalled();
+      // completed=false → 无 revalidate、无后续乐观锁流转
+      expect(txOrderUpdateMany).not.toHaveBeenCalled();
     });
 
     it("marks the product as sold and bumps counters on completion", async () => {

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import {
+  grantContentModeratorRole,
   grantGovernanceRole,
   lookupRoleGrantCandidate,
   revokeGovernanceRole,
@@ -101,6 +102,7 @@ export default async function GovernanceRolesPage({
         <CampusRoleGrantForm
           campuses={campuses}
           grantAction={grantGovernanceRole}
+          contentModeratorAction={grantContentModeratorRole}
           lookupAction={lookupRoleGrantCandidate}
         />
       </section>

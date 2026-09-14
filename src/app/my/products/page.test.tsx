@@ -82,6 +82,7 @@ describe("MyProductsPage", () => {
         favoriteCount: 6,
         category: { name: "教材资料" },
         images: [{ url: "/uploads/products/book.jpg" }],
+        moderations: [],
       },
     ]);
 

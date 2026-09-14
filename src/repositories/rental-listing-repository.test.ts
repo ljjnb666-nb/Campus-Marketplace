@@ -66,7 +66,7 @@ describe("getRentalListings", () => {
     await getRentalListings();
 
     const args = rentalListingFindMany.mock.calls[0][0];
-    expect(args.where).toEqual({ deletedAt: null, status: "AVAILABLE" });
+    expect(args.where).toEqual({ deletedAt: null, status: "AVAILABLE", moderations: { none: { resolvedAt: null } } });
     expect(args.orderBy).toEqual({ createdAt: "desc" });
     expect(args.take).toBe(12);
     expect(args.skip).toBe(0);
@@ -230,6 +230,11 @@ describe("getMyRentalListings", () => {
     const args = rentalListingFindMany.mock.calls[0][0];
     expect(args.where).toEqual({ ownerId: "owner-1", deletedAt: null });
     expect(args.orderBy).toEqual({ createdAt: "desc" });
+    expect(args.include.moderations).toEqual({
+      where: { resolvedAt: null },
+      take: 1,
+      select: { id: true, createdAt: true },
+    });
   });
 });
 

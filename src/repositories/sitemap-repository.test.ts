@@ -29,6 +29,7 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { getSitemapListings } from "@/repositories/sitemap-repository";
 
 describe("sitemap repository", () => {
@@ -65,25 +66,25 @@ describe("sitemap repository", () => {
     await getSitemapListings();
 
     expect(productFindMany).toHaveBeenCalledWith({
-      where: { deletedAt: null, status: "ACTIVE" },
+      where: { deletedAt: null, status: "ACTIVE", ...listingModerationPublicFilter() },
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: 500,
     });
     expect(errandTaskFindMany).toHaveBeenCalledWith({
-      where: { deletedAt: null, status: "OPEN" },
+      where: { deletedAt: null, status: "OPEN", ...listingModerationPublicFilter() },
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: 500,
     });
     expect(serviceListingFindMany).toHaveBeenCalledWith({
-      where: { deletedAt: null, status: "ACTIVE" },
+      where: { deletedAt: null, status: "ACTIVE", ...listingModerationPublicFilter() },
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: 500,
     });
     expect(rentalListingFindMany).toHaveBeenCalledWith({
-      where: { deletedAt: null, status: "AVAILABLE" },
+      where: { deletedAt: null, status: "AVAILABLE", ...listingModerationPublicFilter() },
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: 500,

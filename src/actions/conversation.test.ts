@@ -58,6 +58,57 @@ const {
     rentalListing: {
       findFirst: vi.fn(),
     },
+    // Phase 7C：rereadListingForConversation——listing 行锁 + 活跃 moderation 复查。
+    // 锁内 SELECT 行由各域既有 findFirst mock 派生（场景可控）。
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      const withDeleted = (row: Record<string, unknown> | null) =>
+        row ? [{ ...row, deletedAt: row.deletedAt ?? null }] : [];
+      if (sql.includes("ErrandTask")) {
+        const row = (await transactionClient.errandTask.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row
+            ? {
+                id: "errand-1",
+                campusId: row.campusId,
+                ownerId: row.publisherId,
+                counterpartId: row.accepterId ?? null,
+              }
+            : null,
+        );
+      }
+      if (sql.includes("ServiceListing")) {
+        const row = (await transactionClient.serviceListing.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row ? { id: "service-1", campusId: row.campusId, ownerId: row.providerId } : null,
+        );
+      }
+      if (sql.includes("RentalListing")) {
+        const row = (await transactionClient.rentalListing.findFirst({} as never)) as Record<
+          string,
+          unknown
+        > | null;
+        return withDeleted(
+          row ? { id: "rental-1", campusId: row.campusId, ownerId: row.ownerId } : null,
+        );
+      }
+      const row = (await transactionClient.product.findFirst({} as never)) as Record<
+        string,
+        unknown
+      > | null;
+      return withDeleted(
+        row ? { id: "product-1", campusId: row.campusId, ownerId: row.sellerId } : null,
+      );
+    }),
+    listingModeration: {
+      findFirst: vi.fn(async () => null),
+    },
   };
 
   return {
@@ -390,6 +441,18 @@ describe("conversation actions", () => {
   });
 
   describe("createOrOpenErrandConversation", () => {
+    it("redirects to the errands hub when the errand is missing（line-121 branch）", async () => {
+      errandTaskFindFirst.mockResolvedValue(null);
+
+      const formData = new FormData();
+      formData.set("errandId", "errand-missing");
+
+      await expect(createOrOpenErrandConversation(null, formData)).rejects.toThrow(
+        "REDIRECT:/errands",
+      );
+      expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    });
+
     it("reuses an existing errand conversation for the same publisher and visitor", async () => {
       errandTaskFindFirst.mockResolvedValue({
         id: "errand-1",
@@ -514,6 +577,28 @@ describe("conversation actions", () => {
       const createData = txConversationCreate.mock.calls[0][0].data;
       expect(createData.serviceListingId).toBe("service-1");
       expect(createData.title).toBe("服务咨询：高数辅导");
+    });
+
+    it("returns the unified counterparty denial when the provider is restricted（409 合同，service catch）", async () => {
+      serviceListingFindFirst.mockResolvedValue({
+        id: "service-1",
+        title: "高数辅导",
+        providerId: "provider-1",
+      });
+      gateRequireParticipantsEligible.mockRejectedValue(
+        enforcementError("MARKETPLACE_COUNTERPARTY_UNAVAILABLE"),
+      );
+
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+
+      const result = await createOrOpenServiceConversation(null, formData);
+
+      expect(result).toEqual({
+        success: false,
+        message: "对方当前无法开始新的交易，请稍后再试",
+      });
+      expect(txConversationCreate).not.toHaveBeenCalled();
     });
 
     it("redirects for a missing service or one owned by the current user", async () => {
@@ -690,6 +775,29 @@ describe("conversation actions", () => {
       expect(txMessageCreate).not.toHaveBeenCalled();
     });
 
+    it("rejects malformed payload via schema（invalid branch）", async () => {
+      const formData = new FormData();
+      formData.set("conversationId", "");
+      formData.set("content", "");
+      const result = await sendMessage({ success: false, message: "" }, formData);
+      expect(result.success).toBe(false);
+      expect(txMessageCreate).not.toHaveBeenCalled();
+    });
+
+    it("handles conversation without counterpart（single participant）→ 跳过拉黑检查直接发送", async () => {
+      conversationFindFirst.mockResolvedValue({
+        id: "conversation-1",
+        participants: [{ userId: "user-1" }],
+      });
+      blockedUserFindUnique.mockResolvedValue(null);
+
+      const result = await sendMessage({ success: false, message: "" }, messageFormData("你好"));
+
+      expect(result).toEqual({ success: true, message: "发送成功" });
+      // counterpartId undefined → blockedUser 检查短路
+      expect(blockedUserFindUnique).not.toHaveBeenCalled();
+    });
+
     it("sends a message and refreshes read state in one transaction", async () => {
       conversationFindFirst.mockResolvedValue({
         id: "conversation-1",
@@ -723,5 +831,28 @@ describe("conversation actions", () => {
       expect(result.success).toBe(false);
       expect(conversationFindFirst).not.toHaveBeenCalled();
     });
+    it("returns the unified counterparty denial when the owner is restricted（409 合同，rental catch）", async () => {
+      rentalListingFindFirst.mockResolvedValue({
+        id: "rental-1",
+        title: "相机出租",
+        ownerId: "owner-1",
+      });
+      gateRequireParticipantsEligible.mockRejectedValue(
+        enforcementError("MARKETPLACE_COUNTERPARTY_UNAVAILABLE"),
+      );
+
+      const formData = new FormData();
+      formData.set("rentalListingId", "rental-1");
+
+      const result = await createOrOpenRentalConversation(null, formData);
+
+      expect(result).toEqual({
+        success: false,
+        message: "对方当前无法开始新的交易，请稍后再试",
+      });
+      expect(txConversationCreate).not.toHaveBeenCalled();
+    });
+
+
   });
 });

@@ -38,6 +38,11 @@ const ALLOWED_METADATA_KEYS = new Set([
   "decisionReasonCode",
   "selfReview",
   "enforcementActionId",
+  // Phase 7C：listing 治理机器字段（listingType 为四域枚举字面量，
+  // moderationId 为 ListingModeration 行 id——审计仅持指针，note/description
+  // 等自由文本因白名单结构而结构性不可进入）
+  "listingType",
+  "moderationId",
 ]);
 
 function sanitizeMetadata(

@@ -7,6 +7,7 @@ import { isEnforcementError } from "@/lib/enforcement/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { getOrCreateConversationSafe } from "@/lib/conversation-creation";
 import type { ConversationBizType } from "@/lib/conversation-key";
+import { rereadListingForConversation } from "@/lib/moderation/listing-moderation-query";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
@@ -80,12 +81,11 @@ export async function createOrOpenProductConversation(
       gate: {
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
-          const fresh = await tx.product.findFirst({
-            where: { id: product.id, deletedAt: null },
-            select: { campusId: true, sellerId: true },
-          });
+          // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper；
+          // 活跃治理中 → null → 既有"资源不可用"回退，新会话拒绝）
+          const fresh = await rereadListingForConversation(tx, "PRODUCT", product.id);
           if (!fresh) return null;
-          return { campusId: fresh.campusId, participantIds: [user.id, fresh.sellerId] };
+          return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },
       },
     });
@@ -155,14 +155,12 @@ export async function createOrOpenErrandConversation(
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
           // ERRAND 参与关系是动态的（publisher/accepter），锁后必须从权威行
-          // 重新推导 counterpart，禁止沿用事务外 snapshot
-          const fresh = await tx.errandTask.findFirst({
-            where: { id: errand.id, deletedAt: null },
-            select: { campusId: true, publisherId: true, accepterId: true },
-          });
+          // 重新推导 counterpart，禁止沿用事务外 snapshot。
+          // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）。
+          const fresh = await rereadListingForConversation(tx, "ERRAND", errand.id);
           if (!fresh) return null;
           const freshCounterpart =
-            fresh.publisherId === user.id ? fresh.accepterId : fresh.publisherId;
+            fresh.ownerId === user.id ? fresh.counterpartId : fresh.ownerId;
           if (!freshCounterpart || freshCounterpart === user.id) return null;
           return { campusId: fresh.campusId, participantIds: [user.id, freshCounterpart] };
         },
@@ -228,12 +226,10 @@ export async function createOrOpenServiceConversation(
       gate: {
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
-          const fresh = await tx.serviceListing.findFirst({
-            where: { id: service.id, deletedAt: null },
-            select: { campusId: true, providerId: true },
-          });
+          // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）
+          const fresh = await rereadListingForConversation(tx, "SERVICE", service.id);
           if (!fresh) return null;
-          return { campusId: fresh.campusId, participantIds: [user.id, fresh.providerId] };
+          return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },
       },
     });
@@ -297,10 +293,8 @@ export async function createOrOpenRentalConversation(
       gate: {
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
-          const fresh = await tx.rentalListing.findFirst({
-            where: { id: rental.id, deletedAt: null },
-            select: { campusId: true, ownerId: true },
-          });
+          // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）
+          const fresh = await rereadListingForConversation(tx, "RENTAL", rental.id);
           if (!fresh) return null;
           return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },

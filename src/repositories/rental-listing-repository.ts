@@ -1,5 +1,6 @@
 import { Prisma, RentalPricingUnit } from "@prisma/client";
 import { notFound } from "next/navigation";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
 export type RentalListingQuery = {
@@ -31,6 +32,8 @@ export async function getRentalListings(query: RentalListingQuery = {}) {
   const where: Prisma.RentalListingWhereInput = {
     deletedAt: null,
     status: "AVAILABLE",
+    // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
+    ...listingModerationPublicFilter(),
   };
 
   if (query.q) {
@@ -151,6 +154,16 @@ export async function getRentalListingForEdit(id: string, userId: string) {
   return listing;
 }
 
+/**
+ * Phase 7C FR-03B：浏览计数与治理门解耦（同 incrementProductView 契约）。
+ */
+export async function incrementRentalListingView(listingId: string) {
+  await prisma.rentalListing.update({
+    where: { id: listingId },
+    data: { viewCount: { increment: 1 } },
+  });
+}
+
 export async function getMyRentalListings(userId: string) {
   return prisma.rentalListing.findMany({
     where: { ownerId: userId, deletedAt: null },
@@ -158,6 +171,12 @@ export async function getMyRentalListings(userId: string) {
     include: {
       category: true,
       images: { orderBy: { sortOrder: "asc" }, take: 1 },
+      // Phase 7C OWNER 面：不过滤，但携带活跃治理状态供安全 badge 呈现
+      moderations: {
+        where: { resolvedAt: null },
+        take: 1,
+        select: { id: true, createdAt: true },
+      },
     },
   });
 }

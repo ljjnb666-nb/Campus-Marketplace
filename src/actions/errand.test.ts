@@ -54,6 +54,21 @@ const {
       update: txUserUpdate,
       findMany: txUserFindMany,
     },
+    // Phase 7C：ErrandTask 行锁（FOR UPDATE）+ 活跃 moderation 复查
+    $queryRaw: vi.fn(async () => [
+      {
+        id: "errand-1",
+        campusId: "campus-1",
+        status: "OPEN",
+        reward: "10",
+        publisherId: "publisher-1",
+        accepterId: null,
+        deletedAt: null,
+      },
+    ]),
+    listingModeration: {
+      findFirst: vi.fn(async () => null),
+    },
     $executeRaw: txExecuteRaw,
   };
 
@@ -265,6 +280,7 @@ describe("errand actions", () => {
       publisherId: "publisher-1",
       accepterId: null,
       status: "OPEN",
+      campusId: "campus-1",
       reward,
     });
     txErrandTaskUpdateMany.mockResolvedValue({ count: 0 });
@@ -429,6 +445,7 @@ describe("errand actions", () => {
       publisherId: "publisher-1",
       accepterId: null,
       status: "OPEN",
+      campusId: "campus-1",
       reward: 8,
     });
     txOrderCreate.mockResolvedValue({ id: "order-1" });
