@@ -131,6 +131,15 @@ vi.mock("@/lib/enforcement/capability-gate", () => ({
   marketplaceObligationValidator: vi.fn(() => async () => undefined),
 }));
 
+const { attachOrderPhotos } = vi.hoisted(() => ({
+  attachOrderPhotos: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/asset-service", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/asset-service")>()),
+  attachOrderPhotos,
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));
@@ -577,6 +586,31 @@ describe("rental-order actions", () => {
     expect(result).toEqual({ success: false, message: "无权操作" });
     expect(transactionMock).not.toHaveBeenCalled();
     expect(txRentalHandoverUpsert).not.toHaveBeenCalled();
+  });
+
+  it("confirmPickup：AssetServiceError（photos 超 maxCount=5）→ 错误信息透传", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+
+    const formData = buildPickupFormData({ role: "owner" });
+    for (let i = 0; i < 6; i += 1) {
+      formData.append("photos", new File(["x"], `p${i}.png`, { type: "image/png" }));
+    }
+
+    const result = await confirmPickup(formData);
+    expect(result.success).toBe(false);
+    expect(result.message).toBe("最多上传5张图片");
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("confirmPickup：普通 Error → fallback 文案（photoUploadErrorMessage 默认分支）", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue(pendingPickupOrder);
+    txRentalHandoverUpsert.mockResolvedValue({ ownerConfirmed: true, renterConfirmed: true });
+    transactionMock.mockRejectedValueOnce(new Error("boom"));
+
+    const result = await confirmPickup(buildPickupFormData({ role: "owner" }));
+    expect(result.success).toBe(false);
+    expect(result.message).toBe("操作失败，请稍后重试");
   });
 
   it("rejects confirmPickup when the caller is not the order owner", async () => {

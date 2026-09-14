@@ -207,3 +207,61 @@ describe("Phase 7C governance-listings actions：四域 dispatch 映射", () => 
     );
   });
 });
+
+describe("Phase 7C actions：分支补全（FR-05）", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requireUserMock.mockResolvedValue({ id: "moderator-1", name: "审核员" });
+    revalidateMock.mockReturnValue(undefined);
+  });
+
+  it("restore：schema 注入字段 → strict 拒绝（170 分支）", async () => {
+    const fd = new FormData();
+    fd.set("moderationId", "m-1");
+    fd.set("expectedListingUpdatedAt", "2026-09-13T10:00:00.000Z");
+    fd.set("ownerId", "attacker");
+    fd.set("targetType", "RENTAL");
+    const result = await restoreListingModerationAction(fd);
+    expect(result).toEqual({ success: false, message: "没有权限执行该治理操作" });
+    expect(restoreListingByIdentityMock).not.toHaveBeenCalled();
+    expect(revalidateMock).not.toHaveBeenCalled();
+  });
+
+  it("restore：canonical RbacError → 统一 deny（184 → moderationActionError 分支）", async () => {
+    const { rbacError } = await import("@/lib/rbac/errors");
+    restoreListingByIdentityMock.mockRejectedValue(rbacError("AUTH_PERMISSION_DENIED"));
+
+    const fd = new FormData();
+    fd.set("moderationId", "m-1");
+    fd.set("expectedListingUpdatedAt", "2026-09-13T10:00:00.000Z");
+    const result = await restoreListingModerationAction(fd);
+
+    expect(result).toEqual({ success: false, message: "没有权限执行该治理操作" });
+    expect(revalidateMock).not.toHaveBeenCalled();
+  });
+
+  it("restore：RESTORE_NOT_RESTORABLE → 泛化文案 + 零 revalidate", async () => {
+    const { ModerationError } = await import("@/lib/moderation/errors");
+    restoreListingByIdentityMock.mockRejectedValue(new ModerationError("RESTORE_NOT_RESTORABLE"));
+
+    const fd = new FormData();
+    fd.set("moderationId", "m-1");
+    fd.set("expectedListingUpdatedAt", "2026-09-13T10:00:00.000Z");
+    const result = await restoreListingModerationAction(fd);
+
+    expect(result).toEqual({ success: false, message: "该处置当前不可恢复" });
+    expect(revalidateMock).not.toHaveBeenCalled();
+  });
+
+  it("takedown：RbacError 拒绝走 isRbacError 分支（79 行）而非 actionErrorMessage", async () => {
+    const { rbacError } = await import("@/lib/rbac/errors");
+    moderateProductListingMock.mockRejectedValue(rbacError("AUTH_CAMPUS_SCOPE_MISMATCH"));
+
+    const fd = new FormData();
+    fd.set("listingId", "product-1");
+    fd.set("reasonCode", "OTHER");
+    const result = await moderateProductListingAction(fd);
+
+    expect(result).toEqual({ success: false, message: "没有权限执行该治理操作" });
+  });
+});

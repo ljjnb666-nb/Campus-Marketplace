@@ -441,6 +441,18 @@ describe("conversation actions", () => {
   });
 
   describe("createOrOpenErrandConversation", () => {
+    it("redirects to the errands hub when the errand is missing（line-121 branch）", async () => {
+      errandTaskFindFirst.mockResolvedValue(null);
+
+      const formData = new FormData();
+      formData.set("errandId", "errand-missing");
+
+      await expect(createOrOpenErrandConversation(null, formData)).rejects.toThrow(
+        "REDIRECT:/errands",
+      );
+      expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    });
+
     it("reuses an existing errand conversation for the same publisher and visitor", async () => {
       errandTaskFindFirst.mockResolvedValue({
         id: "errand-1",
@@ -761,6 +773,29 @@ describe("conversation actions", () => {
         message: "消息包含敏感违规内容，发送失败",
       });
       expect(txMessageCreate).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed payload via schema（invalid branch）", async () => {
+      const formData = new FormData();
+      formData.set("conversationId", "");
+      formData.set("content", "");
+      const result = await sendMessage({ success: false, message: "" }, formData);
+      expect(result.success).toBe(false);
+      expect(txMessageCreate).not.toHaveBeenCalled();
+    });
+
+    it("handles conversation without counterpart（single participant）→ 跳过拉黑检查直接发送", async () => {
+      conversationFindFirst.mockResolvedValue({
+        id: "conversation-1",
+        participants: [{ userId: "user-1" }],
+      });
+      blockedUserFindUnique.mockResolvedValue(null);
+
+      const result = await sendMessage({ success: false, message: "" }, messageFormData("你好"));
+
+      expect(result).toEqual({ success: true, message: "发送成功" });
+      // counterpartId undefined → blockedUser 检查短路
+      expect(blockedUserFindUnique).not.toHaveBeenCalled();
     });
 
     it("sends a message and refreshes read state in one transaction", async () => {

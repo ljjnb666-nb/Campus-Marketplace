@@ -339,3 +339,168 @@ describe("Phase 7C listing moderation service（R2 冻结合同）", () => {
     ).rejects.toThrow("备注不能超过 500 字");
   });
 });
+
+// ── FR-05 branch 补全：SERVICE/ERRAND/RENTAL typed seams + restore 全域 ──────
+
+describe("Phase 7C 四域 typed seams（dispatch 分支覆盖）", () => {
+  it("moderateServiceListing：SERVICE FK 落位 + observedStatus", async () => {
+    txQueryRaw.mockResolvedValue([
+      { ...LOCKED_ACTIVE_ROW, campusId: "campus-9", status: "ACTIVE", ownerId: "provider-1" },
+    ]);
+    loadAuthorizationContextMock.mockResolvedValue(globalModerator());
+
+    const result = await (await import("@/lib/moderation/listing-moderation-service"))
+      .moderateServiceListing({
+        moderatorId: "moderator-1",
+        listingId: "service-1",
+        reasonCode: "SPAM_ADVERTISEMENT",
+      });
+
+    expect(result.outcome).toBe("TAKEDOWN");
+    expect(txListingModerationCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          targetType: "SERVICE",
+          productId: null,
+          serviceListingId: "service-1",
+          errandTaskId: null,
+          rentalListingId: null,
+        }),
+      }),
+    );
+  });
+
+  it("moderateErrandListing：ERRAND FK 落位", async () => {
+    txQueryRaw.mockResolvedValue([
+      { ...LOCKED_ACTIVE_ROW, ownerId: "publisher-1" },
+    ]);
+    const result = await (await import("@/lib/moderation/listing-moderation-service"))
+      .moderateErrandListing({
+        moderatorId: "moderator-1",
+        listingId: "errand-1",
+        reasonCode: "OTHER",
+      });
+    expect(txListingModerationCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          targetType: "ERRAND",
+          errandTaskId: "errand-1",
+          productId: null,
+          serviceListingId: null,
+          rentalListingId: null,
+        }),
+      }),
+    );
+  });
+
+  it("moderateRentalListing：RENTAL FK 落位", async () => {
+    txQueryRaw.mockResolvedValue([
+      { ...LOCKED_ACTIVE_ROW, ownerId: "rental-owner-1" },
+    ]);
+    await (await import("@/lib/moderation/listing-moderation-service"))
+      .moderateRentalListing({
+        moderatorId: "moderator-1",
+        listingId: "rental-1",
+        reasonCode: "OTHER",
+      });
+    expect(txListingModerationCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          targetType: "RENTAL",
+          rentalListingId: "rental-1",
+          productId: null,
+          serviceListingId: null,
+          errandTaskId: null,
+        }),
+      }),
+    );
+  });
+
+  it("racePoint seam：注入时在行锁后真实执行", async () => {
+    const calls: string[] = [];
+    txQueryRaw.mockImplementation(async () => {
+      calls.push("row-lock");
+      return [{ ...LOCKED_ACTIVE_ROW }];
+    });
+    await moderateProductListing({
+      moderatorId: "moderator-1",
+      listingId: "product-1",
+      reasonCode: "OTHER",
+      racePoint: async () => {
+        calls.push("race");
+      },
+    });
+    expect(calls).toEqual(["row-lock", "race"]);
+  });
+
+  it("restore 竞态 belt-and-braces：updateMany count!==1 → STALE", async () => {
+    txListingModerationFindFirst.mockResolvedValue({ id: "moderation-1", createdAt: new Date() });
+    txListingModerationUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      restoreProductListing({
+        moderatorId: "moderator-1",
+        listingId: "product-1",
+        moderationId: "moderation-1",
+        expectedListingUpdatedAt: LOCKED_ACTIVE_ROW.updatedAt,
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) => isModerationError(error) && error.code === "STALE_MODERATION_REVIEW",
+    );
+    expect(recordAdminAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe("Phase 7C restore seams：SERVICE/ERRAND/RENTAL（FR-05 branch 补全）", () => {
+  it("restoreServiceListing：全分支路径 resolve+审计", async () => {
+    txQueryRaw.mockResolvedValue([
+      { ...LOCKED_ACTIVE_ROW, campusId: "campus-5", status: "PAUSED", ownerId: "provider-1" },
+    ]);
+    txListingModerationFindFirst.mockResolvedValue({ id: "m-s", createdAt: new Date() });
+
+    const result = await (await import("@/lib/moderation/listing-moderation-service"))
+      .restoreServiceListing({
+        moderatorId: "moderator-1",
+        listingId: "service-1",
+        moderationId: "m-s",
+        expectedListingUpdatedAt: LOCKED_ACTIVE_ROW.updatedAt,
+      });
+    expect(result.outcome).toBe("RESTORED");
+    expect(recordAdminAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "LISTING_RESTORED", metadata: { listingType: "SERVICE", moderationId: "m-s" } }),
+      tx,
+    );
+  });
+
+  it("restoreErrandListing：resolve", async () => {
+    txListingModerationFindFirst.mockResolvedValue({ id: "m-e", createdAt: new Date() });
+    const result = await (await import("@/lib/moderation/listing-moderation-service"))
+      .restoreErrandListing({
+        moderatorId: "moderator-1",
+        listingId: "errand-1",
+        moderationId: "m-e",
+        expectedListingUpdatedAt: LOCKED_ACTIVE_ROW.updatedAt,
+      });
+    expect(result).toEqual({ outcome: "RESTORED", moderationId: "m-e" });
+  });
+
+  it("restoreRentalListing：resolve", async () => {
+    txListingModerationFindFirst.mockResolvedValue({ id: "m-r", createdAt: new Date() });
+    const result = await (await import("@/lib/moderation/listing-moderation-service"))
+      .restoreRentalListing({
+        moderatorId: "moderator-1",
+        listingId: "rental-1",
+        moderationId: "m-r",
+        expectedListingUpdatedAt: LOCKED_ACTIVE_ROW.updatedAt,
+      });
+    expect(result).toEqual({ outcome: "RESTORED", moderationId: "m-r" });
+  });
+
+  it("moderationError overrides：string 与对象两种形态（errors.ts 两分支）", async () => {
+    const { moderationError } = await import("@/lib/moderation/errors");
+    const strForm = moderationError("STALE_MODERATION_REVIEW", "字符串覆盖");
+    expect(strForm.message).toBe("字符串覆盖");
+    const objForm = moderationError("RESTORE_NOT_RESTORABLE", { userMessage: "对象覆盖" });
+    expect(objForm.message).toBe("对象覆盖");
+  });
+});
