@@ -1,9 +1,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
+  gateMock,
   getActiveViewerId,
   getProductDetail,
+  incrementProductView,
   createOrOpenProductConversation,
   createProductOrder,
   deleteProduct,
@@ -11,8 +13,10 @@ const {
   toggleFavorite,
   updateProductStatus,
 } = vi.hoisted(() => ({
+  gateMock: vi.fn(),
   getActiveViewerId: vi.fn(),
   getProductDetail: vi.fn(),
+  incrementProductView: vi.fn(),
   createOrOpenProductConversation: vi.fn(),
   createProductOrder: vi.fn(),
   deleteProduct: vi.fn(),
@@ -40,8 +44,16 @@ vi.mock("@/lib/server-auth", () => ({
   getActiveViewerId,
 }));
 
+vi.mock("@/lib/moderation/listing-moderation-query", () => ({
+  resolvePublicDetailModerationGate: gateMock,
+  hasActiveModerationForPublicSurface: vi.fn(async () => false),
+  rereadListingForConversation: vi.fn(),
+  getActiveListingModeration: vi.fn(async () => null),
+}));
+
 vi.mock("@/repositories/product-repository", () => ({
   getProductDetail,
+  incrementProductView,
 }));
 
 vi.mock("@/actions/conversation", () => ({
@@ -115,6 +127,73 @@ function buildProductDetail() {
     ],
   };
 }
+
+describe("ProductDetailPage Phase 7C 治理门分支（FR-03/03B）", () => {
+  afterEach(cleanup);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    gateMock.mockResolvedValue("OPEN");
+    getActiveViewerId.mockResolvedValue(null);
+    getProductDetail.mockResolvedValue(buildProductDetail());
+    incrementProductView.mockResolvedValue(undefined);
+  });
+
+  it("OPEN：渲染详情并计数（FR03-V02 行为）", async () => {
+    render(
+      await ProductDetailPage({ params: Promise.resolve({ id: "product-1" }) }),
+    );
+    expect(gateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ targetType: "PRODUCT", listingId: "product-1" }),
+    );
+    expect(incrementProductView).toHaveBeenCalledWith("product-1");
+    expect(screen.getByText("物品详细描述")).toBeTruthy();
+  });
+
+  it("HIDDEN：非 owner 访问 → notFound()，零 Product 写入（FR03-V01 行为）", async () => {
+    gateMock.mockResolvedValue("HIDDEN");
+    // 页面使用真实 next/navigation notFound()（未 mock）→ 404 fallback 语义
+    await expect(
+      ProductDetailPage({ params: Promise.resolve({ id: "product-1" }) }),
+    ).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+    expect(incrementProductView).not.toHaveBeenCalled();
+  });
+
+  it("OWNER_VIEW：owner 渲染 + 安全横幅 + 零计数（FR-03B owner 隐藏零写入）", async () => {
+    gateMock.mockResolvedValue("OWNER_VIEW");
+    getActiveViewerId.mockResolvedValue("seller-1");
+    render(
+      await ProductDetailPage({ params: Promise.resolve({ id: "product-1" }) }),
+    );
+    expect(screen.getByTestId("moderation-hidden-banner")).toBeTruthy();
+    expect(incrementProductView).not.toHaveBeenCalled();
+  });
+
+  it("metadata：hidden listing → generic fallback metadata（FR03-M01）", async () => {
+    const { generateMetadata } = await import("./page");
+    getProductDetail.mockResolvedValue(buildProductDetail());
+    gateMock.mockImplementation(async (args: { ownerId: string; listingId: string }) => {
+      // metadata 面调用 hasActiveModerationForPublicSurface（独立于页面 gate）
+      return "OPEN";
+    });
+    // metadata 用 hasActiveModerationForPublicSurface —— 单独 mock 其返回 true
+    const modQuery = await import("@/lib/moderation/listing-moderation-query");
+    vi.mocked(modQuery.hasActiveModerationForPublicSurface).mockResolvedValue(true);
+
+    const meta = await generateMetadata({ params: Promise.resolve({ id: "product-1" }) });
+    expect(String(meta.title)).not.toContain("高数教材");
+    expect(String(meta.title)).toContain("校园集市");
+  });
+
+  it("metadata：可见商品 → 正常 metadata 保留（FR03-M05）", async () => {
+    const { generateMetadata } = await import("./page");
+    getProductDetail.mockResolvedValue(buildProductDetail());
+    const modQuery = await import("@/lib/moderation/listing-moderation-query");
+    vi.mocked(modQuery.hasActiveModerationForPublicSurface).mockResolvedValue(false);
+
+    const meta = await generateMetadata({ params: Promise.resolve({ id: "product-1" }) });
+    expect(String(meta.title)).toContain("高数教材");
+  });
+});
 
 describe("ProductDetailPage Comprehensive Test Suite", () => {
   it("renders owner management controls, price breakdown, seller card and related products", async () => {

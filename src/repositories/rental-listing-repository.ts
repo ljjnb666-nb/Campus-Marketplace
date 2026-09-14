@@ -154,6 +154,16 @@ export async function getRentalListingForEdit(id: string, userId: string) {
   return listing;
 }
 
+/**
+ * Phase 7C FR-03B：浏览计数与治理门解耦（同 incrementProductView 契约）。
+ */
+export async function incrementRentalListingView(listingId: string) {
+  await prisma.rentalListing.update({
+    where: { id: listingId },
+    data: { viewCount: { increment: 1 } },
+  });
+}
+
 export async function getMyRentalListings(userId: string) {
   return prisma.rentalListing.findMany({
     where: { ownerId: userId, deletedAt: null },

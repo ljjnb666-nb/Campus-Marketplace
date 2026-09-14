@@ -31,6 +31,7 @@ import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 import {
   decodeListingModerationCursor,
+  encodeListingModerationCursor,
   listingModerationPageLimitSchema,
   listingModerationTypeFilterSchema,
   LISTING_MODERATION_DEFAULT_PAGE_SIZE,
@@ -66,13 +67,27 @@ function formatDateTime(value: Date | string) {
   }).format(new Date(value));
 }
 
-function buildTabHref(tab: string, type: string | undefined, cursor?: string) {
-  const params = new URLSearchParams({ tab });
-  if (type) {
-    params.set("type", type);
+function buildQueueHref(args: {
+  tab: string;
+  type?: string;
+  q?: string;
+  limit?: number;
+  cursor?: string;
+}) {
+  const params = new URLSearchParams({ tab: args.tab });
+  if (args.type) {
+    params.set("type", args.type);
   }
-  if (cursor) {
-    params.set("cursor", cursor);
+  if (args.q) {
+    params.set("q", args.q);
+  }
+  if (args.limit !== undefined) {
+    params.set("limit", String(args.limit));
+  }
+  // FR-01：cursor 仅在分页链接上携带；切 tab / 改过滤（type/q/limit）时
+  // 语义性清除——过滤表单与 tab 链接不传 cursor，回到各自第一页。
+  if (args.cursor) {
+    params.set("cursor", args.cursor);
   }
   return `/governance/listings?${params.toString()}`;
 }
@@ -188,30 +203,53 @@ export default async function GovernanceListingsPage({
   }
 
   let items: ModerationQueueItem[] = [];
+  let hasMore = false;
   let nextCursor: string | null = null;
   if (!cursorInvalid) {
+    // FR-01：三 tab 全部真 keyset（loader 内 take=limit+1 → hasMore）；
+    // cursor tuple 由各数据集冻结权威定义（browse/reports=listing 元组，
+    // active=moderation 元组），经内部 cursorCreatedAt/cursorId 编码。
     if (tab === "active") {
-      items = await loadActiveModerations({ access, cursor: cursor ?? null, limit });
+      const page = await loadActiveModerations({ access, cursor: cursor ?? null, limit });
+      items = page.items;
+      hasMore = page.hasMore;
     } else {
       const types = typeFilter ? [typeFilter] : [...LISTING_MODERATION_TARGET_TYPES];
       const pages = await Promise.all(
         types.map((targetType) =>
           tab === "browse"
-            ? browseListings({ access, targetType, cursor: cursor ?? null, limit })
+            ? browseListings({
+                access,
+                targetType,
+                q: params.q,
+                cursor: cursor ?? null,
+                limit,
+              })
             : loadReportFlaggedListings({ access, targetType, cursor: cursor ?? null, limit }),
         ),
       );
-      // 多类型合并：按 createdAt 倒序后截取 limit（keyset 语义以首页为主）
-      items = pages
-        .flat()
-        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-        .slice(0, limit);
-      if (items.length === limit) {
-        const last = items[items.length - 1];
-        nextCursor = Buffer.from(
-          JSON.stringify({ createdAt: last.createdAt.toISOString(), id: last.listingId }),
-        ).toString("base64url");
-      }
+      // 多类型 union：全局一致 (createdAt,id) 元组排序（id 全局唯一），
+      // 每类型已取 limit+1 → 合并截取 limit 后 hasMore 语义全局正确。
+      const merged = pages
+        .flatMap((page) => page.items)
+        .sort((a, b) =>
+          b.cursorCreatedAt.getTime() !== a.cursorCreatedAt.getTime()
+            ? b.cursorCreatedAt.getTime() - a.cursorCreatedAt.getTime()
+            : b.cursorId < a.cursorId
+              ? -1
+              : b.cursorId > a.cursorId
+                ? 1
+                : 0,
+        );
+      hasMore = merged.length > limit;
+      items = merged.slice(0, limit);
+    }
+    if (hasMore && items.length > 0) {
+      const last = items[items.length - 1];
+      nextCursor = encodeListingModerationCursor({
+        createdAt: last.cursorCreatedAt,
+        id: last.cursorId,
+      });
     }
   }
 
@@ -226,7 +264,7 @@ export default async function GovernanceListingsPage({
         {QUEUE_TABS.map((candidate) => (
           <Link
             key={candidate.key}
-            href={buildTabHref(candidate.key, params.type)}
+            href={buildQueueHref({ tab: candidate.key, type: params.type, q: params.q, limit })}
             className={`rounded-full px-4 py-2 text-sm font-medium transition ${
               tab === candidate.key
                 ? "bg-slate-950 text-white"
@@ -239,6 +277,8 @@ export default async function GovernanceListingsPage({
         {tab !== "active" ? (
           <form className="ml-auto flex items-center gap-2" method="get">
             <input type="hidden" name="tab" value={tab} />
+            <input type="hidden" name="limit" value={limit} />
+            {/* FR-01：过滤提交不携带 cursor——改过滤即回第一页 */}
             <select
               name="type"
               defaultValue={params.type ?? ""}
@@ -292,7 +332,13 @@ export default async function GovernanceListingsPage({
       {nextCursor ? (
         <div className="mt-6 flex justify-end">
           <Link
-            href={buildTabHref(tab, params.type, nextCursor)}
+            href={buildQueueHref({
+              tab,
+              type: params.type,
+              q: params.q,
+              limit,
+              cursor: nextCursor,
+            })}
             className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:text-slate-950"
           >
             下一页

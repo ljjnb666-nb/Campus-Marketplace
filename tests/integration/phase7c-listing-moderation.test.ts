@@ -11,6 +11,33 @@ vi.mock("next/cache", () => ({
   revalidatePath: () => {},
 }));
 
+// FR-02/FR-03 route-level 回归：真实 server action / page 模块需要 session
+// seam。actionSession 控制 requireUser；viewerSession 控制 getActiveViewerId
+// （null = 匿名公开请求）。
+const sessionSeam = vi.hoisted(() => ({
+  actionUser: { current: null as null | { id: string; email: string; name: string } },
+  viewerId: { current: null as null | string },
+}));
+
+vi.mock("@/lib/server-auth", () => ({
+  requireUser: async () => {
+    if (!sessionSeam.actionUser.current) {
+      throw new Error("NO_SESSION");
+    }
+    return sessionSeam.actionUser.current;
+  },
+  getActiveViewerId: async () => sessionSeam.viewerId.current,
+  getVerifiedSession: async () => {
+    if (!sessionSeam.actionUser.current) {
+      return { ok: false as const };
+    }
+    return {
+      ok: true as const,
+      user: { id: sessionSeam.actionUser.current.id, email: "", name: "", role: "STUDENT" },
+    };
+  },
+}));
+
 import { waitForAdvisoryLockWaiter } from "./helpers/lock-barrier";
 
 /**
@@ -49,6 +76,7 @@ const createdErrandIds: string[] = [];
 const createdRentalIds: string[] = [];
 
 let campusA: { id: string; name: string };
+let campusB: { id: string; name: string };
 let moderator: { id: string };
 let campusModerator: { id: string };
 let seller: { id: string };
@@ -130,6 +158,18 @@ async function ensureErrandCategory() {
     data: { name: `${RUN_TAG}-代取`, slug: `${RUN_TAG}-errand-cat`, isActive: true },
   });
   errandCategoryId = category.id;
+  return category;
+}
+
+let serviceCategoryId: string | null = null;
+async function ensureServiceCategory() {
+  if (serviceCategoryId) {
+    return { id: serviceCategoryId };
+  }
+  const category = await rawClient!.serviceCategory.create({
+    data: { name: `${RUN_TAG}-服务类`, slug: `${RUN_TAG}-svc-cat`, isActive: true },
+  });
+  serviceCategoryId = category.id;
   return category;
 }
 
@@ -231,6 +271,7 @@ vi.mock("@/lib/prisma", async (importOriginal) => {
 
 import {
   moderateProductListing,
+  moderateServiceListing,
   moderateErrandListing,
   moderateRentalListing,
   restoreListingByModerationIdentity,
@@ -240,11 +281,17 @@ import {
   loadActiveModerations,
   loadReportFlaggedListings,
   rereadListingForConversation,
+  hasActiveModerationForPublicSurface,
 } from "@/lib/moderation/listing-moderation-query";
 import {
   createProductOrderTx,
   claimErrandTx,
 } from "@/lib/order-creation";
+import { createServiceOrder, createProductOrder } from "@/actions/order";
+import {
+  decodeListingModerationCursor,
+  encodeListingModerationCursor,
+} from "@/validators/governance-listing";
 import { createRentalOrderTx } from "@/lib/rental-order-machine";
 import { eraseAccount } from "@/lib/privacy/account-erasure";
 
@@ -267,6 +314,14 @@ describe.skipIf(!integrationDatabaseUrl)(
         },
       });
       createdCampusIds.push(campusA.id);
+      campusB = await rawClient!.campus.create({
+        data: {
+          name: `${RUN_TAG}-第二校区`,
+          slug: `${RUN_TAG}-second`,
+          schoolName: "集成测试大学",
+        },
+      });
+      createdCampusIds.push(campusB.id);
 
       moderator = await createFixtureUser("全局内容审核员", { membership: false });
       campusModerator = await createFixtureUser("校区内容审核员");
@@ -316,9 +371,18 @@ describe.skipIf(!integrationDatabaseUrl)(
       await rawClient.listingModeration.deleteMany({
         where: { OR: createdProductIds.map((id) => ({ productId: id })) },
       });
+      await rawClient.listingModeration.deleteMany({
+        where: { OR: createdUserIds.map((id) => ({ moderatorId: id })) },
+      });
+      await rawClient.listingModeration.deleteMany({
+        where: { OR: createdUserIds.map((id) => ({ resolvedById: id })) },
+      });
       for (const id of createdErrandIds) {
         await rawClient.listingModeration.deleteMany({ where: { errandTaskId: id } });
       }
+      await rawClient.serviceListing.deleteMany({
+        where: { providerId: { in: createdUserIds } },
+      });
       for (const id of createdRentalIds) {
         await rawClient.listingModeration.deleteMany({ where: { rentalListingId: id } });
       }
@@ -604,13 +668,13 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
 
       const access = { global: false, campusIds: [campusA.id] };
-      const flagged = await loadReportFlaggedListings({
+      const flaggedPage = await loadReportFlaggedListings({
         access,
         targetType: "PRODUCT",
         cursor: null,
         limit: 25,
       });
-      const flaggedRow = flagged.find((item) => item.listingId === product.id);
+      const flaggedRow = flaggedPage.items.find((item) => item.listingId === product.id);
       expect(flaggedRow).toBeDefined();
       expect(flaggedRow?.openReportReasons).toContain("BANNED_ITEM");
 
@@ -619,20 +683,20 @@ describe.skipIf(!integrationDatabaseUrl)(
         listingId: product.id,
         reasonCode: "SPAM_ADVERTISEMENT",
       });
-      const active = await loadActiveModerations({ access, cursor: null, limit: 25 });
-      const activeRow = active.find(
+      const activePage = await loadActiveModerations({ access, cursor: null, limit: 25 });
+      const activeRow = activePage.items.find(
         (item) => item.listingId === product.id && item.targetType === "PRODUCT",
       );
       expect(activeRow?.activeModeration).toMatchObject({ reasonCode: "SPAM_ADVERTISEMENT" });
 
-      const browsed = await browseListings({
+      const browsedPage = await browseListings({
         access,
         targetType: "PRODUCT",
         cursor: null,
         limit: 50,
       });
       // browse tab 不过滤治理态（GOVERNANCE 读面）
-      expect(browsed.some((item) => item.listingId === product.id)).toBe(true);
+      expect(browsedPage.items.some((item) => item.listingId === product.id)).toBe(true);
     }, 20_000);
 
     // ── C：确定性并发（真 PG；零 sleep）──────────────────────────────────
@@ -1121,6 +1185,397 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       expect(restoredCount).toBe(1); // 仅 SUSPENDED 阶段一次合法 restore
     }, 30_000);
+
+    // ── 7C-Q-PAGE：FR-01 真 keyset 分页（Final Review Repair 冻结）─────────
+
+    /** 控时创建：显式 createdAt 便于 keyset/tie-break 断言。 */
+    async function createTimedProduct(input: {
+      sellerId: string;
+      title: string;
+      createdAt: Date;
+      campusId?: string;
+    }) {
+      const product = await rawClient!.product.create({
+        data: {
+          title: input.title,
+          description: "FR-01 keyset 分页集成商品",
+          price: "10",
+          status: "ACTIVE",
+          condition: "NEW",
+          locationText: "东门",
+          sellerId: input.sellerId,
+          campusId: input.campusId ?? campusA.id,
+          categoryId: (await ensureProductCategory()).id,
+          createdAt: input.createdAt,
+        },
+      });
+      createdProductIds.push(product.id);
+      return product;
+    }
+
+    it("7C-Q-PAGE-01/02/03：browse 三页 keyset——零重叠、并集恰等全量、同 createdAt 以 id DESC 决胜", async () => {
+      const base = new Date("2026-09-01T00:00:00.000Z");
+      await createTimedProduct({ sellerId: seller.id, title: `KEYSET${RUN_TAG}-K1`, createdAt: base });
+      await createTimedProduct({ sellerId: seller.id, title: `KEYSET${RUN_TAG}-K2`, createdAt: new Date(base.getTime() + 1000) });
+      await createTimedProduct({ sellerId: seller.id, title: `KEYSET${RUN_TAG}-K3`, createdAt: new Date(base.getTime() + 2000) });
+      // 同 createdAt pair → id DESC 决胜
+      const k4a = await createTimedProduct({ sellerId: seller.id, title: `KEYSET${RUN_TAG}-K4a`, createdAt: new Date(base.getTime() + 3000) });
+      const k4b = await createTimedProduct({ sellerId: seller.id, title: `KEYSET${RUN_TAG}-K4b`, createdAt: new Date(base.getTime() + 3000) });
+
+      const access = { global: false, campusIds: [campusA.id] };
+      const allIds: string[] = [];
+      let cursor: { createdAt: Date; id: string } | null = null;
+      for (let page = 0; page < 5; page += 1) {
+        const result = await browseListings({ access, targetType: "PRODUCT", q: `KEYSET${RUN_TAG}`, cursor, limit: 2 });
+        for (const item of result.items) {
+          // PAGE-01：页间零重叠
+          expect(allIds).not.toContain(item.listingId);
+          allIds.push(item.listingId);
+        }
+        if (!result.hasMore) break;
+        const last = result.items[result.items.length - 1];
+        cursor = { createdAt: last.cursorCreatedAt, id: last.cursorId };
+      }
+
+      // PAGE-02：并集恰等 canonical 排序（createdAt DESC, id DESC），无遗漏
+      const canonical = await rawClient!.product.findMany({
+        where: { campusId: campusA.id, deletedAt: null, title: { contains: `KEYSET${RUN_TAG}` } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { id: true },
+      });
+      expect(allIds).toEqual(canonical.map((row) => row.id));
+
+      // PAGE-03：同 createdAt pair 相邻且按 id DESC 决胜
+      const idxA = allIds.indexOf(k4a.id);
+      const idxB = allIds.indexOf(k4b.id);
+      expect(Math.abs(idxA - idxB)).toBe(1);
+      const [first, second] = idxA < idxB ? [k4a.id, k4b.id] : [k4b.id, k4a.id];
+      expect(first > second).toBe(true);
+    }, 30_000);
+
+    it("7C-Q-PAGE-04：active moderation 队列 keyset（moderation 元组）→ 全队列分页零重叠且相对序正确", async () => {
+      const base = new Date("2027-01-03T00:00:00.000Z");
+      const targets = [];
+      for (let i = 0; i < 3; i += 1) {
+        const product = await createTimedProduct({ sellerId: seller.id, title: `AM${i}-${RUN_TAG}`, createdAt: base });
+        targets.push(product);
+      }
+      const moderationIds: string[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        const result = await moderateProductListing({
+          moderatorId: moderator.id,
+          listingId: targets[i].id,
+          reasonCode: "OTHER",
+        });
+        moderationIds.push(result.moderationId);
+        await rawClient!.listingModeration.update({
+          where: { id: result.moderationId },
+          data: { createdAt: new Date(base.getTime() + i * 1000) },
+        });
+      }
+      // 本组三条 createdAt=2027（全队列最新）→ 必须占据 keyset 前 3 位，
+      // 顺序 m2 → m1 → m0；limit=2 分页跨页零重叠。
+      const access = { global: false, campusIds: [campusA.id] };
+      const visitedIds: string[] = [];
+      let cursor: { createdAt: Date; id: string } | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const result = await loadActiveModerations({ access, cursor, limit: 2 });
+        for (const item of result.items) {
+          expect(visitedIds).not.toContain(item.activeModeration!.id);
+          visitedIds.push(item.activeModeration!.id);
+        }
+        if (!result.hasMore) break;
+        const last = result.items[result.items.length - 1];
+        cursor = { createdAt: last.cursorCreatedAt, id: last.cursorId };
+      }
+      const myPositions = moderationIds.map((id) => visitedIds.indexOf(id));
+      expect(myPositions.every((position) => position >= 0)).toBe(true);
+      // 相对序：createdAt desc → m2(2s) > m1(1s) > m0(0s)
+      expect(myPositions[2]).toBeLessThan(myPositions[1]);
+      expect(myPositions[1]).toBeLessThan(myPositions[0]);
+      // 前三位恰为本组三条（2027 createdAt 在队列中最新的确定性窗口）
+      expect(visitedIds.slice(0, 3)).toEqual([...moderationIds].reverse());
+      for (const id of moderationIds) {
+        await rawClient!.listingModeration.delete({ where: { id } });
+      }
+    }, 30_000);
+
+    it("7C-Q-PAGE-05：scope + cursor——campus A actor 无法借 cursor 发现 campus B 行", async () => {
+      const base = new Date("2026-09-02T00:00:00.000Z");
+      const campusBProduct = await createTimedProduct({
+        sellerId: seller.id,
+        title: `XB-${RUN_TAG}`,
+        createdAt: base,
+        campusId: campusB.id,
+      });
+      const campusAProduct = await createTimedProduct({
+        sellerId: seller.id,
+        title: `XA-${RUN_TAG}`,
+        createdAt: new Date(base.getTime() - 1000),
+      });
+      // campus A moderator，cursor 伪造为 campus B 行（越权窗口探测）
+      const access = { global: false, campusIds: [campusA.id] };
+      const forgedCursor = { createdAt: campusBProduct.createdAt, id: campusBProduct.id };
+      const page = await browseListings({
+        access,
+        targetType: "PRODUCT",
+        cursor: forgedCursor,
+        limit: 10,
+      });
+      const ids = page.items.map((item) => item.listingId);
+      expect(ids).not.toContain(campusBProduct.id);
+      expect(ids).toContain(campusAProduct.id);
+    }, 30_000);
+
+    it("7C-Q-PAGE-06：q 检索进入查询——命中标题返回、未命中缺席", async () => {
+      const base = new Date("2026-09-04T00:00:00.000Z");
+      const hit = await createTimedProduct({ sellerId: seller.id, title: `QQ命中针${RUN_TAG}`, createdAt: base });
+      const miss = await createTimedProduct({ sellerId: seller.id, title: `QQ其他${RUN_TAG}`, createdAt: new Date(base.getTime() + 1000) });
+      const access = { global: false, campusIds: [campusA.id] };
+      const page = await browseListings({ access, targetType: "PRODUCT", q: "命中针", cursor: null, limit: 25 });
+      const ids = page.items.map((item) => item.listingId);
+      expect(ids).toContain(hit.id);
+      expect(ids).not.toContain(miss.id);
+    }, 30_000);
+
+    it("7C-Q-PAGE-cursor-codec：encode/decode 往返保持 (createdAt,id) 元组", async () => {
+      const tuple = { createdAt: new Date("2026-09-13T08:00:00.000Z"), id: "product-x" };
+      expect(decodeListingModerationCursor(encodeListingModerationCursor(tuple))).toEqual(tuple);
+    }, 15_000);
+
+    // ── FR-02：service/product tx-null → SAFE 失败（route-level 回归）─────
+
+    async function createServiceFixture(title: string) {
+      const service = await rawClient!.serviceListing.create({
+        data: {
+          title,
+          description: "FR-02 集成服务",
+          price: "40",
+          pricingUnit: "PER_SESSION",
+          locationText: "线上",
+          status: "ACTIVE",
+          providerId: seller.id,
+          campusId: campusA.id,
+          categoryId: (await ensureServiceCategory()).id,
+        },
+      });
+      return service;
+    }
+
+    it("FR02-S01：moderated service → action success=false（SAFE 文案）+ 零 Order", async () => {
+      const service = await createServiceFixture(`FR02S-${RUN_TAG}`);
+      await moderateServiceListing({ moderatorId: moderator.id, listingId: service.id, reasonCode: "OTHER" });
+      sessionSeam.actionUser.current = { id: buyer.id, email: "buyer@it.local", name: "买家" };
+
+      const fd = new FormData();
+      fd.set("serviceId", service.id);
+      fd.set("meetingLocation", "北门");
+      fd.set("note", "");
+      const result = await createServiceOrder({ success: false, message: "" }, fd);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toBe("服务不存在或当前不可预约");
+      expect(await rawClient!.order.count({ where: { serviceListingId: service.id } })).toBe(0);
+    }, 30_000);
+
+    it("FR02-S03：normal service → success=true + 恰一条 Order（amount=fresh.price，回归）", async () => {
+      const service = await createServiceFixture(`FR02S-ok-${RUN_TAG}`);
+      sessionSeam.actionUser.current = { id: buyer.id, email: "buyer@it.local", name: "买家" };
+
+      const fd = new FormData();
+      fd.set("serviceId", service.id);
+      fd.set("meetingLocation", "北门");
+      fd.set("note", "");
+      const result = await createServiceOrder({ success: false, message: "" }, fd);
+
+      expect(result.success).toBe(true);
+      const orders = await rawClient!.order.findMany({ where: { serviceListingId: service.id } });
+      expect(orders).toHaveLength(1);
+      expect(orders[0].amount.toString()).toBe("40");
+    }, 30_000);
+
+    it("FR02-P01/P02：moderated product → SAFE 文案（非误导已有订单）+ 正常路径回归", async () => {
+      const hidden = await createTimedProduct({ sellerId: seller.id, title: `FR02P-${RUN_TAG}`, createdAt: new Date("2026-09-05T00:00:00.000Z") });
+      await moderateProductListing({ moderatorId: moderator.id, listingId: hidden.id, reasonCode: "OTHER" });
+      sessionSeam.actionUser.current = { id: buyer.id, email: "buyer@it.local", name: "买家" };
+
+      const fd = new FormData();
+      fd.set("productId", hidden.id);
+      fd.set("meetingLocation", "北门");
+      fd.set("note", "");
+      const denied = await createProductOrder({ success: false, message: "" }, fd);
+
+      expect(denied.success).toBe(false);
+      expect(denied.message).toBe("商品不存在或当前不可购买");
+      expect(denied.message).not.toContain("已有进行中的订单");
+      expect(await rawClient!.order.count({ where: { productId: hidden.id } })).toBe(0);
+
+      const okProduct = await createTimedProduct({ sellerId: seller.id, title: `FR02P-ok-${RUN_TAG}`, createdAt: new Date("2026-09-05T01:00:00.000Z") });
+      const fd2 = new FormData();
+      fd2.set("productId", okProduct.id);
+      fd2.set("meetingLocation", "北门");
+      fd2.set("note", "");
+      const ok = await createProductOrder({ success: false, message: "" }, fd2);
+      expect(ok.success).toBe(true);
+      expect(await rawClient!.order.count({ where: { productId: okProduct.id } })).toBe(1);
+    }, 30_000);
+
+    // ── FR-03/03B：metadata 治理脱敏 + viewCount 门后计数（route-level）────
+
+    it("FR03-M01/M05/V01/V02：product metadata 泛化 + hidden 公开请求零写入 + 正常路径保留", async () => {
+      const { generateMetadata, default: ProductDetailPage } = await import(
+        "@/app/products/[id]/page"
+      );
+      const visible = await createTimedProduct({ sellerId: seller.id, title: `MD-vis-${RUN_TAG}`, createdAt: new Date("2026-09-06T00:00:00.000Z") });
+      const hidden = await createTimedProduct({ sellerId: seller.id, title: `MD-hide-${RUN_TAG}`, createdAt: new Date("2026-09-06T01:00:00.000Z") });
+      await moderateProductListing({ moderatorId: moderator.id, listingId: hidden.id, reasonCode: "OTHER" });
+
+      // M01：hidden → generic fallback metadata（title 不含商品标题/描述）
+      const hiddenMeta = await generateMetadata({ params: Promise.resolve({ id: hidden.id }) });
+      expect(String(hiddenMeta.title)).not.toContain("MD-hide");
+      expect(String(hiddenMeta.title)).toContain("校园集市");
+      if (hiddenMeta.description) {
+        expect(hiddenMeta.description).not.toContain("FR-01 keyset 分页集成商品");
+      }
+      // M05：可见商品 metadata 保留
+      const visibleMeta = await generateMetadata({ params: Promise.resolve({ id: visible.id }) });
+      expect(String(visibleMeta.title)).toContain("MD-vis");
+
+      // V01：hidden 公开请求（匿名 viewer）→ notFound + viewCount/updatedAt 不变
+      const beforeHidden = await rawClient!.product.findUniqueOrThrow({ where: { id: hidden.id } });
+      sessionSeam.viewerId.current = null;
+      await expect(
+        ProductDetailPage({ params: Promise.resolve({ id: hidden.id }) }).then(() => null),
+      ).rejects.toThrow();
+      const afterHidden = await rawClient!.product.findUniqueOrThrow({ where: { id: hidden.id } });
+      expect(afterHidden.viewCount).toBe(beforeHidden.viewCount);
+      expect(afterHidden.updatedAt.getTime()).toBe(beforeHidden.updatedAt.getTime());
+
+      // V02：可见商品公开请求 → 既有计数行为保留
+      const beforeVisible = await rawClient!.product.findUniqueOrThrow({ where: { id: visible.id } });
+      await ProductDetailPage({ params: Promise.resolve({ id: visible.id }) });
+      const afterVisible = await rawClient!.product.findUniqueOrThrow({ where: { id: visible.id } });
+      expect(afterVisible.viewCount).toBe(beforeVisible.viewCount + 1);
+    }, 45_000);
+
+    it("FR03-M02/M03/M04：service/errand/rental hidden metadata 泛化", async () => {
+      // SERVICE
+      const { generateMetadata: serviceMetadata } = await import("@/app/services/[id]/page");
+      const service = await createServiceFixture(`FR03S-${RUN_TAG}`);
+      await moderateServiceListing({ moderatorId: moderator.id, listingId: service.id, reasonCode: "OTHER" });
+      const serviceMeta = await serviceMetadata({ params: Promise.resolve({ id: service.id }) });
+      expect(String(serviceMeta.title)).not.toContain(`FR03S-${RUN_TAG}`);
+
+      // ERRAND
+      const { generateMetadata: errandMetadata } = await import("@/app/errands/[id]/page");
+      const errand = await createErrandFixture(seller.id);
+      await moderateErrandListing({ moderatorId: moderator.id, listingId: errand.id, reasonCode: "OTHER" });
+      const errandMeta = await errandMetadata({ params: Promise.resolve({ id: errand.id }) });
+      expect(String(errandMeta.title)).not.toContain(errand.title);
+
+      // RENTAL
+      const { generateMetadata: rentalMetadata } = await import("@/app/rentals/[id]/page");
+      const rental = await createRentalFixture(seller.id);
+      await moderateRentalListing({ moderatorId: moderator.id, listingId: rental.id, reasonCode: "OTHER" });
+      const rentalMeta = await rentalMetadata({ params: Promise.resolve({ id: rental.id }) });
+      expect(String(rentalMeta.title)).not.toContain(rental.title);
+    }, 45_000);
+
+    it("FR05-COV：rereadListingForConversation SERVICE/RENTAL 分支 + restore ERRAND 域", async () => {
+      const service = await createServiceFixture(`COVS-${RUN_TAG}`);
+      const rental = await createRentalFixture(seller.id);
+
+      // SERVICE 分支（无活跃 moderation → 快照；有 → null）
+      await rawClient!.$transaction((tx: unknown) =>
+        rereadListingForConversation(
+          tx as Parameters<typeof rereadListingForConversation>[0],
+          "SERVICE",
+          service.id,
+        ),
+      ).then((snapshot: unknown) =>
+        expect(snapshot).toMatchObject({ campusId: campusA.id, ownerId: seller.id }),
+      );
+      await moderateServiceListing({ moderatorId: moderator.id, listingId: service.id, reasonCode: "OTHER" });
+      await rawClient!
+        .$transaction((tx: unknown) =>
+          rereadListingForConversation(
+            tx as Parameters<typeof rereadListingForConversation>[0],
+            "SERVICE",
+            service.id,
+          ),
+        )
+        .then((snapshot: unknown) => expect(snapshot).toBeNull());
+
+      // RENTAL 分支
+      await rawClient!.$transaction((tx: unknown) =>
+        rereadListingForConversation(
+          tx as Parameters<typeof rereadListingForConversation>[0],
+          "RENTAL",
+          rental.id,
+        ),
+      ).then((snapshot: unknown) =>
+        expect(snapshot).toMatchObject({ campusId: campusA.id, ownerId: seller.id }),
+      );
+
+      // restore ERRAND 域（RESTORE_BY_TYPE 分支覆盖）
+      const covErrand = await createErrandFixture(seller.id);
+      await moderateErrandListing({ moderatorId: moderator.id, listingId: covErrand.id, reasonCode: "OTHER" });
+      const errandMod = await rawClient!.listingModeration.findFirstOrThrow({
+        where: { errandTaskId: covErrand.id, resolvedAt: null },
+      });
+      const restored = await restoreListingByModerationIdentity({
+        moderatorId: moderator.id,
+        moderationId: errandMod.id,
+        expectedListingUpdatedAt: covErrand.updatedAt,
+      });
+      expect(restored.outcome).toBe("RESTORED");
+    }, 30_000);
+
+    it("FR05-COV：loadGovernanceListingDetail 四域 + loadListingModerationHistory", async () => {
+      const { loadGovernanceListingDetail } = await import(
+        "@/lib/moderation/listing-moderation-query"
+      );
+      const product = await createTimedProduct({ sellerId: seller.id, title: `GOV-P-${RUN_TAG}`, createdAt: new Date("2026-09-08T00:00:00.000Z") });
+      const service = await createServiceFixture(`GOV-S-${RUN_TAG}`);
+      const errand = await createErrandFixture(seller.id);
+      const rental = await createRentalFixture(seller.id);
+
+      const detailProduct = await loadGovernanceListingDetail("PRODUCT", product.id);
+      expect(detailProduct).toMatchObject({ targetType: "PRODUCT", campusId: campusA.id });
+      const detailService = await loadGovernanceListingDetail("SERVICE", service.id);
+      expect(detailService).toMatchObject({ targetType: "SERVICE" });
+      const detailErrand = await loadGovernanceListingDetail("ERRAND", errand.id);
+      expect(detailErrand).toMatchObject({ targetType: "ERRAND", pricing: "¥20" });
+      const detailRental = await loadGovernanceListingDetail("RENTAL", rental.id);
+      expect(detailRental).toMatchObject({ targetType: "RENTAL", imageUrls: [] });
+      expect(await loadGovernanceListingDetail("PRODUCT", "missing-id")).toBeNull();
+
+      // history：写入两条（takedown + resolve + 再 takedown）后应返回两行
+      await moderateProductListing({ moderatorId: moderator.id, listingId: product.id, reasonCode: "OTHER" });
+      const active = await rawClient!.listingModeration.findFirstOrThrow({
+        where: { productId: product.id, resolvedAt: null },
+      });
+      await restoreListingByModerationIdentity({
+        moderatorId: moderator.id,
+        moderationId: active.id,
+        expectedListingUpdatedAt: product.updatedAt,
+      });
+      await moderateProductListing({ moderatorId: moderator.id, listingId: product.id, reasonCode: "OTHER" });
+      const { loadListingModerationHistory: history } = await import(
+        "@/lib/moderation/listing-moderation-query"
+      );
+      const rows = await history({ targetType: "PRODUCT", listingId: product.id });
+      expect(rows).toHaveLength(2);
+      expect(rows[0].resolvedAt).toBeNull();
+      expect(rows[1].resolvedAt).not.toBeNull();
+    }, 45_000);
+
+    it("FR03-helper：hasActiveModerationForPublicSurface 判定（PUBLIC 面 owner exception 不适用）", async () => {
+      const product = await createTimedProduct({ sellerId: seller.id, title: `PUB-${RUN_TAG}`, createdAt: new Date("2026-09-07T00:00:00.000Z") });
+      expect(await hasActiveModerationForPublicSurface("PRODUCT", product.id)).toBe(false);
+      await moderateProductListing({ moderatorId: moderator.id, listingId: product.id, reasonCode: "OTHER" });
+      expect(await hasActiveModerationForPublicSurface("PRODUCT", product.id)).toBe(true);
+    }, 20_000);
   },
 );
 

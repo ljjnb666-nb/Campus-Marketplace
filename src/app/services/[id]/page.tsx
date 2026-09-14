@@ -9,6 +9,7 @@ import { ServiceDetailConsole } from "@/components/service/service-detail-consol
 import { getActiveViewerId } from "@/lib/server-auth";
 import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
 import { getServiceDetail } from "@/repositories/service-repository";
 import { CheckCircle2 } from "lucide-react";
 
@@ -33,6 +34,10 @@ export async function generateMetadata({
 
   try {
     const { service } = await getServiceDetail(id);
+    // Phase 7C FR-03：metadata 属 PUBLIC surface（owner exception 不适用）
+    if (await hasActiveModerationForPublicSurface("SERVICE", service.id)) {
+      return SERVICE_DETAIL_FALLBACK_METADATA;
+    }
     const title = `${service.title} - 校园集市`;
     const description = truncateForMetadata(
       service.description || `查看校园集市技能服务「${service.title}」的服务内容与价格。`,

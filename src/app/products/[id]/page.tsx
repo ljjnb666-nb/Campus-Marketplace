@@ -7,9 +7,12 @@ import { ImageGallery } from "@/components/ui/image-gallery";
 import { ProductCard } from "@/components/product/product-card";
 import { ProductDetailConsole } from "@/components/product/product-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
-import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
+import {
+  hasActiveModerationForPublicSurface,
+  resolvePublicDetailModerationGate,
+} from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
-import { getProductDetail } from "@/repositories/product-repository";
+import { getProductDetail, incrementProductView } from "@/repositories/product-repository";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +35,11 @@ export async function generateMetadata({
 
   try {
     const { product } = await getProductDetail(id, undefined, { countView: false });
+    // Phase 7C FR-03：metadata 属 PUBLIC surface——active moderation 时
+    // 返回 generic fallback（owner exception 不适用于 metadata）。
+    if (await hasActiveModerationForPublicSurface("PRODUCT", product.id)) {
+      return PRODUCT_DETAIL_FALLBACK_METADATA;
+    }
     const title = `${product.title} - 校园集市`;
     const description = truncateForMetadata(
       product.description || `查看校园集市在售二手闲置「${product.title}」的价格、成色与卖家信息。`,
@@ -63,7 +71,11 @@ export default async function ProductDetailPage({
   // Phase 6C-2 raw-auth hardening：收藏状态/owner 个性化按 ACTIVE 账号解析；
   // SUSPENDED 会话 → null → 匿名语义（收藏态与 isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
-  const { product, relatedProducts } = await getProductDetail(id, viewerId ?? undefined);
+  // Phase 7C FR-03B：浏览计数移到治理门之后——hidden/owner-hidden 请求
+  // 零 Product 写入（updatedAt 推进会作废 restore freshness token）。
+  const { product, relatedProducts } = await getProductDetail(id, viewerId ?? undefined, {
+    countView: false,
+  });
   // Phase 7C PUBLIC detail 治理特例：活跃 moderation ∧ 非 owner → notFound()；
   // owner → 渲染 + 安全横幅（OWNER_EDIT_WHILE_HIDDEN = ALLOWED_V1）
   const moderationGate = await resolvePublicDetailModerationGate({
@@ -74,6 +86,9 @@ export default async function ProductDetailPage({
   });
   if (moderationGate === "HIDDEN") {
     notFound();
+  }
+  if (moderationGate === "OPEN") {
+    await incrementProductView(product.id);
   }
   const isOwner = viewerId === product.sellerId;
   const isFavorited = Array.isArray(product.favorites) && product.favorites.length > 0;

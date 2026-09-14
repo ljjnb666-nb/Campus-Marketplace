@@ -56,7 +56,7 @@ const DETAIL = {
   ownerId: "seller-1",
   createdAt: new Date("2026-09-12T10:00:00.000Z"),
   updatedAt: new Date(UPDATED_AT),
-  imageUrls: [],
+  imageUrls: ["/uploads/products/e2e.jpg", "/uploads/products/e2e-2.jpg"],
   pricing: "¥66",
   locationText: "东门",
 };

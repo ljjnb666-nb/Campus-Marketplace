@@ -149,11 +149,23 @@ test("7C-E2E01/02：内容审核员 takedown → owner 安全可见 → restore�
   const ownerPage = await ownerContext.newPage();
   await loginViaUI(ownerPage, ownerEmail, ownerPassword, "E2E被治理卖家");
 
+  // FR-04：确定性断言——先锁定 URL 与页面唯一标题（页面稳定条件），
+  // 再在 main landmark 内断言治理状态节点 count=1 + 可见。禁 .first()/sleep。
   await ownerPage.goto("/my/products");
+  await expect(ownerPage).toHaveURL(/\/my\/products$/);
+  await expect(
+    ownerPage.getByRole("heading", { name: "我的发布" }),
+  ).toBeVisible();
+  await expect(ownerPage.getByTestId("moderation-pending-badge")).toHaveCount(1);
   await expect(ownerPage.getByTestId("moderation-pending-badge")).toBeVisible();
+
   await ownerPage.goto(`/products/${product.id}`);
-  await expect(ownerPage.getByTestId("moderation-hidden-banner")).toBeVisible();
-  await expect(ownerPage.getByText(`E2E 内部备注 ${tag}`)).toHaveCount(0);
+  await expect(ownerPage).toHaveURL(new RegExp(`/products/${product.id}$`));
+  await expect(ownerPage.getByRole("heading", { name: productTitle })).toBeVisible();
+  const ownerMain = ownerPage.getByRole("main");
+  await expect(ownerMain.getByTestId("moderation-hidden-banner")).toHaveCount(1);
+  await expect(ownerMain.getByTestId("moderation-hidden-banner")).toBeVisible();
+  await expect(ownerMain.getByText(`E2E 内部备注 ${tag}`)).toHaveCount(0);
 
   // ---------- moderator：治理 detail 检视现势内容 → restore ----------
   await moderatorPage.goto(`/governance/listings/product/${product.id}`);

@@ -297,6 +297,9 @@ export async function claimErrand(formData: FormData) {
       return;
     }
 
+    // Phase 7C FR-02 同类收敛：tx null（moderation/状态失效/参与方失配/
+    // 抢占失败）→ 静默 no-op（无成功反馈）；revalidate 无条件执行——
+    // 列表刷新非成功信号，仅呈现任务已不可接的现势状态。
     await withTransaction(async (tx) =>
       claimErrandTx(tx, {
         errandId,

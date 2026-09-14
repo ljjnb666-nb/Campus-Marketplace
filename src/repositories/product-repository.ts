@@ -307,8 +307,19 @@ export async function getProductDetail(
   return { product, relatedProducts };
 }
 
-export async function getProductForEdit(productId: string, userId: string) {
-  const product = await prisma.product.findFirst({
+/**
+ * Phase 7C FR-03B：浏览计数与治理门解耦——仅公开可见详情在通过
+ * moderation gate 后调用本函数计数；hidden/owner-hidden/metadata 请求
+ * 不得触碰 Product 行（否则 updatedAt 推进会作废 restore freshness token）。
+ */
+export async function incrementProductView(productId: string) {
+  await prisma.product.update({
+    where: { id: productId },
+    data: { viewCount: { increment: 1 } },
+  });
+}
+
+export async function getProductForEdit(productId: string, userId: string) {  const product = await prisma.product.findFirst({
     where: {
       id: productId,
       sellerId: userId,

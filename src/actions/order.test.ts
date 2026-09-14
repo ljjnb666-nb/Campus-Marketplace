@@ -217,6 +217,8 @@ describe("order actions", () => {
       buildProductOrderFormData(),
     );
 
+    // 事务外 active-order 预检命中（orderFindFirst）→ 专用文案，
+    // 不经过 tx-null 泛化路径
     expect(result).toEqual({
       success: false,
       message: "该商品已有进行中的订单",
@@ -239,9 +241,12 @@ describe("order actions", () => {
       buildProductOrderFormData(),
     );
 
+    // 事务外 active-order 预检命中（orderFindFirst）→ 专用文案，
+    // 不经过 tx-null 泛化路径
+    // Phase 7C FR-02：tx-null（含 updateMany 抢占失败）→ 统一 SAFE 文案
     expect(result).toEqual({
       success: false,
-      message: "该商品已有进行中的订单",
+      message: "商品不存在或当前不可购买",
     });
     expect(txProductUpdateMany).toHaveBeenCalledWith({
       where: {

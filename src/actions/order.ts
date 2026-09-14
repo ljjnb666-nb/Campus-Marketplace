@@ -123,8 +123,11 @@ export async function createProductOrder(
       }),
     );
 
+    // Phase 7C FR-02：tx null 语义已泛化（moderation/现势状态失效/参与方或
+    // campus 失配/抢占失败任一）——统一 SAFE 文案，不区分原因（禁止事务外
+    // 附加查询重判），不误导为"已有进行中的订单"。
     if (!order) {
-      return { ...initialState, message: "该商品已有进行中的订单" };
+      return { ...initialState, message: "商品不存在或当前不可购买" };
     }
 
     revalidateOrderViews({ productId: product.id });
@@ -181,7 +184,9 @@ export async function createServiceOrder(
       return { ...initialState, message: "不能预约自己发布的服务" };
     }
 
-    await withTransaction(async (tx) =>
+    // Phase 7C FR-02：canonical 锁内 gate（moderation/现势状态/参与方/
+    // campus 失配）拒绝时返回 null——统一映射 SAFE 文案，不泄漏治理状态。
+    const order = await withTransaction(async (tx) =>
       createServiceOrderTx(tx, {
         buyerId: user.id,
         service: {
@@ -194,6 +199,10 @@ export async function createServiceOrder(
         note: parsed.data.note || null,
       }),
     );
+
+    if (!order) {
+      return { ...initialState, message: "服务不存在或当前不可预约" };
+    }
 
     revalidateOrderViews({ serviceId: service.id });
 

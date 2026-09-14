@@ -567,6 +567,28 @@ describe("conversation actions", () => {
       expect(createData.title).toBe("服务咨询：高数辅导");
     });
 
+    it("returns the unified counterparty denial when the provider is restricted（409 合同，service catch）", async () => {
+      serviceListingFindFirst.mockResolvedValue({
+        id: "service-1",
+        title: "高数辅导",
+        providerId: "provider-1",
+      });
+      gateRequireParticipantsEligible.mockRejectedValue(
+        enforcementError("MARKETPLACE_COUNTERPARTY_UNAVAILABLE"),
+      );
+
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+
+      const result = await createOrOpenServiceConversation(null, formData);
+
+      expect(result).toEqual({
+        success: false,
+        message: "对方当前无法开始新的交易，请稍后再试",
+      });
+      expect(txConversationCreate).not.toHaveBeenCalled();
+    });
+
     it("redirects for a missing service or one owned by the current user", async () => {
       serviceListingFindFirst.mockResolvedValue(null);
       let formData = new FormData();
@@ -774,5 +796,28 @@ describe("conversation actions", () => {
       expect(result.success).toBe(false);
       expect(conversationFindFirst).not.toHaveBeenCalled();
     });
+    it("returns the unified counterparty denial when the owner is restricted（409 合同，rental catch）", async () => {
+      rentalListingFindFirst.mockResolvedValue({
+        id: "rental-1",
+        title: "相机出租",
+        ownerId: "owner-1",
+      });
+      gateRequireParticipantsEligible.mockRejectedValue(
+        enforcementError("MARKETPLACE_COUNTERPARTY_UNAVAILABLE"),
+      );
+
+      const formData = new FormData();
+      formData.set("rentalListingId", "rental-1");
+
+      const result = await createOrOpenRentalConversation(null, formData);
+
+      expect(result).toEqual({
+        success: false,
+        message: "对方当前无法开始新的交易，请稍后再试",
+      });
+      expect(txConversationCreate).not.toHaveBeenCalled();
+    });
+
+
   });
 });

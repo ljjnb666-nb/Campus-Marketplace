@@ -8,6 +8,7 @@ import { ErrandDetailConsole } from "@/components/errand/errand-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
 import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
 import { getErrandDetail } from "@/repositories/errand-repository";
 import { MapPin, Navigation, Info, ShieldAlert } from "lucide-react";
 
@@ -32,6 +33,10 @@ export async function generateMetadata({
 
   try {
     const { errand } = await getErrandDetail(id);
+    // Phase 7C FR-03：metadata 属 PUBLIC surface（owner exception 不适用）
+    if (await hasActiveModerationForPublicSurface("ERRAND", errand.id)) {
+      return ERRAND_DETAIL_FALLBACK_METADATA;
+    }
     const title = `${errand.title} - 校园集市`;
     const description = truncateForMetadata(
       errand.description || `查看校园集市跑腿任务「${errand.title}」的取送路线与跑腿报酬。`,

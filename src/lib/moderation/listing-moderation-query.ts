@@ -76,6 +76,19 @@ export async function getActiveListingModeration(
   return row ?? null;
 }
 
+/**
+ * FR-03：PUBLIC metadata 面专用（generateMetadata 属公开读面，owner
+ * exception 不适用）——活跃 moderation 存在 → 调用方返回 generic fallback
+ * metadata，hidden listing 的 title/description/pricing/location/images
+ * 不得进入 <title>/meta/OG/Twitter。封装在 lib 层以保持页面零 prisma 导入。
+ */
+export async function hasActiveModerationForPublicSurface(
+  targetType: ListingModerationTargetType,
+  listingId: string,
+): Promise<boolean> {
+  return hasActiveListingModeration(prisma, targetType, listingId);
+}
+
 /** 义务 gate 便捷形态：活跃 moderation 是否存在（存在 → 新义务必须拒绝）。 */
 export async function hasActiveListingModeration(
   client: ModerationReader,
@@ -209,7 +222,7 @@ export async function rereadListingForConversation(
   };
 }
 
-// ── 治理队列读模型（/governance/listings 三 tab；R6/R2 冻结）────────────────
+// ── 治理队列读模型（/governance/listings 三 tab；R6/R2 + Final Review FR-01 冻结）──
 
 export type ModerationQueueItem = {
   key: string;
@@ -224,6 +237,33 @@ export type ModerationQueueItem = {
   activeModeration: { id: string; createdAt: Date; reasonCode: string } | null;
   /** 待处置 tab：未结举报 reason 枚举（最多 5 条；绝不返回 detail 自由文本） */
   openReportReasons: string[];
+  /** FR-01 内部分页元组（客户端无需理解领域含义）：
+   *  browse/reports = listing.(createdAt,id)；active = moderation.(createdAt,id) */
+  cursorCreatedAt: Date;
+  cursorId: string;
+};
+
+/** FR-01 冻结 keyset 谓词（与 scope/campus/type/status/search/治理谓词 AND 合并，
+ * 绝不覆盖既有过滤）：排序 (createdAt DESC, id DESC) 的续页条件为
+ * createdAt < c OR (createdAt = c AND id < c.id)。 */
+function listingKeysetWhere(cursor: { createdAt: Date; id: string } | null): Record<string, unknown> {
+  if (!cursor) {
+    return {};
+  }
+  return {
+    OR: [
+      { createdAt: { lt: cursor.createdAt } },
+      {
+        AND: [{ createdAt: { equals: cursor.createdAt } }, { id: { lt: cursor.id } }],
+      },
+    ],
+  };
+}
+
+/** FR-01 冻结分页返回形态：take = limit+1 → hasMore = rows.length > limit。 */
+export type ModerationQueuePage = {
+  items: ModerationQueueItem[];
+  hasMore: boolean;
 };
 
 const REPORT_OPEN_STATUSES = ["OPEN", "IN_REVIEW"] as const;
@@ -234,7 +274,6 @@ interface QueueDelegate {
   findMany(args: {
     where: Record<string, unknown>;
     orderBy: Array<Record<string, string>>;
-    skip?: number;
     take: number;
     select: Record<string, unknown>;
   }): Promise<unknown[]>;
@@ -288,6 +327,8 @@ function toQueueItem(
     createdAt: row.createdAt,
     activeModeration: row.moderations[0] ?? null,
     openReportReasons: row.reports.map((report) => report.reason),
+    cursorCreatedAt: row.createdAt,
+    cursorId: row.id,
   };
 }
 
@@ -297,15 +338,21 @@ async function runQueueQuery(
   baseWhere: Record<string, unknown>,
   cursor: { createdAt: Date; id: string } | null,
   limit: number,
-): Promise<ModerationQueueItem[]> {
+): Promise<ModerationQueuePage> {
   const rows = (await delegate.findMany({
-    where: baseWhere,
+    where: {
+      ...baseWhere,
+      ...listingKeysetWhere(cursor),
+    },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    ...(cursor ? { skip: 1 } : {}),
-    take: limit,
+    take: limit + 1,
     select: queueSelect(targetType),
   })) as unknown as QueueOwnerRow[];
-  return rows.map((row) => toQueueItem(targetType, row));
+  const hasMore = rows.length > limit;
+  return {
+    items: rows.slice(0, limit).map((row) => toQueueItem(targetType, row)),
+    hasMore,
+  };
 }
 
 /**
@@ -331,13 +378,15 @@ const QUEUE_DELEGATES: Record<
   RENTAL: { delegate: prisma.rentalListing as unknown as QueueDelegate, listingIdField: "id" },
 };
 
-/** tab① 待处置举报：有 OPEN/IN_REVIEW 举报的 listing（举报域只读）。 */
+/** tab① 待处置举报：有 OPEN/IN_REVIEW 举报的 listing（举报域只读）。
+ *  FR-01 冻结：排序元组 = listing.(createdAt, id)——四域 id 全局唯一，
+ *  跨域 union 共用同一 (createdAt,id) cursor tuple 全局一致。 */
 export async function loadReportFlaggedListings(args: {
   access: ListingModerationAccess;
   targetType: ListingModerationTargetType;
   cursor: { createdAt: Date; id: string } | null;
   limit: number;
-}): Promise<ModerationQueueItem[]> {
+}): Promise<ModerationQueuePage> {
   const { delegate } = QUEUE_DELEGATES[args.targetType];
   return runQueueQuery(
     args.targetType,
@@ -352,14 +401,15 @@ export async function loadReportFlaggedListings(args: {
   );
 }
 
-/** tab③ 浏览检视：campus 自动 scope + title 检索 + 状态过滤（独立于举报域）。 */
+/** tab③ 浏览检视：campus 自动 scope + title 检索 + 状态过滤（独立于举报域）。
+ *  FR-01 冻结：排序元组 = listing.(createdAt, id)。 */
 export async function browseListings(args: {
   access: ListingModerationAccess;
   targetType: ListingModerationTargetType;
   q?: string;
   cursor: { createdAt: Date; id: string } | null;
   limit: number;
-}): Promise<ModerationQueueItem[]> {
+}): Promise<ModerationQueuePage> {
   const { delegate } = QUEUE_DELEGATES[args.targetType];
   return runQueueQuery(
     args.targetType,
@@ -374,20 +424,21 @@ export async function browseListings(args: {
   );
 }
 
-/** tab② 治理处置中：活跃 ListingModeration 行（跨四域统一视图）。 */
+/** tab② 治理处置中：活跃 ListingModeration 行（跨四域统一视图）。
+ *  FR-01 冻结：排序元组 = ListingModeration.(createdAt, id)（非 listingId）。 */
 export async function loadActiveModerations(args: {
   access: ListingModerationAccess;
   cursor: { createdAt: Date; id: string } | null;
   limit: number;
-}): Promise<ModerationQueueItem[]> {
+}): Promise<ModerationQueuePage> {
   const rows = await prisma.listingModeration.findMany({
     where: {
       resolvedAt: null,
       ...queueCampusWhere(args.access),
+      ...listingKeysetWhere(args.cursor),
     },
     orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
-    ...(args.cursor ? { skip: 1 } : {}),
-    take: args.limit,
+    take: args.limit + 1,
     include: {
       product: { select: { title: true, status: true, seller: { select: { name: true } } } },
       serviceListing: { select: { title: true, status: true, provider: { select: { name: true } } } },
@@ -398,8 +449,9 @@ export async function loadActiveModerations(args: {
       resolvedBy: { select: { name: true } },
     },
   });
+  const hasMore = rows.length > args.limit;
 
-  return rows.map((row) => {
+  const items = rows.slice(0, args.limit).map((row) => {
     const target =
       row.product ?? row.serviceListing ?? row.errandTask ?? row.rentalListing;
     if (!target) {
@@ -424,8 +476,11 @@ export async function loadActiveModerations(args: {
       createdAt: row.createdAt,
       activeModeration: { id: row.id, createdAt: row.createdAt, reasonCode: row.reasonCode },
       openReportReasons: [],
+      cursorCreatedAt: row.createdAt,
+      cursorId: row.id,
     };
   });
+  return { items, hasMore };
 }
 
 /** 治理 detail：目标 listing 的全部 moderation 历史（含 resolved）。 */

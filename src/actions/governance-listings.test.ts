@@ -2,11 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   moderateProductListingMock,
+  moderateServiceListingMock,
+  moderateErrandListingMock,
+  moderateRentalListingMock,
   restoreListingByIdentityMock,
   revalidateMock,
   requireUserMock,
 } = vi.hoisted(() => ({
   moderateProductListingMock: vi.fn(),
+  moderateServiceListingMock: vi.fn(),
+  moderateErrandListingMock: vi.fn(),
+  moderateRentalListingMock: vi.fn(),
   restoreListingByIdentityMock: vi.fn(),
   revalidateMock: vi.fn(),
   requireUserMock: vi.fn(),
@@ -26,14 +32,17 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/lib/moderation/listing-moderation-service", () => ({
   moderateProductListing: moderateProductListingMock,
-  moderateServiceListing: vi.fn(),
-  moderateErrandListing: vi.fn(),
-  moderateRentalListing: vi.fn(),
+  moderateServiceListing: moderateServiceListingMock,
+  moderateErrandListing: moderateErrandListingMock,
+  moderateRentalListing: moderateRentalListingMock,
   restoreListingByModerationIdentity: restoreListingByIdentityMock,
 }));
 
 import {
+  moderateErrandListingAction,
   moderateProductListingAction,
+  moderateRentalListingAction,
+  moderateServiceListingAction,
   restoreListingModerationAction,
 } from "@/actions/governance-listings";
 
@@ -149,5 +158,52 @@ describe("Phase 7C governance-listings actions（R2-03/R2-06 冻结映射）", (
 
     expect(result).toEqual({ success: false, message: "该处置当前不可恢复" });
     expect(result.message).not.toContain("注销");
+  });
+});
+
+describe("Phase 7C governance-listings actions：四域 dispatch 映射", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    requireUserMock.mockResolvedValue({ id: "moderator-1", name: "审核员" });
+    revalidateMock.mockReturnValue(undefined);
+  });
+
+  it("SERVICE/ERRAND/RENTAL action → 各自 canonical seam + 对应 revalidate", async () => {
+    moderateServiceListingMock.mockResolvedValue({ outcome: "TAKEDOWN", moderationId: "m-s" });
+    moderateErrandListingMock.mockResolvedValue({ outcome: "ALREADY_MODERATED", moderationId: "m-e" });
+    moderateRentalListingMock.mockResolvedValue({ outcome: "TAKEDOWN", moderationId: "m-r" });
+
+    const fd = (id: string) => {
+      const data = new FormData();
+      data.set("listingId", id);
+      data.set("reasonCode", "OTHER");
+      return data;
+    };
+
+    await moderateServiceListingAction(fd("service-1"));
+    expect(moderateServiceListingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ moderatorId: "moderator-1", listingId: "service-1" }),
+    );
+    expect(revalidateMock).toHaveBeenCalledWith("SERVICE", "service-1");
+
+    const errandResult = await moderateErrandListingAction(fd("errand-1"));
+    expect(errandResult.message).toBe("该内容已在治理处置中");
+    expect(revalidateMock).toHaveBeenCalledWith("ERRAND", "errand-1");
+
+    await moderateRentalListingAction(fd("rental-1"));
+    expect(revalidateMock).toHaveBeenCalledWith("RENTAL", "rental-1");
+  });
+
+  it("takedown note 缺省 → null 传递；canonical 抛错 → deny", async () => {
+    const { moderationError } = await import("@/lib/moderation/errors");
+    moderateProductListingMock.mockRejectedValue(moderationError("MODERATION_TARGET_NOT_FOUND"));
+    const fd = new FormData();
+    fd.set("listingId", "product-404");
+    fd.set("reasonCode", "OTHER");
+    const result = await moderateProductListingAction(fd);
+    expect(result).toEqual({ success: false, message: "没有权限执行该治理操作" });
+    expect(moderateProductListingMock).toHaveBeenCalledWith(
+      expect.objectContaining({ note: null }),
+    );
   });
 });
