@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { AuditReadAccess } from "@/lib/audit/audit-access";
+import type { EnforcementReadAccess } from "@/lib/enforcement/enforcement-read-access";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -34,7 +36,8 @@ const rawClient = integrationDatabaseUrl
 
 const RUN_TAG = `p7d-vis-${randomUUID().slice(0, 8)}`;
 const FIXTURE_PASSWORD_HASH = ["$2a$10$", "itfixtureitfixtureitfixtureitfixtureitfix"].join("");
-const LEGACY_SEQ = 900000000n + BigInt(Math.floor(Math.random() * 99_000_000)) + 1n;
+// tests tsconfig target ES2017：BigInt 用构造器（沿 enforcement-sequence.ts 先例）
+const LEGACY_SEQ = BigInt(900000000 + Math.floor(Math.random() * 99_000_000) + 1);
 
 const createdUserIds: string[] = [];
 const createdCampusIds: string[] = [];
@@ -340,7 +343,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
   it("同 createdAt 行 id tiebreak：keyset 分页确定性、零重叠零遗漏", async () => {
     const { loadAuthorizedAuditPage } = await import("@/lib/audit/audit-read-model");
     const { decodeAuditCursor } = await import("@/validators/audit");
-    const access = { global: true, campusIds: [] } as const;
+    const access: AuditReadAccess = { global: true, campusIds: [] };
 
     const collect = async () => {
       const seen: string[] = [];
@@ -489,7 +492,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
   it("队列单值 seq keyset 分页：零重叠零遗漏，末页 nextCursor=null", async () => {
     const { loadAuthorizedEnforcementQueue } = await import("@/lib/enforcement/enforcement-read-model");
     const { decodeEnforcementSeqCursor } = await import("@/validators/enforcement");
-    const access = { global: true, campusIds: [] } as const;
+    const access: EnforcementReadAccess = { global: true, campusIds: [] };
 
     const seen: string[] = [];
     let cursor: bigint | undefined;
@@ -592,7 +595,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
 
   it("T05/T06：campus A 读者——仅跨校区 anchor 或 GLOBAL-only anchor → 不建立存在性", async () => {
     const { hasVisibleTargetAnchor } = await import("@/lib/enforcement/enforcement-read-model");
-    const campusAAccess = { global: false, campusIds: [campusA] } as const;
+    const campusAAccess: EnforcementReadAccess = { global: false, campusIds: [campusA] };
 
     // campusBTarget 仅有 GLOBAL enforcement anchor → campus A 读者不可见
     expect(

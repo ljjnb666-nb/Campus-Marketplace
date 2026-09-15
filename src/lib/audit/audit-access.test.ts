@@ -26,12 +26,17 @@ import {
   requireAuditReader,
 } from "@/lib/audit/audit-access";
 
-function context(overrides: Record<string, unknown> = {}) {
+function context(overrides: Partial<{
+  userId: string;
+  accountActive: boolean;
+  activeCampusIds: string[];
+  grants: Array<{ roleKey: string; scope: "GLOBAL" | "CAMPUS"; campusId: string | null; permissionKeys: string[] }>;
+}> = {}) {
   return {
     userId: "u1",
     accountActive: true,
     activeCampusIds: [] as string[],
-    grants: [] as unknown[],
+    grants: [] as Array<{ roleKey: string; scope: "GLOBAL" | "CAMPUS"; campusId: string | null; permissionKeys: string[] }>,
     ...overrides,
   };
 }

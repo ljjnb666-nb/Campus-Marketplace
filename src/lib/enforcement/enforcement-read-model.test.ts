@@ -44,7 +44,7 @@ const ZERO_ACCESS: EnforcementReadAccess = { global: false, campusIds: [] };
 
 function actionRow(overrides: Record<string, unknown> = {}) {
   return {
-    enforcementSeq: 1000000003n,
+    enforcementSeq: BigInt(1000000003),
     type: "ACCOUNT_SUSPEND",
     campusId: null,
     campus: null,
@@ -108,22 +108,22 @@ describe("loadAuthorizedEnforcementQueue（§17 冻结）", () => {
 
     await loadAuthorizedEnforcementQueue({
       access: GLOBAL_ACCESS,
-      cursor: 1000000000n,
+      cursor: BigInt(1000000000),
       limit: 25,
       filters: { type: "ACCOUNT_SUSPEND", targetId: "t1" },
     });
 
     const conditions = mockEnforcementFindMany.mock.calls[0][0].where.AND;
-    expect(conditions).toContainEqual({ enforcementSeq: { lt: 1000000000n } });
+    expect(conditions).toContainEqual({ enforcementSeq: { lt: BigInt(1000000000) } });
     expect(conditions).toContainEqual({ type: "ACCOUNT_SUSPEND" });
     expect(conditions).toContainEqual({ targetId: "t1" });
   });
 
   it("hasMore → 截断 + nextCursor 为 canonical decimal（R6 wire）", async () => {
     mockEnforcementFindMany.mockResolvedValue([
-      actionRow({ enforcementSeq: 1000000005n }),
-      actionRow({ enforcementSeq: 1000000004n }),
-      actionRow({ enforcementSeq: 1000000003n }),
+      actionRow({ enforcementSeq: BigInt(1000000005) }),
+      actionRow({ enforcementSeq: BigInt(1000000004) }),
+      actionRow({ enforcementSeq: BigInt(1000000003) }),
     ]);
 
     const page = await loadAuthorizedEnforcementQueue({ access: GLOBAL_ACCESS, limit: 2 });
@@ -138,10 +138,10 @@ describe("loadAuthorizedEnforcementQueue（§17 冻结）", () => {
   it("scope 分类：GLOBAL∧null=GLOBAL；CAMPUS:<id>∧一致=CAMPUS；不一致行 fail closed", async () => {
     mockEnforcementFindMany.mockResolvedValue([
       actionRow(),
-      actionRow({ enforcementSeq: 1000000002n, scopeKey: "CAMPUS:A", campusId: "A", campus: { name: "主校区" } }),
-      actionRow({ enforcementSeq: 1000000001n, scopeKey: "GLOBAL", campusId: "A" }),
-      actionRow({ enforcementSeq: 1000000000n, scopeKey: "CAMPUS:A", campusId: "B" }),
-      actionRow({ enforcementSeq: 999999999n, scopeKey: "WEIRD", campusId: null }),
+      actionRow({ enforcementSeq: BigInt(1000000002), scopeKey: "CAMPUS:A", campusId: "A", campus: { name: "主校区" } }),
+      actionRow({ enforcementSeq: BigInt(1000000001), scopeKey: "GLOBAL", campusId: "A" }),
+      actionRow({ enforcementSeq: BigInt(1000000000), scopeKey: "CAMPUS:A", campusId: "B" }),
+      actionRow({ enforcementSeq: BigInt(999999999), scopeKey: "WEIRD", campusId: null }),
     ]);
 
     const page = await loadAuthorizedEnforcementQueue({ access: GLOBAL_ACCESS, limit: 25 });
@@ -199,13 +199,13 @@ describe("loadTargetEnforcementHistory（§20 冻结：bounded seq ASC）", () =
     await loadTargetEnforcementHistory({
       access: GLOBAL_ACCESS,
       targetId: "target-1",
-      cursor: 1000000000n,
+      cursor: BigInt(1000000000),
       limit: 25,
     });
 
     const call = mockEnforcementFindMany.mock.calls[0][0];
     expect(call.where.AND).toContainEqual({ targetId: "target-1" });
-    expect(call.where.AND).toContainEqual({ enforcementSeq: { gt: 1000000000n } });
+    expect(call.where.AND).toContainEqual({ enforcementSeq: { gt: BigInt(1000000000) } });
     expect(call.orderBy).toEqual([{ enforcementSeq: "asc" }]);
     expect(call.take).toBe(26);
   });

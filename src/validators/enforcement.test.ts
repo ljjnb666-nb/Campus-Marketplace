@@ -15,23 +15,24 @@ function enc(payload: string): string {
 
 describe("enforcementSeq wire 合同（R6 / DECISION_14 冻结）", () => {
   it("encode：bigint → canonical decimal string（toString(10)）", () => {
-    expect(encodeEnforcementSeq(1000000000n)).toBe("1000000000");
-    expect(encodeEnforcementSeq(0n)).toBe("0");
-    expect(encodeEnforcementSeq(123456789012345678901234567890n)).toBe(
+    // tests tsconfig target ES2017：BigInt 一律用构造器（禁字面量）
+    expect(encodeEnforcementSeq(BigInt(1000000000))).toBe("1000000000");
+    expect(encodeEnforcementSeq(BigInt(0))).toBe("0");
+    expect(encodeEnforcementSeq(BigInt("123456789012345678901234567890"))).toBe(
       "123456789012345678901234567890",
     );
   });
 
   it("cursor 往返唯一：encode(decode(x)) === x", () => {
-    const seq = 1000000042n;
+    const seq = BigInt(1000000042);
     const cursor = encodeEnforcementSeqCursor(seq);
     expect(decodeEnforcementSeqCursor(cursor)).toBe(seq);
     expect(encodeEnforcementSeqCursor(decodeEnforcementSeqCursor(cursor)!)).toBe(cursor);
   });
 
   it("合法 canonical decimal 解码成功", () => {
-    expect(decodeEnforcementSeqCursor(enc("0"))).toBe(0n);
-    expect(decodeEnforcementSeqCursor(enc("999"))).toBe(999n);
+    expect(decodeEnforcementSeqCursor(enc("0"))).toBe(BigInt(0));
+    expect(decodeEnforcementSeqCursor(enc("999"))).toBe(BigInt(999));
   });
 
   it("拒绝负号 / 加号 / 小数 / 科学计数 / 前导零 / 空串 / 非数字", () => {
@@ -47,7 +48,7 @@ describe("enforcementSeq wire 合同（R6 / DECISION_14 冻结）", () => {
 
   it("拒绝畸形 base64url 与超范围输入（不经 Number，无精度损失）", () => {
     expect(decodeEnforcementSeqCursor("!!!")).toBeNull();
-    const huge = 123456789012345678901234567890n;
+    const huge = BigInt("123456789012345678901234567890");
     expect(decodeEnforcementSeqCursor(encodeEnforcementSeqCursor(huge))).toBe(huge);
   });
 });

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   AUDIT_MAX_PAGE_SIZE,
   auditDateRange,
-  auditPageLimitSchema,
   auditQueueQuerySchema,
   decodeAuditCursor,
   encodeAuditCursor,
