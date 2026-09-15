@@ -66,7 +66,10 @@ export default async function GovernanceEnforcementTargetPage({
   let queryInvalid = false;
   for (const [key, value] of Object.entries(queryParams)) {
     if (typeof value === "string") {
-      rawQuery[key] = value;
+      // 空串视为未填（与 queue 页同语义）
+      if (value !== "") {
+        rawQuery[key] = value;
+      }
     } else {
       queryInvalid = true;
     }

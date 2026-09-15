@@ -50,6 +50,15 @@ test("7D-E2E01：审计队列只读可见 + metadata 安全 + null campus 呈现
   await page.goto("/governance/audit");
   await expect(page.getByRole("heading", { name: "审计日志" })).toBeVisible();
 
+  // 等待客户端 hydration 收敛（生产构建瞬态双挂载，7B 同款确定性等待），
+  // 之后表单交互才可安全定位
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll(
+        'form[aria-label="审计筛选"] input[name="action"]',
+      ).length === 1,
+  );
+
   // governance 导航按 capability 呈现（PLATFORM_ADMIN 五链接齐备）
   const nav = page.getByRole("navigation", { name: "治理控制台" });
   await expect(nav.getByRole("link", { name: "审计日志" })).toBeVisible();
@@ -58,13 +67,15 @@ test("7D-E2E01：审计队列只读可见 + metadata 安全 + null campus 呈现
   // fixture 行可见：action 码 + null campus 呈现「无校区归属记录」
   await page.getByLabel("审计筛选").locator('input[name="action"]').fill(`PHASE7D_E2E_${tag}`);
   await page.getByLabel("审计筛选").getByRole("button", { name: "应用筛选" }).click();
-  await expect(page.getByText(`PHASE7D_E2E_${tag}`)).toBeVisible();
-  await expect(page.getByText("无校区归属记录")).toBeVisible();
-  await expect(page.getByText("全局操作")).toHaveCount(0);
+  await expect(page.getByText(`PHASE7D_E2E_${tag}`).first()).toBeVisible();
+  await expect(page.getByText("无校区归属记录").first()).toBeVisible();
+  // 行卡片内不得出现「全局操作」chip（页面副标题解释文字除外）
+  await expect(page.getByRole("article").getByText("全局操作")).toHaveCount(0);
 
   // metadata 仅以 label/value 结构化条目呈现；内部 detail 绝不出现
-  await expect(page.getByText(/原因码：/)).toBeVisible();
-  await expect(page.getByText("FRAUD_CONFIRMED")).toBeVisible();
+  // （.first()：hydration 收敛窗口内 DOM 瞬态双挂载会让 strict 命中双元素）
+  await expect(page.getByText(/原因码：/).first()).toBeVisible();
+  await expect(page.getByText("FRAUD_CONFIRMED").first()).toBeVisible();
   await expect(page.getByText("SECRET-E2E-7D-INTERNAL-NOTE")).toHaveCount(0);
 
   await context.close();
@@ -145,6 +156,14 @@ test("7D-E2E02：执法队列因果序 → 目标详情（历史 + 当前限制�
   await page.goto("/governance/enforcement");
   await expect(page.getByRole("heading", { name: "执法记录" })).toBeVisible();
 
+  // hydration 收敛确定性等待（同 E2E01）
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll(
+        'form[aria-label="执法记录筛选"] input[name="targetId"]',
+      ).length === 1,
+  );
+
   // targetId 筛选隔离本 fixture
   await page
     .getByLabel("执法记录筛选")
@@ -168,8 +187,8 @@ test("7D-E2E02：执法队列因果序 → 目标详情（历史 + 当前限制�
   await expect(page.getByRole("heading", { name: /目标执法历史：P7D执法目标/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "当前限制状态" })).toBeVisible();
   await expect(page.getByText("受限").first()).toBeVisible();
-  await expect(page.getByText("集市限制")).toBeVisible();
-  await expect(page.getByText("账号停用")).toBeVisible();
+  await expect(page.getByText("集市限制").first()).toBeVisible();
+  await expect(page.getByText("账号停用").first()).toBeVisible();
   await expect(page.getByText("SECRET-E2E-7D-EA-NOTE")).toHaveCount(0);
   await expect(page.getByText("SECRET-E2E-7D-SOURCE")).toHaveCount(0);
 
@@ -235,7 +254,7 @@ test("7D-E2E03：CAMPUS_CONTENT_MODERATOR → Audit/Enforcement 导航缺席 + �
     "CAMPUS_CONTENT_MODERATOR",
     "P7D内容审核员",
   );
-  await expectSiblingIsolation(browser, account, "/governance/listings", "列表治理");
+  await expectSiblingIsolation(browser, account, "/governance/listings", "内容治理");
 });
 
 test("7D-E2E04：CAMPUS_APPEAL_REVIEWER → Audit/Enforcement 导航缺席 + 直连 404", async ({ browser }) => {

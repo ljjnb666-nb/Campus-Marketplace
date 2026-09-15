@@ -45,11 +45,15 @@ export default async function GovernanceEnforcementPage({
   const { access } = await requireEnforcementReader();
   const params = await searchParams;
 
+  // 单值化：数组值视为无效（安全失败），仅接受标量查询参数；
+  // 空串视为未填（GET 表单未填字段会以空串提交，不能触发筛选校验失败）
   const raw: Record<string, string> = {};
   let scalarOnly = true;
   for (const [key, value] of Object.entries(params)) {
     if (typeof value === "string") {
-      raw[key] = value;
+      if (value !== "") {
+        raw[key] = value;
+      }
     } else {
       scalarOnly = false;
     }
