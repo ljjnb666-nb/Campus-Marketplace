@@ -18,7 +18,23 @@ export const auditPageLimitSchema = z.coerce
   .min(1, "limit 必须在 1 到 50 之间")
   .max(AUDIT_MAX_PAGE_SIZE, "limit 必须在 1 到 50 之间");
 
-const auditDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "日期格式必须为 YYYY-MM-DD");
+/**
+ * 真实 UTC 日历日期校验（Final Review Repair 1 / FR03 冻结）：
+ * 形状 ^\d{4}-\d{2}-\d{2}$ 且为真实存在的 UTC 日历日（ISO 往返一致）。
+ * 拒绝 2026-02-30 / 2026-13-01 / 2026-00-01 / 非闰年 02-29 等不可能日期，
+ * 使 Invalid Date 结构性无法进入 Prisma。
+ */
+export function isCanonicalUtcDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+const auditDateSchema = z
+  .string()
+  .refine(isCanonicalUtcDate, "日期必须为真实 UTC 日历日期（YYYY-MM-DD）");
 
 export const auditQueueQuerySchema = z
   .object({
@@ -79,15 +95,17 @@ export function decodeAuditCursor(raw: string): AuditCursor | null {
 }
 
 /**
- * from/to（YYYY-MM-DD）→ createdAt 区间（UTC 全天，v1 冻结边界语义）。
+ * from/to → createdAt 区间（UTC 全天，v1 冻结边界语义）。调用方必须先经
+ * auditQueueQuerySchema（内置 isCanonicalUtcDate）校验——本 helper 是
+ * 日期→UTC range 的唯一构造点，读模型不得自行重复构造（防语义漂移）。
  * 索引友好：与 (createdAt, id)/(campusId, createdAt, id) 复合索引前缀一致。
  */
 export function auditDateRange(from?: string, to?: string): { gte?: Date; lte?: Date } {
   const range: { gte?: Date; lte?: Date } = {};
-  if (from) {
+  if (from && isCanonicalUtcDate(from)) {
     range.gte = new Date(`${from}T00:00:00.000Z`);
   }
-  if (to) {
+  if (to && isCanonicalUtcDate(to)) {
     range.lte = new Date(`${to}T23:59:59.999Z`);
   }
   return range;

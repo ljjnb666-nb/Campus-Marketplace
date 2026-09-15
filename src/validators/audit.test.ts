@@ -21,18 +21,31 @@ describe("audit queue 查询合同", () => {
     expect(auditQueueQuerySchema.safeParse({ evil: "1" }).success).toBe(false);
   });
 
-  it("日期过滤必须为 YYYY-MM-DD", () => {
+  it("日期过滤必须为真实 UTC 日历日期（FR03：形状 + 真实日历）", () => {
     expect(auditQueueQuerySchema.safeParse({ from: "2026-09-15" }).success).toBe(true);
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-02-28" }).success).toBe(true);
+    expect(auditQueueQuerySchema.safeParse({ from: "2028-02-29" }).success).toBe(true); // 闰年
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-02-29" }).success).toBe(false); // 非闰年
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-02-31" }).success).toBe(false); // 不存在的日
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-13-01" }).success).toBe(false); // 不存在的月
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-00-01" }).success).toBe(false); // 零月
+    expect(auditQueueQuerySchema.safeParse({ from: "2026-99-99" }).success).toBe(false);
     expect(auditQueueQuerySchema.safeParse({ from: "2026/09/15" }).success).toBe(false);
     expect(auditQueueQuerySchema.safeParse({ to: "2026-09-15T10:00:00Z" }).success).toBe(false);
+    // Invalid Date 结构性无法通过校验进入 Prisma
+    expect(auditQueueQuerySchema.safeParse({ to: "2026-09-31" }).success).toBe(false);
   });
 
-  it("date range → UTC 全天确定边界", () => {
+  it("date range → UTC 全天确定边界；非法日期不得产出区间（防 Invalid Date 入 Prisma）", () => {
     expect(auditDateRange("2026-09-15", "2026-09-16")).toEqual({
       gte: new Date("2026-09-15T00:00:00.000Z"),
       lte: new Date("2026-09-16T23:59:59.999Z"),
     });
     expect(auditDateRange()).toEqual({});
+    // 防御性：helper 本身也不为不可能日期构造 Date（集中化唯一构造点）
+    expect(auditDateRange("2026-02-31", "2026-13-01")).toEqual({});
+    expect(auditDateRange("2026-02-29")).toEqual({}); // 非闰年
+    expect(auditDateRange("2028-02-29")).toEqual({ gte: new Date("2028-02-29T00:00:00.000Z") });
   });
 });
 

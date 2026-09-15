@@ -93,14 +93,27 @@ describe("loadAuthorizedEnforcementQueue（§17 冻结）", () => {
     expect(page.nextCursor).toBeNull();
   });
 
-  it("campus 读者：AND 恒含 campusId IN 有效校区（GLOBAL 行被谓词排除）", async () => {
+  it("campus 读者：AND 恒含 exact-pair OR 谓词（FR01：campusId 与 scopeKey 成对，无 IN 叉积）", async () => {
     mockEnforcementFindMany.mockResolvedValue([]);
 
-    await loadAuthorizedEnforcementQueue({ access: CAMPUS_A_ACCESS, limit: 25 });
-
-    expect(mockEnforcementFindMany.mock.calls[0][0].where).toEqual({
-      AND: [{ campusId: { in: ["A"] } }],
+    await loadAuthorizedEnforcementQueue({
+      access: { global: false, campusIds: ["A", "B"] },
+      limit: 25,
     });
+
+    const where = mockEnforcementFindMany.mock.calls[0][0].where;
+    expect(where).toEqual({
+      AND: [
+        {
+          OR: [
+            { campusId: "A", scopeKey: "CAMPUS:A" },
+            { campusId: "B", scopeKey: "CAMPUS:B" },
+          ],
+        },
+      ],
+    });
+    // FR01-U：杜绝单列 IN 充当 scope 权威（避免 GLOBAL/A inconsistent 行可见）
+    expect(JSON.stringify(where)).not.toContain('"in":');
   });
 
   it("seq 单值 keyset：cursor → enforcementSeq lt；过滤恒 AND", async () => {
@@ -210,14 +223,15 @@ describe("loadTargetEnforcementHistory（§20 冻结：bounded seq ASC）", () =
     expect(call.take).toBe(26);
   });
 
-  it("campus 读者：历史查询同样恒 AND campus scope", async () => {
+  it("campus 读者：历史查询同样恒 AND exact-pair scope（FR01 统一谓词）", async () => {
     mockEnforcementFindMany.mockResolvedValue([]);
 
     await loadTargetEnforcementHistory({ access: CAMPUS_A_ACCESS, targetId: "t1", limit: 25 });
 
     expect(mockEnforcementFindMany.mock.calls[0][0].where.AND).toContainEqual({
-      campusId: { in: ["A"] },
+      OR: [{ campusId: "A", scopeKey: "CAMPUS:A" }],
     });
+    expect(JSON.stringify(mockEnforcementFindMany.mock.calls[0][0].where)).not.toContain('"in":');
   });
 
   it("zero scope → fail-closed 空页", async () => {
@@ -309,19 +323,35 @@ describe("hasVisibleTargetAnchor（R5 / DECISION_13 存在性权威）", () => {
     expect(await hasVisibleTargetAnchor({ access: GLOBAL_ACCESS, targetId: "t1" })).toBe(false);
   });
 
-  it("campus 读者：anchor 查询恒含 scope 谓词（GLOBAL-only anchor 不可建立存在性）", async () => {
+  it("campus 读者：anchor 查询恒含 exact-pair scope 谓词（GLOBAL-only/inconsistent anchor 不可建立存在性）", async () => {
     mockEnforcementFindFirst.mockResolvedValue(null);
     mockRiskStateFindFirst.mockResolvedValue(null);
 
     expect(await hasVisibleTargetAnchor({ access: CAMPUS_A_ACCESS, targetId: "t1" })).toBe(false);
 
+    // EnforcementAction anchor：exact pair（FR01）
     expect(mockEnforcementFindFirst.mock.calls[0][0].where).toEqual({
       targetId: "t1",
-      AND: [{ campusId: { in: ["A"] } }],
+      AND: [{ OR: [{ campusId: "A", scopeKey: "CAMPUS:A" }] }],
     });
+    // RiskState anchor：沿用已冻结的 campusId 可见性模型（本轮不改）
     expect(mockRiskStateFindFirst.mock.calls[0][0].where).toEqual({
       userId: "t1",
       AND: [{ campusId: { in: ["A"] } }],
+    });
+  });
+
+  it("FR01-U-anchor：inconsistent GLOBAL/A 行不满足 exact pair → campus 读者不可 anchor", async () => {
+    // scopeKey=GLOBAL + campusId=A 的行：exact pair (A, CAMPUS:A) 结构性不命中
+    mockEnforcementFindFirst.mockResolvedValue(null);
+    mockRiskStateFindFirst.mockResolvedValue(null);
+
+    await hasVisibleTargetAnchor({ access: CAMPUS_A_ACCESS, targetId: "inconsistent-only" });
+
+    const where = mockEnforcementFindFirst.mock.calls[0][0].where;
+    expect(where).toEqual({
+      targetId: "inconsistent-only",
+      AND: [{ OR: [{ campusId: "A", scopeKey: "CAMPUS:A" }] }],
     });
   });
 

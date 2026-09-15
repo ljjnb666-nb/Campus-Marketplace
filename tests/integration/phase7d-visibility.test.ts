@@ -54,6 +54,7 @@ let erasedActorId = "";
 let plainUserId = "";
 let riskOnlyTargetId = "";
 let campusBTargetId = "";
+let modOnlyTargetId = "";
 
 describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面（真实 PostgreSQL）", () => {
   beforeAll(async () => {
@@ -239,6 +240,38 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
       },
     });
     createdEnforcementActionIds.push(ea7.id);
+    // FR01-S03：CAMPUS:B scope 权威 + campusId=A 的另一向错配行（exact pair 必须隐藏）
+    const ea8 = await rawClient!.enforcementAction.create({
+      data: {
+        type: "MARKETPLACE_RESTORE",
+        actorId,
+        targetId,
+        campusId: campusA,
+        scopeKey: `CAMPUS:${campusB}`,
+        reasonCode: "FALSE_POSITIVE_CORRECTION",
+        resultState: "RISK_STATE:NORMAL",
+        previousState: "RISK_STATE:RESTRICTED",
+        createdAt: new Date("2026-09-05T08:00:00.000Z"),
+      },
+    });
+    createdEnforcementActionIds.push(ea8.id);
+    // FR01-S06：仅 inconsistent GLOBAL/A anchor 的独立目标
+    const modOnlyTarget = await createUser("仅不一致锚点目标");
+    modOnlyTargetId = modOnlyTarget.id;
+    const ea9 = await rawClient!.enforcementAction.create({
+      data: {
+        type: "MEMBERSHIP_SUSPEND",
+        actorId,
+        targetId: modOnlyTargetId,
+        campusId: campusA,
+        scopeKey: "GLOBAL",
+        reasonCode: "POLICY_VIOLATION",
+        resultState: "CAMPUS_MEMBERSHIP:SUSPENDED",
+        previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
+        createdAt: new Date("2026-09-04T08:00:00.000Z"),
+      },
+    });
+    createdEnforcementActionIds.push(ea9.id);
 
     // ── RiskState fixtures（target：GLOBAL RESTRICTED + campusA 显式 NORMAL）──
     const rs1 = await rawClient!.riskState.create({
@@ -416,18 +449,18 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
       filters: { targetId },
     });
 
-    // target 名下 6 行：ea1/ea2/ea3/ea4/ea5/ea7（ea6 属 campusBTarget，不在内）
-    expect(page.items.length).toBe(6);
+    // target 名下 7 行：ea1/ea2/ea3/ea4/ea5/ea7/ea8（ea6 属 campusBTarget、ea9 属 modOnlyTarget）
+    expect(page.items.length).toBe(7);
     const seqs = page.items.map((item) => BigInt(item.seq));
     for (let index = 1; index < seqs.length; index += 1) {
       expect(seqs[index - 1] > seqs[index]).toBe(true);
     }
-    // createdAt 刻意与 seq 反序：seq 最大者 createdAt 最早（2026-09-06 erased 行）
-    expect(page.items[0].createdAt).toBe("2026-09-06T08:00:00.000Z");
+    // createdAt 刻意与 seq 反序：seq 最大者为 ea8（createdAt 2026-09-05，早于多数行）
+    expect(page.items[0].createdAt).toBe("2026-09-05T08:00:00.000Z");
     expect(page.items[0].seq).toMatch(/^[0-9]+$/);
   });
 
-  it("执法 scope 矩阵：campus A 读者按 campusId 列可见（CAMPUS 行 + 不一致行），GLOBAL/B 不可见", async () => {
+  it("FR01-S01/S02/S03：campus A 读者仅见 exact pair CAMPUS:A 行；GLOBAL/A 与 CAMPUS:B/campusId=A 错配行隐藏", async () => {
     const { loadAuthorizedEnforcementQueue } = await import("@/lib/enforcement/enforcement-read-model");
 
     const page = await loadAuthorizedEnforcementQueue({
@@ -435,12 +468,13 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
       limit: 50,
       filters: { targetId },
     });
-    // campusId=campusA 的 target 行：ea2（CAMPUS:A）+ ea4（scopeKey GLOBAL 但 campusId=A）
-    expect(page.items).toHaveLength(2);
-    const classifications = page.items.map((item) => item.scope).sort();
-    expect(classifications).toEqual(["CAMPUS", "SCOPE_INCONSISTENT"]);
+    // REVERSED（Repair 1）：仅 ea2（campusId=A ∧ scopeKey=CAMPUS:A）可见；
+    // ea4（GLOBAL/A）与 ea8（CAMPUS:B 权威 + campusId=A）不再对 campus A 可见
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].scope).toBe("CAMPUS");
+    expect(page.items[0].campusId).toBe(campusA);
     for (const item of page.items) {
-      expect(item.campusId).toBe(campusA);
+      expect(`${item.scope}:${item.campusId ?? "null"}`).toBe(`CAMPUS:${campusA}`);
     }
   });
 
@@ -508,8 +542,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
       cursor = decodeEnforcementSeqCursor(result.nextCursor)!;
     }
 
-    expect(seen).toHaveLength(6);
-    expect(new Set(seen).size).toBe(6);
+    expect(seen).toHaveLength(7);
+    expect(new Set(seen).size).toBe(7);
   });
 
   it("历史：enforcementSeq ASC bounded keyset（§20）", async () => {
@@ -606,6 +640,75 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7D 审计/执法可见性读面�
     expect(
       await hasVisibleTargetAnchor({ access: campusAAccess, targetId: riskOnlyTargetId }),
     ).toBe(true);
+  });
+
+  // ── FR01：exact scope pair（Repair 1）────────────────────────────────────
+
+  it("FR01-S04：GLOBAL 读者——inconsistent 行可见且呈 SCOPE_INCONSISTENT（供平台运营排查）", async () => {
+    const { loadAuthorizedEnforcementQueue } = await import("@/lib/enforcement/enforcement-read-model");
+
+    const page = await loadAuthorizedEnforcementQueue({
+      access: { global: true, campusIds: [] },
+      limit: 50,
+      filters: { targetId: modOnlyTargetId },
+    });
+    // ea9：scopeKey=GLOBAL + campusId=campusA 的 inconsistent 行
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].scope).toBe("SCOPE_INCONSISTENT");
+    expect(page.items[0].campusId).toBe(campusA);
+  });
+
+  it("FR01-S05：campus A target history——inconsistent 行缺席，仅 exact pair 行", async () => {
+    const { loadTargetEnforcementHistory } = await import("@/lib/enforcement/enforcement-read-model");
+
+    const page = await loadTargetEnforcementHistory({
+      access: { global: false, campusIds: [campusA] },
+      targetId,
+      limit: 50,
+    });
+
+    // target 名下 campus A 可见历史 = 仅 ea2（campusId=A ∧ scopeKey=CAMPUS:A）
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0].scope).toBe("CAMPUS");
+    expect(page.items[0].campusId).toBe(campusA);
+  });
+
+  it("FR01-S06：campus A + 仅 inconsistent GLOBAL/A anchor → 不建立存在性；GLOBAL → 建立", async () => {
+    const { hasVisibleTargetAnchor } = await import("@/lib/enforcement/enforcement-read-model");
+
+    expect(
+      await hasVisibleTargetAnchor({
+        access: { global: false, campusIds: [campusA] },
+        targetId: modOnlyTargetId,
+      }),
+    ).toBe(false);
+    expect(
+      await hasVisibleTargetAnchor({
+        access: { global: true, campusIds: [] },
+        targetId: modOnlyTargetId,
+      }),
+    ).toBe(true);
+  });
+
+  it("FR01-S07：multi-campus [A,B]——exact pair A/A + B/B 可见，B/A 错配与 GLOBAL/A 隐藏（无 cross-product）", async () => {
+    const { loadAuthorizedEnforcementQueue } = await import("@/lib/enforcement/enforcement-read-model");
+
+    const page = await loadAuthorizedEnforcementQueue({
+      access: { global: false, campusIds: [campusA, campusB] },
+      limit: 50,
+      filters: { targetId },
+    });
+
+    // 可见集 = ea2（A/A）+ ea3（B/B）；ea4（GLOBAL/A）与 ea8（CAMPUS:B 权威 + campusId=A）隐藏
+    expect(page.items).toHaveLength(2);
+    for (const item of page.items) {
+      expect(item.scope).toBe("CAMPUS");
+      expect([campusA, campusB]).toContain(item.campusId);
+      expect(`${item.campusId}:${item.scope}`).toBe(`${item.campusId}:CAMPUS`);
+    }
+    // 若 cross-product（campusId IN ∧ scopeKey IN）成立，ea4/ea8 将错误出现
+    const serialized = JSON.stringify(page.items.map((item) => [item.seq, item.scope, item.campusId]));
+    expect(serialized).not.toContain("SCOPE_INCONSISTENT");
   });
 
   it("T08/T09/T10：注销 actor 安全 fallback；DTO 无删除/隐私标志", async () => {

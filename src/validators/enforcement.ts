@@ -58,6 +58,14 @@ export type EnforcementTargetHistoryQuery = z.infer<typeof enforcementTargetHist
 /** canonical decimal string（R6 冻结）：无符号、无前导零、十进制。 */
 export const ENFORCEMENT_SEQ_DECIMAL_PATTERN = /^(0|[1-9][0-9]*)$/;
 
+/**
+ * RAW cursor 本体必须是 canonical base64url（Final Review Repair 1 / FR02 冻结）：
+ * Buffer.from(raw, "base64url") 解码是宽松的（静默剥离非法字符、接受标准
+ * base64 字母表与 =/+//、非规范尾位），因此先对 RAW 做白名单，再解码，
+ * 最后以 re-encode equality 作为 canonical 表示的最终权威。
+ */
+const CURSOR_RAW_BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 /** seq（bigint）→ canonical decimal string（DTO 与 cursor 载荷同一形式）。 */
 export function encodeEnforcementSeq(seq: bigint): string {
   return seq.toString(10);
@@ -69,11 +77,19 @@ export function encodeEnforcementSeqCursor(seq: bigint): string {
 }
 
 /**
- * 解码客户端回传的 seq cursor。任何格式偏离 canonical decimal 的输入
- * （负号/小数/科学计数/前导零/空串/坏 base64url）返回 null（调用方映射
- * 安全失败态）。成功返回 bigint，绝不经过 Number。
+ * 解码客户端回传的 seq cursor（FR02 冻结合同）：
+ *   RAW 匹配 ^[A-Za-z0-9_-]+$（canonical base64url 字母集，禁 =/+///空白/其余字符/空串）
+ *   → 解码 → payload 匹配 canonical decimal
+ *   → BigInt(payload)（绝不经过 Number）
+ *   → encodeEnforcementSeqCursor(seq) === raw（re-encode equality = 最终权威）
+ * 任一步失败返回 null（调用方映射安全失败态）。往返非唯一的非规范编码
+ * （如尾位非零的替代 base64url 形状）同样拒绝。
  */
 export function decodeEnforcementSeqCursor(raw: string): bigint | null {
+  if (!CURSOR_RAW_BASE64URL_PATTERN.test(raw)) {
+    return null;
+  }
+
   let payload: string;
   try {
     payload = Buffer.from(raw, "base64url").toString("utf8");
@@ -85,9 +101,16 @@ export function decodeEnforcementSeqCursor(raw: string): bigint | null {
     return null;
   }
 
+  let seq: bigint;
   try {
-    return BigInt(payload);
+    seq = BigInt(payload);
   } catch {
     return null;
   }
+
+  if (encodeEnforcementSeqCursor(seq) !== raw) {
+    return null;
+  }
+
+  return seq;
 }

@@ -83,15 +83,43 @@ function classifyScope(scopeKey: string, campusId: string | null): EnforcementSc
   return "SCOPE_INCONSISTENT";
 }
 
-/** campus 读者的单列 scope 谓词（campusId=null 行被 SQL IN 结构性排除）。 */
-function enforcementScopeCondition(access: EnforcementReadAccess): Prisma.EnforcementActionWhereInput | null {
+/**
+ * campus 读者的执法可见性谓词（Final Review Repair 1 / FR01 冻结）。
+ *
+ * 授权权威 = (campusId, scopeKey) **exact pair**——单列 `campusId IN [...]`
+ * 不得单独充当 scope 权威：scopeKey=GLOBAL 而 campusId=A 的 inconsistent 行
+ * 会因此对 campus A 读者可见并可 anchor 目标存在性（错误授权）。
+ * exact pair 的 OR 分支集合不产生 cross-product（禁止 campusId IN ∧ scopeKey IN）。
+ *
+ * - GLOBAL 读者：无 scope 谓词（inconsistent 行可见，DTO 以 SCOPE_INCONSISTENT
+ *   呈现供平台运营排查）；
+ * - campus 读者：仅 (A, CAMPUS:A) 形状的行可见；
+ * - 零有效 scope：结构性不可见。
+ *
+ * 三个执法读面（queue / target history / target anchor）必须共用本 helper，
+ * 不得各自手写授权谓词。RiskState 的可见性模型已另行冻结，不走本谓词。
+ */
+type EnforcementVisibility =
+  | { kind: "ALL" }
+  | { kind: "NONE" }
+  | { kind: "SCOPED"; predicate: Prisma.EnforcementActionWhereInput };
+
+function buildEnforcementVisibilityPredicate(access: EnforcementReadAccess): EnforcementVisibility {
   if (access.global) {
-    return null;
+    return { kind: "ALL" };
   }
   if (access.campusIds.length === 0) {
-    return null;
+    return { kind: "NONE" };
   }
-  return { campusId: { in: access.campusIds } };
+  return {
+    kind: "SCOPED",
+    predicate: {
+      OR: access.campusIds.map((campusId) => ({
+        campusId,
+        scopeKey: `CAMPUS:${campusId}`,
+      })),
+    },
+  };
 }
 
 function riskStateScopeCondition(access: EnforcementReadAccess): Prisma.RiskStateWhereInput | null {
@@ -164,15 +192,15 @@ export async function loadAuthorizedEnforcementQueue(input: {
   limit: number;
   filters?: EnforcementQueueFilters;
 }): Promise<EnforcementQueuePage> {
-  const scopeCondition = enforcementScopeCondition(input.access);
-  if (!input.access.global && !scopeCondition) {
+  const visibility = buildEnforcementVisibilityPredicate(input.access);
+  if (visibility.kind === "NONE") {
     return { items: [], nextCursor: null };
   }
 
   const filters = input.filters ?? {};
   const conditions: Prisma.EnforcementActionWhereInput[] = [];
-  if (scopeCondition) {
-    conditions.push(scopeCondition);
+  if (visibility.kind === "SCOPED") {
+    conditions.push(visibility.predicate);
   }
   if (filters.campusId) {
     conditions.push({ campusId: filters.campusId });
@@ -224,16 +252,16 @@ export async function loadTargetEnforcementHistory(input: {
   cursor?: bigint;
   limit: number;
 }): Promise<EnforcementQueuePage> {
-  const scopeCondition = enforcementScopeCondition(input.access);
-  if (!input.access.global && !scopeCondition) {
+  const visibility = buildEnforcementVisibilityPredicate(input.access);
+  if (visibility.kind === "NONE") {
     return { items: [], nextCursor: null };
   }
 
   const conditions: Prisma.EnforcementActionWhereInput[] = [
     { targetId: input.targetId },
   ];
-  if (scopeCondition) {
-    conditions.push(scopeCondition);
+  if (visibility.kind === "SCOPED") {
+    conditions.push(visibility.predicate);
   }
   if (input.cursor !== undefined) {
     conditions.push({ enforcementSeq: { gt: input.cursor } });
@@ -335,15 +363,17 @@ export async function hasVisibleTargetAnchor(input: {
   access: EnforcementReadAccess;
   targetId: string;
 }): Promise<boolean> {
-  const enforcementScope = enforcementScopeCondition(input.access);
-  const riskScope = riskStateScopeCondition(input.access);
-  if (!input.access.global && (!enforcementScope || !riskScope)) {
+  const visibility = buildEnforcementVisibilityPredicate(input.access);
+  if (visibility.kind === "NONE") {
     return false;
   }
 
+  // EnforcementAction anchor：exact-pair 授权谓词（FR01）——inconsistent
+  // GLOBAL/A 行对 campus 读者既不可见也不可 anchor；
+  // RiskState anchor：沿用已冻结的 campusId 可见性模型（本轮不改）。
   const enforcementWhere: Prisma.EnforcementActionWhereInput = {
     targetId: input.targetId,
-    ...(enforcementScope ? { AND: [enforcementScope] } : {}),
+    ...(visibility.kind === "SCOPED" ? { AND: [visibility.predicate] } : {}),
   };
   const anchored = await prisma.enforcementAction.findFirst({
     where: enforcementWhere,
@@ -353,6 +383,10 @@ export async function hasVisibleTargetAnchor(input: {
     return true;
   }
 
+  const riskScope = riskStateScopeCondition(input.access);
+  if (!input.access.global && !riskScope) {
+    return false;
+  }
   const riskWhere: Prisma.RiskStateWhereInput = {
     userId: input.targetId,
     ...(riskScope ? { AND: [riskScope] } : {}),

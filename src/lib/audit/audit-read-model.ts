@@ -4,7 +4,7 @@ import { projectAuditMetadata, type AuditMetadataEntry } from "@/lib/audit/audit
 import type { AuditReadAccess } from "@/lib/audit/audit-access";
 import { hydrateSafeIdentities, UNAVAILABLE_USER_DISPLAY_NAME } from "@/lib/governance/safe-identity";
 import { prisma } from "@/lib/prisma";
-import { encodeAuditCursor, type AuditCursor } from "@/validators/audit";
+import { auditDateRange, encodeAuditCursor, type AuditCursor } from "@/validators/audit";
 
 /**
  * Phase 7D：/governance/audit 授权读模型（operator surface 专用）。
@@ -116,14 +116,11 @@ export async function loadAuthorizedAuditPage(input: {
     conditions.push({ action: filters.action });
   }
   if (filters.from || filters.to) {
-    const createdAt: Prisma.DateTimeFilter = {};
-    if (filters.from) {
-      createdAt.gte = new Date(`${filters.from}T00:00:00.000Z`);
+    // 日期→UTC range 的唯一构造点（FR03 集中化，防 validator/读模型语义漂移）
+    const createdAtRange = auditDateRange(filters.from, filters.to);
+    if (createdAtRange.gte || createdAtRange.lte) {
+      conditions.push({ createdAt: createdAtRange });
     }
-    if (filters.to) {
-      createdAt.lte = new Date(`${filters.to}T23:59:59.999Z`);
-    }
-    conditions.push({ createdAt });
   }
   if (input.cursor) {
     conditions.push(auditKeysetCondition(input.cursor));
