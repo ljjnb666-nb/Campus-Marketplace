@@ -21,6 +21,12 @@ export const PERMISSIONS = {
   "campus.manage": "管理校区与校园认证策略版本",
   "rbac.role.assign": "授予/撤回用户角色",
   "audit.read": "读取管理审计日志",
+  // Phase 7D：执法可见性（纯 governance read capability——仅授权读取
+  // EnforcementAction / RiskState 运营读面，不含任何 mutation 权）。
+  // 刻意不属于下方 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（R1 冻结）：
+  // 新增 read capability 绝不允许静默改变 legacy /admin 资格或
+  // privileged-target 分类。
+  "enforcement.read": "读取执法记录与账户限制状态（治理运营可见性）",
 } as const;
 
 export type PermissionKey = keyof typeof PERMISSIONS;
@@ -33,8 +39,39 @@ export function asPermissionKey(key: string): PermissionKey | null {
 }
 
 /**
- * requireAdmin 兼容桥的后台入口判定集合：持有本集合中任意 permission
- * 即视为可进入管理后台。Phase 6A 全部 permission 仅由 PLATFORM_ADMIN 持有，
- * 行为与旧 `role === "ADMIN"` 完全一致；Phase 7 按页面拆分细粒度判定。
+ * legacy full-admin 等价集合（Phase 7D R1 冻结）。
+ *
+ * baseline caf8c22 时代构成 legacy /admin 入口资格的 permission 全集——
+ * 显式字面量数组，绝不从 PERMISSION_KEYS 派生。此后新增的 governance
+ * capability（如 7D 的 enforcement.read）默认不进入本集合；扩列必须
+ * 显式修改本文件并重新 review。
+ *
+ * 判定形式保持 permission-derived（一个 GLOBAL grant 覆盖本集合全量），
+ * 禁止 role.key === "PLATFORM_ADMIN" 之类的角色名特判
+ * （见 hasFullAdminSurfaceAccess）。
  */
-export const ADMIN_SURFACE_PERMISSION_KEYS: PermissionKey[] = [...PERMISSION_KEYS];
+export const LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS: PermissionKey[] = [
+  "verification.review",
+  "report.review",
+  "listing.moderate",
+  "category.manage",
+  "moderation.keyword.manage",
+  "user.suspend",
+  "appeal.review",
+  "asset.sensitive.read",
+  "campus.manage",
+  "rbac.role.assign",
+  "audit.read",
+];
+
+/**
+ * requireAdmin 兼容桥的后台入口判定集合（Phase 7D R1：原为
+ * `[...PERMISSION_KEYS]` 派生，现显式等于 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS，
+ * 行为与 baseline 逐字节等价）。
+ *
+ * 判定语义见 hasFullAdminSurfaceAccess：必须存在一个 GLOBAL grant 全量覆盖
+ * 本集合（PLATFORM_ADMIN-like full authority），禁止 any-permission 拼接：
+ * 细粒度 GLOBAL/CAMPUS 角色一律不构成旧超管。
+ */
+export const ADMIN_SURFACE_PERMISSION_KEYS: PermissionKey[] =
+  LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS;

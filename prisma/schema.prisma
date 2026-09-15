@@ -735,6 +735,10 @@ model AdminLog {
 
   @@index([adminId, createdAt])
   @@index([targetType, targetId, createdAt])
+  // Phase 7D 审计可见性：仅为 /governance/audit 可见性/过滤查询优化执行，
+  // 不定义任何 scope 语义（授权谓词独立于索引存在）。
+  @@index([campusId, createdAt, id])
+  @@index([createdAt, id])
 }
 
 // ============================================================
