@@ -1,8 +1,15 @@
-import type { AppealDecisionReasonCode, AppealStatus, EnforcementActionType, EnforcementReasonCode } from "@prisma/client";
+import type {
+  AppealDecisionReasonCode,
+  AppealStatus,
+  EnforcementActionType,
+  EnforcementReasonCode,
+  RiskStateLevel,
+} from "@prisma/client";
 
 /**
  * Phase 7A 治理面展示文案（operator 面专用；均为机器码 → 中文标签，
  * 不含任何机密数据）。仅覆盖申诉审核工作流需要的码值。
+ * Phase 7D：扩展执法可见性读面需要的 RiskState 标签。
  */
 
 export const APPEAL_STATUS_LABELS: Record<AppealStatus, string> = {
@@ -41,4 +48,12 @@ export const DECISION_REASON_LABELS: Record<AppealDecisionReasonCode, string> = 
   APPELLANT_ERASED: "申诉人账号已注销",
   MERIT_APPEAL_JUSTIFIED: "申诉理由成立",
   MERIT_VIOLATION_CONFIRMED: "原处罚维持有效",
+};
+
+// ── Phase 7D 执法可见性读面 ────────────────────────────────────────────────
+
+export const RISK_STATE_LABELS: Record<RiskStateLevel, string> = {
+  NORMAL: "正常",
+  WATCH: "观察",
+  RESTRICTED: "受限",
 };

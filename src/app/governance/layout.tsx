@@ -1,6 +1,12 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { deriveAppealReviewAccess } from "@/lib/appeals/reviewer-access";
+import { deriveAuditAccess, hasAnyAuditAccess } from "@/lib/audit/audit-access";
+import {
+  deriveEnforcementReadAccess,
+  hasAnyEnforcementReadAccess,
+} from "@/lib/enforcement/enforcement-read-access";
 import {
   deriveListingModerationAccess,
   hasAnyListingModerationAccess,
@@ -16,12 +22,19 @@ import { requireUser } from "@/lib/server-auth";
  * Phase 7A：/governance 独立路由树（Planning 冻结：绝不置于 /admin 子树）。
  *
  * Phase 7B：root gate 扩宽为 appealReview OR roleManage 的 union。
- * Phase 7C：root gate 再扩宽为 OR listingModeration 的三元 union。三棵子树
- * 仍各自自守：/governance/appeals 走 requireAppealReviewer，/governance/roles
- * 自守 roleManage access，/governance/listings 自守 listing moderation
- * access（双层纵深不变，sibling 互不扩权）。requireAdmin() 零修改，
- * legacy /admin 隔离不变（hasFullAdminSurfaceAccess 对 campus grant /
- * 非全量 GLOBAL grant 恒 false）。私有治理数据：强制动态渲染，零缓存。
+ * Phase 7C：root gate 再扩宽为 OR listingModeration 的三元 union。
+ * Phase 7D：root gate 扩为五元 union（OR audit ∨ enforcementRead），并首次
+ * 提供治理控制台跨区导航——**导航可见性由精确 capability 派生**：无权限
+ * sibling 一律不渲染链接（不得因 root access 显示无权限 sibling）。
+ *
+ * 五棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
+ * /governance/appeals 走 requireAppealReviewer，/governance/roles 自守
+ * roleManage access，/governance/listings 自守 listing moderation access，
+ * /governance/audit 自守 audit read access，/governance/enforcement 自守
+ * enforcement read access。requireAdmin() 零修改，legacy /admin 隔离不变
+ * （hasFullAdminSurfaceAccess 对 campus grant / 非全量 GLOBAL grant 恒 false；
+ * 7D R1 后对新 permission enforcement.read 同样恒 false）。私有治理数据：
+ * 强制动态渲染，零缓存。
  */
 export const dynamic = "force-dynamic";
 
@@ -35,16 +48,62 @@ export default async function GovernanceLayout({
   const appealAccess = deriveAppealReviewAccess(context);
   const roleManageAccess = deriveRoleManageAccess(context);
   const listingModerationAccess = deriveListingModerationAccess(context);
+  const auditAccess = deriveAuditAccess(context);
+  const enforcementAccess = deriveEnforcementReadAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
   if (
     !hasAppealAccess &&
     !hasAnyRoleManageAccess(roleManageAccess) &&
-    !hasAnyListingModerationAccess(listingModerationAccess)
+    !hasAnyListingModerationAccess(listingModerationAccess) &&
+    !hasAnyAuditAccess(auditAccess) &&
+    !hasAnyEnforcementReadAccess(enforcementAccess)
   ) {
     notFound();
   }
 
-  return <div className="min-h-screen bg-slate-50">{children}</div>;
+  // 导航可见性 = 精确 capability（root union 放行 ≠ sibling 可见）
+  const navItems = [
+    { href: "/governance/appeals", label: "申诉审核", visible: hasAppealAccess },
+    {
+      href: "/governance/roles",
+      label: "角色管理",
+      visible: hasAnyRoleManageAccess(roleManageAccess),
+    },
+    {
+      href: "/governance/listings",
+      label: "列表治理",
+      visible: hasAnyListingModerationAccess(listingModerationAccess),
+    },
+    { href: "/governance/audit", label: "审计日志", visible: hasAnyAuditAccess(auditAccess) },
+    {
+      href: "/governance/enforcement",
+      label: "执法记录",
+      visible: hasAnyEnforcementReadAccess(enforcementAccess),
+    },
+  ].filter((item) => item.visible);
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <nav
+        aria-label="治理控制台"
+        className="sticky top-0 z-10 border-b border-slate-200 bg-white"
+      >
+        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-2 px-4 py-3 sm:px-6">
+          <span className="mr-2 text-sm font-semibold text-slate-950">治理控制台</span>
+          {navItems.map((item) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
+            >
+              {item.label}
+            </Link>
+          ))}
+        </div>
+      </nav>
+      {children}
+    </div>
+  );
 }
