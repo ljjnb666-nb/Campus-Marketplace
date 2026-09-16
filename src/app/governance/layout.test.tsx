@@ -177,3 +177,128 @@ describe("GovernanceLayout Phase 7B union gate（R01/R02）", () => {
     expect(notFound).toHaveBeenCalled();
   });
 });
+
+// ── Phase 7D：root gate 五元 union + capability 派生导航 ─────────────────────
+describe("GovernanceLayout Phase 7D union gate + 导航可见性", () => {
+  const activeUser = { id: "r1", email: "r@x", name: "R", role: "STUDENT" };
+
+  it("audit.read-only GLOBAL → 通过 root gate，导航仅显示 审计日志", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "R", scope: "GLOBAL", campusId: null, permissionKeys: ["audit.read"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("navigation", { name: "治理控制台" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "审计日志" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "申诉审核" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "角色管理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "列表治理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+  });
+
+  it("enforcement.read-only GLOBAL → 通过 root gate，导航仅显示 执法记录", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "R", scope: "GLOBAL", campusId: null, permissionKeys: ["enforcement.read"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "执法记录" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+  });
+
+  it("campus moderator（listing.moderate）→ 可入树，但看不到 Audit/Enforcement 链接", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        { roleKey: "CAMPUS_CONTENT_MODERATOR", scope: "CAMPUS", campusId: "A", permissionKeys: ["listing.moderate"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByRole("link", { name: "列表治理" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+  });
+
+  it("legacy 全量 11-key GLOBAL（不含 enforcement.read）→ 五链接齐备", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        {
+          roleKey: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: [
+            "verification.review",
+            "report.review",
+            "listing.moderate",
+            "category.manage",
+            "moderation.keyword.manage",
+            "user.suspend",
+            "appeal.review",
+            "asset.sensitive.read",
+            "campus.manage",
+            "rbac.role.assign",
+            "audit.read",
+          ],
+        },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    for (const label of ["申诉审核", "角色管理", "列表治理", "审计日志"]) {
+      expect(screen.getByRole("link", { name: label })).toBeTruthy();
+    }
+    // R1 语义分离：legacy 全量集合不含 enforcement.read → 执法记录链接不可见
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+  });
+
+  it("audit.read 无 ACTIVE membership 的 campus grant → 不得入树", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "R", scope: "CAMPUS", campusId: "A", permissionKeys: ["audit.read"] },
+      ],
+    });
+
+    await expect(
+      GovernanceLayout({ children: <div>治理内容</div> }),
+    ).rejects.toThrow("NOT_FOUND");
+    expect(notFound).toHaveBeenCalled();
+  });
+});

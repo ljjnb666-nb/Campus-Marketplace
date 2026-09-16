@@ -2,8 +2,8 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import {
-  ADMIN_SURFACE_PERMISSION_KEYS,
   asPermissionKey,
+  LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS,
   type PermissionKey,
 } from "@/lib/rbac/permissions";
 import { rbacError } from "@/lib/rbac/errors";
@@ -157,10 +157,12 @@ export function hasAnyPermission(
 }
 
 /**
- * legacy full-admin 等价判定（Repair 1，Blocker D）：
- * 必须存在一个 GLOBAL grant 且其 permission 集合完整覆盖 legacy admin surface
- * （PLATFORM_ADMIN-like full authority）。禁止 any-permission 拼接：
- * 细粒度 GLOBAL/CAMPUS 角色一律不构成旧超管。
+ * legacy full-admin 等价判定（Repair 1，Blocker D；Phase 7D R1 重绑）：
+ * 必须存在一个 GLOBAL grant 且其 permission 集合完整覆盖
+ * LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（PLATFORM_ADMIN-like full authority）。
+ * 禁止 any-permission 拼接：细粒度 GLOBAL/CAMPUS 角色一律不构成旧超管。
+ * 集合是显式冻结的 baseline 11 key——此后新增 permission（如 enforcement.read）
+ * 不改变本判定（legacy /admin 资格与 privileged-target 分类不随新 capability 漂移）。
  */
 export function hasFullAdminSurfaceAccess(context: AuthorizationContext | null): boolean {
   if (!context) {
@@ -170,7 +172,7 @@ export function hasFullAdminSurfaceAccess(context: AuthorizationContext | null):
   return context.grants.some(
     (grant) =>
       grant.scope === "GLOBAL" &&
-      ADMIN_SURFACE_PERMISSION_KEYS.every((key) => grant.permissionKeys.includes(key)),
+      LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS.every((key) => grant.permissionKeys.includes(key)),
   );
 }
 

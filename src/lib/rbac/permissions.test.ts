@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { ADMIN_SURFACE_PERMISSION_KEYS, asPermissionKey, PERMISSIONS, PERMISSION_KEYS } from "@/lib/rbac/permissions";
+import {
+  ADMIN_SURFACE_PERMISSION_KEYS,
+  asPermissionKey,
+  LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS,
+  PERMISSIONS,
+  PERMISSION_KEYS,
+} from "@/lib/rbac/permissions";
 import { PLATFORM_ADMIN_ROLE_KEY, SYSTEM_ROLES } from "@/lib/rbac/roles";
 
 describe("rbac permission keys（机器可读稳定标识）", () => {
@@ -35,9 +41,46 @@ describe("rbac permission keys（机器可读稳定标识）", () => {
     // 原型链污染键不可作为 permission
     expect(asPermissionKey("toString")).toBeNull();
   });
+});
 
-  it("keeps the admin surface bridge non-empty and aligned with the permission set", () => {
-    expect(ADMIN_SURFACE_PERMISSION_KEYS.length).toBeGreaterThan(0);
-    expect(new Set(ADMIN_SURFACE_PERMISSION_KEYS)).toEqual(new Set(PERMISSION_KEYS));
+describe("Phase 7D R1：legacy full-admin 等价集合与全集分离", () => {
+  it("enforcement.read 是已知 permission（DEFAULT_DENY 输入侧可收窄）", () => {
+    expect(asPermissionKey("enforcement.read")).toBe("enforcement.read");
+    expect(PERMISSIONS["enforcement.read"]).toBe(
+      "读取执法记录与账户限制状态（治理运营可见性）",
+    );
+  });
+
+  it("LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS 显式冻结为 pre-7D 的 11 key", () => {
+    expect([...LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS].sort()).toEqual(
+      [
+        "verification.review",
+        "report.review",
+        "listing.moderate",
+        "category.manage",
+        "moderation.keyword.manage",
+        "user.suspend",
+        "appeal.review",
+        "asset.sensitive.read",
+        "campus.manage",
+        "rbac.role.assign",
+        "audit.read",
+      ].sort(),
+    );
+  });
+
+  it("enforcement.read NOT IN legacy 集合；legacy 集合不再随全集派生（R1 核心）", () => {
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS).not.toContain("enforcement.read");
+    expect(PERMISSION_KEYS).toContain("enforcement.read");
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS.length).toBeLessThan(PERMISSION_KEYS.length);
+  });
+
+  it("legacy /admin 桥判定集合 = LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（baseline 等价）", () => {
+    expect(ADMIN_SURFACE_PERMISSION_KEYS).toBe(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS);
+  });
+
+  it("PLATFORM_ADMIN 仍自动获得 enforcement.read（R1-03 定义层）", () => {
+    const platformAdmin = SYSTEM_ROLES.find((role) => role.key === PLATFORM_ADMIN_ROLE_KEY);
+    expect(platformAdmin!.permissionKeys).toContain("enforcement.read");
   });
 });

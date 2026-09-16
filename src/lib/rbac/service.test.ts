@@ -244,6 +244,75 @@ describe("hasFullAdminSurfaceAccess（legacy full-admin 等价）", () => {
     expect(hasFullAdminSurfaceAccess(fullAdmin)).toBe(true);
   });
 
+  it("R1-01: exact pre-7D 11-key GLOBAL grant → full admin true", () => {
+    const exactLegacy = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        globalGrant([
+          "verification.review",
+          "report.review",
+          "listing.moderate",
+          "category.manage",
+          "moderation.keyword.manage",
+          "user.suspend",
+          "appeal.review",
+          "asset.sensitive.read",
+          "campus.manage",
+          "rbac.role.assign",
+          "audit.read",
+        ]),
+      ],
+    };
+
+    expect(hasFullAdminSurfaceAccess(exactLegacy)).toBe(true);
+  });
+
+  it("R1-02: 同一 grant 不含 enforcement.read → 仍 true（新 read capability 不影响桥）", () => {
+    const withoutEnforcementRead = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        globalGrant(
+          [...ADMIN_SURFACE_PERMISSION_KEYS].filter((key) => key !== "enforcement.read"),
+        ),
+      ],
+    };
+
+    expect(hasFullAdminSurfaceAccess(withoutEnforcementRead)).toBe(true);
+  });
+
+  it("R1-04: GLOBAL 角色仅持 enforcement.read → legacy admin false", () => {
+    const readOnly = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [globalGrant(["enforcement.read"])],
+    };
+
+    expect(hasFullAdminSurfaceAccess(readOnly)).toBe(false);
+  });
+
+  it("R1-05: CAMPUS enforcement.read → legacy admin false", () => {
+    const campusReader = {
+      userId: "user-1",
+      accountActive: true,
+      activeCampusIds: ["campus-a"],
+      grants: [
+        {
+          roleKey: "CAMPUS_ENFORCEMENT_REVIEWER",
+          scope: "CAMPUS" as const,
+          campusId: "campus-a",
+          permissionKeys: ["enforcement.read"],
+        },
+      ],
+    };
+
+    expect(hasFullAdminSurfaceAccess(campusReader)).toBe(false);
+  });
+
   it("denies a limited GLOBAL role（细粒度全局权限 ≠ legacy 超管）", () => {
     const limited = {
       userId: "user-1",
