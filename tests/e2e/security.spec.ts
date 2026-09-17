@@ -19,7 +19,11 @@ test("权限回归：普通学生访问管理后台被重定向", async ({ brows
   await expect(buyer.getByRole("heading", { name: "系统管理" })).toHaveCount(0);
 
   await buyer.goto("/admin/reports");
-  await buyer.waitForURL((url) => url.pathname === "/");
+  // Phase 7E：legacy /admin/reports 退役 → canonical /governance/reports redirect；
+  // 无 report.review scope 的学生被治理 root gate notFound 拦截（404 UI，
+  // 举报处理内容不可见——安全合同不变，仅重定向目的地随退役合同变化）
+  await buyer.waitForURL((url) => url.pathname === "/governance/reports");
+  await expect(buyer.getByRole("heading", { name: "页面不存在" })).toBeVisible();
   await expect(buyer.getByRole("heading", { name: "举报处理" })).toHaveCount(0);
 
   await buyerContext.close();

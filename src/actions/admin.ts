@@ -2,13 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
 import { reviewReportInGovernance } from "@/lib/reports/report-review-service";
-import { createNotification } from "@/repositories/notification-repository";
 import {
   categoryFormSchema,
   categoryStatusSchema,
