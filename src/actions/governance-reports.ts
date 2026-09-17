@@ -135,10 +135,11 @@ export async function reviewGovernanceReport(
   formData: FormData,
 ): Promise<GovernanceReportActionState> {
   try {
+    const noteRaw = formData.get("handledNote");
     const parsed = governanceReportReviewSchema.safeParse({
       reportId: formData.get("reportId"),
       status: formData.get("status"),
-      handledNote: formData.get("handledNote"),
+      handledNote: typeof noteRaw === "string" ? noteRaw : undefined,
     });
     if (!parsed.success) {
       return { success: false, error: parsed.error.issues[0]?.message ?? "参数无效" };
