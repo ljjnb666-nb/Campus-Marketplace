@@ -179,15 +179,27 @@ describe("releaseGovernanceReportCase", () => {
     expect(revalidatePathMock).toHaveBeenCalledWith("/governance/reports");
   });
 
-  it("零有效 access → 统一 deny；非领用人 deny 文案与 missing 同形", async () => {
+  it("零有效 access → 统一 deny；参数缺失 → 校验错误；非领用人/非域错误 → 域内与兜底文案", async () => {
     loadAuthorizationContextMock.mockResolvedValue(emptyAccessContext());
     const deny = await releaseGovernanceReportCase(formData({ reportId: "report-1" }));
     expect(deny).toEqual({ success: false, error: "没有权限处理该举报" });
     expect(releaseModerationCaseMock).not.toHaveBeenCalled();
 
+    loadAuthorizationContextMock.mockResolvedValue(globalAccessContext());
+
+    const invalid = await releaseGovernanceReportCase(formData({}));
+    expect(invalid.success).toBe(false);
+    expect(releaseModerationCaseMock).not.toHaveBeenCalled();
+
     releaseModerationCaseMock.mockRejectedValue(new ReportCaseError("REPORT_CASE_FORBIDDEN"));
     const forbidden = await releaseGovernanceReportCase(formData({ reportId: "report-1" }));
-    expect(forbidden).toEqual(deny);
+    expect(forbidden.error).toBe("没有权限处理该举报");
+
+    releaseModerationCaseMock.mockRejectedValue(new Error("db down"));
+    const fallback = await releaseGovernanceReportCase(formData({ reportId: "report-1" }));
+    expect(fallback.success).toBe(false);
+    expect(fallback.error).toBeTruthy();
+    expect(fallback.error).not.toBe("没有权限处理该举报");
   });
 });
 
