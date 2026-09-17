@@ -286,6 +286,7 @@ async function main() {
 
   await Promise.all(
     Array.from({ length: 5 }).map((_, index) =>
+      // Phase 7E：seed 数据同样携带 immutable scope 快照（产品所在校区）
       prisma.report.create({
         data: {
           targetType: "PRODUCT",
@@ -293,6 +294,8 @@ async function main() {
           detail: "示例举报内容，待管理员处理。",
           reporterId: users[index].id,
           productId: products[index].id,
+          campusId: campus.id,
+          scopeKey: `CAMPUS:${campus.id}`,
         },
       }),
     ),

@@ -23,6 +23,12 @@ export const CAMPUS_APPEAL_REVIEWER_ROLE_KEY = "CAMPUS_APPEAL_REVIEWER";
 // 授予/撤回走 /governance/roles server-owned action（roleKey 不出自客户端）。
 export const CAMPUS_CONTENT_MODERATOR_ROLE_KEY = "CAMPUS_CONTENT_MODERATOR";
 
+// Phase 7E：校区举报审核员（仅 report.review 的 campus-scoped 窄角色）。
+// report.review 属 pre-7D legacy 11-key（R1 冻结不动）；本角色只是把既有
+// capability 以 CAMPUS scope 供给治理面，不改变 legacy /admin 资格判定。
+// 生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）。
+export const CAMPUS_REPORT_REVIEWER_ROLE_KEY = "CAMPUS_REPORT_REVIEWER";
+
 export const GLOBAL_SCOPE_KEY = "GLOBAL";
 
 /** CAMPUS 角色授予行的 scopeKey 编码（assignment service 维护与 campusId 一致）。 */
@@ -55,5 +61,11 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "校区内容审核员",
     scope: "CAMPUS",
     permissionKeys: ["listing.moderate"],
+  },
+  {
+    key: CAMPUS_REPORT_REVIEWER_ROLE_KEY,
+    name: "校区举报审核员",
+    scope: "CAMPUS",
+    permissionKeys: ["report.review"],
   },
 ];

@@ -308,7 +308,7 @@ export function ErrandDetailConsole({
         action={async (formData) => {
           return createReport({ success: false, message: "" }, formData);
         }}
-        targetType="ERRAND"
+        targetType="ERRAND_TASK"
         errandTaskId={errand.id}
       />
     </>

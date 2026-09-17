@@ -135,6 +135,10 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
     await rawClient!.policyAcceptance.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.adminLog.deleteMany({ where: { adminId: { in: createdUserIds } } });
+    // Phase 7E：case 行经 RESTRICT FK 引用 Report——先删 case 再删 Report
+    await rawClient!.moderationCase.deleteMany({
+      where: { report: { OR: [{ reporterId: { in: createdUserIds } }, { targetUserId: { in: createdUserIds } }] } },
+    });
     await rawClient!.report.deleteMany({
       where: { OR: [{ reporterId: { in: createdUserIds } }, { targetUserId: { in: createdUserIds } }] },
     });
@@ -1090,6 +1094,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
         reason: "FAKE_INFO",
         reporterId: reporter.id,
         targetUserId: reported.id,
+        campusId: null,
+        scopeKey: "UNSCOPED",
       },
     });
 

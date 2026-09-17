@@ -1,6 +1,11 @@
 import { Prisma, type ReportStatus, type ReportTargetType } from "@prisma/client";
 
 import { withTransaction } from "@/lib/prisma";
+import {
+  caseSlaDeadline,
+  syncModerationCaseOnReviewTx,
+  type ModerationCaseReviewSyncResult,
+} from "@/lib/reports/moderation-case-sync";
 
 /**
  * Phase 6B Repair 1 Blocker D：Report ↔ RiskFlag 确定性投影 / 对账。
@@ -51,6 +56,7 @@ export type ReportTargetRef = {
   productId?: string | null;
   errandTaskId?: string | null;
   serviceListingId?: string | null;
+  rentalListingId?: string | null;
   targetUserId?: string | null;
   messageId?: string | null;
 };
@@ -131,6 +137,22 @@ export async function resolveReportTargetContext(
       });
       return {
         ownerUserId: row?.providerId ?? null,
+        campusId: row?.campusId ?? null,
+        targetExists: Boolean(row),
+      };
+    }
+    case "RENTAL_LISTING": {
+      // Phase 7E rental report repair：RENTAL_LISTING 举报从创建到审核全链成立。
+      // 语义与其余三域一致：owner/campus 从目标对象解析（绝不猜测）。
+      if (!ref.rentalListingId) {
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      }
+      const row = await tx.rentalListing.findUnique({
+        where: { id: ref.rentalListingId },
+        select: { ownerId: true, campusId: true },
+      });
+      return {
+        ownerUserId: row?.ownerId ?? null,
         campusId: row?.campusId ?? null,
         targetExists: Boolean(row),
       };
@@ -305,6 +327,7 @@ export async function reconcileReportRiskProjection(
         productId: true,
         errandTaskId: true,
         serviceListingId: true,
+        rentalListingId: true,
         targetUserId: true,
         messageId: true,
       },
@@ -387,11 +410,21 @@ export async function reconcileReportRiskProjection(
  * Repair 2 Blocker D：举报审核的事务级入口（serialization boundary）。
  *
  * 顺序（Report row 是 domain lock；本路径不引入 USER subject locks，
- * 因此不存在 "row lock → USER advisory" 反序）：
+ * 因此不存在 "row lock → USER advisory" 反序；Phase 7E canonical 治理
+ * 路径的 USER:actor subject lock 由 report-review-service 在事务最前取得，
+ * 与本函数的行锁构成冻结锁序 USER → REPORT → MODERATION_CASE）：
  *   SELECT ... FOR UPDATE（锁定同一 Report 行）
  *   → locked status 读取（不信任 pre-lock 读数）
+ *   → MODERATION_CASE 行 FOR UPDATE（Phase 7E：case 元数据与 report
+ *     transition 严格同事务串行——commit 后不得出现 report terminal ∧
+ *     case active 或反之）
+ *   → racePoint（测试 seam）
+ *   → authorizeAfterLock（Phase 7E：锁后授权复核 seam，canonical 治理
+ *     路径必传；legacy 直调路径不传则保持既有行为）
  *   → assertReportStatusTransition
  *   → canonical Report update（status/handledBy/handledNote/handledAt）
+ *   → syncModerationCaseOnReviewTx（closedAt/openedAt/dueAt 同步；reopen
+ *     重置 openedAt/dueAt=now+SLA）
  *   → reconcileReportRiskProjection（同一 locked transaction）
  *   → AdminLog + reporter notification（举报提交/处理确认属既有事务性合同，
  *     见 §35/§36——不与 enforcement notification 的 post-commit 规则混淆）
@@ -404,15 +437,43 @@ export type ApplyReportReviewInput = {
   status: ReportStatus;
   handledNote?: string | null;
   racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /**
+   * Phase 7E：锁后授权复核 seam。在 REPORT + CASE 行锁取得之后、transition
+   * 断言之前执行——角色撤销/账号停用/membership 停用的 TOCTOU 关闭点。
+   * canonical 治理路径（report-review-service）必传；不传 = 既有行为
+   * （仅 legacy 兼容直调与单元测试使用）。
+   */
+  authorizeAfterLock?: (
+    tx: Prisma.TransactionClient,
+    locked: { reportId: string; campusId: string | null; scopeKey: string },
+  ) => Promise<void>;
+};
+
+export type ApplyReportReviewResult = {
+  reportId: string;
+  status: ReportStatus;
+  reporterId: string;
+  caseId: string;
+  reopened: boolean;
+  dueAt: Date;
 };
 
 export async function applyReportReviewTx(
   tx: Prisma.TransactionClient,
   input: ApplyReportReviewInput,
-): Promise<{ reportId: string; status: ReportStatus; reporterId: string }> {
-  // ---- 步骤 1：行锁下读取 canonical status（TOCTOU 关闭点） ----
-  const locked = await tx.$queryRaw<{ id: string; status: ReportStatus; reporterId: string }[]>`
-    SELECT id, status, "reporterId"
+): Promise<ApplyReportReviewResult> {
+  // ---- 步骤 1：行锁下读取 canonical status + scope 快照（TOCTOU 关闭点） ----
+  const locked = await tx.$queryRaw<
+    {
+      id: string;
+      status: ReportStatus;
+      reporterId: string;
+      createdAt: Date;
+      campusId: string | null;
+      scopeKey: string;
+    }[]
+  >`
+    SELECT id, status, "reporterId", "createdAt", "campusId", "scopeKey"
     FROM "Report"
     WHERE id = ${input.reportId}
     FOR UPDATE`;
@@ -422,17 +483,34 @@ export async function applyReportReviewTx(
     throw new Error(`REPORT_NOT_FOUND:${input.reportId}`);
   }
 
-  // ---- 步骤 2：测试 seam（winner 已持行锁） ----
+  // ---- 步骤 2：MODERATION_CASE 行锁（case 元数据同步与并发 claim 串行化） ----
+  const lockedCaseRows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id
+    FROM "ModerationCase"
+    WHERE "reportId" = ${report.id}
+    FOR UPDATE`;
+  const lockedCase = lockedCaseRows[0];
+
+  // ---- 步骤 3：测试 seam（winner 已持行锁） ----
   if (input.racePoint) {
     await input.racePoint(tx);
   }
 
-  // ---- 步骤 3：锁定状态上的 transition 断言 ----
+  // ---- 步骤 4：锁后授权复核（canonical 治理路径；在 transition 断言前） ----
+  if (input.authorizeAfterLock) {
+    await input.authorizeAfterLock(tx, {
+      reportId: report.id,
+      campusId: report.campusId,
+      scopeKey: report.scopeKey,
+    });
+  }
+
+  // ---- 步骤 5：锁定状态上的 transition 断言 ----
   assertReportStatusTransition(report.status, input.status);
 
   const handled = input.status === "RESOLVED" || input.status === "REJECTED";
 
-  // ---- 步骤 4：canonical update + projection + AdminLog + notification ----
+  // ---- 步骤 6：canonical update + case 同步 + projection + 审计 ----
   const updated = await tx.report.update({
     where: { id: report.id },
     data: {
@@ -444,11 +522,23 @@ export async function applyReportReviewTx(
     select: { reporterId: true },
   });
 
+  const caseSync: ModerationCaseReviewSyncResult = await syncModerationCaseOnReviewTx(tx, {
+    reportId: report.id,
+    existingCaseId: lockedCase?.id ?? null,
+    campusId: report.campusId,
+    scopeKey: report.scopeKey,
+    reportCreatedAt: report.createdAt,
+    previousStatus: report.status,
+    nextStatus: input.status,
+  });
+
   await reconcileReportRiskProjection(
     { reportId: report.id, actorId: input.actorId },
     tx,
   );
 
+  // 审计（既有一行合同不变：action/detail 语义保留；Phase 7E 补 campusId
+  // 快照与 case 指针 metadata，与 7D audit read model 的 scope 展示一致）
   await tx.adminLog.create({
     data: {
       adminId: input.actorId,
@@ -456,8 +546,17 @@ export async function applyReportReviewTx(
       targetType: "REPORT",
       targetId: report.id,
       detail: input.handledNote || null,
+      campusId: report.campusId,
+      metadata: caseSync ? { sourceId: caseSync.caseId } : undefined,
     },
   });
 
-  return { reportId: report.id, status: input.status, reporterId: updated.reporterId };
+  return {
+    reportId: report.id,
+    status: input.status,
+    reporterId: updated.reporterId,
+    caseId: caseSync?.caseId ?? lockedCase?.id ?? "",
+    reopened: caseSync?.reopened ?? false,
+    dueAt: caseSync?.dueAt ?? caseSlaDeadline(report.createdAt),
+  };
 }

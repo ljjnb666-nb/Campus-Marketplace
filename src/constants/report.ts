@@ -15,3 +15,13 @@ export const REPORT_STATUS_LABELS = {
   RESOLVED: "已处理",
   REJECTED: "已驳回",
 } as const;
+
+// Phase 7E：举报目标类型展示标签（治理面 queue/detail 用）
+export const REPORT_TARGET_TYPE_LABELS = {
+  PRODUCT: "商品",
+  ERRAND_TASK: "跑腿任务",
+  SERVICE_LISTING: "服务",
+  RENTAL_LISTING: "租赁",
+  USER: "用户",
+  MESSAGE: "消息",
+} as const;

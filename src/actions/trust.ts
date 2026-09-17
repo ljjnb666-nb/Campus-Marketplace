@@ -8,6 +8,8 @@ import {
   reconcileReportRiskProjection,
   resolveReportTargetContext,
 } from "@/lib/enforcement/report-projection";
+import { createModerationCaseForReportTx } from "@/lib/reports/moderation-case-sync";
+import { deriveReportScopeSnapshot } from "@/lib/reports/report-scope";
 import { createNotification } from "@/repositories/notification-repository";
 import { reportFormSchema, reviewFormSchema } from "@/validators/trust";
 
@@ -154,6 +156,7 @@ export async function createReport(
       productId: formData.get("productId"),
       errandTaskId: formData.get("errandTaskId"),
       serviceListingId: formData.get("serviceListingId"),
+      rentalListingId: formData.get("rentalListingId"),
       targetUserId: formData.get("targetUserId"),
       messageId: formData.get("messageId"),
     });
@@ -172,60 +175,83 @@ export async function createReport(
           ? { errandTaskId: parsed.data.errandTaskId || null }
           : parsed.data.targetType === "SERVICE_LISTING"
             ? { serviceListingId: parsed.data.serviceListingId || null }
-            : parsed.data.targetType === "USER"
-              ? { targetUserId: parsed.data.targetUserId || null }
-              : { messageId: parsed.data.messageId || null };
+            : parsed.data.targetType === "RENTAL_LISTING"
+              ? { rentalListingId: parsed.data.rentalListingId || null }
+              : parsed.data.targetType === "USER"
+                ? { targetUserId: parsed.data.targetUserId || null }
+                : { messageId: parsed.data.messageId || null };
 
-    // Repair 2 Blocker E：owner/campus 解析唯一来源（resolveReportTargetContext）
-    // ——本 action 不再维护任何 targetType → owner 的重复 switch
-    const targetContext = await withTransaction((tx) =>
-      resolveReportTargetContext(tx, {
+    const targetRef = {
       targetType: parsed.data.targetType,
       productId: parsed.data.productId || null,
       errandTaskId: parsed.data.errandTaskId || null,
       serviceListingId: parsed.data.serviceListingId || null,
+      rentalListingId: parsed.data.rentalListingId || null,
       targetUserId: parsed.data.targetUserId || null,
-        messageId: parsed.data.messageId || null,
-      }),
-    );
+      messageId: parsed.data.messageId || null,
+    };
 
-    if (!targetContext.targetExists) {
-      return { ...initialState, message: "举报目标不存在" };
-    }
+    // Phase 7E：target context 解析、scope 快照、Report 创建、1:1 case 创建、
+    // RiskFlag 投影与通知收敛进同一个事务（创建原子合同）。
+    const outcome = await withTransaction(async (tx) => {
+      // Repair 2 Blocker E：owner/campus 解析唯一来源（resolveReportTargetContext）
+      // ——本 action 不再维护任何 targetType → owner 的重复 switch。
+      const targetContext = await resolveReportTargetContext(tx, targetRef);
 
-    const targetOwnerId = targetContext.ownerUserId;
+      if (!targetContext.targetExists) {
+        return { ...initialState, message: "举报目标不存在" };
+      }
 
-    if (targetOwnerId && targetOwnerId === user.id) {
-      return { ...initialState, message: "不能举报自己发布或发送的内容" };
-    }
+      const targetOwnerId = targetContext.ownerUserId;
 
-    const existingOpenReport = await prisma.report.findFirst({
-      where: {
-        reporterId: user.id,
-        targetType: parsed.data.targetType,
-        status: {
-          in: ["OPEN", "IN_REVIEW"],
+      if (targetOwnerId && targetOwnerId === user.id) {
+        return { ...initialState, message: "不能举报自己发布或发送的内容" };
+      }
+
+      const existingOpenReport = await tx.report.findFirst({
+        where: {
+          reporterId: user.id,
+          targetType: parsed.data.targetType,
+          status: {
+            in: ["OPEN", "IN_REVIEW"],
+          },
+          ...payload,
         },
-        ...payload,
-      },
-      select: {
-        id: true,
-      },
-    });
+        select: {
+          id: true,
+        },
+      });
 
-    if (existingOpenReport) {
-      return { ...initialState, message: "该目标已有待处理举报，请勿重复提交" };
-    }
+      if (existingOpenReport) {
+        return { ...initialState, message: "该目标已有待处理举报，请勿重复提交" };
+      }
 
-    await withTransaction(async (tx) => {
+      // Phase 7E：immutable scope 快照（frozen fail-closed rule——listing 目标
+      // 取目标对象 campus；USER/MESSAGE 恒 UNSCOPED，绝不从 User.campusId 猜测）
+      const scopeSnapshot = deriveReportScopeSnapshot(
+        parsed.data.targetType,
+        targetContext.campusId,
+      );
+
       const report = await tx.report.create({
         data: {
           reporterId: user.id,
           targetType: parsed.data.targetType,
           reason: parsed.data.reason,
           detail: parsed.data.detail || null,
+          campusId: scopeSnapshot.campusId,
+          scopeKey: scopeSnapshot.scopeKey,
           ...payload,
         },
+      });
+
+      // Phase 7E：1:1 ModerationCase（openedAt = report 创建时刻，SLA 起点；
+      // UNIQUE(reportId) 为 DB 兜底）
+      await createModerationCaseForReportTx(tx, {
+        reportId: report.id,
+        campusId: scopeSnapshot.campusId,
+        scopeKey: scopeSnapshot.scopeKey,
+        openedAt: report.createdAt,
       });
 
       // Phase 6B + Repair 2：举报创建经中央 projection 收敛产生
@@ -240,19 +266,21 @@ export async function createReport(
         title: "举报已提交",
         content: `你的举报已受理，编号 ${report.id.slice(-8)}，平台会尽快核查并在处理后通知你。`,
       });
+
+      return { success: true, message: "举报已提交，客服人员会尽快审核处理" };
     });
 
-    revalidatePath("/products");
-    revalidatePath("/errands");
-    revalidatePath("/services");
-    revalidatePath("/users");
-    revalidatePath("/reports");
-    revalidatePath("/notifications");
+    if (outcome.success) {
+      revalidatePath("/products");
+      revalidatePath("/errands");
+      revalidatePath("/services");
+      revalidatePath("/rentals");
+      revalidatePath("/users");
+      revalidatePath("/reports");
+      revalidatePath("/notifications");
+    }
 
-    return {
-      success: true,
-      message: "举报已提交，客服人员会尽快审核处理",
-    };
+    return outcome;
   } catch (error) {
     return { ...initialState, message: actionErrorMessage(error, "createReport") };
   }

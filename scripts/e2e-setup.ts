@@ -89,6 +89,8 @@ function migrateDeploy(): void {
 // 与 prisma/seed.ts 相同的外键安全顺序（含租赁模块全链）
 async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.review.deleteMany();
+  // Phase 7E：ModerationCase 1:1 引用 Report（RESTRICT）——先删 case 再删 Report
+  await prisma.moderationCase.deleteMany();
   await prisma.report.deleteMany();
   await prisma.notification.deleteMany();
   await prisma.message.deleteMany();
@@ -123,6 +125,12 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.moderationKeyword.deleteMany();
 
   // NextAuth 表 + 全部用户（E2E 库完全由本脚本拥有）
+  // Phase 6B/6C/7C 治理表：FK 指向 User/listing（RESTRICT）——先删子表再删用户
+  await prisma.appeal.deleteMany();
+  await prisma.enforcementAction.deleteMany();
+  await prisma.riskFlag.deleteMany();
+  await prisma.riskState.deleteMany();
+  await prisma.listingModeration.deleteMany();
   await prisma.account.deleteMany();
   await prisma.session.deleteMany();
   await prisma.verificationToken.deleteMany();

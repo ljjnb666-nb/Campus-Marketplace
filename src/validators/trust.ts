@@ -21,7 +21,8 @@ export const reviewFormSchema = z.object({
 });
 
 export const reportFormSchema = z.object({
-  targetType: z.enum(["PRODUCT", "ERRAND_TASK", "SERVICE_LISTING", "USER", "MESSAGE"]),
+  // Phase 7E rental repair：RENTAL_LISTING 纳入（与 ReportTargetType 全集一致）
+  targetType: z.enum(["PRODUCT", "ERRAND_TASK", "SERVICE_LISTING", "RENTAL_LISTING", "USER", "MESSAGE"]),
   reason: z.enum([
     "FAKE_INFO",
     "SCAM_RISK",
@@ -43,6 +44,7 @@ export const reportFormSchema = z.object({
   productId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
   errandTaskId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
   serviceListingId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
+  rentalListingId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
   targetUserId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
   messageId: z.string().trim().nullable().optional().transform((value) => value ?? ""),
 });

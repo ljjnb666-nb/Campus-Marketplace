@@ -45,15 +45,18 @@ test("举报与 moderation：买家举报商品 → 管理员处理完成", asyn
   expect(report?.reason).toBe("FAKE_INFO");
   await buyerContext.close();
 
-  // ---------- 管理员后台处理 ----------
+  // ---------- 管理员处理（Phase 7E：canonical /governance/reports 治理面；
+  // legacy /admin/reports 已退役为 redirect，见 phase7e-report-moderation.spec） ----------
   const adminContext = await browser.newContext({ storageState: storageStatePath("admin") });
   const admin = await adminContext.newPage();
-  await admin.goto("/admin/reports");
+  await admin.goto("/governance/reports?limit=50");
   const reportCard = admin.locator("article", { hasText: title }).first();
   await expect(reportCard).toBeVisible();
+  await reportCard.getByRole("link", { name: "查看详情" }).click();
+  await expect(admin.getByRole("heading", { name: "举报详情" })).toBeVisible();
 
   // 标记处理中（form submit 走 server action，成功后页面可能整页刷新）
-  await reportCard.getByRole("button", { name: "标记处理中" }).click();
+  await admin.getByRole("button", { name: "标记处理中" }).click();
   await expect
     .poll(
       async () =>
@@ -62,12 +65,15 @@ test("举报与 moderation：买家举报商品 → 管理员处理完成", asyn
     )
     .toBe("IN_REVIEW");
 
-  // 重新加载后台页后再填备注并完成处理，避免 action 刷新后 locator 指向旧 DOM
-  await admin.goto("/admin/reports");
-  const refreshedCard = admin.locator("article", { hasText: title }).first();
-  await expect(refreshedCard).toBeVisible();
-  await refreshedCard.getByPlaceholder("填写处理说明").first().fill(`E2E 处理备注 ${tag}`);
-  await refreshedCard.getByRole("button", { name: "处理完成" }).click();
+  // 重新加载详情后再填备注并完成处理，避免 action 刷新后 locator 指向旧 DOM
+  const reportRow = await e2eDb().report.findFirst({
+    where: { productId },
+    orderBy: { createdAt: "desc" },
+  });
+  await admin.goto(`/governance/reports/${reportRow!.id}`);
+  await admin.getByRole("heading", { name: "举报详情" }).waitFor();
+  await admin.locator('textarea[name="handledNote"]').first().fill(`E2E 处理备注 ${tag}`);
+  await admin.getByRole("button", { name: "处理完成" }).click();
   await expect
     .poll(
       async () =>

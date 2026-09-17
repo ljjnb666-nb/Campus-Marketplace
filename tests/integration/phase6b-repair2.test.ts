@@ -147,6 +147,10 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
     await rawClient!.riskFlag.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.riskState.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.enforcementAction.deleteMany({ where: { targetId: { in: createdUserIds } } });
+    // Phase 7E：case 行经 RESTRICT FK 引用 Report——先删 case 再删 Report
+    await rawClient!.moderationCase.deleteMany({
+      where: { report: { OR: [{ reporterId: { in: createdUserIds } }, { targetUserId: { in: createdUserIds } }] } },
+    });
     await rawClient!.report.deleteMany({
       where: { OR: [{ reporterId: { in: createdUserIds } }, { targetUserId: { in: createdUserIds } }] },
     });
@@ -195,6 +199,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         reason: "FAKE_INFO",
         reporterId: reporter.id,
         targetUserId: target.id,
+        campusId: null,
+        scopeKey: "UNSCOPED",
       },
     });
 
@@ -291,6 +297,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         reason: "SCAM_RISK",
         reporterId: reporter.id,
         targetUserId: target.id,
+        campusId: null,
+        scopeKey: "UNSCOPED",
       },
     });
 
@@ -779,6 +787,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         reason: "FAKE_INFO",
         reporterId: reporter.id,
         productId: product.id,
+        campusId: campusA.id,
+        scopeKey: `CAMPUS:${campusA.id}`,
       },
     });
     await reconcileReportRiskProjection({ reportId: productReport.id });
@@ -800,6 +810,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         reason: "FAKE_INFO",
         reporterId: reporter.id,
         serviceListingId: service.id,
+        campusId: campusA.id,
+        scopeKey: `CAMPUS:${campusA.id}`,
       },
     });
     await reconcileReportRiskProjection({ reportId: serviceReport.id });
@@ -825,6 +837,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         reason: "HARASSMENT",
         reporterId: reporter.id,
         messageId: message.id,
+        campusId: null,
+        scopeKey: "UNSCOPED",
       },
     });
     await reconcileReportRiskProjection({ reportId: messageReport.id });

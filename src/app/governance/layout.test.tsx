@@ -301,4 +301,52 @@ describe("GovernanceLayout Phase 7D union gate + 导航可见性", () => {
     ).rejects.toThrow("NOT_FOUND");
     expect(notFound).toHaveBeenCalled();
   });
+
+  // Phase 7E：root gate 六元 union + 精确 capability 派生导航
+  it("7E：CAMPUS_REPORT_REVIEWER（report.review@A + ACTIVE membership）→ 可入树，仅见「举报处理」链接", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        {
+          roleKey: "CAMPUS_REPORT_REVIEWER",
+          scope: "CAMPUS",
+          campusId: "A",
+          permissionKeys: ["report.review"],
+        },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "举报处理" })).toBeTruthy();
+    // sibling 互不扩权：无 appeal/role/listing/audit/enforcement scope → 不渲染
+    expect(screen.queryByRole("link", { name: "申诉审核" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "角色管理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "列表治理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+  });
+
+  it("7E：report.review 无 ACTIVE membership 的 campus grant → 不得入树", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "CAMPUS_REPORT_REVIEWER", scope: "CAMPUS", campusId: "A", permissionKeys: ["report.review"] },
+      ],
+    });
+
+    await expect(
+      GovernanceLayout({ children: <div>治理内容</div> }),
+    ).rejects.toThrow("NOT_FOUND");
+    expect(notFound).toHaveBeenCalled();
+  });
 });
