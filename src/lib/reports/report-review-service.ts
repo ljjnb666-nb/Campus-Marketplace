@@ -19,7 +19,8 @@ import { loadAuthorizationContext, requirePermissionInContext } from "@/lib/rbac
  * projection → 审计）。
  *
  * 冻结链（单个 locked transaction）：
- *   USER:actor subject lock（sorted subject-lock contract）
+ *   USER:actor subject lock（sorted subject-lock contract；FR01：真正获取，
+ *   与 claim/release 同源序列化 role revoke / 账号停用 / membership 停用）
  *   → REPORT 行 FOR UPDATE
  *   → MODERATION_CASE 行 FOR UPDATE
  *   → 锁后授权复核（report.review；UNSCOPED 仅 GLOBAL，campus exact-pair）
@@ -82,6 +83,14 @@ export async function reviewReportInGovernance(
   const notification = getReportNotificationCopy(input.status, input.handledNote || undefined);
 
   return withTransaction(async (tx) => {
+    // FR01（Final Review Repair 1）：USER:actor advisory lock 与 claim/release
+    // 同源——在同一事务内、REPORT 行锁之前取得，序列化 role revoke / 账号停用
+    // / membership 停用 vs 治理写（7C R2-01 同源合同），关闭"锁后授权重读"
+    // 之前的角色/状态变更窗口（TOCTOU）。失败随事务回滚，零吞错。
+    await acquireGovernanceSubjectLocks(tx, [
+      { subjectType: "USER", subjectId: input.actorId },
+    ]);
+
     const review = await applyReportReviewTx(tx, {
       reportId: input.reportId,
       actorId: input.actorId,

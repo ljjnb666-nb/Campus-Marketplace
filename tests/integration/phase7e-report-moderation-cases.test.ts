@@ -302,6 +302,47 @@ async function waitForRowLockWaiter(
   throw new Error(`row-lock barrier 超时：未观察到对 ${tableMarker} 的 FOR UPDATE 等待者`);
 }
 
+/** advisory 锁等待者证明：T2 真实阻塞在 USER:actor governance 锁上（零 sleep）。 */
+async function waitForAdvisoryLockWaiter(
+  client: PrismaClient,
+  options: { timeoutMs?: number } = {},
+) {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ pid: number }[]>`
+      SELECT a.pid
+      FROM pg_stat_activity a
+      WHERE a.wait_event_type = 'Lock'
+        AND a.query ILIKE '%pg_advisory_xact_lock%'
+        AND a.pid <> pg_backend_pid()`;
+    if (rows.length > 0) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("advisory-lock barrier 超时：未观察到 USER:actor governance 锁等待者");
+}
+
+/** FR01 共享：campus A scope 的 USER 举报 + case（scope 快照与目标类型解耦）。 */
+async function createReviewableScenario() {
+  const report = await createReportRow({
+    reporterId: reporter.id,
+    targetType: "USER",
+    targetUserId: seller.id,
+    campusId: campusA.id,
+    scopeKey: `CAMPUS:${campusA.id}`,
+  });
+  await createCaseRow({
+    reportId: report.id,
+    campusId: campusA.id,
+    scopeKey: `CAMPUS:${campusA.id}`,
+    openedAt: report.createdAt,
+    dueAt: new Date(report.createdAt.getTime() + 48 * 60 * 60 * 1000),
+  });
+  return report;
+}
+
 async function queueItemsFor(access: { global: boolean; campusIds: string[] }, filters?: Record<string, unknown>) {
   const { loadAuthorizedReportQueue } = await import("@/lib/reports/report-query");
   const items: Awaited<ReturnType<typeof loadAuthorizedReportQueue>>["items"] = [];
@@ -360,6 +401,10 @@ afterAll(async () => {
   await rawClient.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
   await rawClient.report.deleteMany({ where: { id: { in: createdReportIds } } });
   await rawClient.adminLog.deleteMany({ where: { adminId: { in: createdUserIds } } });
+  // FR01 S04：suspend/reinstate 以 fixture 用户为 actor/target 写入 EnforcementAction
+  await rawClient.enforcementAction.deleteMany({
+    where: { OR: [{ targetId: { in: createdUserIds } }, { actorId: { in: createdUserIds } }] },
+  });
   await rawClient.userRoleAssignment.deleteMany({ where: { id: { in: createdAssignmentIds } } });
   await rawClient.campusMembership.deleteMany({ where: { id: { in: createdMembershipIds } } });
   await rawClient.message.deleteMany({ where: { conversationId: { in: createdConversationIds } } });
@@ -1123,5 +1168,269 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7E claim/review 并发（真实 
     expect(finalReport.status).toBe("RESOLVED");
     const kase = await rawClient!.moderationCase.findUniqueOrThrow({ where: { reportId: report.id } });
     expect(kase.closedAt).not.toBeNull();
+  });
+});
+
+// ── FR01（Final Review Repair 1）：review 的 USER:actor 序列化竞态 ───────────
+
+describe.skipIf(!integrationDatabaseUrl)("Phase 7E FR01 review actor serialization（真实 PG）", () => {
+  /** 自愈：前序测试中断可能遗留角色缺失/账号 SUSPENDED——每个场景前恢复基准态。 */
+  async function ensureReviewerReady() {
+    const existing = await rawClient!.userRoleAssignment.findFirst({
+      where: {
+        userId: reviewerA.id,
+        role: { key: "CAMPUS_REPORT_REVIEWER" },
+        campusId: campusA.id,
+      },
+    });
+    if (!existing) {
+      await assignRoleByKey(reviewerA.id, "CAMPUS_REPORT_REVIEWER", campusA.id);
+    }
+    const account = await rawClient!.user.findUniqueOrThrow({
+      where: { id: reviewerA.id },
+      select: { status: true },
+    });
+    if (account.status !== "ACTIVE") {
+      const { reinstateAccount } = await import("@/lib/enforcement/account-enforcement-service");
+      await reinstateAccount({
+        actorId: globalAdmin.id,
+        targetUserId: reviewerA.id,
+        reasonCode: "MANUAL_REVIEW",
+        sourceType: "ADMIN_ACTION",
+      });
+    }
+  }
+
+  it("S01+S03：review 先持 USER:actor 锁 → revoke 阻塞于同一锁 → review 合法提交 → revoke 随后完成", async () => {
+    const { reviewReportInGovernance } = await import("@/lib/reports/report-review-service");
+    const { revokeRole } = await import("@/lib/rbac/assignment-service");
+
+    await ensureReviewerReady();
+    const report = await createReviewableScenario();
+
+    // T1（reviewerA review）：USER:reviewerA advisory lock → REPORT/CASE 行锁
+    // → racePoint 发"已持锁"信号后等待屏障
+    let signalLocked: () => void = () => {};
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    let releaseBarrier: () => void = () => {};
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const reviewPromise = reviewReportInGovernance({
+      actorId: reviewerA.id,
+      reportId: report.id,
+      status: "RESOLVED",
+      racePoint: async () => {
+        signalLocked();
+        await barrier;
+      },
+    }).catch((error: unknown) => error);
+
+    await locked;
+
+    // T2（globalAdmin 经 canonical assignment service 撤销 reviewerA 角色）：
+    // acquireActorTargetLocks 含 USER:reviewerA → 必须阻塞在 T1 的 actor 锁后
+    const revokePromise = revokeRole({
+      actorId: globalAdmin.id,
+      targetUserId: reviewerA.id,
+      roleKey: "CAMPUS_REPORT_REVIEWER",
+      campusId: campusA.id,
+    }).catch((error: unknown) => error);
+
+    await waitForAdvisoryLockWaiter(rawClient!);
+
+    // 串行化放行：canonical 顺序 = review（持锁者）先提交
+    releaseBarrier();
+    const reviewOutcome = await reviewPromise;
+    const revokeOutcome = await revokePromise;
+
+    // S03：review 在其授权仍有效的时刻合法提交
+    expect(reviewOutcome).toMatchObject({ status: "RESOLVED" });
+    expect(revokeOutcome).toEqual({ removed: true });
+
+    // 终态一致性：report terminal + case closed + 恰一条成功审计（无 stale
+    // success——审计与提交同事务，角色撤销发生在其后）
+    const finalReport = await rawClient!.report.findUniqueOrThrow({
+      where: { id: report.id }, select: { status: true },
+    });
+    expect(finalReport.status).toBe("RESOLVED");
+    const kase = await rawClient!.moderationCase.findUniqueOrThrow({ where: { reportId: report.id } });
+    expect(kase.closedAt).not.toBeNull();
+    const successAudits = await rawClient!.adminLog.findMany({
+      where: { action: "REPORT_RESOLVED", targetId: report.id },
+    });
+    expect(successAudits).toHaveLength(1);
+
+    // 恢复 fixture 角色（后续场景需要 reviewerA 授权）
+    await assignRoleByKey(reviewerA.id, "CAMPUS_REPORT_REVIEWER", campusA.id);
+  });
+
+  it("S02：role revoke 先完成 → review 锁内授权失败，零副作用（零 stale success）", async () => {
+    const { reviewReportInGovernance } = await import("@/lib/reports/report-review-service");
+    const { revokeRole } = await import("@/lib/rbac/assignment-service");
+    const { isRbacError } = await import("@/lib/rbac/errors");
+
+    await ensureReviewerReady();
+    const report = await createReviewableScenario();
+
+    // 基线快照（共享库中 reporter 可能已有历史通知——断言"零新增"而非全量数）
+    const notificationsBefore = await rawClient!.notification.count({
+      where: { userId: reporter.id, type: "REPORT" },
+    });
+    const auditsBefore = await rawClient!.adminLog.count({
+      where: { action: "REPORT_RESOLVED", targetId: report.id },
+    });
+
+    // revoke 先完成（canonical service，真实删除 assignment）
+    const revokeOutcome = await revokeRole({
+      actorId: globalAdmin.id,
+      targetUserId: reviewerA.id,
+      roleKey: "CAMPUS_REPORT_REVIEWER",
+      campusId: campusA.id,
+    });
+    expect(revokeOutcome).toEqual({ removed: true });
+
+    // review 随后：锁内授权重读为最终权威 → 拒绝 + 事务回滚
+    const reviewOutcome = await reviewReportInGovernance({
+      actorId: reviewerA.id,
+      reportId: report.id,
+      status: "RESOLVED",
+    }).catch((error: unknown) => error);
+
+    expect(isRbacError(reviewOutcome)).toBe(true);
+    expect((reviewOutcome as { code: string }).code).toBe("AUTH_PERMISSION_DENIED");
+
+    // 零副作用断言：Report / Case / RiskFlag / 审计 / 通知 全部不变
+    const unchanged = await rawClient!.report.findUniqueOrThrow({
+      where: { id: report.id }, select: { status: true },
+    });
+    expect(unchanged.status).toBe("OPEN");
+    const kase = await rawClient!.moderationCase.findUniqueOrThrow({ where: { reportId: report.id } });
+    expect(kase.closedAt).toBeNull();
+    expect(kase.assignedToId).toBeNull();
+    const flags = await rawClient!.riskFlag.count({
+      where: { sourceType: "REPORT", sourceId: report.id },
+    });
+    expect(flags).toBe(0);
+    expect(
+      await rawClient!.adminLog.count({ where: { action: "REPORT_RESOLVED", targetId: report.id } }),
+    ).toBe(auditsBefore);
+    expect(
+      await rawClient!.notification.count({ where: { userId: reporter.id, type: "REPORT" } }),
+    ).toBe(notificationsBefore);
+
+    // 恢复 fixture 角色
+    await assignRoleByKey(reviewerA.id, "CAMPUS_REPORT_REVIEWER", campusA.id);
+  });
+
+  it("S04：account suspension 与 review 同锁序列化——并发时 review 先赢合法；suspend 先完成则 review 拒绝（无 TOCTOU 窗口）", async () => {
+    const { reviewReportInGovernance } = await import("@/lib/reports/report-review-service");
+    const { suspendAccount, reinstateAccount } = await import("@/lib/enforcement/account-enforcement-service");
+    const { isRbacError } = await import("@/lib/rbac/errors");
+
+    await ensureReviewerReady();
+    const enforcementInput = (targetUserId: string) => ({
+      actorId: globalAdmin.id,
+      targetUserId,
+      reasonCode: "MANUAL_REVIEW" as const,
+      sourceType: "ADMIN_ACTION",
+    });
+
+    // —— 段 1（并发）：review 持 USER:reviewerA 锁期间 suspend 阻塞 →
+    // review 在账号仍 ACTIVE 的时刻合法提交 → suspend 随后生效 ——
+    const reportA = await createReviewableScenario();
+
+    let signalLocked: () => void = () => {};
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    let releaseBarrier: () => void = () => {};
+    const barrier = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const reviewPromise = reviewReportInGovernance({
+      actorId: reviewerA.id,
+      reportId: reportA.id,
+      status: "RESOLVED",
+      racePoint: async () => {
+        signalLocked();
+        await barrier;
+      },
+    }).catch((error: unknown) => error);
+
+    await locked;
+
+    const suspendPromise = suspendAccount(enforcementInput(reviewerA.id)).catch(
+      (error: unknown) => error,
+    );
+    await waitForAdvisoryLockWaiter(rawClient!);
+
+    releaseBarrier();
+    const reviewOutcome = await reviewPromise;
+    const suspendOutcome = await suspendPromise;
+
+    expect(reviewOutcome).toMatchObject({ status: "RESOLVED" });
+    expect(suspendOutcome).toMatchObject({ alreadyInState: false });
+
+    // —— 恢复 ACTIVE ——
+    await reinstateAccount(enforcementInput(reviewerA.id));
+
+    // —— 段 2（suspend 先完成）：锁内账号状态重读为权威 → review 拒绝 + 回滚 ——
+    const suspendAgain = await suspendAccount(enforcementInput(reviewerA.id));
+    expect(suspendAgain.alreadyInState).toBe(false);
+
+    const reportB = await createReviewableScenario();
+    const deniedReview = await reviewReportInGovernance({
+      actorId: reviewerA.id,
+      reportId: reportB.id,
+      status: "RESOLVED",
+    }).catch((error: unknown) => error);
+
+    expect(isRbacError(deniedReview)).toBe(true);
+    expect((deniedReview as { code: string }).code).toBe("AUTH_ACCOUNT_INACTIVE");
+
+    const reportBUnchanged = await rawClient!.report.findUniqueOrThrow({
+      where: { id: reportB.id }, select: { status: true },
+    });
+    expect(reportBUnchanged.status).toBe("OPEN");
+    const reportBCase = await rawClient!.moderationCase.findUniqueOrThrow({
+      where: { reportId: reportB.id },
+    });
+    expect(reportBCase.closedAt).toBeNull();
+    const reportBAudits = await rawClient!.adminLog.count({
+      where: { action: "REPORT_RESOLVED", targetId: reportB.id },
+    });
+    expect(reportBAudits).toBe(0);
+
+    // 恢复 reviewerA ACTIVE（S04 未撤销角色，仅账号状态）
+    await reinstateAccount(enforcementInput(reviewerA.id));
+  });
+
+  it("S05：claim → release → review 兼容锁序回归（同一 report 顺序执行，零 40P01）", async () => {
+    const { claimModerationCase, releaseModerationCase } = await import("@/lib/reports/moderation-case-service");
+    const { reviewReportInGovernance } = await import("@/lib/reports/report-review-service");
+
+    await ensureReviewerReady();
+    const report = await createReviewableScenario();
+
+    // 三条 mutation 路径共享 USER → REPORT → CASE 锁序：顺序执行零死锁
+    const claim = await claimModerationCase({ actorId: reviewerA.id, reportId: report.id });
+    expect(claim.outcome).toBe("CLAIMED");
+
+    const release = await releaseModerationCase({ actorId: reviewerA.id, reportId: report.id });
+    expect(release.outcome).toBe("RELEASED");
+
+    const review = await reviewReportInGovernance({
+      actorId: reviewerA.id, reportId: report.id, status: "RESOLVED",
+    });
+    expect(review.status).toBe("RESOLVED");
+
+    // 交叉 actor 再验一次（globalAdmin 对已终局 case 幂等合法重提交）
+    const reviewAgain = await reviewReportInGovernance({
+      actorId: globalAdmin.id, reportId: report.id, status: "RESOLVED",
+    });
+    expect(reviewAgain.status).toBe("RESOLVED");
   });
 });

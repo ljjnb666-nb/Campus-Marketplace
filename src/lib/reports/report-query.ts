@@ -5,6 +5,7 @@ import { isModerationCaseOverdue } from "@/lib/reports/moderation-case-sync";
 import { prisma } from "@/lib/prisma";
 import { canReviewReportScope, type ReportReviewAccess } from "@/lib/reports/report-access";
 import {
+  reportScopeLabel,
   reportReviewCampusBranch,
   reportReviewUnscopedBranch,
   resolveReportReviewScope,
@@ -290,10 +291,7 @@ export async function loadAuthorizedReportQueue(input: {
     status: row.report.status,
     targetType: row.report.targetType,
     safeTargetLabel: buildSafeTargetLabel(row.report, targetUserNames),
-    scopeLabel:
-      row.report.campusId !== null
-        ? `校区：${row.report.campus?.name ?? "未知校区"}`
-        : "平台级",
+    scopeLabel: reportScopeLabel(row.report.campusId, row.report.campus?.name ?? null),
     createdAt: row.report.createdAt.toISOString(),
     dueAt: row.dueAt.toISOString(),
     overdue: isModerationCaseOverdue({ closedAt: row.closedAt, dueAt: row.dueAt }, now),
@@ -345,8 +343,16 @@ export type ReportDetailDto = {
 export type ReportDetailResult = { ok: true; detail: ReportDetailDto } | { ok: false };
 
 /**
- * 详情授权（与 7A 同款统一拒绝）：missing → malformed scope → 越权，
- * 全部统一 { ok: false }（调用方映射 notFound()，无存在性 oracle——P05/P06）。
+ * 详情授权（FR02 两阶段读，Final Review Repair 1 冻结顺序）：
+ *
+ *   Stage A — 最小 authority 锚点（仅 id/campusId/scopeKey/case 存在性，
+ *   结构性不含 detail/handledNote/reporterId/目标内容/身份字段）
+ *   → authorize（missing/缺 case/malformed scope/越权 统一 { ok:false }，
+ *   调用方映射 notFound()，无存在性 oracle——P05/P06）
+ *   → Stage B — 授权通过后才进行敏感水合（detail/handledNote/目标关系/
+ *   case 时钟/assignedToId）+ 批量安全身份水合。
+ *
+ * 授权失败路径绝不触碰任何敏感列（D02/D03/D04）。
  */
 export async function loadAuthorizedReportDetail(input: {
   viewerId: string;
@@ -354,6 +360,37 @@ export async function loadAuthorizedReportDetail(input: {
   access: ReportReviewAccess;
   reportId: string;
 }): Promise<ReportDetailResult> {
+  // ---- Stage A：最小 authority 锚点（授权谓词所需字段，零敏感载荷） ----
+  const anchor = await prisma.report.findUnique({
+    where: { id: input.reportId },
+    select: {
+      id: true,
+      campusId: true,
+      scopeKey: true,
+      moderationCase: {
+        select: {
+          id: true,
+        },
+      },
+    },
+  });
+
+  if (!anchor || !anchor.moderationCase) {
+    return { ok: false };
+  }
+
+  const scope = resolveReportReviewScope({
+    campusId: anchor.campusId,
+    scopeKey: anchor.scopeKey,
+  });
+  if (!scope) {
+    return { ok: false };
+  }
+  if (!canReviewReportScope(input.access, scope)) {
+    return { ok: false };
+  }
+
+  // ---- Stage B：授权通过后的敏感水合 ----
   const row = await prisma.report.findUnique({
     where: { id: input.reportId },
     select: {
@@ -367,7 +404,6 @@ export async function loadAuthorizedReportDetail(input: {
       handledNote: true,
       reporterId: true,
       campusId: true,
-      scopeKey: true,
       campus: { select: { name: true } },
       product: { select: { title: true } },
       errandTask: { select: { title: true } },
@@ -388,14 +424,7 @@ export async function loadAuthorizedReportDetail(input: {
   });
 
   if (!row || !row.moderationCase) {
-    return { ok: false };
-  }
-
-  const scope = resolveReportReviewScope({ campusId: row.campusId, scopeKey: row.scopeKey });
-  if (!scope) {
-    return { ok: false };
-  }
-  if (!canReviewReportScope(input.access, scope)) {
+    // Stage A 与 B 之间的极端竞态（行被删除）：与未授权同形，反 oracle
     return { ok: false };
   }
 
@@ -423,8 +452,7 @@ export async function loadAuthorizedReportDetail(input: {
       targetType: row.targetType,
       detail: row.detail,
       safeTargetLabel,
-      scopeLabel:
-        row.campusId !== null ? `校区：${row.campus?.name ?? "未知校区"}` : "平台级",
+      scopeLabel: reportScopeLabel(row.campusId, row.campus?.name ?? null),
       reporterName: reporter?.displayName ?? UNAVAILABLE_USER_DISPLAY_NAME,
       createdAt: row.createdAt.toISOString(),
       handledAt: row.handledAt ? row.handledAt.toISOString() : null,

@@ -94,3 +94,24 @@ export function reportReviewUnscopedBranch(): {
 } {
   return { campusId: null, scopeKey: UNSCOPED_SCOPE_KEY };
 }
+
+/**
+ * FR03（Final Review Repair 1）：scope 的 canonical 呈现标签（queue/detail
+ * 唯一消费点，授权语义零改动——UNSCOPED 仍仅 GLOBAL report.review 读者）。
+ *
+ * UNSCOPED 语义 = "无校区归属记录"（USER/MESSAGE 无可靠 campus provenance），
+ * 绝不呈现"平台级"/"全局"/"GLOBAL"——那是 GLOBAL 执法 provenance 的措辞，
+ * Report 快照不存在该语义。CAMPUS → "校区：<name>"；campus 名缺失时以
+ * "未知校区" 占位（名称水合失败不改变归属语义）。
+ */
+export const UNSCOPED_SCOPE_LABEL = "无校区归属记录";
+
+export function reportScopeLabel(
+  campusId: string | null,
+  campusName: string | null,
+): string {
+  if (campusId === null) {
+    return UNSCOPED_SCOPE_LABEL;
+  }
+  return `校区：${campusName ?? "未知校区"}`;
+}

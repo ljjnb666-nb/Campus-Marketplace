@@ -109,7 +109,7 @@ export default async function GovernanceReportsPage({
         filters,
       });
 
-  // campus 过滤下拉：GLOBAL → 全部校区（+平台级）；campus reviewer → 仅其有效
+  // campus 过滤下拉：GLOBAL → 全部校区；campus reviewer → 仅其有效
   // scope 校区。选项集合由授权派生，绝不提供越权选项。
   const campusOptions = await listReportQueueCampuses(access);
 

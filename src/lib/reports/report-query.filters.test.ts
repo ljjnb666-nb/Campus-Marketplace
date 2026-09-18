@@ -180,6 +180,40 @@ describe("loadAuthorizedReportQueue（授权谓词 + filter AND 形状）", () =
     expect(page.nextCursor).not.toBeNull();
   });
 
+  it("L04：UNSCOPED 队列行 scopeLabel = 无校区归属记录（与 detail 同一 reportScopeLabel 语义）", async () => {
+    caseFindMany.mockResolvedValue([
+      caseRow(),
+      caseRow({
+        id: "case-u",
+        campusId: null,
+        scopeKey: "UNSCOPED",
+        report: {
+          id: "report-u",
+          reason: "HARASSMENT",
+          status: "OPEN",
+          targetType: "MESSAGE",
+          createdAt: new Date("2026-09-16T00:00:00.000Z"),
+          campusId: null,
+          campus: null,
+          product: null,
+          errandTask: null,
+          serviceListing: null,
+          rentalListing: null,
+          targetUserId: "target-1",
+        },
+      }),
+    ]);
+    const page = await loadAuthorizedReportQueue({ viewerId: "v1", access: GLOBAL_ACCESS, limit: 25 });
+
+    expect(page.items.find((i) => i.reportId === "report-1")!.scopeLabel).toBe("校区：校区A");
+    const unscoped = page.items.find((i) => i.reportId === "report-u")!;
+    expect(unscoped.scopeLabel).toBe("无校区归属记录");
+    // L05：queue 全量 DTO 不出现 平台级/全局/GLOBAL 文案
+    expect(JSON.stringify(page.items)).not.toContain("平台级");
+    expect(JSON.stringify(page.items)).not.toContain("全局");
+    expect(JSON.stringify(page.items)).not.toContain("GLOBAL");
+  });
+
   it("DTO 最小化：message 内容 / handledNote / detail 结构性不在 select", async () => {
     caseFindMany.mockResolvedValue([caseRow()]);
     await loadAuthorizedReportQueue({ viewerId: "v1", access: GLOBAL_ACCESS, limit: 25 });

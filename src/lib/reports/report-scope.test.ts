@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   UNSCOPED_SCOPE_KEY,
+  UNSCOPED_SCOPE_LABEL,
   deriveReportScopeSnapshot,
   reportCampusScopeKey,
   reportReviewCampusBranch,
   reportReviewUnscopedBranch,
+  reportScopeLabel,
   resolveReportReviewScope,
 } from "@/lib/reports/report-scope";
 
@@ -75,5 +77,39 @@ describe("队列分支构造器（exact pair，禁止叉积）", () => {
 
   it("UNSCOPED 分支固定形状（campusId=null）", () => {
     expect(reportReviewUnscopedBranch()).toEqual({ campusId: null, scopeKey: "UNSCOPED" });
+  });
+});
+
+/**
+ * FR03（Final Review Repair 1）：scope 呈现标签唯一语义。
+ * UNSCOPED = 无校区归属记录（绝不呈现"平台级"/"全局"/"GLOBAL"）；
+ * CAMPUS = 校区：<name>。授权语义零改动。
+ */
+describe("reportScopeLabel（canonical 呈现标签）", () => {
+  it("L01：CAMPUS 报告 → 校区：<name>", () => {
+    expect(reportScopeLabel("A", "主校区")).toBe("校区：主校区");
+  });
+
+  it("L01b：campus 名水合缺失 → 校区：未知校区（归属语义不变）", () => {
+    expect(reportScopeLabel("A", null)).toBe("校区：未知校区");
+  });
+
+  it("L02/L03：UNSCOPED（USER/MESSAGE）→ 无校区归属记录", () => {
+    expect(reportScopeLabel(null, null)).toBe(UNSCOPED_SCOPE_LABEL);
+    expect(reportScopeLabel(null, "任意名称不参与")).toBe(UNSCOPED_SCOPE_LABEL);
+  });
+
+  it("L05：任何输入组合都不产生 平台级/全局/GLOBAL 文案", () => {
+    for (const [campusId, campusName] of [
+      [null, null],
+      [null, "主校区"],
+      ["A", "主校区"],
+      ["A", null],
+    ] as const) {
+      const label = reportScopeLabel(campusId, campusName);
+      expect(label).not.toContain("平台级");
+      expect(label).not.toContain("全局");
+      expect(label).not.toContain("GLOBAL");
+    }
   });
 });
