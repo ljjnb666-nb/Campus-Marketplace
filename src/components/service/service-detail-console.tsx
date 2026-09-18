@@ -266,7 +266,7 @@ export function ServiceDetailConsole({
         action={async (formData) => {
           return createReport({ success: false, message: "" }, formData);
         }}
-        targetType="SERVICE"
+        targetType="SERVICE_LISTING"
         serviceListingId={service.id}
       />
     </>

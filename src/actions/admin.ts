@@ -2,13 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
-import { applyReportReviewTx } from "@/lib/enforcement/report-projection";
-import { createNotification } from "@/repositories/notification-repository";
+import { reviewReportInGovernance } from "@/lib/reports/report-review-service";
 import {
   categoryFormSchema,
   categoryStatusSchema,
@@ -185,31 +184,6 @@ export async function toggleServiceCategoryStatus(
   return toggleCategoryStatus("SERVICE", formData);
 }
 
-function getReportNotificationCopy(status: "IN_REVIEW" | "RESOLVED" | "REJECTED", handledNote?: string) {
-  if (status === "IN_REVIEW") {
-    return {
-      title: "举报处理中",
-      content: handledNote
-        ? `你提交的举报正在处理中。处理说明：${handledNote}`
-        : "你提交的举报正在处理中，平台会在核查完成后通知你结果。",
-    };
-  }
-
-  if (status === "RESOLVED") {
-    return {
-      title: "举报已处理",
-      content: `你提交的举报已处理完成。${handledNote ? `处理说明：${handledNote}` : ""}`,
-    };
-  }
-
-  return {
-    title: "举报处理结果已更新",
-    content: `你提交的举报未通过。${
-      handledNote ? `处理说明：${handledNote}` : "如有需要可补充更完整的信息后再次提交。"
-    }`,
-  };
-}
-
 export async function reviewVerification(
   formData: FormData,
 ): Promise<AdminActionState | undefined> {
@@ -261,30 +235,20 @@ export async function reviewReport(formData: FormData): Promise<AdminActionState
       return invalidFormState();
     }
 
-    const notification = getReportNotificationCopy(parsed.data.status, parsed.data.handledNote || undefined);
-
-    await withTransaction(async (tx) => {
-      // Repair 2 Blocker D：SELECT ... FOR UPDATE 序列化同一 Report 的状态变更
-      // （locked status → transition 断言 → canonical update → projection →
-      // AdminLog，全部同一 locked transaction；本路径不引入 USER subject locks，
-      // 无 row lock → advisory 反序）
-      const review = await applyReportReviewTx(tx, {
-        reportId: parsed.data.reportId,
-        actorId: admin.id,
-        status: parsed.data.status,
-        handledNote: parsed.data.handledNote || null,
-      });
-
-      await createNotification(tx, {
-        userId: review.reporterId,
-        type: "REPORT",
-        title: notification.title,
-        content: notification.content,
-      });
+    // Phase 7E：legacy 薄 adapter——canonical mutation authority 是
+    // reviewReportInGovernance（USER subject lock → REPORT/CASE 行锁 →
+    // 锁后授权 → transition 断言 → update + case 同步 + projection + 审计 +
+    // reporter 通知，全部同一 locked transaction）。本 action 零域逻辑。
+    await reviewReportInGovernance({
+      actorId: admin.id,
+      reportId: parsed.data.reportId,
+      status: parsed.data.status,
+      handledNote: parsed.data.handledNote || null,
     });
 
     revalidatePath("/admin");
     revalidatePath("/admin/reports");
+    revalidatePath("/governance/reports");
     revalidatePath("/notifications");
   } catch (error) {
     // 中央 transition/存在性错误的用户可读提示

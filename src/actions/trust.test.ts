@@ -18,15 +18,23 @@ const {
   transactionMock,
   txReviewCreate,
   txReportCreate,
+  txReportFindFirst,
+  txCaseCreate,
 } = vi.hoisted(() => {
   const txReviewCreate = vi.fn();
   const txReportCreate = vi.fn();
+  const txReportFindFirst = vi.fn();
+  const txCaseCreate = vi.fn();
   const transactionClient = {
     review: {
       create: txReviewCreate,
     },
     report: {
       create: txReportCreate,
+      findFirst: txReportFindFirst,
+    },
+    moderationCase: {
+      create: txCaseCreate,
     },
   };
 
@@ -50,6 +58,8 @@ const {
     ),
     txReviewCreate,
     txReportCreate,
+    txReportFindFirst,
+    txCaseCreate,
   };
 });
 
@@ -132,9 +142,13 @@ describe("trust actions", () => {
     transactionMock.mockClear();
     txReviewCreate.mockReset();
     txReportCreate.mockReset();
+    txReportFindFirst.mockReset();
+    txCaseCreate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT", name: "测试同学" });
     reportFindFirst.mockResolvedValue(null);
+    txReportFindFirst.mockResolvedValue(null);
+    txCaseCreate.mockResolvedValue({ id: "case-1" });
 
     // Repair 2：createReport 走 resolveReportTargetContext 单源解析；
     // mock 与生产 resolver 同一归属语义，数据来自各 fixture find mocks
@@ -164,7 +178,7 @@ describe("trust actions", () => {
             const row = await productFindFirst({ where: { id: productId, deletedAt: null } });
             return {
               ownerUserId: row?.sellerId ?? null,
-              campusId: null,
+              campusId: row?.campusId ?? null,
               targetExists: Boolean(row),
             };
           }
@@ -173,7 +187,7 @@ describe("trust actions", () => {
             const row = await errandTaskFindFirst({ where: { id: errandTaskId, deletedAt: null } });
             return {
               ownerUserId: row?.publisherId ?? null,
-              campusId: null,
+              campusId: row?.campusId ?? null,
               targetExists: Boolean(row),
             };
           }
@@ -184,7 +198,7 @@ describe("trust actions", () => {
             });
             return {
               ownerUserId: row?.providerId ?? null,
-              campusId: null,
+              campusId: row?.campusId ?? null,
               targetExists: Boolean(row),
             };
           }
@@ -370,15 +384,13 @@ describe("trust actions", () => {
       success: false,
       message: "不能举报自己发布或发送的内容",
     });
-    expect(reportFindFirst).not.toHaveBeenCalled();
-    // Repair 2：target 解析经 resolveReportTargetContext（只读事务）——
-    // 事务仅承载解析查询，不再包含重复举报查询/写入
-    expect(reportFindFirst).not.toHaveBeenCalled();
+    expect(txReportFindFirst).not.toHaveBeenCalled();
+    expect(txReportCreate).not.toHaveBeenCalled();
   });
 
   it("rejects a duplicate open report for the same target", async () => {
-    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1" });
-    reportFindFirst.mockResolvedValue({ id: "report-1" });
+    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1", campusId: "campus-1" });
+    txReportFindFirst.mockResolvedValue({ id: "report-1" });
 
     const formData = new FormData();
     formData.set("targetType", "PRODUCT");
@@ -396,7 +408,7 @@ describe("trust actions", () => {
       success: false,
       message: "该目标已有待处理举报，请勿重复提交",
     });
-    expect(reportFindFirst).toHaveBeenCalledWith({
+    expect(txReportFindFirst).toHaveBeenCalledWith({
       where: {
         reporterId: "user-1",
         targetType: "PRODUCT",
@@ -409,11 +421,13 @@ describe("trust actions", () => {
         id: true,
       },
     });
+    expect(txReportCreate).not.toHaveBeenCalled();
+    expect(txCaseCreate).not.toHaveBeenCalled();
   });
 
-  it("submits a product report and notifies the reporter", async () => {
-    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1" });
-    txReportCreate.mockResolvedValue({ id: "report-abcdef12345678" });
+  it("submits a product report with campus scope snapshot + case and notifies the reporter", async () => {
+    productFindFirst.mockResolvedValue({ id: "product-1", sellerId: "seller-1", campusId: "campus-1" });
+    txReportCreate.mockResolvedValue({ id: "report-abcdef12345678", createdAt: new Date("2026-09-16T00:00:00.000Z") });
 
     const formData = new FormData();
     formData.set("targetType", "PRODUCT");
@@ -431,14 +445,29 @@ describe("trust actions", () => {
       success: true,
       message: "举报已提交，客服人员会尽快审核处理",
     });
+    // Phase 7E：immutable scope 快照随创建写入
     expect(txReportCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         reporterId: "user-1",
         targetType: "PRODUCT",
         reason: "FAKE_INFO",
         productId: "product-1",
+        campusId: "campus-1",
+        scopeKey: "CAMPUS:campus-1",
       }),
     });
+    // Phase 7E：1:1 ModerationCase（openedAt = report.createdAt，SLA 起点）
+    expect(txCaseCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          reportId: "report-abcdef12345678",
+          campusId: "campus-1",
+          scopeKey: "CAMPUS:campus-1",
+          openedAt: new Date("2026-09-16T00:00:00.000Z"),
+          dueAt: new Date("2026-09-18T00:00:00.000Z"),
+        }),
+      }),
+    );
     expect(createNotification).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: "user-1", type: "REPORT" }),
@@ -446,9 +475,9 @@ describe("trust actions", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/reports");
   });
 
-  it("submits a message report against another sender", async () => {
+  it("submits a message report as UNSCOPED（campusId=null）", async () => {
     messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1" });
-    txReportCreate.mockResolvedValue({ id: "report-1" });
+    txReportCreate.mockResolvedValue({ id: "report-1", createdAt: new Date("2026-09-16T00:00:00.000Z") });
 
     const formData = new FormData();
     formData.set("targetType", "MESSAGE");
@@ -464,8 +493,20 @@ describe("trust actions", () => {
 
     expect(result.success).toBe(true);
     expect(txReportCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ messageId: "message-1" }),
+      data: expect.objectContaining({
+        messageId: "message-1",
+        campusId: null,
+        scopeKey: "UNSCOPED",
+      }),
     });
+    expect(txCaseCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          campusId: null,
+          scopeKey: "UNSCOPED",
+        }),
+      }),
+    );
   });
 
   it("blocks another user with an optional reason", async () => {
@@ -522,8 +563,8 @@ describe("trust actions", () => {
   });
 
   it("submits reports against errand tasks and service listings", async () => {
-    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", publisherId: "publisher-1" });
-    txReportCreate.mockResolvedValue({ id: "report-1" });
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", publisherId: "publisher-1", campusId: "campus-2" });
+    txReportCreate.mockResolvedValue({ id: "report-1", createdAt: new Date("2026-09-16T00:00:00.000Z") });
 
     let formData = new FormData();
     formData.set("targetType", "ERRAND_TASK");
@@ -538,10 +579,14 @@ describe("trust actions", () => {
     let result = await createReport({ success: false, message: "" }, formData);
     expect(result.success).toBe(true);
     expect(txReportCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ errandTaskId: "errand-1" }),
+      data: expect.objectContaining({
+        errandTaskId: "errand-1",
+        campusId: "campus-2",
+        scopeKey: "CAMPUS:campus-2",
+      }),
     });
 
-    serviceListingFindFirst.mockResolvedValue({ id: "service-1", providerId: "provider-1" });
+    serviceListingFindFirst.mockResolvedValue({ id: "service-1", providerId: "provider-1", campusId: "campus-3" });
     formData = new FormData();
     formData.set("targetType", "SERVICE_LISTING");
     formData.set("reason", "HARASSMENT");
@@ -555,7 +600,74 @@ describe("trust actions", () => {
     result = await createReport({ success: false, message: "" }, formData);
     expect(result.success).toBe(true);
     expect(txReportCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ serviceListingId: "service-1" }),
+      data: expect.objectContaining({
+        serviceListingId: "service-1",
+        campusId: "campus-3",
+        scopeKey: "CAMPUS:campus-3",
+      }),
+    });
+  });
+
+  it("submits a rental listing report with campus scope snapshot（7E rental repair）", async () => {
+    txReportCreate.mockResolvedValue({ id: "report-rental-1", createdAt: new Date("2026-09-16T00:00:00.000Z") });
+
+    // rentalListingId 未在 mock resolver 中单列：与生产同构，走 default 之外的
+    // RENTAL_LISTING 分支——此处直接以 resolver mock 的 RENTAL_LISTING 语义覆盖
+    reportProjection.resolveReportTargetContext.mockImplementation(
+      async (_tx, ref: { targetType: string; rentalListingId?: string | null }) => {
+        if (ref.targetType === "RENTAL_LISTING" && ref.rentalListingId === "rental-1") {
+          return { ownerUserId: "owner-1", campusId: "campus-9", targetExists: true };
+        }
+        return { ownerUserId: null, campusId: null, targetExists: false };
+      },
+    );
+
+    const formData = new FormData();
+    formData.set("targetType", "RENTAL_LISTING");
+    formData.set("reason", "SCAM_RISK");
+    formData.set("detail", "租赁物品与描述不符");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("rentalListingId", "rental-1");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(true);
+    expect(txReportCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        targetType: "RENTAL_LISTING",
+        rentalListingId: "rental-1",
+        campusId: "campus-9",
+        scopeKey: "CAMPUS:campus-9",
+      }),
+    });
+    expect(txCaseCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ campusId: "campus-9", scopeKey: "CAMPUS:campus-9" }),
+      }),
+    );
+    // 不能举报自己的租赁物品
+    reportProjection.resolveReportTargetContext.mockImplementation(
+      async () => ({ ownerUserId: "user-1", campusId: "campus-9", targetExists: true }),
+    );
+    const selfFormData = new FormData();
+    selfFormData.set("targetType", "RENTAL_LISTING");
+    selfFormData.set("reason", "SCAM_RISK");
+    selfFormData.set("detail", "");
+    selfFormData.set("productId", "");
+    selfFormData.set("errandTaskId", "");
+    selfFormData.set("serviceListingId", "");
+    selfFormData.set("rentalListingId", "rental-1");
+    selfFormData.set("targetUserId", "");
+    selfFormData.set("messageId", "");
+
+    const selfResult = await createReport({ success: false, message: "" }, selfFormData);
+    expect(selfResult).toEqual({
+      success: false,
+      message: "不能举报自己发布或发送的内容",
     });
   });
 

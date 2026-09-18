@@ -241,6 +241,8 @@ model User {
   // Phase 7C：listing 治理 overlay（provenance，Restrict：历史不可随账户删除丢失）
   listingModerations    ListingModeration[]       @relation("ListingModerator")
   listingRestorations   ListingModeration[]       @relation("ListingModerationResolver")
+  // Phase 7E：举报运营 case 领用（claim/release；SetNull：领用人引用消失时 case 仍在）
+  assignedModerationCases ModerationCase[]        @relation("ModerationCaseAssignee")
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   deletedAt             DateTime?
@@ -309,6 +311,9 @@ model Campus {
   enforcementActions   EnforcementAction[]
   // Phase 7C：listing 治理 overlay
   listingModerations   ListingModeration[]
+  // Phase 7E：举报 scope 快照与运营 case（Restrict：治理 provenance 不随删除丢失）
+  reportedScope        Report[]                   @relation("ReportScopeCampus")
+  moderationCases      ModerationCase[]           @relation("ModerationCaseCampus")
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
 }
@@ -662,6 +667,11 @@ model Report {
   handledById      String?
   handledNote      String?
   handledAt        DateTime?
+  // Phase 7E：immutable scope provenance（创建时快照，绝不回填猜测）。
+  // 四类 listing 目标 = 目标对象 campusId + scopeKey=CAMPUS:<campusId>；
+  // USER/MESSAGE = campusId null + scopeKey=UNSCOPED（frozen fail-closed rule）。
+  campusId         String?
+  scopeKey         String
   reporter         User             @relation("ReportReporter", fields: [reporterId], references: [id])
   targetUser       User?            @relation("ReportTargetUser", fields: [targetUserId], references: [id])
   product          Product?         @relation("ReportTargetProduct", fields: [productId], references: [id])
@@ -669,11 +679,44 @@ model Report {
   serviceListing   ServiceListing?  @relation("ReportTargetService", fields: [serviceListingId], references: [id])
   rentalListing    RentalListing?   @relation("ReportTargetRental", fields: [rentalListingId], references: [id])
   message          Message?         @relation("ReportTargetMessage", fields: [messageId], references: [id])
+  campus           Campus?          @relation("ReportScopeCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  moderationCase   ModerationCase?
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
   @@index([status, createdAt])
   @@index([reporterId, createdAt])
+  // Phase 7E：campus reviewer 的 exact-pair 授权谓词（campusId ∧ scopeKey
+  // 同源合取；禁止 campusId IN (...) 叉积语义依赖本索引之外的查询形状）。
+  @@index([campusId, scopeKey])
+}
+
+// Phase 7E：举报运营 case（1:1 Report）。Report 仍是 canonical decision truth
+// ——本表只承载运营元数据（assignment / SLA dueAt / 关闭时钟），零 decision
+// state（终局结果唯一权威是 Report.status）。case operational state 由
+// closedAt 派生：null = ACTIVE，非 null = CLOSED。
+model ModerationCase {
+  id             String    @id @default(cuid())
+  reportId       String    @unique
+  campusId       String?
+  scopeKey       String
+  assignedToId   String?
+  openedAt       DateTime
+  dueAt          DateTime
+  lastActivityAt DateTime
+  closedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  report     Report   @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  campus     Campus?  @relation("ModerationCaseCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  assignedTo User?    @relation("ModerationCaseAssignee", fields: [assignedToId], references: [id])
+
+  // 队列排序 keyset tuple（dueAt ASC, createdAt ASC, id ASC）
+  @@index([dueAt, createdAt, id])
+  // campus reviewer exact-pair 授权谓词
+  @@index([campusId, scopeKey])
+  @@index([assignedToId])
 }
 
 model Notification {

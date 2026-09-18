@@ -133,18 +133,48 @@ describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
   });
 
   function reportRow(status: string) {
-    return [{ id: REPORT_ID, status, reporterId: "reporter-1" }];
+    return [
+      {
+        id: REPORT_ID,
+        status,
+        reporterId: "reporter-1",
+        createdAt: new Date("2026-09-16T00:00:00.000Z"),
+        campusId: "campus-1",
+        scopeKey: "CAMPUS:campus-1",
+      },
+    ];
   }
 
-  it("applies the review under the row lock with reconcile + admin log", async () => {
-    const $queryRaw = vi.fn().mockResolvedValue(reportRow("OPEN"));
+  // Phase 7E：$queryRaw 依次被 Report 行锁与 ModerationCase 行锁调用——
+  // 按 SQL 静态片段区分返回行（mock 语义对齐真实 Prisma tag 形态）
+  function rawQueryMock(reportRows: unknown[], caseRows: unknown[] = [{ id: "case-1" }]) {
+    return vi.fn(async (query: TemplateStringsArray) => {
+      const sql = Array.from(query).join("");
+      if (sql.includes("ModerationCase")) {
+        return caseRows;
+      }
+      return reportRows;
+    });
+  }
+
+  function caseModelStub() {
+    return {
+      create: vi.fn().mockResolvedValue({ id: "case-new", dueAt: new Date(), closedAt: null }),
+      update: vi.fn().mockResolvedValue({ id: "case-1", dueAt: new Date(), closedAt: null }),
+    };
+  }
+
+  it("applies the review under the row lock with case sync + reconcile + admin log", async () => {
+    const $queryRaw = rawQueryMock(reportRow("OPEN"));
     const reportUpdate = vi.fn().mockResolvedValue({ reporterId: "reporter-1" });
     const adminLogCreate = vi.fn().mockResolvedValue({});
+    const moderationCase = caseModelStub();
     const tx = {
       $queryRaw,
       report: { findUnique: vi.fn().mockResolvedValue(reportRow("RESOLVED")), update: reportUpdate },
       user: { findUnique: vi.fn().mockResolvedValue({ id: OWNER }) },
       adminLog: { create: adminLogCreate },
+      moderationCase,
       riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
     } as never;
 
@@ -166,12 +196,19 @@ describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
       }),
       select: { reporterId: true },
     });
+    // Phase 7E：terminal review 关闭 case；审计行携带 case 指针 metadata
+    expect(moderationCase.update).toHaveBeenCalled();
     expect(adminLogCreate).toHaveBeenCalled();
-    expect(result).toMatchObject({ reportId: REPORT_ID, status: "RESOLVED" });
+    expect(result).toMatchObject({
+      reportId: REPORT_ID,
+      status: "RESOLVED",
+      caseId: "case-1",
+      reopened: false,
+    });
   });
 
   it("throws REPORT_NOT_FOUND for missing reports", async () => {
-    const $queryRaw = vi.fn().mockResolvedValue([]);
+    const $queryRaw = rawQueryMock([]);
     const tx = { $queryRaw } as never;
 
     await expect(
@@ -179,14 +216,18 @@ describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
     ).rejects.toThrow("REPORT_NOT_FOUND:ghost");
   });
 
-  it("runs racePoint after the row lock and before the transition assert（race seam）", async () => {
-    const $queryRaw = vi.fn().mockResolvedValue(reportRow("OPEN"));
+  it("runs racePoint after the row locks and before the transition assert（race seam）", async () => {
     const order: string[] = [];
+    const $queryRaw = vi.fn(async (query: TemplateStringsArray) => {
+      const sql = Array.from(query).join("");
+      order.push(sql.includes("ModerationCase") ? "case-row-lock" : "report-row-lock");
+      if (sql.includes("ModerationCase")) {
+        return [{ id: "case-1" }];
+      }
+      return reportRow("OPEN");
+    });
     const tx = {
-      $queryRaw: $queryRaw.mockImplementation(async () => {
-        order.push("row-lock");
-        return reportRow("OPEN");
-      }),
+      $queryRaw,
       report: {
         findUnique: vi.fn().mockResolvedValue(reportRow("OPEN")),
         update: vi.fn().mockImplementation(async () => {
@@ -196,6 +237,7 @@ describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
       },
       user: { findUnique: vi.fn().mockResolvedValue({ id: OWNER }) },
       adminLog: { create: vi.fn().mockResolvedValue({}) },
+      moderationCase: caseModelStub(),
       riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
     } as never;
 
@@ -208,7 +250,45 @@ describe("applyReportReviewTx（FOR UPDATE 序列化审核）", () => {
       },
     });
 
-    expect(order).toEqual(["row-lock", "race-point", "update"]);
+    expect(order).toEqual(["report-row-lock", "case-row-lock", "race-point", "update"]);
+  });
+
+  it("runs authorizeAfterLock after the row locks and before the transition assert（锁后授权 seam）", async () => {
+    const order: string[] = [];
+    const $queryRaw = vi.fn(async (query: TemplateStringsArray) => {
+      const sql = Array.from(query).join("");
+      order.push(sql.includes("ModerationCase") ? "case-row-lock" : "report-row-lock");
+      if (sql.includes("ModerationCase")) {
+        return [{ id: "case-1" }];
+      }
+      return reportRow("OPEN");
+    });
+    const tx = {
+      $queryRaw,
+      report: {
+        findUnique: vi.fn().mockResolvedValue(reportRow("OPEN")),
+        update: vi.fn().mockImplementation(async () => {
+          order.push("update");
+          return { reporterId: "reporter-1" };
+        }),
+      },
+      user: { findUnique: vi.fn().mockResolvedValue({ id: OWNER }) },
+      adminLog: { create: vi.fn().mockResolvedValue({}) },
+      moderationCase: caseModelStub(),
+      riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
+    } as never;
+
+    await applyReportReviewTx(tx, {
+      reportId: REPORT_ID,
+      actorId: "admin-1",
+      status: "RESOLVED",
+      authorizeAfterLock: async (_client, locked) => {
+        order.push("authorize");
+        expect(locked).toMatchObject({ reportId: REPORT_ID, campusId: "campus-1" });
+      },
+    });
+
+    expect(order).toEqual(["report-row-lock", "case-row-lock", "authorize", "update"]);
   });
 });
 

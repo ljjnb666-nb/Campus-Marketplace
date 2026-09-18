@@ -304,7 +304,7 @@ export function RentalDetailConsole({
         action={async (formData) => {
           return createReport({ success: false, message: "" }, formData);
         }}
-        targetType="RENTAL"
+        targetType="RENTAL_LISTING"
         rentalListingId={listing.id}
       />
     </>

@@ -26,6 +26,7 @@ const {
   suspendAccount,
   reinstateAccount,
   applyReportReviewTx,
+  reviewReportInGovernance,
   reportQueryRaw,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
@@ -53,6 +54,7 @@ const {
   suspendAccount: vi.fn(),
   reinstateAccount: vi.fn(),
   applyReportReviewTx: vi.fn(),
+  reviewReportInGovernance: vi.fn(),
   reportQueryRaw: vi.fn(),
 }));
 
@@ -71,6 +73,13 @@ vi.mock("@/lib/enforcement/account-enforcement-service", () => ({
 
 vi.mock("@/lib/enforcement/report-projection", () => ({
   applyReportReviewTx,
+}));
+
+// Phase 7E：legacy reviewReport 是 canonical 服务的薄 adapter——
+// mock 面跟随 mutation authority（FR01 后 canonical 服务自带 actor subject
+// lock，stub 事务无法承载，域行为由 report-review-service/集成测试覆盖）。
+vi.mock("@/lib/reports/report-review-service", () => ({
+  reviewReportInGovernance,
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -174,6 +183,14 @@ describe("admin actions", () => {
       status: "RESOLVED",
       reporterId: "user-2",
     });
+    reviewReportInGovernance.mockReset().mockResolvedValue({
+      reportId: "report-1",
+      status: "RESOLVED",
+      reporterId: "user-2",
+      caseId: "case-1",
+      reopened: false,
+      dueAt: new Date("2026-09-18T00:00:00.000Z"),
+    });
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
@@ -202,9 +219,7 @@ describe("admin actions", () => {
     requireAdmin.mockResolvedValue({ id: "admin-1", role: "ADMIN" });
   });
 
-  it("sends an in-review notification when a report is marked as processing", async () => {
-    reportUpdate.mockResolvedValue({ reporterId: "user-2" });
-
+  it("passes review through to the canonical governance service（Phase 7E FR01 薄 adapter）", async () => {
     const formData = new FormData();
     formData.set("reportId", "report-1");
     formData.set("status", "IN_REVIEW");
@@ -212,15 +227,14 @@ describe("admin actions", () => {
 
     await reviewReport(formData);
 
-    expect(createNotification).toHaveBeenCalledWith(
-      expect.any(Object),
-      expect.objectContaining({
-        userId: "user-2",
-        type: "REPORT",
-        title: "举报处理中",
-        content: "你提交的举报正在处理中。处理说明：已转交值班管理员复核",
-      }),
-    );
+    // 通知文案合同归 canonical 服务所有（其单测/集成覆盖）；本层仅断言透传
+    expect(reviewReportInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      reportId: "report-1",
+      status: "IN_REVIEW",
+      handledNote: "已转交值班管理员复核",
+    });
+    expect(revalidatePath).toHaveBeenCalledWith("/governance/reports");
   });
 
   it("returns an error state and skips the transaction when report input is invalid", async () => {
@@ -636,35 +650,33 @@ describe("admin actions", () => {
   // /governance/listings canonical moderation service；raw 写入口普查为零，
   // 相关回归移至 src/lib/moderation 与 tests/integration/phase7c-*）。
 
-  it("notifies the reporter with resolved and rejected report copy", async () => {
-    reportUpdate.mockResolvedValue({ reporterId: "user-2" });
+  it("passes resolved and rejected review decisions through unchanged", async () => {
+    const resolvedForm = new FormData();
+    resolvedForm.set("reportId", "report-1");
+    resolvedForm.set("status", "RESOLVED");
+    resolvedForm.set("handledNote", "已下架违规商品");
 
-    const formData = new FormData();
-    formData.set("reportId", "report-1");
-    formData.set("status", "RESOLVED");
-    formData.set("handledNote", "已下架违规商品");
+    await reviewReport(resolvedForm);
 
-    await reviewReport(formData);
+    expect(reviewReportInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      reportId: "report-1",
+      status: "RESOLVED",
+      handledNote: "已下架违规商品",
+    });
 
-    expect(createNotification).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        title: "举报已处理",
-        content: "你提交的举报已处理完成。处理说明：已下架违规商品",
-      }),
-    );
+    const rejectedForm = new FormData();
+    rejectedForm.set("reportId", "report-1");
+    rejectedForm.set("status", "REJECTED");
+    rejectedForm.set("handledNote", "");
+    await reviewReport(rejectedForm);
 
-    formData.set("status", "REJECTED");
-    formData.set("handledNote", "");
-    await reviewReport(formData);
-
-    expect(createNotification).toHaveBeenLastCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        title: "举报处理结果已更新",
-        content: "你提交的举报未通过。如有需要可补充更完整的信息后再次提交。",
-      }),
-    );
+    expect(reviewReportInGovernance).toHaveBeenLastCalledWith({
+      actorId: "admin-1",
+      reportId: "report-1",
+      status: "REJECTED",
+      handledNote: null,
+    });
   });
 
   it("returns an error state when review transactions fail", async () => {
@@ -686,6 +698,7 @@ describe("admin actions", () => {
     formData.delete("verificationId");
     formData.set("reportId", "report-1");
     formData.set("status", "IN_REVIEW");
+    reviewReportInGovernance.mockRejectedValueOnce(new Error("db down"));
     const reportResult = await reviewReport(formData);
     expect(reportResult?.success).toBe(false);
 

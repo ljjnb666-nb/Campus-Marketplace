@@ -411,6 +411,8 @@ describe.skipIf(!integrationDatabaseUrl)(
       await rawClient.errandTask.deleteMany({ where: { id: { in: createdErrandIds } } });
       await rawClient.rentalListing.deleteMany({ where: { id: { in: createdRentalIds } } });
       await rawClient.campusMembership.deleteMany({ where: { userId: { in: createdUserIds } } });
+      // Phase 7E：case 行经 RESTRICT FK 引用 Report——先删 case 再删 Report
+      await rawClient.moderationCase.deleteMany({ where: { report: { reporterId: { in: createdUserIds } } } });
       await rawClient.report.deleteMany({ where: { reporterId: { in: createdUserIds } } });
       await rawClient.user.deleteMany({ where: { id: { in: createdUserIds } } });
       await rawClient.campus.deleteMany({ where: { id: { in: createdCampusIds } } });
@@ -664,6 +666,8 @@ describe.skipIf(!integrationDatabaseUrl)(
           status: "OPEN",
           reporterId: reporter.id,
           productId: product.id,
+          campusId: campusA.id,
+          scopeKey: `CAMPUS:${campusA.id}`,
         },
       });
 

@@ -7,7 +7,15 @@ interface ReportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   action: (formData: FormData) => Promise<{ success?: boolean; message?: string } | void>;
-  targetType: "PRODUCT" | "ERRAND" | "SERVICE" | "RENTAL" | "USER";
+  // Phase 7E rental repair：prop 直接取 canonical ReportTargetType 值——
+  // 此前 "ERRAND"/"SERVICE"/"RENTAL" 短名直传 FormData，zod enum 必然拒绝
+  // （rental 举报链路完全断路的根因之一）；PRODUCT/USER 值不变。
+  targetType:
+    | "PRODUCT"
+    | "ERRAND_TASK"
+    | "SERVICE_LISTING"
+    | "RENTAL_LISTING"
+    | "USER";
   productId?: string;
   errandTaskId?: string;
   serviceListingId?: string;
