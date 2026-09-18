@@ -36,7 +36,8 @@ function caseRow(overrides: Record<string, unknown> = {}) {
     id: "case-1",
     campusId: "A",
     scopeKey: "CAMPUS:A",
-    dueAt: new Date("2026-09-18T00:00:00.000Z"),
+    // 远期 dueAt：夹具不得随墙钟越过 SLA 而翻转 overdue
+    dueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
     closedAt: null,
     assignedToId: null,
     createdAt: new Date("2026-09-16T00:00:00.000Z"),

@@ -132,7 +132,8 @@ describe("loadAuthorizedReportDetail（统一拒绝）", () => {
 
 describe("loadAuthorizedReportDetail（DTO 形状）", () => {
   it("CAMPUS PRODUCT 详情：scope 标签/领用人/时钟/scopeAuthorized 全量呈现", async () => {
-    const dueAt = new Date("2026-09-18T08:00:00.000Z");
+    // 远期 dueAt：overdue 为实算值，夹具不得随墙钟越界翻转
+    const dueAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
     reportFindUnique.mockResolvedValue(
       reportRow({
         handledAt: new Date("2026-09-17T08:00:00.000Z"),
