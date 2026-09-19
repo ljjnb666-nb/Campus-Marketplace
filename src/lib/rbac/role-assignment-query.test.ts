@@ -157,7 +157,14 @@ describe("loadManagedRoleAssignments prisma 路径", () => {
 
     const call = prismaMock.userRoleAssignment.findMany.mock.calls.at(-1)![0];
     expect(call.where.role).toEqual({
-      key: { in: ["CAMPUS_APPEAL_REVIEWER", "CAMPUS_CONTENT_MODERATOR", "CAMPUS_REPORT_REVIEWER"] },
+      key: {
+        in: [
+          "CAMPUS_APPEAL_REVIEWER",
+          "CAMPUS_CONTENT_MODERATOR",
+          "CAMPUS_REPORT_REVIEWER",
+          "CAMPUS_VERIFICATION_REVIEWER",
+        ],
+      },
     });
     expect(call.where.campusId).toEqual({ in: ["campus-a"] });
     expect(call.where.OR).toBeDefined();

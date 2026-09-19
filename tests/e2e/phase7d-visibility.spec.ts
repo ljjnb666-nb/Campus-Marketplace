@@ -172,8 +172,14 @@ test("7D-E2E02：执法队列因果序 → 目标详情（历史 + 当前限制�
   await page.getByLabel("执法记录筛选").getByRole("button", { name: "应用筛选" }).click();
 
   // 队列两行按 seq DESC（先出现的 seq 更大；seq 以 # 前缀呈现，≥1e9 为 10 位数字）
+  // Phase 7F 确定性修复：allTextContents 不自动等待——并行负载下过滤页可能
+  // 尚未渲染完成，用 expect.poll 等待行数收敛后再读取（防 0 行瞬时读）。
+  await expect
+    .poll(async () => (await page.getByText(/#\d{10,}/).allTextContents()).length, {
+      timeout: 15_000,
+    })
+    .toBe(2);
   const seqTexts = await page.getByText(/#\d{10,}/).allTextContents();
-  expect(seqTexts.length).toBe(2);
   const firstSeq = BigInt(seqTexts[0].match(/#(\d{10,})/)![1]);
   const secondSeq = BigInt(seqTexts[1].match(/#(\d{10,})/)![1]);
   expect(firstSeq > secondSeq).toBe(true);

@@ -29,6 +29,15 @@ export const CAMPUS_CONTENT_MODERATOR_ROLE_KEY = "CAMPUS_CONTENT_MODERATOR";
 // 生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）。
 export const CAMPUS_REPORT_REVIEWER_ROLE_KEY = "CAMPUS_REPORT_REVIEWER";
 
+// Phase 7F：校区认证审核员。permission set 必须恰好为
+// { verification.review, verification.evidence.read }（指令冻结，禁止增删）：
+// 审核权与"查看认证证据材料"的窄读取权捆绑供给，但不获得任何其它私有
+// 资产读取权（verification.evidence.read 对非 VERIFICATION 资产恒 DENY）。
+// verification.evidence.read 不在 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS
+// 内（R1 冻结不动）。生产既有库经 data-only migration 收敛（与
+// SYSTEM_ROLES 同一定义）。
+export const CAMPUS_VERIFICATION_REVIEWER_ROLE_KEY = "CAMPUS_VERIFICATION_REVIEWER";
+
 export const GLOBAL_SCOPE_KEY = "GLOBAL";
 
 /** CAMPUS 角色授予行的 scopeKey 编码（assignment service 维护与 campusId 一致）。 */
@@ -67,5 +76,11 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "校区举报审核员",
     scope: "CAMPUS",
     permissionKeys: ["report.review"],
+  },
+  {
+    key: CAMPUS_VERIFICATION_REVIEWER_ROLE_KEY,
+    name: "校区认证审核员",
+    scope: "CAMPUS",
+    permissionKeys: ["verification.review", "verification.evidence.read"],
   },
 ];

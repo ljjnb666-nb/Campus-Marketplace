@@ -338,6 +338,11 @@ model UserVerification {
   // 审核决策机器可读原因码（如 VERIFICATION_MATERIALS_INVALID），可空
   reasonCode       String?
   submittedAt      DateTime                  @default(now())
+  // Phase 7F 审核SLA：提交/重新提交时 = submittedAt + 48h（唯一运行时写路径；
+  // 历史行由 migration backfill 以 submittedAt 为 origin，绝不用迁移执行时刻）。
+  // 决定后保留为历史值；OVERDUE 只读判定 = PENDING ∧ reviewDueAt < now，
+  // 不驱动任何自动决定或 enforcement。
+  reviewDueAt      DateTime
   reviewedAt       DateTime?
   reviewedById     String?
   // 认证证据必须能反查其依据的 policy/version（发布后不可变，冗余快照三元组，
@@ -350,6 +355,9 @@ model UserVerification {
   reviewedBy       User?                     @relation("VerificationReviewer", fields: [reviewedById], references: [id])
   policy           CampusVerificationPolicy? @relation(fields: [policyId], references: [id])
   uploadedAssets   UploadedAsset[]           @relation("AssetVerification")
+
+  // Phase 7F：治理队列排序（reviewDueAt ASC, submittedAt ASC, id ASC）
+  @@index([reviewDueAt, submittedAt, id])
 }
 
 model ProductCategory {

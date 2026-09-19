@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { deriveAppealReviewAccess } from "@/lib/appeals/reviewer-access";
 import { deriveAuditAccess, hasAnyAuditAccess } from "@/lib/audit/audit-access";
+import { deriveVerificationReviewAccess, hasAnyVerificationReviewAccess } from "@/lib/campus/verification-review-access";
 import {
   deriveEnforcementReadAccess,
   hasAnyEnforcementReadAccess,
@@ -19,6 +20,10 @@ import {
   deriveRoleManageAccess,
   hasAnyRoleManageAccess,
 } from "@/lib/rbac/role-manage-access";
+import {
+  deriveUserOperationsAccess,
+  hasAnyUserOperationsAccess,
+} from "@/lib/governance/user-operations-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 
@@ -33,15 +38,19 @@ import { requireUser } from "@/lib/server-auth";
  * Phase 7E：root gate 扩为六元 union（OR reportReview——report.review 是
  * pre-7D legacy 11-key 的既有 capability，此处仅以 CAMPUS scope 供给治理面，
  * 不改 legacy /admin 判定）。
+ * Phase 7F：root gate 扩为八元 union（OR verificationReview ∨ userOperations
+ * ——前者是既有 verification.review capability 的 CAMPUS scope 供给，后者是
+ * GLOBAL user.suspend ONLY 的用户运营面）。
  *
- * 六棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
+ * 八棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
  * /governance/appeals 走 requireAppealReviewer，/governance/roles 自守
  * roleManage access，/governance/listings 自守 listing moderation access，
  * /governance/audit 自守 audit read access，/governance/enforcement 自守
- * enforcement read access，/governance/reports 自守 report review access。
- * requireAdmin() 零修改，legacy /admin 隔离不变（hasFullAdminSurfaceAccess
- * 对 campus grant / 非全量 GLOBAL grant 恒 false）。私有治理数据：
- * 强制动态渲染，零缓存。
+ * enforcement read access，/governance/reports 自守 report review access，
+ * /governance/verifications 自守 verification review access，
+ * /governance/users 自守 GLOBAL user.suspend。requireAdmin() 零修改，
+ * legacy /admin 隔离不变（hasFullAdminSurfaceAccess 对 campus grant /
+ * 非全量 GLOBAL grant 恒 false）。私有治理数据：强制动态渲染，零缓存。
  */
 export const dynamic = "force-dynamic";
 
@@ -58,6 +67,8 @@ export default async function GovernanceLayout({
   const auditAccess = deriveAuditAccess(context);
   const enforcementAccess = deriveEnforcementReadAccess(context);
   const reportAccess = deriveReportReviewAccess(context);
+  const verificationAccess = deriveVerificationReviewAccess(context);
+  const userOperationsAccess = deriveUserOperationsAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
@@ -67,7 +78,9 @@ export default async function GovernanceLayout({
     !hasAnyListingModerationAccess(listingModerationAccess) &&
     !hasAnyAuditAccess(auditAccess) &&
     !hasAnyEnforcementReadAccess(enforcementAccess) &&
-    !hasAnyReportReviewAccess(reportAccess)
+    !hasAnyReportReviewAccess(reportAccess) &&
+    !hasAnyVerificationReviewAccess(verificationAccess) &&
+    !hasAnyUserOperationsAccess(userOperationsAccess)
   ) {
     notFound();
   }
@@ -95,6 +108,16 @@ export default async function GovernanceLayout({
       href: "/governance/reports",
       label: "举报处理",
       visible: hasAnyReportReviewAccess(reportAccess),
+    },
+    {
+      href: "/governance/verifications",
+      label: "认证审核",
+      visible: hasAnyVerificationReviewAccess(verificationAccess),
+    },
+    {
+      href: "/governance/users",
+      label: "用户管理",
+      visible: hasAnyUserOperationsAccess(userOperationsAccess),
     },
   ].filter((item) => item.visible);
 

@@ -7,6 +7,7 @@ import {
 } from "@/lib/governance/governance-lock";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { getCurrentVerificationPolicy } from "@/lib/campus/verification-policy-service";
+import { computeVerificationReviewDueAt } from "@/lib/campus/verification-sla";
 import { createActiveMembership } from "@/lib/campus/membership-service";
 import { rbacError } from "@/lib/rbac/errors";
 import {
@@ -175,6 +176,8 @@ export async function submitMembershipVerification(
         reviewedAt: null,
         reviewedById: null,
         submittedAt,
+        // Phase 7F SLA：重新提交以新的 submittedAt 为 origin 重置 48h 时钟
+        reviewDueAt: computeVerificationReviewDueAt(submittedAt),
         ...policyEvidence,
       },
       create: {
@@ -186,6 +189,8 @@ export async function submitMembershipVerification(
         studentCardImage: input.studentCardImageToken,
         status: "PENDING",
         submittedAt,
+        // Phase 7F SLA：首次提交 submittedAt + 48h
+        reviewDueAt: computeVerificationReviewDueAt(submittedAt),
         ...policyEvidence,
       },
     });

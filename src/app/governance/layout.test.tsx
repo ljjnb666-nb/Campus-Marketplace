@@ -15,6 +15,23 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/lib/rbac/service", () => ({
   loadAuthorizationContext,
+  // Phase 7F：user-operations derive 依赖 hasPermission（GLOBAL-only 语义的
+  // 忠实最小实现，仅供本测试的 mock context 使用）
+  hasPermission: (
+    context:
+      | {
+          accountActive?: boolean;
+          grants?: Array<{ scope: string; campusId: string | null; permissionKeys: string[] }>;
+        }
+      | null,
+    permission: string,
+  ) =>
+    Boolean(
+      context?.accountActive &&
+        context.grants?.some(
+          (grant) => grant.scope === "GLOBAL" && grant.permissionKeys.includes(permission),
+        ),
+    ),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -341,6 +358,70 @@ describe("GovernanceLayout Phase 7D union gate + 导航可见性", () => {
       activeCampusIds: [],
       grants: [
         { roleKey: "CAMPUS_REPORT_REVIEWER", scope: "CAMPUS", campusId: "A", permissionKeys: ["report.review"] },
+      ],
+    });
+
+    await expect(
+      GovernanceLayout({ children: <div>治理内容</div> }),
+    ).rejects.toThrow("NOT_FOUND");
+    expect(notFound).toHaveBeenCalled();
+  });
+});
+
+// ── Phase 7F：root gate 八元 union（+ verificationReview ∨ userOperations）───
+describe("GovernanceLayout Phase 7F union gate（认证审核 / 用户运营）", () => {
+  const activeUser = { id: "r1", email: "r@x", name: "R", role: "STUDENT" };
+
+  it("7F：campus verification reviewer alone → 入树；认证审核导航可见；sibling 不可见", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        { roleKey: "CAMPUS_VERIFICATION_REVIEWER", scope: "CAMPUS", campusId: "A", permissionKeys: ["verification.review", "verification.evidence.read"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "认证审核" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "用户管理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "申诉审核" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "举报处理" })).toBeNull();
+  });
+
+  it("7F：GLOBAL user.suspend alone → 入树；用户管理导航可见；认证审核不可见", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "OP", scope: "GLOBAL", campusId: null, permissionKeys: ["user.suspend"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "用户管理" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "认证审核" })).toBeNull();
+  });
+
+  it("7F：campus-scoped user.suspend grant（无 GLOBAL）→ 不构成用户运营面", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        { roleKey: "CS", scope: "CAMPUS", campusId: "A", permissionKeys: ["user.suspend"] },
       ],
     });
 

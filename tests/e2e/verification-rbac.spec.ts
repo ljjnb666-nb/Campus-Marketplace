@@ -14,6 +14,8 @@ test("认证生命周期：提交 → 越权拒绝 → 审核员批准（含敏�
   const outsiderEmail = "e2e-outsider@e2e.test";
 
   // ---------- 学生提交认证材料（复认证：VERIFIED → PENDING 合法流转） ----------
+  // 提交前时间戳：poll 必须锚定"本次提交"（outsider 残留旧行时防 stale read）
+  const beforeSubmit = new Date(Date.now() - 60_000);
   const studentContext = await browser.newContext({ storageState: storageStatePath("outsider") });
   const student = await studentContext.newPage();
   await student.goto("/verification");
@@ -28,14 +30,14 @@ test("认证生命周期：提交 → 越权拒绝 → 审核员批准（含敏�
     .poll(async () =>
       (
         await e2eDb().userVerification.findFirst({
-          where: { user: { email: outsiderEmail } },
+          where: { user: { email: outsiderEmail }, submittedAt: { gt: beforeSubmit } },
         })
       )?.status,
     )
     .toBe("PENDING");
 
   const verification = await e2eDb().userVerification.findFirst({
-    where: { user: { email: outsiderEmail } },
+    where: { user: { email: outsiderEmail }, submittedAt: { gt: beforeSubmit } },
   });
   expect(verification).toBeTruthy();
   // Phase 6A：提交证据记录 policy 版本快照（e2e-setup 已发布 v1）
@@ -90,11 +92,16 @@ test("认证生命周期：提交 → 越权拒绝 → 审核员批准（含敏�
     .toBeGreaterThan(0);
 
   // ---------- 审核批准：状态机推进 + 审计行 ----------
-  await adminPage.goto("/admin/verifications");
-  const reviewCard = adminPage.locator("article", { hasText: "E2E无关用户" }).first();
-  await expect(reviewCard).toBeVisible();
-  await reviewCard.getByPlaceholder("补充审核说明").fill(`E2E 通过 ${tag}`);
-  await reviewCard.getByRole("button", { name: "通过认证" }).click();
+  // Phase 7F：legacy /admin/verifications 已退役（redirect）——审核走 canonical
+  // /governance/verifications 治理面（队列 → 详情 → 决定）。
+  await adminPage.goto("/governance/verifications?limit=50");
+  await expect(adminPage.getByRole("heading", { name: "认证审核" })).toBeVisible();
+  const queueCard = adminPage.locator("article", { hasText: "E2E无关用户" }).first();
+  await expect(queueCard).toBeVisible();
+  await queueCard.getByRole("link", { name: "查看详情" }).click();
+  await expect(adminPage.getByRole("heading", { name: "认证详情" })).toBeVisible();
+  await adminPage.getByPlaceholder("补充审核说明").fill(`E2E 通过 ${tag}`);
+  await adminPage.getByRole("button", { name: "通过认证" }).click();
 
   await expect
     .poll(async () =>

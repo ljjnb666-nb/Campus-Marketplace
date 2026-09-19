@@ -749,7 +749,9 @@ export type PrivateAssetAccessResult =
  * - HANDOVER / RETURN / REPORT：对应租赁订单的租客/出租者
  * - 治理/审核访问：`asset.sensitive.read` permission（取代旧 role 判定），
  *   campus-scoped 授权必须与资产所属校区精确匹配（默认拒绝；
- *   资产校区不可解析时仅 GLOBAL 授权放行）
+ *   资产校区不可解析时仅 GLOBAL 授权放行）；
+ *   Phase 7F：VERIFICATION 绑定资产额外接受 `verification.evidence.read`
+ *   （同样 campus 精确匹配）——该窄权限对其它 category 恒 NO ACCESS
  * - UPLOADING（上传中）/已删除/待删除 → not_found；已过保留期 → expired
  *
  * 资产校区解析（按绑定关系）：认证材料 → membership.campusId；
@@ -831,6 +833,24 @@ export async function resolvePrivateAssetAccess(
       })
     )?.campusId ??
     null;
+
+  if (asset.category === "VERIFICATION") {
+    // Phase 7F：verification.evidence.read 窄授权——仅对 VERIFICATION 绑定资产
+    // 放行，campus 精确匹配 asset.verification.membership.campusId（GLOBAL grant
+    // 自然覆盖全部对应 evidence；campus unresolvable 时仅 GLOBAL 放行）。
+    // 与 asset.sensitive.read 并列（OR），不改变其既有语义。
+    if (
+      hasPermission(context, "asset.sensitive.read", permissionTargetCampusId) ||
+      hasPermission(
+        context,
+        "verification.evidence.read",
+        asset.verification?.membership.campusId ?? null,
+      )
+    ) {
+      return { ok: true, asset, grantedBy: "permission" };
+    }
+    return { ok: false, reason: "forbidden" };
+  }
 
   if (hasPermission(context, "asset.sensitive.read", permissionTargetCampusId)) {
     return { ok: true, asset, grantedBy: "permission" };
