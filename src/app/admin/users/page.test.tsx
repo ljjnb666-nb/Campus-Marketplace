@@ -1,78 +1,24 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-const { requireAdmin, getAdminUserList, toggleUserStatus } = vi.hoisted(() => ({
-  requireAdmin: vi.fn(),
-  getAdminUserList: vi.fn(),
-  toggleUserStatus: vi.fn(),
-}));
+const redirectMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/server-auth", () => ({
-  requireAdmin,
-}));
-
-vi.mock("@/repositories/admin-repository", () => ({
-  getAdminUserList,
-}));
-
-vi.mock("@/actions/admin", () => ({
-  toggleUserStatus,
+vi.mock("next/navigation", () => ({
+  redirect: redirectMock,
 }));
 
 import AdminUsersPage from "@/app/admin/users/page";
 
-afterEach(() => {
-  cleanup();
-});
-
+/**
+ * Phase 7F legacy retirement：/admin/users 只做无条件 redirect 到 canonical
+ * 用户运营面 /governance/users（无 requireAdmin 桥——授权由目标页
+ * requireUserOperationsAdmin 独立执行）。
+ */
 describe("AdminUsersPage", () => {
-  it("renders the empty state when there are no users", async () => {
-    requireAdmin.mockResolvedValue(undefined);
-    getAdminUserList.mockResolvedValue([]);
+  it("redirects unconditionally to /governance/users (no admin bridge)", async () => {
+    redirectMock.mockReset();
+    await AdminUsersPage();
 
-    render(await AdminUsersPage());
-
-    expect(screen.getByRole("heading", { name: "用户管理" })).toBeTruthy();
-    expect(screen.getByText("当前还没有可管理的用户数据。")).toBeTruthy();
-  });
-
-  it("renders user details and status actions", async () => {
-    requireAdmin.mockResolvedValue(undefined);
-    getAdminUserList.mockResolvedValue([
-      {
-        id: "user-1",
-        name: "张同学",
-        email: "student@example.com",
-        schoolName: "示例大学",
-        status: "ACTIVE",
-        verificationStatus: "VERIFIED",
-        role: "STUDENT",
-        creditScore: 98,
-        completedOrdersCount: 12,
-        createdAt: new Date("2026-07-10T08:00:00.000Z"),
-        lastLoginAt: null,
-        campus: { name: "主校区" },
-        _count: {
-          products: 4,
-          createdErrandTasks: 2,
-          serviceListings: 3,
-          buyerOrders: 5,
-        },
-      },
-    ]);
-
-    render(await AdminUsersPage());
-
-    expect(screen.getByText("张同学")).toBeTruthy();
-    expect(screen.getByText("student@example.com")).toBeTruthy();
-    expect(screen.getByText("账号状态：正常")).toBeTruthy();
-    expect(screen.getByText("认证状态：已认证")).toBeTruthy();
-    expect(screen.getByText("信用分：98")).toBeTruthy();
-    expect(screen.getByText("完成订单：12")).toBeTruthy();
-    expect(screen.getByText("商品 4")).toBeTruthy();
-    expect(screen.getByText("最近登录：暂无记录")).toBeTruthy();
-    expect(screen.getByDisplayValue("user-1")).toBeTruthy();
-    expect(screen.getByDisplayValue("SUSPENDED")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "停用账号" })).toBeTruthy();
+    expect(redirectMock).toHaveBeenCalledTimes(1);
+    expect(redirectMock).toHaveBeenCalledWith("/governance/users");
   });
 });

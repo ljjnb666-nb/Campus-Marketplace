@@ -884,6 +884,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B Repair 2 补充集成测试�
         studentIdLast4: "2468",
         studentCardImage: "erased",
         status: "VERIFIED",
+        // Phase 7F：reviewDueAt NOT NULL——历史语义 = submittedAt + 48h
+        reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
       },
     });
 

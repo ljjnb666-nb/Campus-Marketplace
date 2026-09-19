@@ -27,6 +27,11 @@ export const PERMISSIONS = {
   // 新增 read capability 绝不允许静默改变 legacy /admin 资格或
   // privileged-target 分类。
   "enforcement.read": "读取执法记录与账户限制状态（治理运营可见性）",
+  // Phase 7F：认证证据窄读取（纯 read capability）。语义严格限定为
+  // "仅访问 verification-bound private evidence"（UploadedAsset.category ==
+  // VERIFICATION 且 campus 精确匹配；其它 category 一律 NO ACCESS）——
+  // 不构成任何其它私有资产的读取权，也不进入 legacy 11-key 等价集合。
+  "verification.evidence.read": "读取校园认证绑定的私有证据材料（仅认证材料）",
 } as const;
 
 export type PermissionKey = keyof typeof PERMISSIONS;
