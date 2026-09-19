@@ -44,7 +44,8 @@ function baseItem(overrides: Record<string, unknown> = {}) {
     createdAt: new Date("2026-09-16T08:00:00.000Z").toISOString(),
     lastLoginAt: null,
     activeCampusNames: ["主校区"],
-    verificationStatus: "PENDING",
+    // FR01：canonical effective verification（非 legacy 投影）
+    effectiveVerificationStatus: "PENDING",
     ...overrides,
   };
 }

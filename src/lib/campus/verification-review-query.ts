@@ -1,6 +1,10 @@
 import type { Prisma, VerificationStatus } from "@prisma/client";
 
 import { hydrateSafeIdentities, UNAVAILABLE_USER_DISPLAY_NAME } from "@/lib/governance/safe-identity";
+import {
+  parseCanonicalCursorDate,
+  parseCanonicalCursorJson,
+} from "@/lib/governance/canonical-cursor";
 import { prisma } from "@/lib/prisma";
 import { isVerificationReviewOverdue } from "@/lib/campus/verification-sla";
 import {
@@ -71,33 +75,25 @@ export function encodeVerificationCursor(cursor: VerificationCursor): string {
   ).toString("base64url");
 }
 
-/** 解码客户端回传 cursor；任何解析/校验失败返回 null（调用方安全失败态）。 */
+/** 解码客户端回传 cursor（FR03 canonical 纪律，与 decodeUserCursor 同一 SSOT
+ * helper：exact keys / canonical ISO / re-encode equality）；任何解析/校验失败
+ * 返回 null（调用方安全失败态）。 */
 export function decodeVerificationCursor(raw: string): VerificationCursor | null {
-  let payload: unknown;
-  try {
-    const json = Buffer.from(raw, "base64url").toString("utf8");
-    payload = JSON.parse(json);
-  } catch {
+  const payload = parseCanonicalCursorJson(raw, ["reviewDueAt", "submittedAt", "id"]);
+  if (!payload) {
     return null;
   }
-  if (typeof payload !== "object" || payload === null) {
+  const reviewDueAt = parseCanonicalCursorDate(payload.reviewDueAt);
+  const submittedAt = parseCanonicalCursorDate(payload.submittedAt);
+  if (!reviewDueAt || !submittedAt || payload.id.length === 0) {
     return null;
   }
-  const { reviewDueAt, submittedAt, id } = payload as Record<string, unknown>;
-  if (
-    typeof reviewDueAt !== "string" ||
-    typeof submittedAt !== "string" ||
-    typeof id !== "string" ||
-    id.length === 0
-  ) {
+  const cursor: VerificationCursor = { reviewDueAt, submittedAt, id: payload.id };
+  // canonical 外层编码 + canonical JSON 键序的最终权威（FR03 C09/C10）
+  if (encodeVerificationCursor(cursor) !== raw) {
     return null;
   }
-  const reviewDueAtDate = new Date(reviewDueAt);
-  const submittedAtDate = new Date(submittedAt);
-  if (Number.isNaN(reviewDueAtDate.getTime()) || Number.isNaN(submittedAtDate.getTime())) {
-    return null;
-  }
-  return { reviewDueAt: reviewDueAtDate, submittedAt: submittedAtDate, id };
+  return cursor;
 }
 
 /** 授权 scope 谓词（fail-closed：无有效 scope 时返回 false → 永远空页）。 */

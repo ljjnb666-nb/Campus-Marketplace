@@ -151,6 +151,35 @@ type UserTrustBase = {
   receivedReviewsCount: number;
 };
 
+/**
+ * Phase 6B canonical trust contract（7F Final Repair 1 FR01 提取为 SSOT 纯函数
+ * ——治理读面（user-operations 等）必须复用本推导，禁止发明第二信任定义）：
+ *
+ *   EFFECTIVE_VERIFIED = canonical UserVerification.status == VERIFIED
+ *     AND 绑定 CampusMembership.status == ACTIVE
+ *
+ * - canonical UserVerification 缺失 → UNVERIFIED（fail closed，Final Repair）；
+ * - status != VERIFIED → 透出对应 safe canonical status（仅展示语义，
+ *   绝不宣称 effective VERIFIED）；
+ * - VERIFIED ∧ 绑定 membership 非 ACTIVE → UNVERIFIED（effective 口径）；
+ * - LEGACY_VERIFICATION_PROJECTION（User.verificationStatus）=
+ *   NON_AUTHORITATIVE_FOR_TRUST：绝不作为本函数输入。
+ */
+export function deriveEffectiveVerification(
+  verification: {
+    status: VerificationStatus;
+    membership: { status: CampusMembershipStatus } | null;
+  } | null,
+): VerificationStatus {
+  if (!verification) {
+    return "UNVERIFIED";
+  }
+  if (verification.status === "VERIFIED") {
+    return verification.membership?.status === "ACTIVE" ? "VERIFIED" : "UNVERIFIED";
+  }
+  return verification.status;
+}
+
 async function loadUserTrustBase(
   userId: string,
   tx?: Prisma.TransactionClient,
@@ -163,21 +192,9 @@ async function loadUserTrustBase(
     return null;
   }
 
-  // EFFECTIVE_VERIFIED = canonical UserVerification.status == VERIFIED
-  //   AND 绑定 CampusMembership.status == ACTIVE（Phase 6B canonical trust contract）。
-  // canonical 认证行缺失 => fail closed：UNVERIFIED（Final Repair）。
-  // LEGACY_VERIFICATION_PROJECTION = NON_AUTHORITATIVE_FOR_TRUST：
-  // User.verificationStatus 仅保留 display/session/bootstrap/migration 兼容，
-  // 不能独立产生 effective VERIFIED trust 信号。
-  let effectiveVerification: VerificationStatus;
-  if (!user.verification) {
-    effectiveVerification = "UNVERIFIED";
-  } else if (user.verification.status === "VERIFIED") {
-    effectiveVerification =
-      user.verification.membership?.status === "ACTIVE" ? "VERIFIED" : "UNVERIFIED";
-  } else {
-    effectiveVerification = user.verification.status;
-  }
+  // EFFECTIVE_VERIFIED 推导复用 SSOT 纯函数 deriveEffectiveVerification
+  //（7F Final Repair 1 FR01：单一信任定义，治理读面同源复用）。
+  const effectiveVerification = deriveEffectiveVerification(user.verification);
   const effectiveVerificationBoundCampusId: string | null =
     user.verification?.membership?.campusId ?? null;
 

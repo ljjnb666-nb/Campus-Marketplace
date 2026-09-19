@@ -48,8 +48,8 @@ function baseDetail(overrides: Record<string, unknown> = {}) {
     createdAt: new Date("2026-09-16T08:00:00.000Z").toISOString(),
     lastLoginAt: null,
     memberships: [{ campusName: "主校区", status: "ACTIVE" }],
-    verificationStatus: "PENDING",
-    riskStates: [],
+    // FR01：canonical effective verification（非 legacy 投影）
+    effectiveVerificationStatus: "PENDING",
     ...overrides,
   };
 }
@@ -65,7 +65,7 @@ describe("GovernanceUserDetailPage（用户详情，两阶段读 + canonical 账
     expect(loadUserOperationsDetail).toHaveBeenCalledWith({ userId: "ghost" });
   });
 
-  it("渲染安全详情（maskedEmail/校区身份/风控摘要/canonical 执法链接），ACTIVE → 停用表单", async () => {
+  it("渲染安全详情（maskedEmail/校区身份/canonical 执法链接），ACTIVE → 停用表单", async () => {
     mockAdmin();
     loadUserOperationsDetail.mockResolvedValue({ ok: true, detail: baseDetail() });
 
@@ -76,7 +76,7 @@ describe("GovernanceUserDetailPage（用户详情，两阶段读 + canonical 账
     expect(screen.getByText("正常")).toBeTruthy();
     expect(screen.getByText("审核中")).toBeTruthy();
     expect(screen.getByText("主校区 · 生效")).toBeTruthy();
-    expect(screen.getByText("当前无风控限制记录。")).toBeTruthy();
+    // RS05：enforcement canonical 链接保留
     expect(
       screen.getByRole("link", { name: "查看执法记录（canonical 读面）→" }).getAttribute("href"),
     ).toBe("/governance/enforcement/targets/user-1");
@@ -84,13 +84,16 @@ describe("GovernanceUserDetailPage（用户详情，两阶段读 + canonical 账
     expect(screen.queryByRole("form", { name: "恢复账号" })).toBeNull();
   });
 
-  it("SUSPENDED → 恢复表单；risk-state 摘要呈现", async () => {
+  it("SUSPENDED → 恢复表单；FR02 RS04：页面渲染零 risk-state 摘要（含传入数据也不渲染）", async () => {
     mockAdmin();
     loadUserOperationsDetail.mockResolvedValue({
       ok: true,
       detail: baseDetail({
         status: "SUSPENDED",
-        riskStates: [{ scopeKey: "GLOBAL", state: "MARKETPLACE_RESTRICTED", reasonCode: "MANUAL_REVIEW" }],
+        // 即使 DTO 被注入 risk 形状数据（结构上不可能，防御性断言）也不渲染
+        riskStates: [
+          { scopeKey: "GLOBAL", state: "MARKETPLACE_RESTRICTED", reasonCode: "MANUAL_REVIEW" },
+        ],
       }),
     });
 
@@ -98,7 +101,11 @@ describe("GovernanceUserDetailPage（用户详情，两阶段读 + canonical 账
 
     expect(screen.getByRole("form", { name: "恢复账号" })).toBeTruthy();
     expect(screen.queryByRole("form", { name: "停用账号" })).toBeNull();
-    expect(screen.getByText(/受限/)).toBeTruthy();
-    expect(screen.getByText(/MANUAL_REVIEW/)).toBeTruthy();
+    // RS04：无风控摘要 section / 无 state / 无 reasonCode 呈现
+    expect(screen.queryByText("风控状态摘要")).toBeNull();
+    expect(screen.queryByText(/MARKETPLACE_RESTRICTED/)).toBeNull();
+    expect(screen.queryByText(/MANUAL_REVIEW/)).toBeNull();
+    // RS05：enforcement canonical 链接保留
+    expect(screen.getByRole("link", { name: "查看执法记录（canonical 读面）→" })).toBeTruthy();
   });
 });

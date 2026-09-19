@@ -42,9 +42,12 @@ function formatDateTime(value: string | null) {
  * Phase 7F 用户详情（两阶段读；每请求独立重授权）：
  * - Stage A 最小锚点（不读 email/studentId/认证材料/私有备注）→
  *   missing/deleted/erased 统一 notFound（无存在性 oracle，U05）；
- * - Stage B 安全水合：maskedEmail / memberships / 有效认证投影 /
- *   risk-state 摘要；不复制 EnforcementAction history——canonical 读面在
- *   /governance/enforcement/targets/[userId]，本页仅提供链接；
+ * - Stage B 安全水合：maskedEmail / memberships / canonical 有效认证投影
+ *   （FR01：deriveEffectiveVerification SSOT，非 legacy 投影）；
+ *   FR02：绝不读取/呈现 RiskState（user.suspend ≠ enforcement.read ≠
+ *   audit.read 的能力分离）——canonical 风险/执法读面在
+ *   /governance/enforcement/targets/[userId]（自守 enforcement.read），
+ *   本页仅提供链接，不复制 EnforcementAction history；
  * - 停用/恢复 = canonical suspendAccount/reinstateAccount 薄入口
  *   （privileged target / self / 幂等由域锁内 fail closed，U06/U07）。
  */
@@ -82,7 +85,7 @@ export default async function GovernanceUserDetailPage({
             {USER_STATUS_LABELS[detail.status]}
           </span>
           <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-            {VERIFICATION_STATUS_LABELS[detail.verificationStatus]}
+            {VERIFICATION_STATUS_LABELS[detail.effectiveVerificationStatus]}
           </span>
         </div>
       </div>
@@ -112,20 +115,10 @@ export default async function GovernanceUserDetailPage({
       </section>
 
       <section className="mt-6 rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">
-        <h2 className="mb-4 text-xl font-semibold text-slate-950">风控状态摘要</h2>
-        {detail.riskStates.length === 0 ? (
-          <p className="text-sm text-slate-500">当前无风控限制记录。</p>
-        ) : (
-          <ul className="grid gap-2 text-sm text-slate-600">
-            {detail.riskStates.map((risk) => (
-              <li key={risk.scopeKey}>
-                {risk.scopeKey === "GLOBAL" ? "全平台" : risk.scopeKey} ·{" "}
-                {risk.state === "NORMAL" ? "正常" : "受限"}
-                {risk.reasonCode ? ` · ${risk.reasonCode}` : ""}
-              </li>
-            ))}
-          </ul>
-        )}
+        <h2 className="mb-4 text-xl font-semibold text-slate-950">执法记录</h2>
+        <p className="text-sm text-slate-600">
+          风险状态与执法历史在执法读面呈现（独立授权，本页不重复读取）。
+        </p>
         <div className="mt-4">
           <Link
             href={`/governance/enforcement/targets/${detail.userId}`}

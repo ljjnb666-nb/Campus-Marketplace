@@ -219,7 +219,7 @@ export default async function GovernanceUsersPage({
                   {USER_STATUS_LABELS[item.status]}
                 </span>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                  {VERIFICATION_STATUS_LABELS[item.verificationStatus]}
+                  {VERIFICATION_STATUS_LABELS[item.effectiveVerificationStatus]}
                 </span>
                 {item.activeCampusNames.length > 0 ? (
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">

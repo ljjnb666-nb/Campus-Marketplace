@@ -1,27 +1,33 @@
 import type { Prisma, UserStatus, VerificationStatus } from "@prisma/client";
 
+import {
+  parseCanonicalCursorDate,
+  parseCanonicalCursorJson,
+} from "@/lib/governance/canonical-cursor";
+import { deriveEffectiveVerification } from "@/lib/trust/trust-snapshot";
 import { prisma } from "@/lib/prisma";
 
 /**
  * Phase 7F：用户运营读模型（/governance/users 队列 + 详情）。
  *
- * 硬合同（指令冻结）：
+ * 硬合同（指令冻结 + Final Repair 1 FR01/FR02 修订）：
  * - 授权模型 = GLOBAL user.suspend ONLY（页面入口 resolver 已挡；本读模型
  *   只服务授权后的呈现，filter 只能缩小结果，不能扩大授权范围）；
  * - 队列 DTO 最小化：绝不携带 full email / studentId / 私有认证证据 /
- *   User.role authority / raw verificationStatus authority / creditScore
- *   （不作为治理信号）/ internal notes——仅 id / safe displayName /
- *   account status / createdAt / lastLoginAt / active campus summary /
- *   effective verification summary；
+ *   User.role authority / creditScore（不作为治理信号）/ internal notes；
+ * - FR01：有效认证 = canonical truth（deriveEffectiveVerification SSOT，
+ *   Phase 6B trust contract）——User.verificationStatus
+ *   （LEGACY_VERIFICATION_PROJECTION = NON_AUTHORITATIVE_FOR_TRUST）结构性
+ *   不进入 select/DTO/filter；EFFECTIVE_VERIFIED = canonical
+ *   UserVerification.status == VERIFIED ∧ 绑定 membership.status == ACTIVE；
+ * - FR02：RiskState 绝不进入本读模型（user.suspend ≠ enforcement.read
+ *   ≠ audit.read 的能力分离）——canonical 风险读面在
+ *   /governance/enforcement/targets/[userId]，本页仅提供链接；
  * - 排序 createdAt DESC, id DESC；bounded keyset（default 25 / max 50）；
  * - 存在性反 oracle：deleted / erased 用户从队列结构性排除，详情 Stage A
  *   判定 missing/deleted/erased 统一 notFound（互不可区分，不泄漏
  *   ACCOUNT_ERASED / ACCOUNT_DELETED / target privileged state）；
- * - 详情两阶段读：Stage A 最小 target 锚点（id/status/deletedAt/erasedAt，
- *   不读 email / studentId / verification material / private notes）→
- *   Stage B 安全详情水合（maskedEmail / memberships / effective
- *   verification summary / risk-state summary）；不复制 EnforcementAction
- *   history，仅提供 canonical link /governance/enforcement/targets/[userId]。
+ * - cursor 为 canonical 纪律（canonical-cursor.ts，FR03）。
  */
 
 export const USER_QUEUE_DEFAULT_PAGE_SIZE = 25;
@@ -35,8 +41,11 @@ export type UserQueueItemDto = {
   lastLoginAt: string | null;
   /** ACTIVE membership 的校区名列表（展示用；非授权依据） */
   activeCampusNames: string[];
-  /** 有效认证状态投影（展示用；非授权依据） */
-  verificationStatus: VerificationStatus;
+  /**
+   * 有效认证状态（FR01：canonical truth，含绑定 membership ACTIVE 求交；
+ * 绝非 User.verificationStatus legacy 投影）
+   */
+  effectiveVerificationStatus: VerificationStatus;
 };
 
 export type UserQueuePage = {
@@ -59,25 +68,20 @@ export function encodeUserCursor(cursor: UserCursor): string {
 }
 
 export function decodeUserCursor(raw: string): UserCursor | null {
-  let payload: unknown;
-  try {
-    const json = Buffer.from(raw, "base64url").toString("utf8");
-    payload = JSON.parse(json);
-  } catch {
+  const payload = parseCanonicalCursorJson(raw, ["createdAt", "id"]);
+  if (!payload) {
     return null;
   }
-  if (typeof payload !== "object" || payload === null) {
+  const createdAt = parseCanonicalCursorDate(payload.createdAt);
+  if (!createdAt || payload.id.length === 0) {
     return null;
   }
-  const { createdAt, id } = payload as Record<string, unknown>;
-  if (typeof createdAt !== "string" || typeof id !== "string" || id.length === 0) {
+  const cursor: UserCursor = { createdAt, id: payload.id };
+  // canonical 外层编码 + canonical JSON 键序的最终权威（FR03 C09/C10）
+  if (encodeUserCursor(cursor) !== raw) {
     return null;
   }
-  const createdAtDate = new Date(createdAt);
-  if (Number.isNaN(createdAtDate.getTime())) {
-    return null;
-  }
-  return { createdAt: createdAtDate, id };
+  return cursor;
 }
 
 /** keyset 条件（DESC 全 tuple：createdAt < ∨ (=∧ id <)）。 */
@@ -90,22 +94,46 @@ function userKeysetCondition(cursor: UserCursor): Prisma.UserWhereInput {
   };
 }
 
+/**
+ * FR01：有效认证 filter 的 canonical relation 谓词。
+ * - VERIFIED = canonical 认证 VERIFIED ∧ 绑定 membership ACTIVE；
+ * - UNVERIFIED = 上式取反（含 canonical 认证缺失 / 非 VERIFIED / 绑定
+ *   membership 非 ACTIVE 三族——绝不静默实现为 legacy 投影判等）；
+ * - 其余值 = canonical status 展示语义（不含 membership 求交）。
+ */
+function effectiveVerificationFilterCondition(
+  verificationStatus: VerificationStatus,
+): Prisma.UserWhereInput {
+  const effectiveVerified: Prisma.UserWhereInput["verification"] = {
+    is: { status: "VERIFIED", membership: { is: { status: "ACTIVE" } } },
+  };
+  switch (verificationStatus) {
+    case "VERIFIED":
+      return { verification: effectiveVerified };
+    case "UNVERIFIED":
+      return { NOT: { verification: effectiveVerified } };
+    default:
+      return { verification: { is: { status: verificationStatus } } };
+  }
+}
+
 const queueUserSelect = {
   id: true,
   name: true,
   status: true,
   createdAt: true,
   lastLoginAt: true,
-  verificationStatus: true,
-  deletedAt: true,
-  erasedAt: true,
+  // FR01：canonical 认证 + 绑定 membership status（推导 effective）；
+  // User.verificationStatus / creditScore / email / studentId 结构性不在
+  // select 内（NON_AUTHORITATIVE_FOR_TRUST + DTO 最小化合同）
+  verification: {
+    select: { status: true, membership: { select: { status: true } } },
+  },
   memberships: {
     where: { status: "ACTIVE" },
     select: { campus: { select: { name: true } } },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   },
-  // email / studentIdLast4 / role / creditScore / 任何私有认证证据
-  // 结构性不在队列 select 内（DTO 最小化合同）
 } satisfies Prisma.UserSelect;
 
 export async function loadUserOperationsQueue(input: {
@@ -124,7 +152,7 @@ export async function loadUserOperationsQueue(input: {
     andConditions.push({ status: filters.status });
   }
   if (filters.verificationStatus) {
-    andConditions.push({ verificationStatus: filters.verificationStatus });
+    andConditions.push(effectiveVerificationFilterCondition(filters.verificationStatus));
   }
   if (filters.campusId) {
     andConditions.push({ memberships: { some: { campusId: filters.campusId, status: "ACTIVE" } } });
@@ -150,7 +178,7 @@ export async function loadUserOperationsQueue(input: {
     createdAt: row.createdAt.toISOString(),
     lastLoginAt: row.lastLoginAt ? row.lastLoginAt.toISOString() : null,
     activeCampusNames: row.memberships.map((membership) => membership.campus.name),
-    verificationStatus: row.verificationStatus,
+    effectiveVerificationStatus: deriveEffectiveVerification(row.verification),
   }));
 
   const last = pageRows[pageRows.length - 1];
@@ -194,10 +222,10 @@ export type UserDetailDto = {
   createdAt: string;
   lastLoginAt: string | null;
   memberships: Array<{ campusName: string; status: string }>;
-  /** 有效认证状态投影（展示用；非授权依据） */
-  verificationStatus: VerificationStatus;
-  /** risk-state 摘要（每 scope 一行，current 状态；仅展示，非授权依据） */
-  riskStates: Array<{ scopeKey: string; state: string; reasonCode: string | null }>;
+  /** 有效认证状态（FR01：canonical truth；非授权依据，亦非 legacy 投影） */
+  effectiveVerificationStatus: VerificationStatus;
+  // FR02：RiskState 绝不进入 user.suspend 读面——canonical 风险读面在
+  // /governance/enforcement/targets/[userId]（其自守 enforcement.read）。
 };
 
 export type UserDetailResult = { ok: true; detail: UserDetailDto } | { ok: false };
@@ -210,8 +238,8 @@ export type UserDetailResult = { ok: true; detail: UserDetailDto } | { ok: false
  *   → missing / deleted / erased 统一 { ok:false }（调用方映射 notFound()，
  *   无存在性 oracle——不区分三种形态，不泄漏 ACCOUNT_ERASED /
  *   ACCOUNT_DELETED / target privileged state）
- *   → Stage B — 安全详情水合（maskedEmail / memberships / verification
- *   投影 / RiskState current 摘要）。
+ *   → Stage B — 安全详情水合（maskedEmail / memberships / canonical 有效
+ *   认证投影，FR02：无任何 RiskState 读取）。
  *
  * 不复制 EnforcementAction history（canonical 读面在
  * /governance/enforcement/targets/[userId]，本页仅提供链接）。
@@ -239,18 +267,18 @@ export async function loadUserOperationsDetail(input: {
       status: true,
       createdAt: true,
       lastLoginAt: true,
-      verificationStatus: true,
       deletedAt: true,
       erasedAt: true,
+      // FR01：canonical 认证 + 绑定 membership status（非 legacy 投影）
+      verification: {
+        select: { status: true, membership: { select: { status: true } } },
+      },
       memberships: {
         select: { status: true, campus: { select: { name: true } } },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       },
-      riskStates: {
-        select: { scopeKey: true, state: true, reasonCode: true },
-        orderBy: [{ scopeKey: "asc" }],
-      },
-      // studentIdLast4 / 私有认证证据 / role / creditScore 结构性不在 select 内
+      // FR02：RiskState 结构性不在 select 内（user.suspend ≠ enforcement.read）；
+      // studentIdLast4 / 私有认证证据 / role / creditScore 同样不在 select 内
     },
   });
 
@@ -272,12 +300,7 @@ export async function loadUserOperationsDetail(input: {
         campusName: membership.campus.name,
         status: membership.status,
       })),
-      verificationStatus: row.verificationStatus,
-      riskStates: row.riskStates.map((risk) => ({
-        scopeKey: risk.scopeKey,
-        state: risk.state,
-        reasonCode: risk.reasonCode,
-      })),
+      effectiveVerificationStatus: deriveEffectiveVerification(row.verification),
     },
   };
 }

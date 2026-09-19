@@ -553,16 +553,17 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 用户运营面", () => {
     const item = page.items.find((entry) => entry.userId === privacyStudent.id);
     expect(item).toBeDefined();
 
-    // DTO 形状恰为允许字段（UP04/UP05：无 role authority、无 creditScore）
+    // DTO 形状恰为允许字段（UP04/UP05：无 role authority、无 creditScore；
+    // FR01：verification 字段为 canonical effective，非 legacy 投影）
     expect(Object.keys(item!).sort()).toEqual(
       [
         "activeCampusNames",
         "createdAt",
         "displayName",
+        "effectiveVerificationStatus",
         "lastLoginAt",
         "status",
         "userId",
-        "verificationStatus",
       ].sort(),
     );
 
@@ -589,17 +590,17 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 用户运营面", () => {
     if (result.ok) {
       expect(result.detail.maskedEmail).not.toBe(detailStudent.email);
       expect(result.detail.maskedEmail).toMatch(/^[a-zA-Z0-9]{1,2}\*\*\*@/);
+      // FR01/FR02：字段为 canonical effective verification；无 riskStates
       expect(Object.keys(result.detail).sort()).toEqual(
         [
           "createdAt",
           "displayName",
+          "effectiveVerificationStatus",
           "lastLoginAt",
           "maskedEmail",
           "memberships",
-          "riskStates",
           "status",
           "userId",
-          "verificationStatus",
         ].sort(),
       );
     }
@@ -1525,3 +1526,214 @@ function membershipSuspensionApplied(
 ): boolean {
   return typeof result === "object" && result.status === "SUSPENDED";
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// Final Repair 1：FR01 projection-drift（EV01..EV07）+ FR02 risk disclosure
+// （RS01..RS06）——真实 PG 关系谓词/关系 select 语义。
+// ══════════════════════════════════════════════════════════════════════════
+
+describe.skipIf(!integrationDatabaseUrl)("Phase 7F Final Repair 1（EV/RS）", () => {
+  it("EV01..EV05：投影漂移骗不过治理——queue/detail 均以 canonical truth 呈现", async () => {
+    const { loadUserOperationsQueue, loadUserOperationsDetail } = await import(
+      "@/lib/governance/user-operations-query"
+    );
+
+    // EV01：投影 VERIFIED + canonical 认证缺失 → effective UNVERIFIED
+    const ev01 = await createFixtureUser("EV01投影漂移");
+    await rawClient!.user.update({
+      where: { id: ev01.id },
+      data: { verificationStatus: "VERIFIED" },
+    });
+
+    // EV02：投影 VERIFIED + canonical VERIFIED + 绑定 membership SUSPENDED
+    //   → effective UNVERIFIED
+    const ev02 = await createFixtureUser("EV02成员失效", { membershipCampusId: null });
+    const ev02Verification = await createVerificationFixture({
+      userId: ev02.id,
+      campusId: campusA.id,
+      options: { membershipStatus: "SUSPENDED", status: "VERIFIED" },
+    });
+    await rawClient!.user.update({
+      where: { id: ev02.id },
+      data: { verificationStatus: "VERIFIED" },
+    });
+
+    // EV03：投影 UNVERIFIED + canonical VERIFIED + membership ACTIVE
+    //   → effective VERIFIED（反向漂移）
+    const ev03 = await createFixtureUser("EV03投影滞后");
+    await createVerificationFixture({
+      userId: ev03.id,
+      campusId: campusA.id,
+      options: { status: "VERIFIED" },
+    });
+    await rawClient!.user.update({
+      where: { id: ev03.id },
+      data: { verificationStatus: "UNVERIFIED" },
+    });
+
+    const page = await loadUserOperationsQueue({ limit: 50 });
+    const q = new Map(page.items.map((item) => [item.userId, item]));
+
+    // EV04：queue 展示 canonical truth
+    expect(q.get(ev01.id)!.effectiveVerificationStatus).toBe("UNVERIFIED");
+    expect(q.get(ev02.id)!.effectiveVerificationStatus).toBe("UNVERIFIED");
+    expect(q.get(ev03.id)!.effectiveVerificationStatus).toBe("VERIFIED");
+
+    // EV05：detail 展示 canonical truth
+    const d01 = await loadUserOperationsDetail({ userId: ev01.id });
+    const d02 = await loadUserOperationsDetail({ userId: ev02.id });
+    const d03 = await loadUserOperationsDetail({ userId: ev03.id });
+    expect(d01.ok && d01.detail.effectiveVerificationStatus).toBe("UNVERIFIED");
+    expect(d02.ok && d02.detail.effectiveVerificationStatus).toBe("UNVERIFIED");
+    expect(d03.ok && d03.detail.effectiveVerificationStatus).toBe("VERIFIED");
+
+    // canonical 行状态不变（读路径零副作用）
+    const canonical = await rawClient!.userVerification.findUniqueOrThrow({
+      where: { id: ev02Verification.id },
+    });
+    expect(canonical.status).toBe("VERIFIED");
+  });
+
+  it("EV06+EV07：VERIFIED/UNVERIFIED filter 走 canonical 关系谓词；投影不改变结果", async () => {
+    const { loadUserOperationsQueue } = await import("@/lib/governance/user-operations-query");
+
+    // canonical VERIFIED+ACTIVE（投影 UNVERIFIED）
+    const verified = await createFixtureUser("EV06真验证");
+    await createVerificationFixture({
+      userId: verified.id,
+      campusId: campusA.id,
+      options: { status: "VERIFIED" },
+    });
+    await rawClient!.user.update({
+      where: { id: verified.id },
+      data: { verificationStatus: "UNVERIFIED" },
+    });
+
+    // canonical 缺失（投影 VERIFIED）
+    const unverified = await createFixtureUser("EV06假验证");
+    await rawClient!.user.update({
+      where: { id: unverified.id },
+      data: { verificationStatus: "VERIFIED" },
+    });
+
+    // canonical VERIFIED + membership SUSPENDED（投影 VERIFIED）
+    const suspendedBinding = await createFixtureUser("EV06绑定失效", { membershipCampusId: null });
+    await createVerificationFixture({
+      userId: suspendedBinding.id,
+      campusId: campusA.id,
+      options: { membershipStatus: "SUSPENDED", status: "VERIFIED" },
+    });
+
+    const verifiedPage = await loadUserOperationsQueue({
+      limit: 50,
+      filters: { verificationStatus: "VERIFIED" },
+    });
+    const verifiedIds = new Set(verifiedPage.items.map((item) => item.userId));
+    expect(verifiedIds.has(verified.id)).toBe(true);
+    expect(verifiedIds.has(unverified.id)).toBe(false);
+    expect(verifiedIds.has(suspendedBinding.id)).toBe(false);
+
+    const unverifiedPage = await loadUserOperationsQueue({
+      limit: 50,
+      filters: { verificationStatus: "UNVERIFIED" },
+    });
+    const unverifiedIds = new Set(unverifiedPage.items.map((item) => item.userId));
+    expect(unverifiedIds.has(unverified.id)).toBe(true);
+    expect(unverifiedIds.has(suspendedBinding.id)).toBe(true);
+    expect(unverifiedIds.has(verified.id)).toBe(false);
+
+    // EV07：翻转 legacy 投影 → 三个 fixture 用户在 filter 结果中的归属逐项
+    // 不变（投影零参与）。注：不做全集合相等断言——队列是跨集成文件共享库
+    // 上的全局截断面（limit=50），并行 fixture 用户会进入/离开窗口，与本
+    // 断言语义无关。
+    await rawClient!.user.update({
+      where: { id: verified.id },
+      data: { verificationStatus: "VERIFIED" },
+    });
+    await rawClient!.user.update({
+      where: { id: unverified.id },
+      data: { verificationStatus: "UNVERIFIED" },
+    });
+
+    const verifiedPageAfter = await loadUserOperationsQueue({
+      limit: 50,
+      filters: { verificationStatus: "VERIFIED" },
+    });
+    const verifiedIdsAfter = new Set(verifiedPageAfter.items.map((item) => item.userId));
+    expect(verifiedIdsAfter.has(verified.id)).toBe(true);
+    expect(verifiedIdsAfter.has(unverified.id)).toBe(false);
+    expect(verifiedIdsAfter.has(suspendedBinding.id)).toBe(false);
+
+    const unverifiedPageAfter = await loadUserOperationsQueue({
+      limit: 50,
+      filters: { verificationStatus: "UNVERIFIED" },
+    });
+    const unverifiedIdsAfter = new Set(unverifiedPageAfter.items.map((item) => item.userId));
+    expect(unverifiedIdsAfter.has(unverified.id)).toBe(true);
+    expect(unverifiedIdsAfter.has(suspendedBinding.id)).toBe(true);
+    expect(unverifiedIdsAfter.has(verified.id)).toBe(false);
+  });
+
+  it("RS01..RS03+RS06：queue/detail select 与 DTO 结构性零 RiskState（user.suspend-only 上下文不获内部风险数据）", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const { loadUserOperationsQueue, loadUserOperationsDetail } = await import(
+      "@/lib/governance/user-operations-query"
+    );
+
+    const target = await createFixtureUser("RS风险目标");
+    await rawClient!.riskState.create({
+      data: {
+        userId: target.id,
+        campusId: null,
+        scopeKey: "GLOBAL",
+        state: "RESTRICTED",
+        reasonCode: "FRAUD_CONFIRMED",
+      },
+    });
+
+    // 扩展 client 方法 spyOn 会丢结果——委托 raw client（User/RiskState 均不在
+    // 软删除模型集，行为等价），换取调用参数快照
+    const findUniqueSpy = vi
+      .spyOn(prisma.user, "findUnique")
+      .mockImplementation(
+        ((args: Prisma.UserFindUniqueArgs) =>
+          rawClient!.user.findUnique(args)) as unknown as typeof prisma.user.findUnique,
+      );
+    const riskFindManySpy = vi
+      .spyOn(prisma.riskState, "findMany")
+      .mockImplementation(
+        ((args: Prisma.RiskStateFindManyArgs) =>
+          rawClient!.riskState.findMany(args)) as unknown as typeof prisma.riskState.findMany,
+      );
+
+    try {
+      const page = await loadUserOperationsQueue({ limit: 50 });
+      // RS01：queue 的 DTO 零 risk 形状 / 零 legacy verificationStatus 投影字段
+      const queueSerialized = JSON.stringify(page.items);
+      expect(queueSerialized).not.toContain("riskState");
+      expect(queueSerialized).not.toContain("scopeKey");
+      expect(queueSerialized).not.toContain("reasonCode");
+
+      findUniqueSpy.mockClear();
+      riskFindManySpy.mockClear();
+      const detail = await loadUserOperationsDetail({ userId: target.id });
+      expect(detail.ok).toBe(true);
+      // RS02：detail 的 Stage B select 无 RiskState / 无 verificationStatus 投影
+      for (const call of findUniqueSpy.mock.calls) {
+        expect(JSON.stringify(call[0])).not.toContain("riskStates");
+        expect(JSON.stringify(call[0])).not.toContain("verificationStatus");
+      }
+      // RS03：DTO 零 risk 形状字段（目标行存在 RESTRICTED 风险态也绝不出现）
+      const detailSerialized = JSON.stringify(detail);
+      expect(detailSerialized).not.toContain("riskState");
+      expect(detailSerialized).not.toContain("scopeKey");
+      expect(detailSerialized).not.toContain("reasonCode");
+      expect(detailSerialized).not.toContain("RESTRICTED");
+      // RS06：user.suspend-only 读路径全程零 RiskState 查询
+      expect(riskFindManySpy).not.toHaveBeenCalled();
+    } finally {
+      findUniqueSpy.mockRestore();
+      riskFindManySpy.mockRestore();
+    }
+  });
+});
