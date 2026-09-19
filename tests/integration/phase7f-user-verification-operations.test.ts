@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
-import { PrismaClient, type Prisma } from "@prisma/client";
+import { PrismaClient, type Prisma, type VerificationStatus } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // Phase 7F User & Campus Verification Operations 集成测试（真实 PostgreSQL）。
@@ -147,7 +147,7 @@ async function createVerificationFixture(input: {
   campusId: string;
   options?: {
     membershipStatus?: "ACTIVE" | "SUSPENDED";
-    status?: "PENDING" | "VERIFIED" | "REJECTED" | "REVOKED";
+    status?: "UNVERIFIED" | "PENDING" | "VERIFIED" | "REJECTED" | "REVOKED";
     submittedAt?: Date;
     withEvidenceAsset?: boolean;
   };
@@ -1594,84 +1594,110 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F Final Repair 1（EV/RS）", (
     expect(canonical.status).toBe("VERIFIED");
   });
 
-  it("EV06+EV07：VERIFIED/UNVERIFIED filter 走 canonical 关系谓词；投影不改变结果", async () => {
+  it("FR04 F01..F07：五个 verification filter 构成互斥分区；display==filter；投影漂移免疫", async () => {
     const { loadUserOperationsQueue } = await import("@/lib/governance/user-operations-query");
 
-    // canonical VERIFIED+ACTIVE（投影 UNVERIFIED）
-    const verified = await createFixtureUser("EV06真验证");
+    // 7 个 canonical 形态 fixture（投影随后刻意翻乱）：
+    const f01 = await createFixtureUser("F01缺失认证");
+    const f02 = await createFixtureUser("F02未认证");
     await createVerificationFixture({
-      userId: verified.id,
+      userId: f02.id,
+      campusId: campusA.id,
+      options: { status: "UNVERIFIED" },
+    });
+    const f03 = await createFixtureUser("F03有效认证");
+    await createVerificationFixture({
+      userId: f03.id,
       campusId: campusA.id,
       options: { status: "VERIFIED" },
     });
-    await rawClient!.user.update({
-      where: { id: verified.id },
-      data: { verificationStatus: "UNVERIFIED" },
-    });
-
-    // canonical 缺失（投影 VERIFIED）
-    const unverified = await createFixtureUser("EV06假验证");
-    await rawClient!.user.update({
-      where: { id: unverified.id },
-      data: { verificationStatus: "VERIFIED" },
-    });
-
-    // canonical VERIFIED + membership SUSPENDED（投影 VERIFIED）
-    const suspendedBinding = await createFixtureUser("EV06绑定失效", { membershipCampusId: null });
+    const f04 = await createFixtureUser("F04绑定失效", { membershipCampusId: null });
     await createVerificationFixture({
-      userId: suspendedBinding.id,
+      userId: f04.id,
       campusId: campusA.id,
       options: { membershipStatus: "SUSPENDED", status: "VERIFIED" },
     });
-
-    const verifiedPage = await loadUserOperationsQueue({
-      limit: 50,
-      filters: { verificationStatus: "VERIFIED" },
+    const f05 = await createFixtureUser("F05待审");
+    await createVerificationFixture({
+      userId: f05.id,
+      campusId: campusA.id,
+      options: { status: "PENDING" },
     });
-    const verifiedIds = new Set(verifiedPage.items.map((item) => item.userId));
-    expect(verifiedIds.has(verified.id)).toBe(true);
-    expect(verifiedIds.has(unverified.id)).toBe(false);
-    expect(verifiedIds.has(suspendedBinding.id)).toBe(false);
-
-    const unverifiedPage = await loadUserOperationsQueue({
-      limit: 50,
-      filters: { verificationStatus: "UNVERIFIED" },
+    const f06 = await createFixtureUser("F06已驳回");
+    await createVerificationFixture({
+      userId: f06.id,
+      campusId: campusA.id,
+      options: { status: "REJECTED" },
     });
-    const unverifiedIds = new Set(unverifiedPage.items.map((item) => item.userId));
-    expect(unverifiedIds.has(unverified.id)).toBe(true);
-    expect(unverifiedIds.has(suspendedBinding.id)).toBe(true);
-    expect(unverifiedIds.has(verified.id)).toBe(false);
-
-    // EV07：翻转 legacy 投影 → 三个 fixture 用户在 filter 结果中的归属逐项
-    // 不变（投影零参与）。注：不做全集合相等断言——队列是跨集成文件共享库
-    // 上的全局截断面（limit=50），并行 fixture 用户会进入/离开窗口，与本
-    // 断言语义无关。
-    await rawClient!.user.update({
-      where: { id: verified.id },
-      data: { verificationStatus: "VERIFIED" },
-    });
-    await rawClient!.user.update({
-      where: { id: unverified.id },
-      data: { verificationStatus: "UNVERIFIED" },
+    const f07 = await createFixtureUser("F07已吊销");
+    await createVerificationFixture({
+      userId: f07.id,
+      campusId: campusA.id,
+      options: { status: "REVOKED" },
     });
 
-    const verifiedPageAfter = await loadUserOperationsQueue({
-      limit: 50,
-      filters: { verificationStatus: "VERIFIED" },
-    });
-    const verifiedIdsAfter = new Set(verifiedPageAfter.items.map((item) => item.userId));
-    expect(verifiedIdsAfter.has(verified.id)).toBe(true);
-    expect(verifiedIdsAfter.has(unverified.id)).toBe(false);
-    expect(verifiedIdsAfter.has(suspendedBinding.id)).toBe(false);
+    // SSOT 语义下每个 fixture 的唯一 effective 归属：
+    const expected: Array<{ id: string; effective: VerificationStatus }> = [
+      { id: f01.id, effective: "UNVERIFIED" }, // F01 missing
+      { id: f02.id, effective: "UNVERIFIED" }, // F02 canonical UNVERIFIED
+      { id: f03.id, effective: "VERIFIED" }, // F03 VERIFIED + ACTIVE
+      { id: f04.id, effective: "UNVERIFIED" }, // F04 VERIFIED + SUSPENDED
+      { id: f05.id, effective: "PENDING" }, // F05 PENDING
+      { id: f06.id, effective: "REJECTED" }, // F06 REJECTED
+      { id: f07.id, effective: "REVOKED" }, // F07 REVOKED
+    ];
 
-    const unverifiedPageAfter = await loadUserOperationsQueue({
-      limit: 50,
-      filters: { verificationStatus: "UNVERIFIED" },
-    });
-    const unverifiedIdsAfter = new Set(unverifiedPageAfter.items.map((item) => item.userId));
-    expect(unverifiedIdsAfter.has(unverified.id)).toBe(true);
-    expect(unverifiedIdsAfter.has(suspendedBinding.id)).toBe(true);
-    expect(unverifiedIdsAfter.has(verified.id)).toBe(false);
+    const FILTERS = ["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED", "REVOKED"] as const;
+
+    async function loadFilterMembership() {
+      const map = new Map<string, Set<string>>();
+      for (const filter of FILTERS) {
+        const page = await loadUserOperationsQueue({
+          limit: 50,
+          filters: { verificationStatus: filter },
+        });
+        map.set(
+          filter,
+          new Set(page.items.map((item) => item.userId)),
+        );
+      }
+      return map;
+    }
+
+    async function assertPartition(label: string) {
+      const membership = await loadFilterMembership();
+      for (const { id, effective } of expected) {
+        // 互斥分区：每个 fixture 恰好命中一个 filter，且就是 SSOT 语义的那个
+        const containing = FILTERS.filter((filter) => membership.get(filter)!.has(id));
+        expect(containing, `${label}: ${id} 恰命中一个 filter`).toEqual([effective]);
+      }
+
+      // display == filter：queue 展示字段与唯一命中 filter 同一 canonical truth
+      const page = await loadUserOperationsQueue({ limit: 50 });
+      const display = new Map(
+        page.items.map((item) => [item.userId, item.effectiveVerificationStatus]),
+      );
+      for (const { id, effective } of expected) {
+        expect(display.get(id), `${label}: display ${id}`).toBe(effective);
+      }
+    }
+
+    // 投影漂移第一轮：全部 fixture 的 legacy 投影翻成与 canonical 无关的值
+    await rawClient!.user.update({ where: { id: f01.id }, data: { verificationStatus: "VERIFIED" } });
+    await rawClient!.user.update({ where: { id: f02.id }, data: { verificationStatus: "REVOKED" } });
+    await rawClient!.user.update({ where: { id: f03.id }, data: { verificationStatus: "UNVERIFIED" } });
+    await rawClient!.user.update({ where: { id: f04.id }, data: { verificationStatus: "PENDING" } });
+    await rawClient!.user.update({ where: { id: f05.id }, data: { verificationStatus: "VERIFIED" } });
+    await rawClient!.user.update({ where: { id: f06.id }, data: { verificationStatus: "UNVERIFIED" } });
+    await rawClient!.user.update({ where: { id: f07.id }, data: { verificationStatus: "PENDING" } });
+    await assertPartition("round1");
+
+    // 投影漂移第二轮：再翻转一部分 → filter/展示仍零变化
+    await rawClient!.user.update({ where: { id: f01.id }, data: { verificationStatus: "UNVERIFIED" } });
+    await rawClient!.user.update({ where: { id: f03.id }, data: { verificationStatus: "VERIFIED" } });
+    await rawClient!.user.update({ where: { id: f05.id }, data: { verificationStatus: "REJECTED" } });
+    await rawClient!.user.update({ where: { id: f07.id }, data: { verificationStatus: "VERIFIED" } });
+    await assertPartition("round2");
   });
 
   it("RS01..RS03+RS06：queue/detail select 与 DTO 结构性零 RiskState（user.suspend-only 上下文不获内部风险数据）", async () => {

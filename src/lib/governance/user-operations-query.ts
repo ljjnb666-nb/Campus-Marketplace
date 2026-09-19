@@ -95,23 +95,46 @@ function userKeysetCondition(cursor: UserCursor): Prisma.UserWhereInput {
 }
 
 /**
- * FR01：有效认证 filter 的 canonical relation 谓词。
- * - VERIFIED = canonical 认证 VERIFIED ∧ 绑定 membership ACTIVE；
- * - UNVERIFIED = 上式取反（含 canonical 认证缺失 / 非 VERIFIED / 绑定
- *   membership 非 ACTIVE 三族——绝不静默实现为 legacy 投影判等）；
- * - 其余值 = canonical status 展示语义（不含 membership 求交）。
+ * FR01/FR04：有效认证 filter 的 canonical relation 谓词——DB 语义必须与
+ * deriveEffectiveVerification（SSOT，Phase 6B trust contract）逐条相等：
+ * - VERIFIED = canonical status VERIFIED ∧ 绑定 membership ACTIVE；
+ * - UNVERIFIED = 恰为 SSOT 推导得到 UNVERIFIED 的三族：
+ *     A. canonical UserVerification 行缺失；
+ *     B. canonical status = UNVERIFIED；
+ *     C. canonical VERIFIED ∧ 绑定 membership.status != ACTIVE
+ *   ——绝不是 NOT(effective VERIFIED)（那会吞入 PENDING/REJECTED/REVOKED）。
+ *   schema 事实：UserVerification.membership 为 required relation（不可缺失），
+ *   故 C 用 status != ACTIVE 完整表达（无 "membership missing" 分支）；
+ * - PENDING/REJECTED/REVOKED = canonical status 展示语义（不含 membership 求交）。
  */
 function effectiveVerificationFilterCondition(
   verificationStatus: VerificationStatus,
 ): Prisma.UserWhereInput {
-  const effectiveVerified: Prisma.UserWhereInput["verification"] = {
-    is: { status: "VERIFIED", membership: { is: { status: "ACTIVE" } } },
-  };
   switch (verificationStatus) {
     case "VERIFIED":
-      return { verification: effectiveVerified };
+      return {
+        verification: {
+          is: { status: "VERIFIED", membership: { is: { status: "ACTIVE" } } },
+        },
+      };
     case "UNVERIFIED":
-      return { NOT: { verification: effectiveVerified } };
+      return {
+        OR: [
+          // A：canonical 行缺失
+          { verification: { is: null } },
+          // B：canonical status = UNVERIFIED
+          { verification: { is: { status: "UNVERIFIED" } } },
+          // C：canonical VERIFIED ∧ 绑定 membership 非 ACTIVE
+          {
+            verification: {
+              is: {
+                status: "VERIFIED",
+                membership: { is: { status: { not: "ACTIVE" } } },
+              },
+            },
+          },
+        ],
+      };
     default:
       return { verification: { is: { status: verificationStatus } } };
   }
