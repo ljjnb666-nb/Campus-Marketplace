@@ -718,7 +718,8 @@ test("7G-E2E07 appeal overdue 渲染（审核已超时徽标；只读零自动�
   const adminPage = await adminCtx.newPage();
   await adminPage.goto("/governance/appeals?limit=50");
   await expect(adminPage.getByRole("heading", { name: "申诉审核" })).toBeVisible();
-  await expect(adminPage.getByText("审核已超时")).toBeVisible();
+  // CI retries 会为本 spec 累积多个 overdue fixture → 徽标存在性用 .first()
+  await expect(adminPage.getByText("审核已超时").first()).toBeVisible();
 
   // 只读零自动决定：申诉保持 SUBMITTED、无 reviewedBy
   await expect
