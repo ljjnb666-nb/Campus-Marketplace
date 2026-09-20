@@ -1550,11 +1550,17 @@ describe.skipIf(!integrationDatabaseUrl)(
         support: deriveSupportManageAccess(adminContext),
       });
       const globalByDomain = new Map(globalSummaries.map((summary) => [summary.domain, summary]));
+      // 一致性权威断言：GLOBAL dashboard == DB 全局 active 谓词计数（邻近查询对）。
+      // 注：CI 集成库为全新无种子库——除本测试夹具外无其它行，因此 GLOBAL ==
+      // campus 视角（2==2）是合法终态；此处只断言单调包含（global ⊇ campus），
+      // 跨校区/UNSCOPED 的隔离证明由上方 campusB 专属计数 == 1 与
+      // UNSCOPED 工单的 queue 级 containment 断言承担。
       const dbOpenCases = await rawClient!.moderationCase.count({ where: { closedAt: null } });
       expect(globalByDomain.get("reports")!.activeCount).toBe(dbOpenCases);
-      expect(globalByDomain.get("reports")!.activeCount).toBeGreaterThan(
+      expect(globalByDomain.get("reports")!.activeCount).toBeGreaterThanOrEqual(
         byDomain.get("reports")!.activeCount,
       );
+      // support：UNSCOPED 活跃工单仅计入 GLOBAL——严格大于恒成立（差恰为本夹具 1 行）
       expect(globalByDomain.get("support")!.activeCount).toBeGreaterThan(
         byDomain.get("support")!.activeCount,
       );
