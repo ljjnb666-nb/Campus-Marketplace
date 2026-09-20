@@ -358,6 +358,25 @@ describe("loadAuthorizedSupportQueue filter 组合（恒 AND 在 scope 之内）
     });
   });
 
+  it("queue DTO：assigned 行 identity 缺失 fallback（339 臂）", async () => {
+    campusFindMany.mockResolvedValue([{ id: "A" }]);
+    ticketFindMany.mockResolvedValue([
+      ticketRow({ assignedToId: "agent-erased", status: "IN_PROGRESS" }),
+    ]);
+    userFindMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in
+        .filter((id: string) => id !== "agent-erased")
+        .map((id: string) => ({ id, name: `用户-${id}`, deletedAt: null, erasedAt: null })),
+    );
+
+    const page = await loadAuthorizedSupportQueue({
+      viewerId: "viewer-1",
+      access: CAMPUS_A_ACCESS,
+      limit: 25,
+    });
+    expect(page.items[0]!.assignedAgent).toBe("已注销用户");
+  });
+
   it("campus row 缺失名 → campusName null；CAMPUS 工单行渲染校区名", async () => {
     campusFindMany.mockResolvedValue([{ id: "A" }]);
     ticketFindMany.mockResolvedValue([

@@ -193,6 +193,27 @@ describe("loadAuthorizedDisputeQueue（DB 内授权 + filter 收敛）", () => {
     ]);
   });
 
+  it("queue DTO：assigned 行 identity 缺失 fallback（230/232 臂）", async () => {
+    campusFindMany.mockResolvedValue([{ id: "A" }]);
+    disputeFindMany.mockResolvedValue([
+      disputeRow({ assignedToId: "reviewer-erased", initiatorId: "initiator-1" }),
+    ]);
+    userFindMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in
+        .filter((id: string) => id !== "reviewer-erased")
+        .map((id: string) => ({ id, name: `用户-${id}`, deletedAt: null, erasedAt: null })),
+    );
+
+    const page = await loadAuthorizedDisputeQueue({
+      viewerId: "viewer-1",
+      access: CAMPUS_A_ACCESS,
+      limit: 25,
+    });
+
+    expect(page.items[0]!.assignedReviewer).toBe("已注销用户");
+    expect(page.items[0]!.initiatorName).toBe("用户-initiator-1");
+  });
+
   it("queue DTO 最小面：无 reason/evidence/adminNote；身份批量安全水合；hasMore → nextCursor", async () => {
     campusFindMany.mockResolvedValue([{ id: "A" }]);
     disputeFindMany.mockResolvedValue([
@@ -410,6 +431,41 @@ describe("loadAuthorizedDisputeDetail（两阶段读，授权失败零敏感载�
       expect(detail.detail.resolution.resolvedByName).toBeNull();
       expect(detail.detail.initiatorName).toBe("已注销用户");
       expect(detail.detail.canViewEvidence).toBe(false);
+    }
+  });
+
+  it("detail：resolvedByName 有值 + assigned 有值臂（417/418 反向臂）", async () => {
+    disputeFindUnique.mockResolvedValueOnce({
+      id: "d3",
+      campusId: "A",
+      scopeKey: "CAMPUS:A",
+      status: "RESOLVED",
+      orderId: "o1",
+    });
+    disputeFindUnique.mockResolvedValueOnce(
+      disputeRow({
+        id: "d3",
+        status: "RESOLVED",
+        assignedToId: "assignee-1",
+        resolutionCode: "MUTUAL_AGREEMENT",
+        resolutionAction: "RESTORE_PREVIOUS",
+        resolvedAt: new Date("2026-09-19T12:00:00.000Z"),
+        resolvedById: "resolver-1",
+      }),
+    );
+    const detail = await loadAuthorizedDisputeDetail({
+      viewerId: "viewer-9",
+      context: authCtx(),
+      access: CAMPUS_A_ACCESS,
+      disputeId: "d3",
+    });
+    expect(detail.ok).toBe(true);
+    if (detail.ok) {
+      expect(detail.detail.assignedReviewer!.displayName).toBe("用户-assignee-1");
+      expect(detail.detail.selfAssigned).toBe(false);
+      expect(detail.detail.resolution.resolvedByName).toBe("用户-resolver-1");
+      expect(detail.detail.resolution.code).toBe("MUTUAL_AGREEMENT");
+      expect(detail.detail.resolution.resolvedAt).toBe("2026-09-19T12:00:00.000Z");
     }
   });
 

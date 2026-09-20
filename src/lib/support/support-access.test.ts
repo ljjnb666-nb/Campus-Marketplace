@@ -53,6 +53,19 @@ describe("deriveSupportManageAccess（DEFAULT_DENY）", () => {
     });
   });
 
+  it("无 support.manage 的 grant → skip 臂（44）", () => {
+    expect(
+      deriveSupportManageAccess(
+        ctx([{ roleKey: "R", scope: "CAMPUS", campusId: "A", permissionKeys: ["dispute.review"] }], ["A"]),
+      ),
+    ).toEqual({ global: false, campusIds: [] });
+    expect(
+      deriveSupportManageAccess(
+        ctx([{ roleKey: "R", scope: "GLOBAL", campusId: null, permissionKeys: ["report.review"] }]),
+      ),
+    ).toEqual({ global: false, campusIds: [] });
+  });
+
   it("CAMPUS grant ∧ ACTIVE membership 求交；去重", () => {
     expect(deriveSupportManageAccess(ctx([campusGrant("A")], []))).toEqual({
       global: false,

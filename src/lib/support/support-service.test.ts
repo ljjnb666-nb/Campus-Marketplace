@@ -303,6 +303,24 @@ describe("claim / release（USER:actor → ticket 行锁 → 锁后授权）", (
       code: "SUPPORT_TICKET_NOT_FOUND",
     });
   });
+
+  it("终局防御臂：resolve/close 行锁空（325）与 requester 漂移（329）→ fail closed", async () => {
+    txStub.$queryRaw.mockResolvedValue([]);
+    await expect(
+      resolveSupportTicket({ actorId: "agent-1", ticketId: "t1", resolutionCode: "OTHER" }),
+    ).rejects.toMatchObject({ code: "SUPPORT_TICKET_NOT_FOUND" });
+
+    await expect(closeSupportTicket({ actorId: "agent-1", ticketId: "t1" })).rejects.toMatchObject({
+      code: "SUPPORT_TICKET_NOT_FOUND",
+    });
+
+    txStub.$queryRaw.mockResolvedValue([
+      { id: "t1", campusId: null, scopeKey: "UNSCOPED", status: "OPEN", assignedToId: null, requesterId: "someone-else" },
+    ]);
+    await expect(
+      resolveSupportTicket({ actorId: "agent-1", ticketId: "t1", resolutionCode: "OTHER" }),
+    ).rejects.toMatchObject({ code: "SUPPORT_TICKET_INVALID_TRANSITION" });
+  });
 });
 
 describe("resolve / close（ONE sorted set：actor + requester）", () => {

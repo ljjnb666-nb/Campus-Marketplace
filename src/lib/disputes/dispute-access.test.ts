@@ -98,4 +98,15 @@ describe("deriveDisputeReviewAccess（DEFAULT_DENY）", () => {
     await expect(requireDisputeReviewer()).rejects.toThrow("NEXT_NOT_FOUND");
     expect(notFoundMock).toHaveBeenCalled();
   });
+
+  it("requireDisputeReviewer：context null（用户消失）→ notFound（104 臂）", async () => {
+    requireUserMock.mockResolvedValue({ id: "u1" });
+    loadAuthorizationContextMock.mockResolvedValue(null);
+    notFoundMock.mockImplementation(() => {
+      throw new Error("NEXT_NOT_FOUND_2");
+    });
+
+    const { requireDisputeReviewer } = await import("@/lib/disputes/dispute-access");
+    await expect(requireDisputeReviewer()).rejects.toThrow("NEXT_NOT_FOUND_2");
+  });
 });
