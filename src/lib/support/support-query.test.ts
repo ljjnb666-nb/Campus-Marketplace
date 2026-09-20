@@ -162,6 +162,49 @@ describe("loadAuthorizedSupportDetail（两阶段读）", () => {
     expect(ticketFindUnique).toHaveBeenCalledTimes(2);
   });
 
+  it("Stage B 行消失（极端竞态）与兜底臂：campus null / 未领用 / erased requester", async () => {
+    ticketFindUnique.mockResolvedValueOnce(ticketRow());
+    ticketFindUnique.mockResolvedValueOnce(null);
+    const vanished = await loadAuthorizedSupportDetail({
+      viewerId: "v1",
+      context: authCtx(),
+      access: GLOBAL_ACCESS,
+      ticketId: "t1",
+    });
+    expect(vanished).toEqual({ ok: false });
+
+    ticketFindUnique.mockResolvedValueOnce(
+      ticketRow({ campusId: "A", scopeKey: "CAMPUS:A", status: "IN_PROGRESS" }),
+    );
+    ticketFindUnique.mockResolvedValueOnce(
+      ticketRow({
+        campusId: "A",
+        scopeKey: "CAMPUS:A",
+        campus: null,
+        status: "IN_PROGRESS",
+        assignedToId: null,
+        requesterId: "requester-erased",
+        internalNote: null,
+        resolvedAt: null,
+        resolvedById: null,
+      }),
+    );
+    userFindMany.mockResolvedValue([]);
+    const detail = await loadAuthorizedSupportDetail({
+      viewerId: "viewer-9",
+      context: authCtx(),
+      access: CAMPUS_A_ACCESS,
+      ticketId: "t1",
+    });
+    expect(detail.ok).toBe(true);
+    if (detail.ok) {
+      expect(detail.detail.campusName).toBeNull();
+      expect(detail.detail.assignedAgent).toBeNull();
+      expect(detail.detail.requesterName).toBe("已注销用户");
+      expect(detail.detail.resolution.resolvedAt).toBeNull();
+    }
+  });
+
   it("授权通过 → Stage B（description/internalNote/requester 身份）", async () => {
     ticketFindUnique.mockResolvedValueOnce(ticketRow());
     ticketFindUnique.mockResolvedValueOnce(

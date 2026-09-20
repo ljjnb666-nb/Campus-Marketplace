@@ -353,6 +353,66 @@ describe("loadAuthorizedDisputeDetail（两阶段读，授权失败零敏感载�
     }
   });
 
+  it("Stage B 行消失（极端竞态）与兜底臂：campus 名缺失 / 未领用 / 零终局 / erased 身份 fallback", async () => {
+    // Stage B 行消失 → ok:false
+    disputeFindUnique.mockResolvedValueOnce({
+      id: "d1",
+      campusId: "A",
+      scopeKey: "CAMPUS:A",
+      status: "OPEN",
+      orderId: "o1",
+    });
+    disputeFindUnique.mockResolvedValueOnce(null);
+    const vanished = await loadAuthorizedDisputeDetail({
+      viewerId: "v1",
+      context: authCtx(),
+      access: GLOBAL_ACCESS,
+      disputeId: "d1",
+    });
+    expect(vanished).toEqual({ ok: false });
+
+    // 兜底臂：campus 行缺失、未领用、无终局、resolvedById 空、erased initiator
+    disputeFindUnique.mockResolvedValueOnce({
+      id: "d2",
+      campusId: "A",
+      scopeKey: "CAMPUS:A",
+      status: "OPEN",
+      orderId: "o1",
+    });
+    disputeFindUnique.mockResolvedValueOnce(
+      disputeRow({
+        id: "d2",
+        campus: null,
+        initiatorId: "initiator-erased",
+        assignedToId: null,
+        resolutionCode: null,
+        resolutionAction: null,
+        resolvedAt: null,
+        resolvedById: null,
+        openedFromOrderStatus: null,
+        evidencePhotos: [],
+        adminNote: null,
+      }),
+    );
+    userFindMany.mockResolvedValue([]);
+    const detail = await loadAuthorizedDisputeDetail({
+      viewerId: "viewer-9",
+      context: authCtx(),
+      access: CAMPUS_A_ACCESS,
+      disputeId: "d2",
+    });
+    expect(detail.ok).toBe(true);
+    if (detail.ok) {
+      expect(detail.detail.campusName).toBe("未知校区");
+      expect(detail.detail.assignedReviewer).toBeNull();
+      expect(detail.detail.selfAssigned).toBe(false);
+      expect(detail.detail.resolution.resolvedAt).toBeNull();
+      expect(detail.detail.resolution.resolvedByName).toBeNull();
+      expect(detail.detail.initiatorName).toBe("已注销用户");
+      expect(detail.detail.canViewEvidence).toBe(false);
+    }
+  });
+
   it("Stage A↔B 竞态（campus 快照不一致）→ { ok:false }（反 oracle）", async () => {
     disputeFindUnique.mockResolvedValueOnce({
       id: "d1",
