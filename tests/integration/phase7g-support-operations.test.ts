@@ -521,6 +521,69 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7G support + appeal SLA（真实
     }
   });
 
+  // ── FR04：通知零自由文本复制（sentinel 隐私合同）────────────────────────────
+
+  it("FR04-SENTINEL：resolutionMessage 自由文本绝不复制进 Notification；erasure 只收敛权威列", async () => {
+    const requester = await createFixtureUser("FR04requester");
+    const globalOp = await globalAgent();
+    const { createSupportTicket, resolveSupportTicket } = await import(
+      "@/lib/support/support-service"
+    );
+    const sentinelMessage = "请联系 13800138000，QQ 123456";
+
+    const ticket = await createSupportTicket({
+      requesterId: requester.id,
+      category: "ACCOUNT",
+      subject: "FR04 sentinel 工单",
+      description: "FR04 通知零复制验证描述。",
+    });
+    createdTicketIds.push(ticket.id);
+
+    await resolveSupportTicket({
+      actorId: globalOp.id,
+      ticketId: ticket.id,
+      resolutionCode: "USER_GUIDED",
+      resolutionMessage: sentinelMessage,
+    });
+
+    // 权威列：SupportTicket.resolutionMessage 含 sentinel（USER_VISIBLE 原样）
+    const row = await rawClient!.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+    expect(row.resolutionMessage).toBe(sentinelMessage);
+
+    // Notification.content：不含电话/QQ/完整 resolutionMessage——只有固定安全文本
+    const notifications = await rawClient!.notification.findMany({
+      where: { userId: requester.id, type: "SYSTEM" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(notifications.length).toBeGreaterThan(0);
+    for (const notification of notifications) {
+      expect(notification.content).not.toContain("13800138000");
+      expect(notification.content).not.toContain("123456");
+      expect(notification.content).not.toContain("请联系");
+      expect(JSON.stringify(notification)).not.toContain("sentinelMessage");
+    }
+    const resolvedNotice = notifications.find((n) => n.title === "支持工单已处理");
+    expect(resolvedNotice).toBeDefined();
+    expect(resolvedNotice!.content).toBe(
+      "你的支持工单已处理完成，请进入工单详情查看处理结果。",
+    );
+
+    // terminal ticket erasure：权威列收敛为 null；通知侧从不存在自由文本
+    // （无需"搜索通知文本再 scrub"——写边界已避免复制）
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    await eraseAccount(requester.id);
+
+    const after = await rawClient!.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+    expect(after.resolutionMessage).toBeNull();
+    const notificationsAfter = await rawClient!.notification.findMany({
+      where: { userId: requester.id },
+    });
+    for (const notification of notificationsAfter) {
+      expect(notification.content).not.toContain("13800138000");
+      expect(notification.content).not.toContain("123456");
+    }
+  });
+
   // ── S-RACE-01/02 + NO_40P01 ────────────────────────────────────────────────
 
   it("S-RACE-01：4 并发创建 → active 计数恒 ≤ 3（恰 3 成功或更少）", async () => {

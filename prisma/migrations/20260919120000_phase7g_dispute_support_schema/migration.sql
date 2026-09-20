@@ -3,9 +3,16 @@
 -- 硬合同（Phase 7G directive 冻结）：
 -- - RentalDispute 运营字段：campus scope 快照（RentalOrder → RentalListing
 --   .campusId 回填，绝不从 User.campusId 推断）、openedFromOrderStatus 历史回填
---   （唯一来源 RentalOrderStatusLog.toStatus='IN_DISPUTE' 的 fromStatus，不可靠
---   还原 → NULL，禁止伪造）、dueAt 历史回填 = 行自身 createdAt + 48h
---   （绝不能用迁移执行时刻 now() + INTERVAL）；
+--   （pre-7G 权威写序：dispute.create(t0) → order IN_DISPUTE → statusLog(t1>t0)，
+--   故取 dispute 创建之后最近一条 toStatus='IN_DISPUTE' 的 fromStatus；不可靠
+--   还原 → NULL，禁止伪造 NULL→COMPLETED）、dueAt 历史回填 = 行自身 createdAt
+--   + 48h（绝不能用迁移执行时刻 now() + INTERVAL）；
+-- - FR02 PREFLIGHT：历史并发可在同订单留下多行 active dispute——建 partial
+--   unique 前显式检测，命中即 ABORT（PHASE7G_DUPLICATE_ACTIVE_DISPUTES），
+--   禁止迁移自动 pick/delete/CLOSE/RESOLVED（那会替运营创造业务结论）；
+-- - FR03：历史 OPEN/IN_REVIEW dispute 回填 owner+renter 两条 source-linked
+--   ACTIVE DISPUTE hold（确定性 id='hold_'||md5(disputeId:role)，无 pgcrypto
+--   依赖，rerun 安全）；terminal 历史不建 hold；
 -- - 同一 RentalOrder 至多一个 active dispute（OPEN/IN_REVIEW）：
 --   PostgreSQL partial unique index（terminal 历史不阻断未来新 episode，
 --   绝不是 UNIQUE(orderId)）；
@@ -33,6 +40,35 @@ CREATE TYPE "SupportTicketStatus" AS ENUM ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'C
 CREATE TYPE "SupportTicketCategory" AS ENUM ('ACCOUNT', 'VERIFICATION', 'MARKETPLACE', 'SAFETY', 'OTHER');
 
 CREATE TYPE "SupportResolutionCode" AS ENUM ('ANSWERED', 'USER_GUIDED', 'DUPLICATE', 'INVALID', 'OUT_OF_SCOPE', 'OTHER');
+
+-- ============================================================
+-- 1.5 FR02 PREFLIGHT：duplicate active dispute 检测
+-- ============================================================
+--
+-- pre-7G schema/runtime 无 active-dispute 唯一约束，历史并发可能在同一
+-- RentalOrder 上产生多行 OPEN/IN_REVIEW dispute。在创建 partial unique
+-- index（RentalDispute_order_active_key）与任何 7G 语义回填之前显式检测；
+-- 命中即 ABORT（异常随显式事务整体回滚，零 partial schema/data）。
+--
+-- 禁止迁移自动 pick/delete/CLOSE/RESOLVED 任何一行——那是在替运营人员
+-- 创造业务结论。诊断前缀 PHASE7G_DUPLICATE_ACTIVE_DISPUTES 稳定可搜索。
+
+DO $$
+DECLARE
+    duplicate_order_count int;
+BEGIN
+    SELECT COUNT(*) INTO duplicate_order_count FROM (
+        SELECT "orderId"
+        FROM "RentalDispute"
+        WHERE "status" IN ('OPEN', 'IN_REVIEW')
+        GROUP BY "orderId"
+        HAVING COUNT(*) > 1
+    ) duplicates;
+
+    IF duplicate_order_count > 0 THEN
+        RAISE EXCEPTION 'PHASE7G_DUPLICATE_ACTIVE_DISPUTES: % RentalOrder(s) carry multiple active (OPEN/IN_REVIEW) RentalDispute rows; manual reconciliation required before Phase 7G upgrade', duplicate_order_count;
+    END IF;
+END $$;
 
 -- ============================================================
 -- 2. RentalDispute 运营字段
@@ -69,8 +105,8 @@ SET "openedFromOrderStatus" = (
     WHERE l."orderId" = d."orderId"
       AND l."toStatus" = 'IN_DISPUTE'
       AND l."fromStatus" IS NOT NULL
-      AND l."createdAt" <= d."createdAt"
-    ORDER BY l."createdAt" DESC, l."id" DESC
+      AND l."createdAt" >= d."createdAt"
+    ORDER BY l."createdAt" ASC, l."id" ASC
     LIMIT 1
 )
 WHERE d."openedFromOrderStatus" IS NULL;
@@ -118,6 +154,53 @@ CREATE INDEX "DataHold_sourceType_sourceId_status_idx" ON "DataHold"("sourceType
 -- 历史/手动 hold（sourceType/sourceId 为 NULL）不受影响。
 CREATE UNIQUE INDEX "DataHold_source_active_key" ON "DataHold"("type", "subjectType", "subjectId", "sourceType", "sourceId")
 WHERE "status" = 'ACTIVE' AND "sourceType" IS NOT NULL AND "sourceId" IS NOT NULL;
+
+-- 2i. FR03：历史 active dispute 的 DataHold truth 收敛。
+--
+-- pre-7G 的 initiateDispute 不创建 DataHold——历史 OPEN/IN_REVIEW dispute 在
+-- 7G canonical contract 下必须各自携带 owner+renter 两条 source-linked
+-- ACTIVE hold；terminal（RESOLVED/CLOSED）绝不建立 ACTIVE hold。
+--
+-- id = 'hold_' || md5(disputeId || ':owner'|':renter')：PostgreSQL 内建
+-- md5（无 pgcrypto 扩展依赖）、确定性、rerun 安全（ON CONFLICT ("id")
+-- DO NOTHING）。createdAt 取 dispute 自身 createdAt（禁迁移执行时刻）。
+INSERT INTO "DataHold" (
+    "id", "type", "status", "subjectType", "subjectId",
+    "reasonCode", "sourceType", "sourceId", "createdAt"
+)
+SELECT
+    'hold_' || md5(d."id" || ':owner'),
+    'DISPUTE',
+    'ACTIVE',
+    'USER',
+    o."ownerId",
+    'ACTIVE_RENTAL_DISPUTE',
+    'RENTAL_DISPUTE',
+    d."id",
+    d."createdAt"
+FROM "RentalDispute" d
+JOIN "RentalOrder" o ON o."id" = d."orderId"
+WHERE d."status" IN ('OPEN', 'IN_REVIEW')
+ON CONFLICT ("id") DO NOTHING;
+
+INSERT INTO "DataHold" (
+    "id", "type", "status", "subjectType", "subjectId",
+    "reasonCode", "sourceType", "sourceId", "createdAt"
+)
+SELECT
+    'hold_' || md5(d."id" || ':renter'),
+    'DISPUTE',
+    'ACTIVE',
+    'USER',
+    o."renterId",
+    'ACTIVE_RENTAL_DISPUTE',
+    'RENTAL_DISPUTE',
+    d."id",
+    d."createdAt"
+FROM "RentalDispute" d
+JOIN "RentalOrder" o ON o."id" = d."orderId"
+WHERE d."status" IN ('OPEN', 'IN_REVIEW')
+ON CONFLICT ("id") DO NOTHING;
 
 -- ============================================================
 -- 4. SupportTicket 新域

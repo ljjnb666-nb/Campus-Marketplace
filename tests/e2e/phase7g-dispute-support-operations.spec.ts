@@ -193,7 +193,10 @@ test("7G-E2E01 租客发起纠纷 → 订单 IN_DISPUTE → campus reviewer 见�
   const renterPage = await renterContext.newPage();
   await renterPage.goto(`/rental-orders/${order.id}/dispute`);
   await expect(renterPage.getByRole("heading", { name: "发起纠纷" })).toBeVisible();
-  await renterPage.locator('textarea[name="reason"]').fill(`E2E7G 归还物品与描述不符 ${tag}`);
+  await renterPage
+    .locator('textarea[name="reason"]')
+    .first()
+    .fill(`E2E7G 归还物品与描述不符 ${tag}`);
   await renterPage.getByRole("button", { name: "提交纠纷申请" }).click();
   // RentalActionForm 成功后 redirect 到订单详情页（"action 后 revalidate 换掉
   // 反馈区"同款：先等重定向，DB 不变量随后断言）

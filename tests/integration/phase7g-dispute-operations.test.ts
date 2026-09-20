@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -268,6 +269,90 @@ beforeAll(async () => {
   });
   createdCampusIds.push(campusB.id);
 });
+
+// ── 迁移真升级测试基建（pre-7G schema 重放 → 应用 7G schema migration）───────
+
+const P7G_SCHEMA_MIGRATION = "20260919120000_phase7g_dispute_support_schema";
+
+function swapDatabaseName(databaseUrl: string, name: string): string {
+  const parsed = new URL(databaseUrl);
+  parsed.pathname = `/${name}`;
+  parsed.search = "";
+  return parsed.toString();
+}
+
+/** 无 shell 的 Prisma CLI 调用（spawnSync 参数数组；Windows 直调 CLI 入口）。 */
+function runPrismaCli(args: string[], databaseUrl: string, input?: string): string {
+  const result = spawnSync(
+    process.execPath,
+    [join("node_modules", "prisma", "build", "index.js"), ...args],
+    {
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      encoding: "utf8",
+      input,
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(`prisma cli failed (${result.status}): ${result.stderr}`);
+  }
+  return result.stdout;
+}
+
+function runPrismaDbExecute(sql: string, databaseUrl: string): void {
+  runPrismaCli(["db", "execute", "--schema", "prisma/schema.prisma", "--stdin"], databaseUrl, sql);
+}
+
+/** 期望失败的 db execute（dirty fixture 断言用）：返回 { ok, stderr }。 */
+function runPrismaDbExecuteExpectingFailure(sql: string, databaseUrl: string): { ok: boolean; stderr: string } {
+  const result = spawnSync(
+    process.execPath,
+    [join("node_modules", "prisma", "build", "index.js"), "db", "execute", "--schema", "prisma/schema.prisma", "--stdin"],
+    {
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      encoding: "utf8",
+      input: sql,
+    },
+  );
+  return { ok: result.status === 0, stderr: result.stderr };
+}
+
+function createTempDatabase(dbName: string): string {
+  const maintenanceUrl = swapDatabaseName(integrationDatabaseUrl!, "postgres");
+  runPrismaDbExecute(`DROP DATABASE IF EXISTS "${dbName}";`, maintenanceUrl);
+  runPrismaDbExecute(`CREATE DATABASE "${dbName}";`, maintenanceUrl);
+  return swapDatabaseName(integrationDatabaseUrl!, dbName);
+}
+
+function dropTempDatabase(dbName: string): void {
+  const maintenanceUrl = swapDatabaseName(integrationDatabaseUrl!, "postgres");
+  try {
+    runPrismaDbExecute(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE);`, maintenanceUrl);
+  } catch {
+    // CI/本地偶发连接残留：FORCE 已尽力，不影响主流程断言
+  }
+}
+
+/** 重放全部 pre-7G-schema 迁移（时间戳 < 7G schema 迁移），返回连接 URL。 */
+function replayPre7GSchema(tempDb: string): string {
+  const tempUrl = createTempDatabase(tempDb);
+  const migrationsDir = join(process.cwd(), "prisma", "migrations");
+  const preMigrations = readdirSync(migrationsDir)
+    .filter((name) => /^\d{14}_/.test(name) && name < P7G_SCHEMA_MIGRATION)
+    .sort();
+  expect(preMigrations.length).toBeGreaterThan(0);
+  for (const name of preMigrations) {
+    const sql = readFileSync(join(migrationsDir, name, "migration.sql"), "utf8");
+    runPrismaDbExecute(sql, tempUrl);
+  }
+  return tempUrl;
+}
+
+function p7gSchemaMigrationSql(): string {
+  return readFileSync(
+    join(process.cwd(), "prisma", "migrations", P7G_SCHEMA_MIGRATION, "migration.sql"),
+    "utf8",
+  );
+}
 
 afterAll(async () => {
   if (!rawClient) {
@@ -1272,4 +1357,232 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7G dispute operations（真实 P
       expect(errorCodeOf(error)).not.toBeNull();
     }
   });
+});
+
+// ── MIG-UP：pre-7G 真实升级矩阵（临时库重放 pre-7G schema → 应用 7G schema SQL）──
+//
+// FR01：pre-7G 权威写序 = dispute.create(t0) → order IN_DISPUTE → statusLog(t1>t0)；
+//       回填必须取创建之后最近一条对应 transition（不再用旧 <= 方向）。
+// FR02：dirty duplicate-active fixture → 迁移 ABORT，诊断含
+//       PHASE7G_DUPLICATE_ACTIVE_DISPUTES，事务整体回滚零 partial schema。
+// FR03：历史 OPEN/IN_REVIEW → 恰 2 条 source-linked ACTIVE hold；terminal → 0；
+//       无关 LEGAL hold 零触碰；hold INSERT rerun 安全。
+
+describe.skipIf(!integrationDatabaseUrl)("Phase 7G migration real-upgrade matrix（临时库）", () => {
+  const t0 = new Date("2026-09-01T08:00:00.000Z");
+  const t1After = new Date("2026-09-01T08:01:00.000Z"); // FR01：写序之后
+  const t1Before = new Date("2026-09-01T07:59:00.000Z"); // 旧错误方向（不可用）
+
+  async function seedPre7GDisputeWorld(
+    tempClient: PrismaClient,
+    options: { disputes: Array<{ key: string; status: string; logAt: Date | null }> },
+  ) {
+    await tempClient.$executeRaw`
+      INSERT INTO "Campus" ("id", "name", "slug", "schoolName", "createdAt", "updatedAt")
+      VALUES ('mig-campus', 'MIG 校区', ${"mig-campus-" + RUN_TAG}, '集成测试大学', ${t0}, ${t0})`;
+    await tempClient.$executeRaw`
+      INSERT INTO "User" ("id", "email", "name", "passwordHash", "schoolName", "campusId", "createdAt", "updatedAt")
+      VALUES
+        ('mig-owner',  ${"mig-owner@" + RUN_TAG + ".it"},  'MIG Owner',  'x', '集成测试大学', 'mig-campus', ${t0}, ${t0}),
+        ('mig-renter', ${"mig-renter@" + RUN_TAG + ".it"}, 'MIG Renter', 'x', '集成测试大学', 'mig-campus', ${t0}, ${t0})`;
+    await tempClient.$executeRaw`
+      INSERT INTO "RentalCategory" ("id", "name", "slug", "createdAt", "updatedAt")
+      VALUES ('mig-cat', 'MIG 分类', ${"mig-cat-" + RUN_TAG}, ${t0}, ${t0})`;
+    await tempClient.$executeRaw`
+      INSERT INTO "RentalListing" (
+        "id", "ownerId", "categoryId", "campusId", "title", "description",
+        "condition", "price", "pricingUnit", "depositAmount", "minimumDuration",
+        "maximumDuration", "pickupLocation", "returnLocation", "createdAt", "updatedAt"
+      ) VALUES (
+        'mig-listing', 'mig-owner', 'mig-cat', 'mig-campus', 'MIG 物品', '升级夹具',
+        'NORMAL_USED', 100, 'PER_DAY', 50, 1, 30, '门口', '门口', ${t0}, ${t0}
+      )`;
+
+    for (const [index, d] of options.disputes.entries()) {
+      const orderId = `mig-order-${d.key}`;
+      const disputeId = `mig-dispute-${d.key}`;
+      await tempClient.$executeRaw`
+        INSERT INTO "RentalOrder" (
+          "id", "orderNumber", "rentalListingId", "ownerId", "renterId",
+          "startTime", "endTime", "quantity", "unitPriceSnapshot",
+          "pricingUnitSnapshot", "rentalDuration", "rentalAmount", "depositAmount",
+          "finalAmount", "paymentStatus", "depositStatus", "status",
+          "pickupLocationSnapshot", "returnLocationSnapshot", "createdAt", "updatedAt"
+        ) VALUES (
+          ${orderId}, ${"MIG-" + RUN_TAG + "-" + index}, 'mig-listing', 'mig-owner', 'mig-renter',
+          ${t0}, ${new Date(t0.getTime() + 86_400_000)}, 1, 100,
+          'PER_DAY', 1, 100, 50, 150,
+          'OFFLINE_PENDING', 'PENDING_PAYMENT', 'IN_DISPUTE',
+          '门口', '门口', ${t0}, ${t0}
+        )`;
+      await tempClient.$executeRaw`
+        INSERT INTO "RentalDispute" (
+          "id", "orderId", "initiatorId", "reason", "evidencePhotos",
+          "status", "createdAt", "updatedAt"
+        ) VALUES (
+          ${disputeId}, ${orderId}, 'mig-renter', ${"MIG 纠纷 " + d.key}, '{}',
+          ${d.status}::"RentalDisputeStatus", ${t0}, ${t0}
+        )`;
+      if (d.logAt !== null) {
+        await tempClient.$executeRaw`
+          INSERT INTO "RentalOrderStatusLog" (
+            "id", "orderId", "fromStatus", "toStatus", "operatorId", "createdAt"
+          ) VALUES (
+            ${`mig-log-${d.key}`}, ${orderId}, 'IN_RENTAL', 'IN_DISPUTE', 'mig-renter', ${d.logAt}
+          )`;
+      }
+    }
+  }
+
+  it("MIG-UP-01/FR01：pre-7G 权威写序（log at t1 > t0）→ 回填 IN_RENTAL；不可用 transition → NULL（禁伪造）", async () => {
+    const tempDb = `campus_p7g_mig_${randomUUID().slice(0, 8)}`;
+    const tempUrl = replayPre7GSchema(tempDb);
+    const tempClient = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });
+    try {
+      await seedPre7GDisputeWorld(tempClient, {
+        disputes: [
+          { key: "recoverable", status: "OPEN", logAt: t1After },
+          { key: "unrecoverable", status: "OPEN", logAt: t1Before },
+          { key: "nolog", status: "IN_REVIEW", logAt: null },
+        ],
+      });
+
+      runPrismaDbExecute(p7gSchemaMigrationSql(), tempUrl);
+
+      const rows = await tempClient.$queryRaw<{ id: string; opened_from: string | null }[]>`
+        SELECT "id", "openedFromOrderStatus"::text AS "opened_from" FROM "RentalDispute" ORDER BY "id"`;
+      const byId = new Map(rows.map((r) => [r.id, r.opened_from]));
+      // 可靠恢复：pre-7G 写序 dispute(t0) → IN_DISPUTE → log(t1 > t0) → fromStatus
+      expect(byId.get("mig-dispute-recoverable")).toBe("IN_RENTAL");
+      // log 只存在于创建之前（旧 <= 方向才会误选它）→ NULL，绝不伪造
+      expect(byId.get("mig-dispute-unrecoverable")).toBeNull();
+      // 无任何 transition → NULL
+      expect(byId.get("mig-dispute-nolog")).toBeNull();
+    } finally {
+      await tempClient.$disconnect();
+      dropTempDatabase(tempDb);
+    }
+  }, 120_000);
+
+  it("MIG-UP-02/FR02：dirty duplicate-active fixture → 迁移 ABORT（PHASE7G_DUPLICATE_ACTIVE_DISPUTES）+ 事务回滚零 partial schema", async () => {
+    const tempDb = `campus_p7g_dirty_${randomUUID().slice(0, 8)}`;
+    const tempUrl = replayPre7GSchema(tempDb);
+    const tempClient = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });
+    try {
+      await seedPre7GDisputeWorld(tempClient, {
+        disputes: [{ key: "dup-a", status: "OPEN", logAt: t1After }],
+      });
+      // 同订单第二行 active dispute（pre-7G 无唯一约束下并发可产生的 dirty 状态）
+      await tempClient.$executeRaw`
+        INSERT INTO "RentalDispute" (
+          "id", "orderId", "initiatorId", "reason", "evidencePhotos",
+          "status", "createdAt", "updatedAt"
+        ) VALUES (
+          'mig-dispute-dup-b', 'mig-order-dup-a', 'mig-owner', '并发重复 episode', '{}',
+          'OPEN'::"RentalDisputeStatus", ${new Date(t1After.getTime() + 1000)}, ${t1After}
+        )`;
+
+      const outcome = runPrismaDbExecuteExpectingFailure(p7gSchemaMigrationSql(), tempUrl);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.stderr).toContain("PHASE7G_DUPLICATE_ACTIVE_DISPUTES");
+      expect(outcome.stderr).toContain("manual reconciliation required");
+
+      // 零 partial schema：显式事务整体回滚（7G 新增对象均未生效；
+      // DataHold 是 pre-7G 既有表，仍应存在且未加 source 列）
+      const tables = await tempClient.$queryRaw<{ table_name: string }[]>`
+        SELECT "table_name"::text FROM "information_schema"."tables"
+        WHERE "table_schema" = 'public' AND "table_name" = 'SupportTicket'`;
+      expect(tables).toHaveLength(0);
+      const dataHoldCols = await tempClient.$queryRaw<{ column_name: string }[]>`
+        SELECT "column_name"::text FROM "information_schema"."columns"
+        WHERE "table_name" = 'DataHold' AND "column_name" = 'sourceType'`;
+      expect(dataHoldCols).toHaveLength(0);
+      const columns = await tempClient.$queryRaw<{ column_name: string }[]>`
+        SELECT "column_name"::text FROM "information_schema"."columns"
+        WHERE "table_name" = 'RentalDispute' AND "column_name" = 'openedFromOrderStatus'`;
+      expect(columns).toHaveLength(0);
+    } finally {
+      await tempClient.$disconnect();
+      dropTempDatabase(tempDb);
+    }
+  }, 120_000);
+
+  it("MIG-UP-03/FR03 H-MIG-01..06：历史 OPEN/IN_REVIEW → 恰双 source-linked ACTIVE holds；terminal → 0；无关 LEGAL hold 零触碰；INSERT rerun 安全", async () => {
+    const tempDb = `campus_p7g_holds_${randomUUID().slice(0, 8)}`;
+    const tempUrl = replayPre7GSchema(tempDb);
+    const tempClient = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });
+    try {
+      await seedPre7GDisputeWorld(tempClient, {
+        disputes: [
+          { key: "open", status: "OPEN", logAt: t1After }, // H-MIG-01
+          { key: "inreview", status: "IN_REVIEW", logAt: t1After }, // H-MIG-02
+          { key: "resolved", status: "RESOLVED", logAt: t1After }, // H-MIG-03
+          { key: "closed", status: "CLOSED", logAt: t1After }, // H-MIG-04
+        ],
+      });
+      // H-MIG-06 对照：无关手动 LEGAL hold（source 为 NULL）
+      await tempClient.$executeRaw`
+        INSERT INTO "DataHold" ("id", "type", "status", "subjectType", "subjectId", "reasonCode", "createdAt")
+        VALUES ('mig-legal-hold', 'LEGAL', 'ACTIVE', 'USER', 'mig-owner', 'IT_LEGAL', ${t0})`;
+
+      runPrismaDbExecute(p7gSchemaMigrationSql(), tempUrl);
+
+      // OPEN + IN_REVIEW 各恰 2 条；terminal 恰 0
+      const holdRows = await tempClient.$queryRaw<
+        { source_id: string; subject_id: string; reason: string; source_type: string }[]
+      >`
+        SELECT "sourceId"::text AS "source_id", "subjectId"::text AS "subject_id",
+               "reasonCode"::text AS reason, "sourceType"::text AS "source_type"
+        FROM "DataHold"
+        WHERE "type" = 'DISPUTE' AND "status" = 'ACTIVE'`;
+
+      const forOpen = holdRows.filter((h) => h.source_id === "mig-dispute-open");
+      const forInReview = holdRows.filter((h) => h.source_id === "mig-dispute-inreview");
+      expect(forOpen).toHaveLength(2); // H-MIG-01
+      expect(forInReview).toHaveLength(2); // H-MIG-02
+      expect(holdRows.filter((h) => h.source_id === "mig-dispute-resolved")).toHaveLength(0); // H-MIG-03
+      expect(holdRows.filter((h) => h.source_id === "mig-dispute-closed")).toHaveLength(0); // H-MIG-04
+
+      // H-MIG-05：source provenance + 双当事人（owner+renter）
+      for (const pair of [
+        { sourceId: "mig-dispute-open" },
+        { sourceId: "mig-dispute-inreview" },
+      ]) {
+        const rows = holdRows.filter((h) => h.source_id === pair.sourceId);
+        expect(new Set(rows.map((h) => h.subject_id))).toEqual(
+          new Set(["mig-owner", "mig-renter"]),
+        );
+        for (const h of rows) {
+          expect(h.reason).toBe("ACTIVE_RENTAL_DISPUTE");
+          expect(h.source_type).toBe("RENTAL_DISPUTE");
+        }
+      }
+
+      // H-MIG-06：无关 LEGAL hold 零触碰
+      const legal = await tempClient.$queryRaw<{ status: string; source_type: string | null }[]>`
+        SELECT "status"::text AS status, "sourceType"::text AS "source_type"
+        FROM "DataHold" WHERE "id" = 'mig-legal-hold'`;
+      expect(legal[0]!.status).toBe("ACTIVE");
+      expect(legal[0]!["source_type"]).toBeNull();
+
+      // rerun 安全：确定性 id + ON CONFLICT ("id") DO NOTHING → 重放两条 INSERT 零新增
+      const migrationSql = p7gSchemaMigrationSql();
+      const firstInsert = migrationSql.indexOf('INSERT INTO "DataHold"');
+      const lastConflict = migrationSql.lastIndexOf('ON CONFLICT ("id") DO NOTHING;');
+      expect(firstInsert).toBeGreaterThan(0);
+      expect(lastConflict).toBeGreaterThan(firstInsert);
+      const holdInserts = migrationSql.slice(
+        firstInsert,
+        lastConflict + 'ON CONFLICT ("id") DO NOTHING;'.length,
+      );
+      runPrismaDbExecute(holdInserts, tempUrl);
+      const holdCountAfterReplay = await tempClient.$queryRaw<{ count: bigint }[]>`
+        SELECT COUNT(*)::bigint AS count FROM "DataHold"
+        WHERE "sourceType" = 'RENTAL_DISPUTE' AND "status" = 'ACTIVE'`;
+      expect(holdCountAfterReplay[0]!.count).toBe(BigInt(4));
+    } finally {
+      await tempClient.$disconnect();
+      dropTempDatabase(tempDb);
+    }
+  }, 180_000);
 });

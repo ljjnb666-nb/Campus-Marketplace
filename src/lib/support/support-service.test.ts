@@ -334,10 +334,22 @@ describe("resolve / close（ONE sorted set：actor + requester）", () => {
       }),
       txStub,
     );
+    // FR04：通知是固定安全文本的事件信号——绝不复制 resolutionMessage /
+    // internalNote 自由文本（唯一权威用户可见文本 = SupportTicket.resolutionMessage）
     expect(createNotification).toHaveBeenCalledWith(
       txStub,
-      expect.objectContaining({ userId: "requester-1" }),
+      {
+        userId: "requester-1",
+        type: "SYSTEM",
+        title: "支持工单已处理",
+        content: "你的支持工单已处理完成，请进入工单详情查看处理结果。",
+      },
     );
+    const notificationPayload = JSON.stringify(
+      createNotification.mock.calls.at(-1)![1],
+    );
+    expect(notificationPayload).not.toContain("已为你重置密码入口");
+    expect(notificationPayload).not.toContain("用户可能遭遇钓鱼");
   });
 
   it("close：OPEN → CLOSED（resolutionCode 不写）", async () => {
