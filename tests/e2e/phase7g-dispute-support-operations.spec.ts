@@ -472,11 +472,12 @@ test("7G-E2E04 CAMPUS 工单全链：创建 → agent 领用/解决 → requeste
     `E2E7G工单用户 ${tag}`,
   );
   await userPage.goto("/support");
-  await userPage.locator('select[name="category"]').selectOption("MARKETPLACE");
-  await userPage.locator('select[name="campusId"]').selectOption({ label: campus.name });
-  await userPage.locator('input[name="subject"]').fill(`E2E7G 交易问题求助 ${tag}`);
+  await userPage.locator('select[name="category"]').first().selectOption("MARKETPLACE");
+  await userPage.locator('select[name="campusId"]').first().selectOption({ label: campus.name });
+  await userPage.locator('input[name="subject"]').first().fill(`E2E7G 交易问题求助 ${tag}`);
   await userPage
     .locator('textarea[name="description"]')
+    .first()
     .fill(`E2E7G 需要校区支持人员协助处理一笔交易争议，描述内容 ${tag}。`);
   await userPage.getByRole("button", { name: "提交工单" }).click();
   await expect
@@ -637,9 +638,12 @@ test("7G-E2E06 active 支持工单阻断注销（PrivacyRequest → BLOCKED + AC
     `E2E7G注销用户 ${tag}`,
   );
   await userPage.goto("/support");
-  await userPage.locator('select[name="category"]').selectOption("ACCOUNT");
-  await userPage.locator('input[name="subject"]').fill(`E2E7G 注销前工单 ${tag}`);
-  await userPage.locator('textarea[name="description"]').fill(`E2E7G 阻断注销的 active 工单描述 ${tag}。`);
+  await userPage.locator('select[name="category"]').first().selectOption("ACCOUNT");
+  await userPage.locator('input[name="subject"]').first().fill(`E2E7G 注销前工单 ${tag}`);
+  await userPage
+    .locator('textarea[name="description"]')
+    .first()
+    .fill(`E2E7G 阻断注销的 active 工单描述 ${tag}。`);
   await userPage.getByRole("button", { name: "提交工单" }).click();
   await expect
     .poll(

@@ -95,7 +95,7 @@ UPDATE "RentalDispute"
 SET "dueAt" = "createdAt" + INTERVAL '48 hours'
 WHERE "dueAt" IS NULL;
 
--- 2c. openedFromOrderStatus 历史回填：每个 dispute 取其创建时刻之前、
+-- 2c. openedFromOrderStatus 历史回填：每个 dispute 取其创建时刻之后（含同刻）的
 --     最近一条 toStatus='IN_DISPUTE' 且 fromStatus 非空的 status log；
 --     无法可靠还原 → 保持 NULL（禁止伪造，绝不猜 COMPLETED）。
 UPDATE "RentalDispute" AS d
