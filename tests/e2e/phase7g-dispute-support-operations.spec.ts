@@ -195,7 +195,9 @@ test("7G-E2E01 租客发起纠纷 → 订单 IN_DISPUTE → campus reviewer 见�
   await expect(renterPage.getByRole("heading", { name: "发起纠纷" })).toBeVisible();
   await renterPage.locator('textarea[name="reason"]').fill(`E2E7G 归还物品与描述不符 ${tag}`);
   await renterPage.getByRole("button", { name: "提交纠纷申请" }).click();
-  await expect(renterPage.getByText("已发起纠纷")).toBeVisible({ timeout: 15_000 });
+  // RentalActionForm 成功后 redirect 到订单详情页（"action 后 revalidate 换掉
+  // 反馈区"同款：先等重定向，DB 不变量随后断言）
+  await expect(renterPage.getByText("申诉/纠纷处理中")).toBeVisible({ timeout: 20_000 });
 
   // DB 不变量：order IN_DISPUTE + dispute 快照 + SLA dueAt
   await expect
@@ -229,7 +231,10 @@ test("7G-E2E01 租客发起纠纷 → 订单 IN_DISPUTE → campus reviewer 见�
   );
   await reviewerPage.goto("/governance/disputes?limit=50");
   await expect(reviewerPage.getByRole("heading", { name: "纠纷处理" })).toBeVisible();
-  const detailLink = reviewerPage.locator(`a[href="/governance/disputes/${dispute.id}"]`);
+  // Phase 2 已知双渲染坑：软导航瞬间同元素短暂成对出现 → 一律 .first()
+  const detailLink = reviewerPage
+    .locator(`a[href="/governance/disputes/${dispute.id}"]`)
+    .first();
   await expect(detailLink).toBeVisible();
 
   await detailLink.click();
@@ -291,17 +296,22 @@ test("7G-E2E02 reviewer claim → resolve RESTORE_PREVIOUS → 订单恢复 + ho
     `E2E7G处理员 ${tag}`,
   );
   await page.goto(`/governance/disputes/${dispute.id}`);
-  await expect(page.getByText(`E2E7G 需要恢复的纠纷 ${tag}`)).toBeVisible();
+  await expect(page.getByText(`E2E7G 需要恢复的纠纷 ${tag}`).first()).toBeVisible();
 
-  // claim（领用处理）
+  // claim（领用处理）。revalidate 会换掉反馈区（7A 已知坑）——先 poll DB
   await page.getByRole("form", { name: "领用纠纷" }).getByRole("button", { name: "领用处理" }).click();
-  await expect(page.getByRole("status")).toContainText("已领用该纠纷", { timeout: 15_000 });
+  await expect
+    .poll(async () => {
+      const row = await db.rentalDispute.findUniqueOrThrow({ where: { id: dispute.id } });
+      return `${row.status}:${row.assignedToId ?? "none"}`;
+    }, { timeout: 15_000 })
+    .toBe(`IN_REVIEW:${reviewer.id}`);
 
   // resolve：默认 resolutionCode=MUTUAL_AGREEMENT；action 选 RESTORE_PREVIOUS
   const resolveForm = page.getByRole("form", { name: "解决纠纷" });
   await resolveForm.locator('select[name="resolutionAction"]').selectOption("RESTORE_PREVIOUS");
   await resolveForm.getByRole("button", { name: "标记已解决" }).click();
-  await expect(page.getByRole("status").last()).toContainText("操作已提交", { timeout: 15_000 });
+  // 终局断言以 DB 为权威（revalidate 换掉反馈区）
 
   // DB 不变量：dispute terminal + 订单恢复 + holds 双释放 + 审计
   await expect
@@ -466,7 +476,15 @@ test("7G-E2E04 CAMPUS 工单全链：创建 → agent 领用/解决 → requeste
     .locator('textarea[name="description"]')
     .fill(`E2E7G 需要校区支持人员协助处理一笔交易争议，描述内容 ${tag}。`);
   await userPage.getByRole("button", { name: "提交工单" }).click();
-  await expect(userPage.getByRole("status")).toContainText("工单已提交", { timeout: 15_000 });
+  await expect
+    .poll(
+      async () =>
+        db.supportTicket.count({
+          where: { requesterId: requester.id, subject: `E2E7G 交易问题求助 ${tag}` },
+        }),
+      { timeout: 15_000 },
+    )
+    .toBe(1);
 
   const ticket = await db.supportTicket.findFirstOrThrow({
     where: { requesterId: requester.id, subject: `E2E7G 交易问题求助 ${tag}` },
@@ -494,22 +512,26 @@ test("7G-E2E04 CAMPUS 工单全链：创建 → agent 领用/解决 → requeste
   );
   await agentPage.goto("/governance/support?limit=50");
   await expect(agentPage.getByRole("heading", { name: "支持工单" })).toBeVisible();
-  await agentPage.locator(`a[href="/governance/support/${ticket.id}"]`).click();
-  await expect(agentPage.getByText(`E2E7G 交易问题求助 ${tag}`)).toBeVisible();
+  await agentPage.locator(`a[href="/governance/support/${ticket.id}"]`).first().click();
+  await expect(agentPage.getByText(`E2E7G 交易问题求助 ${tag}`).first()).toBeVisible();
 
   await agentPage
     .getByRole("form", { name: "领用工单" })
     .getByRole("button", { name: "领用处理" })
     .click();
-  await expect(agentPage.getByRole("status")).toContainText("已领用该工单", { timeout: 15_000 });
+  // revalidate 换掉反馈区 → poll DB（领用状态权威）
+  await expect
+    .poll(async () => {
+      const row = await db.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
+      return `${row.status}:${row.assignedToId ?? "none"}`;
+    }, { timeout: 15_000 })
+    .toBe(`IN_PROGRESS:${agent.id}`);
 
   const resolveForm = agentPage.getByRole("form", { name: "解决工单" });
   await resolveForm.locator('select[name="resolutionCode"]').selectOption("USER_GUIDED");
   await resolveForm.locator('textarea[name="resolutionMessage"]').fill("请按指引完成退货流程");
   await resolveForm.locator('textarea[name="internalNote"]').fill(`E2E7G 内部备注机密内容 ${tag}`);
   await resolveForm.getByRole("button", { name: "标记已解决" }).click();
-  await expect(agentPage.getByRole("status").last()).toContainText("操作已提交", { timeout: 15_000 });
-
   await expect
     .poll(async () => (await db.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } })).status, {
       timeout: 15_000,
@@ -568,7 +590,7 @@ test("7G-E2E05 UNSCOPED 工单：campus agent 不可见（404 反 oracle），GL
   );
   await agentPage.goto("/governance/support?limit=50");
   await expect(agentPage.getByRole("heading", { name: "支持工单" })).toBeVisible();
-  await expect(agentPage.locator(`a[href="/governance/support/${ticket.id}"]`)).toHaveCount(0);
+  await expect(agentPage.locator(`a[href="/governance/support/${ticket.id}"]`).first()).toHaveCount(0);
 
   // 详情直击 → 404 反 oracle（SSR 流式 404 UI 以可见标题断言）
   await agentPage.goto(`/governance/support/${ticket.id}`);
@@ -580,10 +602,14 @@ test("7G-E2E05 UNSCOPED 工单：campus agent 不可见（404 反 oracle），GL
   const adminPage = await adminCtx.newPage();
   await adminPage.goto("/governance/support?limit=50");
   await expect(adminPage.getByRole("heading", { name: "支持工单" })).toBeVisible();
-  await expect(adminPage.locator(`a[href="/governance/support/${ticket.id}"]`)).toBeVisible();
+  await expect(
+    adminPage.locator(`a[href="/governance/support/${ticket.id}"]`).first(),
+  ).toBeVisible();
 
   await adminPage.goto(`/governance/support/${ticket.id}`);
-  await expect(adminPage.getByText("E2E7G UNSCOPED 工单描述，仅平台级专员可见。")).toBeVisible();
+  await expect(
+    adminPage.getByText("E2E7G UNSCOPED 工单描述，仅平台级专员可见。").first(),
+  ).toBeVisible();
   await adminCtx.close();
 });
 
@@ -612,7 +638,15 @@ test("7G-E2E06 active 支持工单阻断注销（PrivacyRequest → BLOCKED + AC
   await userPage.locator('input[name="subject"]').fill(`E2E7G 注销前工单 ${tag}`);
   await userPage.locator('textarea[name="description"]').fill(`E2E7G 阻断注销的 active 工单描述 ${tag}。`);
   await userPage.getByRole("button", { name: "提交工单" }).click();
-  await expect(userPage.getByRole("status")).toContainText("工单已提交", { timeout: 15_000 });
+  await expect
+    .poll(
+      async () =>
+        db.supportTicket.count({
+          where: { requesterId: requester.id, subject: `E2E7G 注销前工单 ${tag}` },
+        }),
+      { timeout: 15_000 },
+    )
+    .toBe(1);
 
   // 用户申请注销（typed confirmation：输入"注销账号"）→ 被工单阻断
   await userPage.goto("/my/privacy");
@@ -656,9 +690,8 @@ test("7G-E2E07 appeal overdue 渲染（审核已超时徽标；只读零自动�
     campusId: campus.id,
   });
 
-  // DB 直接 seed punitive EA（与 6C 集成夹具同形）
-  const seqRow = await db.$queryRaw<{ seq: bigint }[]>`
-    SELECT COALESCE(MAX("enforcementSeq"), 0) + 1 AS seq FROM "EnforcementAction"`;
+  // DB 直接 seed punitive EA（与 6C 集成夹具同形）；enforcementSeq 走
+  // DB sequence 自增（显式 MAX+1 会与其他并行 spec 的 app 写竞态撞 unique）
   const enforcementAction = await db.enforcementAction.create({
     data: {
       type: "MEMBERSHIP_SUSPEND",
@@ -669,7 +702,6 @@ test("7G-E2E07 appeal overdue 渲染（审核已超时徽标；只读零自动�
       reasonCode: "POLICY_VIOLATION",
       previousState: "CAMPUS_MEMBERSHIP:ACTIVE",
       resultState: "CAMPUS_MEMBERSHIP:SUSPENDED",
-      enforcementSeq: seqRow[0]!.seq,
     },
   });
   const appeal = await db.appeal.create({
