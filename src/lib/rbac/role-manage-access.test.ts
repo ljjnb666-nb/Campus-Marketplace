@@ -27,17 +27,21 @@ function context(overrides: Partial<AuthorizationContext>): AuthorizationContext
 
 // U01：allowlist 显式冻结，禁止派生扩列
 describe("MANAGEABLE_GOVERNANCE_ROLE_KEYS（U01）", () => {
-  it("Phase 7F 扩列后恰为四个 campus 角色，且 isManageableGovernanceRoleKey 收窄判定", () => {
+  it("Phase 7G 扩列后恰为六个 campus 角色，且 isManageableGovernanceRoleKey 收窄判定", () => {
     expect([...MANAGEABLE_GOVERNANCE_ROLE_KEYS]).toEqual([
       CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
       "CAMPUS_CONTENT_MODERATOR",
       "CAMPUS_REPORT_REVIEWER",
       "CAMPUS_VERIFICATION_REVIEWER",
+      "CAMPUS_DISPUTE_REVIEWER",
+      "CAMPUS_SUPPORT_AGENT",
     ]);
     expect(isManageableGovernanceRoleKey("CAMPUS_APPEAL_REVIEWER")).toBe(true);
     expect(isManageableGovernanceRoleKey("CAMPUS_CONTENT_MODERATOR")).toBe(true);
     expect(isManageableGovernanceRoleKey("CAMPUS_REPORT_REVIEWER")).toBe(true);
     expect(isManageableGovernanceRoleKey("CAMPUS_VERIFICATION_REVIEWER")).toBe(true);
+    expect(isManageableGovernanceRoleKey("CAMPUS_DISPUTE_REVIEWER")).toBe(true);
+    expect(isManageableGovernanceRoleKey("CAMPUS_SUPPORT_AGENT")).toBe(true);
     expect(isManageableGovernanceRoleKey("PLATFORM_ADMIN")).toBe(false);
     expect(isManageableGovernanceRoleKey("FUTURE_CAMPUS_ROLE")).toBe(false);
     expect(isManageableGovernanceRoleKey("")).toBe(false);

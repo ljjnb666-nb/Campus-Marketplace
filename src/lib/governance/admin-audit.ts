@@ -43,6 +43,13 @@ const ALLOWED_METADATA_KEYS = new Set([
   // 等自由文本因白名单结构而结构性不可进入）
   "listingType",
   "moderationId",
+  // Phase 7G：dispute / support 机器字段（全部为机器可读码/指针；dispute
+  // reason / support description / internalNote / evidence URL 等自由文本
+  // 因白名单结构而结构性不可进入）
+  "disputeId",
+  "resolutionCode",
+  "resolutionAction",
+  "ticketId",
 ]);
 
 function sanitizeMetadata(

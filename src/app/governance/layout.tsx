@@ -3,6 +3,10 @@ import { notFound } from "next/navigation";
 
 import { deriveAppealReviewAccess } from "@/lib/appeals/reviewer-access";
 import { deriveAuditAccess, hasAnyAuditAccess } from "@/lib/audit/audit-access";
+import {
+  deriveDisputeReviewAccess,
+  hasAnyDisputeReviewAccess,
+} from "@/lib/disputes/dispute-access";
 import { deriveVerificationReviewAccess, hasAnyVerificationReviewAccess } from "@/lib/campus/verification-review-access";
 import {
   deriveEnforcementReadAccess,
@@ -20,6 +24,10 @@ import {
   deriveRoleManageAccess,
   hasAnyRoleManageAccess,
 } from "@/lib/rbac/role-manage-access";
+import {
+  deriveSupportManageAccess,
+  hasAnySupportManageAccess,
+} from "@/lib/support/support-access";
 import {
   deriveUserOperationsAccess,
   hasAnyUserOperationsAccess,
@@ -41,16 +49,21 @@ import { requireUser } from "@/lib/server-auth";
  * Phase 7F：root gate 扩为八元 union（OR verificationReview ∨ userOperations
  * ——前者是既有 verification.review capability 的 CAMPUS scope 供给，后者是
  * GLOBAL user.suspend ONLY 的用户运营面）。
+ * Phase 7G：root gate 扩为十元 union（OR disputeReview ∨ supportManage——
+ * 两者均为 7G 新增 permission 的治理面供给，不进 legacy 11-key，requireAdmin
+ * 资格与 privileged-target 分类零变化）。
  *
- * 八棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
+ * 十棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
  * /governance/appeals 走 requireAppealReviewer，/governance/roles 自守
  * roleManage access，/governance/listings 自守 listing moderation access，
  * /governance/audit 自守 audit read access，/governance/enforcement 自守
  * enforcement read access，/governance/reports 自守 report review access，
  * /governance/verifications 自守 verification review access，
- * /governance/users 自守 GLOBAL user.suspend。requireAdmin() 零修改，
- * legacy /admin 隔离不变（hasFullAdminSurfaceAccess 对 campus grant /
- * 非全量 GLOBAL grant 恒 false）。私有治理数据：强制动态渲染，零缓存。
+ * /governance/users 自守 GLOBAL user.suspend，/governance/disputes 自守
+ * dispute review access，/governance/support 自守 support manage access。
+ * requireAdmin() 零修改，legacy /admin 隔离不变（hasFullAdminSurfaceAccess
+ * 对 campus grant / 非全量 GLOBAL grant 恒 false）。私有治理数据：强制动态
+ * 渲染，零缓存。
  */
 export const dynamic = "force-dynamic";
 
@@ -69,6 +82,8 @@ export default async function GovernanceLayout({
   const reportAccess = deriveReportReviewAccess(context);
   const verificationAccess = deriveVerificationReviewAccess(context);
   const userOperationsAccess = deriveUserOperationsAccess(context);
+  const disputeAccess = deriveDisputeReviewAccess(context);
+  const supportAccess = deriveSupportManageAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
@@ -80,7 +95,9 @@ export default async function GovernanceLayout({
     !hasAnyEnforcementReadAccess(enforcementAccess) &&
     !hasAnyReportReviewAccess(reportAccess) &&
     !hasAnyVerificationReviewAccess(verificationAccess) &&
-    !hasAnyUserOperationsAccess(userOperationsAccess)
+    !hasAnyUserOperationsAccess(userOperationsAccess) &&
+    !hasAnyDisputeReviewAccess(disputeAccess) &&
+    !hasAnySupportManageAccess(supportAccess)
   ) {
     notFound();
   }
@@ -118,6 +135,16 @@ export default async function GovernanceLayout({
       href: "/governance/users",
       label: "用户管理",
       visible: hasAnyUserOperationsAccess(userOperationsAccess),
+    },
+    {
+      href: "/governance/disputes",
+      label: "纠纷处理",
+      visible: hasAnyDisputeReviewAccess(disputeAccess),
+    },
+    {
+      href: "/governance/support",
+      label: "支持工单",
+      visible: hasAnySupportManageAccess(supportAccess),
     },
   ].filter((item) => item.visible);
 

@@ -145,8 +145,15 @@ async function insertRawAction(data: {
 }
 
 async function createAppealRow(enforcementActionId: string, statement = "集成测试申诉材料") {
+  // Phase 7G：Appeal.reviewDueAt NOT NULL——fixture 以当前时刻为 origin（与
+  // submitAppeal 运行时写路径同语义：提交时刻 + 48h）
   return rawClient!.appeal.create({
-    data: { enforcementActionId, status: "SUBMITTED", statement },
+    data: {
+      enforcementActionId,
+      status: "SUBMITTED",
+      statement,
+      reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+    },
   });
 }
 
@@ -684,7 +691,10 @@ describe.skipIf(!integrationDatabaseUrl)(
       const nullAppeal = await createAppealRow(nullPairId);
 
       const { access: accessAB } = await deriveAccess(campusReviewerAB.id);
-      expect(accessAB).toEqual({ global: false, campusIds: [campusA.id, campusB.id] });
+      // campusIds 集合语义（消费方恒 includes 判定）；行返回顺序无 ORDER BY
+      // 不作承诺——Phase 7G 并行加载同库曾翻转物理行序，此处按序无关比较
+      expect(accessAB.global).toBe(false);
+      expect([...accessAB.campusIds].sort()).toEqual([campusA.id, campusB.id].sort());
 
       const { loadAuthorizedAppealQueue } = await import("@/lib/appeals/review-queue");
       const page = await loadAuthorizedAppealQueue({
@@ -726,12 +736,11 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
 
       const { access: accessA } = await deriveAccess(campusReviewerA.id);
-      const { loadAuthorizedAppealQueue, } = await import("@/lib/appeals/review-queue");
-      const { decodeAppealCursor } = await import("@/validators/appeal");
+      const { loadAuthorizedAppealQueue, decodeAppealReviewCursor } = await import("@/lib/appeals/review-queue");
       const page = await loadAuthorizedAppealQueue({
         viewerId: campusReviewerA.id,
         access: accessA,
-        cursor: decodeAppealCursor(cursorFromGlobalReviewer)!,
+        cursor: decodeAppealReviewCursor(cursorFromGlobalReviewer)!,
         limit: 50,
       });
       expect(itemIds(page.items)).not.toContain(appealB.id);
@@ -739,8 +748,7 @@ describe.skipIf(!integrationDatabaseUrl)(
 
     it("Q-09：队列有界（take=limit+1 / keyset 严格推进 / 跨页无重复）", async () => {
       const { access } = await deriveAccess(globalReviewer.id);
-      const { loadAuthorizedAppealQueue } = await import("@/lib/appeals/review-queue");
-      const { decodeAppealCursor } = await import("@/validators/appeal");
+      const { loadAuthorizedAppealQueue, decodeAppealReviewCursor } = await import("@/lib/appeals/review-queue");
 
       const page1 = await loadAuthorizedAppealQueue({
         viewerId: globalReviewer.id,
@@ -754,15 +762,17 @@ describe.skipIf(!integrationDatabaseUrl)(
         const page2 = await loadAuthorizedAppealQueue({
           viewerId: globalReviewer.id,
           access,
-          cursor: decodeAppealCursor(page1.nextCursor)!,
+          cursor: decodeAppealReviewCursor(page1.nextCursor)!,
           limit: 2,
         });
         expect(page2.items.length).toBeLessThanOrEqual(2);
 
-        // keyset 语义：page2 全部严格"不晚于"page1 末行（createdAt DESC, id DESC）
+        // keyset 语义：page2 全部严格"不早于"page1 末行
+        // （Phase 7G 排序冻结：reviewDueAt ASC, createdAt ASC, id ASC）
         const last1 = page1.items[page1.items.length - 1]!;
         for (const item of page2.items) {
-          expect(item.createdAt <= last1.createdAt).toBe(true);
+          const tuple = (i: typeof item) => `${i.reviewDueAt}|${i.createdAt}|${i.id}`;
+          expect(tuple(item) >= tuple(last1)).toBe(true);
         }
         // 跨页无重复
         const page1Ids = new Set(itemIds(page1.items));

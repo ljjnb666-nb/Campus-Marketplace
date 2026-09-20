@@ -48,6 +48,12 @@ const ACTIVE_RENTAL_ORDER_STATUSES = [
   "IN_DISPUTE",
 ] as const;
 
+/** 仍在处理中的支持工单状态（存在即阻断注销；terminal 不阻断） */
+const ACTIVE_SUPPORT_TICKET_STATUSES = ["OPEN", "IN_PROGRESS"] as const;
+
+/** 支持工单自由文本的注销匿名化标记（ERASED_USER_DISPLAY_NAME 同一惯例） */
+export const ERASED_SUPPORT_TICKET_TEXT_MARKER = "（该内容已随账号注销删除）";
+
 /** 匿名化后的展示名（RELATIONAL_HISTORY 约定） */
 export const ERASED_USER_DISPLAY_NAME = "已注销用户";
 
@@ -128,6 +134,26 @@ export async function eraseAccount(
         reasonCode: "ACTIVE_TRANSACTION_BLOCK",
       });
       throw governanceError("ACTIVE_TRANSACTION_BLOCK");
+    }
+
+    // Phase 7G：active 支持工单（OPEN/IN_PROGRESS）阻断注销。已持有
+    // USER:<requester> subject 锁——与 createSupportTicket / claim / resolve
+    // 同锁串行（S-RACE 线性化合同）：工单创建/终局要么整体先于本检查提交
+    // （必见），要么被推迟到本事务提交之后（届时其锁内 account recheck
+    // / 状态机断言 fail closed）。terminal（RESOLVED/CLOSED）不阻断。
+    const activeSupportTicketCount = await client.supportTicket.count({
+      where: {
+        requesterId: userId,
+        status: { in: [...ACTIVE_SUPPORT_TICKET_STATUSES] },
+      },
+    });
+
+    if (activeSupportTicketCount > 0) {
+      logger.warn("account_erasure_blocked", "privacy", {
+        subjectId: userId,
+        reasonCode: "ACTIVE_SUPPORT_TICKET",
+      });
+      throw governanceError("ACTIVE_SUPPORT_TICKET");
     }
 
     // 测试 seam：锁与全部前置检查之后、首个破坏性写之前（并发 hold 在此
@@ -217,6 +243,21 @@ export async function eraseAccount(
 
     // 会话表吊销（JWT 策略下该表通常为空，此为纵深防御）
     await client.session.deleteMany({ where: { userId } });
+
+    // Phase 7G：支持工单自由文本清理（terminal 工单不阻断注销，但 user
+    // free text 必须清除）。保留行级 provenance：ticket id / category /
+    // status / scope / timestamps；subject/description → 匿名化标记，
+    // resolutionMessage/internalNote → null（字段分离冻结下两类文本均为
+    // user/operator free text，注销即清）。
+    await client.supportTicket.updateMany({
+      where: { requesterId: userId },
+      data: {
+        subject: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        resolutionMessage: null,
+        internalNote: null,
+      },
+    });
 
     const result: AccountErasureResult = {
       userId,

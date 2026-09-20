@@ -8,9 +8,9 @@ import {
   APPEAL_STATUS_LABELS,
   ENFORCEMENT_TYPE_LABELS,
 } from "@/constants/governance";
-import { loadAuthorizedAppealQueue } from "@/lib/appeals/review-queue";
+import { loadAuthorizedAppealQueue, decodeAppealReviewCursor, type AppealReviewCursor } from "@/lib/appeals/review-queue";
 import { requireAppealReviewer } from "@/lib/appeals/reviewer-access";
-import { APPEAL_DEFAULT_PAGE_SIZE, APPEAL_MAX_PAGE_SIZE, appealPageLimitSchema, decodeAppealCursor, type AppealCursor } from "@/validators/appeal";
+import { APPEAL_DEFAULT_PAGE_SIZE, APPEAL_MAX_PAGE_SIZE, appealPageLimitSchema } from "@/validators/appeal";
 
 export const dynamic = "force-dynamic";
 
@@ -51,10 +51,10 @@ export default async function GovernanceAppealsPage({
   }
 
   // Repair 1 §7：空串/畸形 cursor = present → 解码失败 → 安全失败态
-  let cursor: AppealCursor | undefined;
+  let cursor: AppealReviewCursor | undefined;
   let cursorInvalid = false;
   if (params.cursor !== undefined) {
-    const decoded = decodeAppealCursor(params.cursor);
+    const decoded = decodeAppealReviewCursor(params.cursor);
     if (!decoded) {
       cursorInvalid = true;
     } else {
@@ -111,6 +111,11 @@ export default async function GovernanceAppealsPage({
                     ? "全平台"
                     : `校区：${item.campusName ?? "未知校区"}`}
                 </span>
+                {item.overdue ? (
+                  <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-700">
+                    审核已超时
+                  </span>
+                ) : null}
                 {item.selfReview ? (
                   <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800">
                     你是该处罚的原执行者
@@ -121,6 +126,7 @@ export default async function GovernanceAppealsPage({
                 <div className="space-y-2 text-sm text-slate-600">
                   <p>申诉人：{item.appellantName}</p>
                   <p>提交时间：{formatDateTime(item.createdAt)}</p>
+                  <p>审核时限：{formatDateTime(item.reviewDueAt)}</p>
                 </div>
                 <div className="space-y-3">
                   <Link

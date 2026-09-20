@@ -92,6 +92,8 @@ test("申诉审核治理面：campus reviewer 队列 → 详情 → 开始审核
       enforcementActionId: enforcementAction.id,
       status: "SUBMITTED",
       statement,
+      // Phase 7G：reviewDueAt NOT NULL（提交时刻 + 48h，与运行时写路径同语义）
+      reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
     },
   });
 

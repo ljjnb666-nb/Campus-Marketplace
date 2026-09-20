@@ -108,6 +108,8 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
 
   await prisma.rentalReview.deleteMany();
   await prisma.rentalDispute.deleteMany();
+  // Phase 7G：SupportTicket 引用 User（RESTRICT）/Campus（RESTRICT）——先删工单
+  await prisma.supportTicket.deleteMany();
   await prisma.rentalDamageClaim.deleteMany();
   await prisma.rentalExtensionRequest.deleteMany();
   await prisma.rentalReturnRecord.deleteMany();

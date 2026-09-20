@@ -1817,7 +1817,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       try {
         const migrationsDir = path.resolve("prisma", "migrations");
         const preMigrations = readdirSync(migrationsDir)
-          .filter((name) => /^\d{14}_/.test(name) && name !== NEW_MIGRATION)
+          // Phase 7G：7G 及之后的 migration 依赖 6C Appeal 表（重放序要求
+          // 本测试只重放时间戳早于 6C 的 pre-migrations，再应用 6C 本体）
+          .filter((name) => /^\d{14}_/.test(name) && name < NEW_MIGRATION)
           .sort();
         expect(preMigrations.length).toBeGreaterThan(0);
         const preSql = preMigrations
@@ -1852,7 +1854,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       try {
         const migrationsDir = path.resolve("prisma", "migrations");
         const preMigrations = readdirSync(migrationsDir)
-          .filter((name) => /^\d{14}_/.test(name) && name !== NEW_MIGRATION)
+          // Phase 7G：7G 及之后的 migration 依赖 6C Appeal 表（重放序要求
+          // 本测试只重放时间戳早于 6C 的 pre-migrations，再应用 6C 本体）
+          .filter((name) => /^\d{14}_/.test(name) && name < NEW_MIGRATION)
           .sort();
         const preSql = preMigrations
           .map((name) => readFileSync(path.join(migrationsDir, name, "migration.sql"), "utf8"))

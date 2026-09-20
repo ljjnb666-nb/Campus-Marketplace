@@ -22,8 +22,10 @@ describe("rbac permission keys（机器可读稳定标识）", () => {
     // Phase 7E：新增 CAMPUS_REPORT_REVIEWER（scope=CAMPUS，仅 report.review）；
     // Phase 7F：新增 CAMPUS_VERIFICATION_REVIEWER（scope=CAMPUS，恰
     // verification.review + verification.evidence.read 两 key）；
+    // Phase 7G：新增 CAMPUS_DISPUTE_REVIEWER（恰 dispute.review +
+    // dispute.evidence.read）与 CAMPUS_SUPPORT_AGENT（恰 support.manage）；
     // PLATFORM_ADMIN 仍是唯一全量 GLOBAL 角色（定义合同见 roles.test.ts）
-    expect(SYSTEM_ROLES).toHaveLength(5);
+    expect(SYSTEM_ROLES).toHaveLength(7);
     const platformAdmin = SYSTEM_ROLES.find((role) => role.key === PLATFORM_ADMIN_ROLE_KEY);
     expect(platformAdmin).toBeDefined();
     expect(platformAdmin!.scope).toBe("GLOBAL");

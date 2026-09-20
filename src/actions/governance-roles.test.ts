@@ -457,13 +457,16 @@ describe("Phase 7C content moderator role provisioning", () => {
     const { SYSTEM_ROLES } = await import("@/lib/rbac/roles");
     // allowlist 是显式枚举（不是 SYSTEM_ROLES.filter 派生）：
     // Phase 7E 显式扩列 CAMPUS_REPORT_REVIEWER、Phase 7F 显式扩列
-    // CAMPUS_VERIFICATION_REVIEWER（新 CAMPUS 角色仍须显式修改
-    // allowlist 文件才会暴露给管理面——本断言即扩列记录）。
+    // CAMPUS_VERIFICATION_REVIEWER、Phase 7G 显式扩列
+    // CAMPUS_DISPUTE_REVIEWER / CAMPUS_SUPPORT_AGENT（新 CAMPUS 角色仍须显式
+    // 修改 allowlist 文件才会暴露给管理面——本断言即扩列记录）。
     expect(MANAGEABLE_GOVERNANCE_ROLE_KEYS).toEqual([
       "CAMPUS_APPEAL_REVIEWER",
       "CAMPUS_CONTENT_MODERATOR",
       "CAMPUS_REPORT_REVIEWER",
       "CAMPUS_VERIFICATION_REVIEWER",
+      "CAMPUS_DISPUTE_REVIEWER",
+      "CAMPUS_SUPPORT_AGENT",
     ]);
     // 结构不变量：allowlist 内角色 scope 恒 CAMPUS
     for (const roleKey of MANAGEABLE_GOVERNANCE_ROLE_KEYS) {

@@ -982,9 +982,22 @@ describe.skipIf(!integrationDatabaseUrl)(
       // → listing 先提交 → restriction 随后生效（绝无 post-restriction commit）
       {
         const gate = controllableGate();
+        // Phase 7G repair 2（P7-CLOSURE-DEBT-01 关闭）：与 RACE-2 同款确定性
+        // 起跑——先等 listing 真实取得 USER:seller subject 锁（racePoint 位于
+        // enforceMarketplaceCapability 之后，触发即持锁）再启动 restrict，
+        // 消除高负载下 restrict 先赢、barrier 等待永不出现的 waiter 的起跑
+        // 竞态（不移动 seam、不弱化 barrier 证明：restrict 仍必须真实等待
+        // USER:seller 锁）。
+        let signalListingLockAcquired!: () => void;
+        const listingLockAcquired = new Promise<void>((resolve) => {
+          signalListingLockAcquired = resolve;
+        });
         const listingPromise = createListing(async () => {
+          signalListingLockAcquired();
           await gate.promise;
         });
+        await listingLockAcquired;
+        // listing 已持 USER:seller 锁 → restrict 必然进入等待队列
         const restrictPromise = restrict(seller.id);
         await waitForAdvisoryLockWaiter(rawClient!, [`USER:${seller.id}`]);
         gate.release();
@@ -1265,6 +1278,8 @@ describe.skipIf(!integrationDatabaseUrl)(
           enforcementActionId: ea.id,
           status: "SUBMITTED",
           statement: "RACE-6 集成测试申诉陈述",
+          // Phase 7G：reviewDueAt NOT NULL
+          reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
         },
       });
 

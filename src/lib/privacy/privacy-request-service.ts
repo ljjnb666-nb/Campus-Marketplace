@@ -82,7 +82,11 @@ const ACTIVE_DELETION_STATUSES: PrivacyRequestStatus[] = ["REQUESTED", "IN_PROGR
 
 export type DeletionOutcome =
   | { status: "COMPLETED"; request: PrivacyRequest; erasure: AccountErasureResult }
-  | { status: "BLOCKED"; request: PrivacyRequest; reasonCode: "ACTIVE_DATA_HOLD" | "ACTIVE_TRANSACTION_BLOCK" };
+  | {
+      status: "BLOCKED";
+      request: PrivacyRequest;
+      reasonCode: "ACTIVE_DATA_HOLD" | "ACTIVE_TRANSACTION_BLOCK" | "ACTIVE_SUPPORT_TICKET";
+    };
 
 /**
  * 创建并同步执行账号注销请求。
@@ -126,7 +130,14 @@ export async function createAccountDeletionRequest(userId: string): Promise<Dele
       } catch (error) {
         const code = (error as { code?: string }).code;
 
-        if (code === "ACTIVE_DATA_HOLD" || code === "ACTIVE_TRANSACTION_BLOCK") {
+        // Phase 7G：ACTIVE_SUPPORT_TICKET 与既有两码同层——前置检查阶段的
+      // 只读阻断码（工单 OPEN/IN_PROGRESS 计数在 USER 锁内、任何匿名化写之前），
+      // BLOCKED 落库同样不存在部分擦除共存。
+      if (
+        code === "ACTIVE_DATA_HOLD" ||
+        code === "ACTIVE_TRANSACTION_BLOCK" ||
+        code === "ACTIVE_SUPPORT_TICKET"
+      ) {
           // 阻断路径零部分擦除的结构保证：eraseAccount 的前置检查全部是
           // 只读查询且先于任何写执行——这两个错误码只可能在前置检查阶段
           // 抛出，此刻事务内还没有发生任何匿名化写。BLOCKED 状态更新因此
@@ -166,6 +177,9 @@ export function describeBlockedReason(reasonCode: string | null): string {
   }
   if (reasonCode === "ACTIVE_TRANSACTION_BLOCK") {
     return "账号存在进行中的交易，请先完成或取消后再申请注销";
+  }
+  if (reasonCode === "ACTIVE_SUPPORT_TICKET") {
+    return "账号存在进行中的支持工单，请等待工单处理完成后再申请注销";
   }
   return "注销请求被阻止，请联系平台支持";
 }
@@ -212,7 +226,14 @@ export async function retryBlockedRequest(requestId: string): Promise<DeletionOu
     } catch (error) {
       const code = (error as { code?: string }).code;
 
-      if (code === "ACTIVE_DATA_HOLD" || code === "ACTIVE_TRANSACTION_BLOCK") {
+      // Phase 7G：ACTIVE_SUPPORT_TICKET 与既有两码同层——前置检查阶段的
+      // 只读阻断码（工单 OPEN/IN_PROGRESS 计数在 USER 锁内、任何匿名化写之前），
+      // BLOCKED 落库同样不存在部分擦除共存。
+      if (
+        code === "ACTIVE_DATA_HOLD" ||
+        code === "ACTIVE_TRANSACTION_BLOCK" ||
+        code === "ACTIVE_SUPPORT_TICKET"
+      ) {
         const blocked = await transitionPrivacyRequest(
           inProgress.id,
           "BLOCKED",

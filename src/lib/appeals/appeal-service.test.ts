@@ -116,7 +116,13 @@ describe("submitAppeal（USER target 锁先于最终资格读；唯一约束为�
     // 锁必须先于锁内重读（pre-read 仅解析锁键，绝不作为资格依据）
     expect(order).toEqual(["user-lock", "re-read-after-lock"]);
     expect(txAppealCreate).toHaveBeenCalledWith({
-      data: { enforcementActionId: EA_ID, status: "SUBMITTED", statement: "请复核这条处罚" },
+      data: {
+        enforcementActionId: EA_ID,
+        status: "SUBMITTED",
+        statement: "请复核这条处罚",
+        // Phase 7G：提交时写入审核 SLA 到期（提交时刻 + 48h）
+        reviewDueAt: expect.any(Date),
+      },
     });
     expect(createNotification).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       userId: TARGET_ID,
