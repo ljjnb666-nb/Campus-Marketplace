@@ -45,6 +45,7 @@ const createdCampusIds: string[] = [];
 const createdMembershipIds: string[] = [];
 const createdAssignmentIds: string[] = [];
 const createdListingIds: string[] = [];
+const createdCategoryIds: string[] = [];
 const createdOrderIds: string[] = [];
 const createdDisputeIds: string[] = [];
 const createdAssetIds: string[] = [];
@@ -104,9 +105,20 @@ async function createRentalFixture(options: {
   campusId: string;
   status?: string;
 }) {
-  const category = await rawClient!.rentalCategory.findFirstOrThrow({
-    where: { isActive: true },
+  // CI fresh 库无 seed：测试自建自有 category（不依赖任何 seed 数据）
+  let category = await rawClient!.rentalCategory.findFirst({
+    where: { slug: `it-${RUN_TAG}` },
   });
+  if (!category) {
+    category = await rawClient!.rentalCategory.create({
+      data: {
+        name: `IT 纠纷夹具分类 ${RUN_TAG}`,
+        slug: `it-${RUN_TAG}`,
+        isActive: true,
+      },
+    });
+    createdCategoryIds.push(category.id);
+  }
   const listing = await rawClient!.rentalListing.create({
     data: {
       ownerId: options.ownerId,
@@ -271,6 +283,7 @@ afterAll(async () => {
       rawClient.rentalOrderStatusLog.deleteMany({ where: { orderId: { in: createdOrderIds } } }),
       rawClient.rentalOrder.deleteMany({ where: { id: { in: createdOrderIds } } }),
       rawClient.rentalListing.deleteMany({ where: { id: { in: createdListingIds } } }),
+      rawClient.rentalCategory.deleteMany({ where: { id: { in: createdCategoryIds } } }),
       rawClient.supportTicket.deleteMany({ where: { id: { in: createdTicketIds } } }),
       rawClient.userRoleAssignment.deleteMany({ where: { id: { in: createdAssignmentIds } } }),
       rawClient.campusMembership.deleteMany({ where: { id: { in: createdMembershipIds } } }),
