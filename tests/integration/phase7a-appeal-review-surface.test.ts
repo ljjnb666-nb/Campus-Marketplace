@@ -691,7 +691,10 @@ describe.skipIf(!integrationDatabaseUrl)(
       const nullAppeal = await createAppealRow(nullPairId);
 
       const { access: accessAB } = await deriveAccess(campusReviewerAB.id);
-      expect(accessAB).toEqual({ global: false, campusIds: [campusA.id, campusB.id] });
+      // campusIds 集合语义（消费方恒 includes 判定）；行返回顺序无 ORDER BY
+      // 不作承诺——Phase 7G 并行加载同库曾翻转物理行序，此处按序无关比较
+      expect(accessAB.global).toBe(false);
+      expect([...accessAB.campusIds].sort()).toEqual([campusA.id, campusB.id].sort());
 
       const { loadAuthorizedAppealQueue } = await import("@/lib/appeals/review-queue");
       const page = await loadAuthorizedAppealQueue({
