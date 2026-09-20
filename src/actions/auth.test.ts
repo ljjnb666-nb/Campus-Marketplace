@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   hash,
-  campusFindUnique,
+  campusFindFirst,
   userCreate,
   membershipCreate,
   mockHeaders,
@@ -10,7 +10,7 @@ const {
   recordSignupAcceptances,
 } = vi.hoisted(() => ({
   hash: vi.fn(),
-  campusFindUnique: vi.fn(),
+  campusFindFirst: vi.fn(),
   userCreate: vi.fn(),
   membershipCreate: vi.fn(),
   mockHeaders: vi.fn(),
@@ -29,7 +29,7 @@ vi.mock("next/headers", () => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     campus: {
-      findUnique: campusFindUnique,
+      findFirst: campusFindFirst,
     },
   },
   withTransaction: transactionMock,
@@ -69,7 +69,7 @@ function buildRegisterFormData(overrides?: { agreeLegal?: string; documentIds?: 
 describe("auth actions", () => {
   beforeEach(() => {
     hash.mockReset();
-    campusFindUnique.mockReset();
+    campusFindFirst.mockReset();
     userCreate.mockReset();
     membershipCreate.mockReset().mockResolvedValue({ id: "membership-1" });
     mockHeaders.mockReset();
@@ -89,7 +89,7 @@ describe("auth actions", () => {
   });
 
   it("rejects registration without the explicit legal consent checkbox", async () => {
-    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    campusFindFirst.mockResolvedValue({ id: "campus-1" });
 
     const result = await registerUser(
       { success: false, message: "" },
@@ -102,7 +102,7 @@ describe("auth actions", () => {
   });
 
   it("rejects registration when the selected campus does not exist", async () => {
-    campusFindUnique.mockResolvedValue(null);
+    campusFindFirst.mockResolvedValue(null);
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
@@ -113,8 +113,25 @@ describe("auth actions", () => {
     expect(userCreate).not.toHaveBeenCalled();
   });
 
+  it("rejects registration for a deactivated campus（Phase 7H §23 admission 一致性）", async () => {
+    // 服务端 admission gate 与注册页 selector（listActiveCampuses）同谓词：
+    // isActive: true 过滤后未命中 → 与不存在同形拒绝
+    campusFindFirst.mockResolvedValue(null);
+
+    const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
+
+    expect(result).toEqual({
+      success: false,
+      message: "校区不存在",
+    });
+    expect(userCreate).not.toHaveBeenCalled();
+    expect(campusFindFirst).toHaveBeenCalledWith({
+      where: { id: "campus-1", isActive: true },
+    });
+  });
+
   it("returns a friendly message when the email is already registered", async () => {
-    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    campusFindFirst.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
     userCreate.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
@@ -132,7 +149,7 @@ describe("auth actions", () => {
   });
 
   it("creates the user and bound acceptance evidence in the same transaction", async () => {
-    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    campusFindFirst.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
@@ -164,7 +181,7 @@ describe("auth actions", () => {
   });
 
   it("surfaces policy version conflicts as registration failures (fail closed)", async () => {
-    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    campusFindFirst.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
     // 提交期间 required 集合变化：同意记录失败 → 整体失败（事务回滚，不留无同意的账号）
     recordSignupAcceptances.mockRejectedValue(
@@ -182,7 +199,7 @@ describe("auth actions", () => {
     mockHeaders.mockImplementation(async () => ({
       get: (name: string) => (name === "x-forwarded-for" ? "203.0.113.9" : null),
     }));
-    campusFindUnique.mockResolvedValue({ id: "campus-1" });
+    campusFindFirst.mockResolvedValue({ id: "campus-1" });
     hash.mockResolvedValue("hashed-password");
 
     let result = { success: true, message: "" };

@@ -52,113 +52,142 @@ export async function createVerificationPolicy(input: {
  * 发布策略：DRAFT → PUBLISHED（发布即不可变）。
  * 事务内先锁 campus（acquireCampusVerificationPolicyLocks），锁内重读
  * highest published，待发布版本号必须更高——(campusId, version) 唯一约束兜底。
+ *
+ * Phase 7H：拆出 publishVerificationPolicyInTx 供治理 seam
+ * （policy-governance-service）在「USER:actor 锁 + policy 锁 + 锁后授权
+ * 重读」内复用同一套 invariant（幂等发布/RETIRED 禁发布/版本顺序）。
+ * options.tx 提供时直接在调用方事务内执行（不另起事务），既有调用方
+ * （无 tx）行为逐字节不变。
  */
-export async function publishVerificationPolicy(
+export type VerificationPolicyMutationOptions = {
+  actorId?: string;
+  tx?: Prisma.TransactionClient;
+};
+
+export async function publishVerificationPolicyInTx(
+  tx: Prisma.TransactionClient,
   policyId: string,
   options: { actorId?: string } = {},
 ): Promise<CampusVerificationPolicy> {
-  return withTransaction(async (tx) => {
-    const policy = await tx.campusVerificationPolicy.findUnique({ where: { id: policyId } });
+  const policy = await tx.campusVerificationPolicy.findUnique({ where: { id: policyId } });
 
-    if (!policy) {
-      throw governanceError("CAMPUS_VERIFICATION_POLICY_NOT_FOUND");
-    }
+  if (!policy) {
+    throw governanceError("CAMPUS_VERIFICATION_POLICY_NOT_FOUND");
+  }
 
-    if (policy.status === "PUBLISHED") {
-      // 幂等：重复发布同一策略原样返回，不产生第二个 published 版本
-      return policy;
-    }
+  if (policy.status === "PUBLISHED") {
+    // 幂等：重复发布同一策略原样返回，不产生第二个 published 版本
+    return policy;
+  }
 
-    if (policy.status === "RETIRED") {
-      throw governanceError("CAMPUS_VERIFICATION_POLICY_ALREADY_PUBLISHED", "已退役的策略不能重新发布");
-    }
+  if (policy.status === "RETIRED") {
+    throw governanceError("CAMPUS_VERIFICATION_POLICY_ALREADY_PUBLISHED", "已退役的策略不能重新发布");
+  }
 
-    await acquireCampusVerificationPolicyLocks(tx, [policy.campusId]);
+  await acquireCampusVerificationPolicyLocks(tx, [policy.campusId]);
 
-    const highestPublished = await tx.campusVerificationPolicy.findFirst({
-      where: {
-        campusId: policy.campusId,
-        status: { in: ["PUBLISHED", "RETIRED"] },
-      },
-      orderBy: { version: "desc" },
-      select: { version: true },
-    });
-
-    if (highestPublished && policy.version <= highestPublished.version) {
-      throw governanceError(
-        "CAMPUS_VERIFICATION_POLICY_ALREADY_PUBLISHED",
-        "存在不低于该版本的已发布策略，请使用更高版本号",
-      );
-    }
-
-    const published = await tx.campusVerificationPolicy.update({
-      where: { id: policy.id },
-      data: { status: "PUBLISHED", publishedAt: new Date() },
-    });
-
-    if (options.actorId) {
-      await recordAdminAudit(
-        {
-          actorId: options.actorId,
-          action: "PUBLISH_VERIFICATION_POLICY",
-          targetType: "CAMPUS_VERIFICATION_POLICY",
-          targetId: published.id,
-          campusId: published.campusId,
-          metadata: { policyVersion: published.version },
-        },
-        tx,
-      );
-    }
-
-    logger.info("campus_verification_policy_published", "governance", {
-      policyId: published.id,
-      campusId: published.campusId,
-      version: published.version,
-      contentHash: published.contentHash,
-    });
-
-    return published;
+  const highestPublished = await tx.campusVerificationPolicy.findFirst({
+    where: {
+      campusId: policy.campusId,
+      status: { in: ["PUBLISHED", "RETIRED"] },
+    },
+    orderBy: { version: "desc" },
+    select: { version: true },
   });
+
+  if (highestPublished && policy.version <= highestPublished.version) {
+    throw governanceError(
+      "CAMPUS_VERIFICATION_POLICY_ALREADY_PUBLISHED",
+      "存在不低于该版本的已发布策略，请使用更高版本号",
+    );
+  }
+
+  const published = await tx.campusVerificationPolicy.update({
+    where: { id: policy.id },
+    data: { status: "PUBLISHED", publishedAt: new Date() },
+  });
+
+  if (options.actorId) {
+    await recordAdminAudit(
+      {
+        actorId: options.actorId,
+        action: "PUBLISH_VERIFICATION_POLICY",
+        targetType: "CAMPUS_VERIFICATION_POLICY",
+        targetId: published.id,
+        campusId: published.campusId,
+        metadata: { policyVersion: published.version },
+      },
+      tx,
+    );
+  }
+
+  logger.info("campus_verification_policy_published", "governance", {
+    policyId: published.id,
+    campusId: published.campusId,
+    version: published.version,
+    contentHash: published.contentHash,
+  });
+
+  return published;
+}
+
+export async function publishVerificationPolicy(
+  policyId: string,
+  options: VerificationPolicyMutationOptions = {},
+): Promise<CampusVerificationPolicy> {
+  if (options.tx) {
+    return publishVerificationPolicyInTx(options.tx, policyId, options);
+  }
+  return withTransaction((tx) => publishVerificationPolicyInTx(tx, policyId, options));
 }
 
 /** DRAFT → RETIRED（放弃草稿）；PUBLISHED → RETIRED（下线，保留历史可查）。 */
-export async function retireVerificationPolicy(
+export async function retireVerificationPolicyInTx(
+  tx: Prisma.TransactionClient,
   policyId: string,
   options: { actorId?: string } = {},
 ): Promise<CampusVerificationPolicy> {
-  return withTransaction(async (tx) => {
-    const policy = await tx.campusVerificationPolicy.findUnique({
-      where: { id: policyId },
-      select: { id: true, campusId: true },
-    });
-
-    if (!policy) {
-      throw governanceError("CAMPUS_VERIFICATION_POLICY_NOT_FOUND");
-    }
-
-    await acquireCampusVerificationPolicyLocks(tx, [policy.campusId]);
-
-    const retired = await tx.campusVerificationPolicy.update({
-      where: { id: policy.id },
-      data: { status: "RETIRED" },
-    });
-
-    if (options.actorId) {
-      await recordAdminAudit(
-        {
-          actorId: options.actorId,
-          action: "RETIRE_VERIFICATION_POLICY",
-          targetType: "CAMPUS_VERIFICATION_POLICY",
-          targetId: retired.id,
-          campusId: retired.campusId,
-          metadata: { policyVersion: retired.version },
-        },
-        tx,
-      );
-    }
-
-    return retired;
+  const policy = await tx.campusVerificationPolicy.findUnique({
+    where: { id: policyId },
+    select: { id: true, campusId: true },
   });
+
+  if (!policy) {
+    throw governanceError("CAMPUS_VERIFICATION_POLICY_NOT_FOUND");
+  }
+
+  await acquireCampusVerificationPolicyLocks(tx, [policy.campusId]);
+
+  const retired = await tx.campusVerificationPolicy.update({
+    where: { id: policy.id },
+    data: { status: "RETIRED" },
+  });
+
+  if (options.actorId) {
+    await recordAdminAudit(
+      {
+        actorId: options.actorId,
+        action: "RETIRE_VERIFICATION_POLICY",
+        targetType: "CAMPUS_VERIFICATION_POLICY",
+        targetId: retired.id,
+        campusId: retired.campusId,
+        metadata: { policyVersion: retired.version },
+      },
+      tx,
+    );
+  }
+
+  return retired;
+}
+
+export async function retireVerificationPolicy(
+  policyId: string,
+  options: VerificationPolicyMutationOptions = {},
+): Promise<CampusVerificationPolicy> {
+  if (options.tx) {
+    return retireVerificationPolicyInTx(options.tx, policyId, options);
+  }
+  return withTransaction((tx) => retireVerificationPolicyInTx(tx, policyId, options));
 }
 
 /**

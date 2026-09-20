@@ -14,9 +14,12 @@ test("权限回归：普通学生访问管理后台被重定向", async ({ brows
   const buyer = await buyerContext.newPage();
 
   await buyer.goto("/admin");
-  // requireAdmin 对非管理员 redirect("/")——页面内容不可见
-  await buyer.waitForURL((url) => url.pathname === "/");
-  await expect(buyer.getByRole("heading", { name: "系统管理" })).toHaveCount(0);
+  // Phase 7H：legacy /admin root 退役 → canonical /governance redirect；
+  // 无任何 governance capability 的学生被治理 root gate notFound 拦截
+  // （legacy dashboard 内容不可见——安全合同不变，仅重定向目的地随 §40 退役合同变化）
+  await buyer.waitForURL((url) => url.pathname === "/governance");
+  await expect(buyer.getByRole("heading", { name: "管理后台" })).toHaveCount(0);
+  await expect(buyer.getByRole("heading", { name: "页面不存在" })).toBeVisible();
 
   await buyer.goto("/admin/reports");
   // Phase 7E：legacy /admin/reports 退役 → canonical /governance/reports redirect；

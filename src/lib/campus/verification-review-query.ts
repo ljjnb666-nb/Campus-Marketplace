@@ -97,7 +97,7 @@ export function decodeVerificationCursor(raw: string): VerificationCursor | null
 }
 
 /** 授权 scope 谓词（fail-closed：无有效 scope 时返回 false → 永远空页）。 */
-function verificationScopePredicate(
+export function verificationScopePredicate(
   access: VerificationReviewAccess,
 ): Prisma.UserVerificationWhereInput | null {
   if (access.global) {

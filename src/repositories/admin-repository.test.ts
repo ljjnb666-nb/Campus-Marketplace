@@ -62,7 +62,6 @@ vi.mock("@/lib/prisma", () => ({
 
 import {
   getAdminCategoryList,
-  getAdminDashboardData,
   getAdminErrandCategoryList,
   getAdminModerationKeywords,
   getAdminServiceCategoryList,
@@ -83,122 +82,6 @@ describe("admin repository", () => {
     errandCategoryFindMany.mockReset();
     serviceCategoryFindMany.mockReset();
     moderationKeywordFindMany.mockReset();
-  });
-
-  it("returns dashboard data with pending queues and daily counters", async () => {
-    userVerificationFindMany.mockResolvedValue([{ id: "verification-1" }]);
-    reportFindMany.mockResolvedValue([{ id: "report-1" }]);
-    reportCount.mockResolvedValueOnce(6).mockResolvedValueOnce(2).mockResolvedValueOnce(6);
-    userVerificationCount.mockResolvedValueOnce(4).mockResolvedValueOnce(3);
-    userCount.mockResolvedValueOnce(42).mockResolvedValueOnce(5);
-    productCount.mockResolvedValueOnce(20).mockResolvedValueOnce(12).mockResolvedValueOnce(3);
-    errandTaskCount.mockResolvedValueOnce(10).mockResolvedValueOnce(7);
-
-    const result = await getAdminDashboardData();
-
-    expect(result).toEqual({
-      pendingVerifications: [{ id: "verification-1" }],
-      openReports: [{ id: "report-1" }],
-      latestReports: 6,
-      latestVerifications: 4,
-      todayNewReports: 2,
-      todayNewVerifications: 3,
-      totalUsers: 42,
-      todayNewUsers: 5,
-      totalProducts: 20,
-      activeProducts: 12,
-      todayNewProducts: 3,
-      totalErrands: 10,
-      completedErrands: 7,
-      totalReports: 6,
-    });
-    expect(reportFindMany).toHaveBeenCalledWith({
-      where: { status: "OPEN" },
-      orderBy: { createdAt: "asc" },
-      include: {
-        reporter: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        product: {
-          select: {
-            id: true,
-            title: true,
-          },
-        },
-        errandTask: {
-          select: {
-            id: true,
-            title: true,
-          },
-        },
-        serviceListing: {
-          select: {
-            id: true,
-            title: true,
-          },
-        },
-        targetUser: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-        message: {
-          select: {
-            id: true,
-            content: true,
-          },
-        },
-      },
-      take: 8,
-    });
-    expect(userCount).toHaveBeenNthCalledWith(1, {
-      where: {
-        deletedAt: null,
-      },
-    });
-    expect(userCount).toHaveBeenNthCalledWith(2, {
-      where: {
-        deletedAt: null,
-        createdAt: {
-          gte: expect.any(Date),
-        },
-      },
-    });
-    expect(productCount).toHaveBeenNthCalledWith(1, {
-      where: {
-        deletedAt: null,
-      },
-    });
-    expect(productCount).toHaveBeenNthCalledWith(2, {
-      where: {
-        deletedAt: null,
-        status: "ACTIVE",
-      },
-    });
-    expect(productCount).toHaveBeenNthCalledWith(3, {
-      where: {
-        deletedAt: null,
-        createdAt: {
-          gte: expect.any(Date),
-        },
-      },
-    });
-    expect(errandTaskCount).toHaveBeenNthCalledWith(1, {
-      where: {
-        deletedAt: null,
-      },
-    });
-    expect(errandTaskCount).toHaveBeenNthCalledWith(2, {
-      where: {
-        deletedAt: null,
-        status: "COMPLETED",
-      },
-    });
-    expect(reportCount).toHaveBeenNthCalledWith(3);
   });
 
   it("returns the report review queue with all supported target relations", async () => {

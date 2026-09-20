@@ -40,7 +40,7 @@ import type { AuthorizationContext } from "@/lib/rbac/service";
  * AdminAudit 结构性不在 select 内）。
  */
 
-const QUEUE_STATUSES: AppealStatus[] = ["SUBMITTED", "IN_REVIEW"];
+export const QUEUE_STATUSES: AppealStatus[] = ["SUBMITTED", "IN_REVIEW"];
 
 export type AppealQueueItemDto = {
   id: string;
@@ -102,7 +102,7 @@ export function decodeAppealReviewCursor(raw: string): AppealReviewCursor | null
 }
 
 /** 授权分支集合（fail-closed：无有效 scope 时返回不可能命中的空数组）。 */
-async function authorizedEnforcementBranches(
+export async function authorizedEnforcementBranches(
   access: AppealReviewAccess,
 ): Promise<Prisma.EnforcementActionWhereInput[]> {
   if (access.global) {

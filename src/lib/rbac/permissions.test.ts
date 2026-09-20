@@ -89,3 +89,31 @@ describe("Phase 7D R1：legacy full-admin 等价集合与全集分离", () => {
     expect(platformAdmin!.permissionKeys).toContain("enforcement.read");
   });
 });
+
+// ── Phase 7H：operations.overview 窄读取 permission（GLOBAL only）───────────
+describe("Phase 7H：operations.overview（运营级系统概览）", () => {
+  it("operations.overview 是已知 permission（DEFAULT_DENY 输入侧可收窄）", () => {
+    expect(asPermissionKey("operations.overview")).toBe("operations.overview");
+    expect(PERMISSIONS["operations.overview"]).toBe(
+      "读取平台运行状态与安全的运营级系统概览",
+    );
+  });
+
+  it("operations.overview NOT IN legacy 集合（R1 冻结不动：恰 11 key 零变化）", () => {
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS).not.toContain("operations.overview");
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS).toHaveLength(11);
+    expect(PERMISSION_KEYS).toContain("operations.overview");
+    expect(ADMIN_SURFACE_PERMISSION_KEYS).toBe(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS);
+  });
+
+  it("PLATFORM_ADMIN 因全量派生自然获得 operations.overview（无需新角色/assignment）", () => {
+    const platformAdmin = SYSTEM_ROLES.find((role) => role.key === PLATFORM_ADMIN_ROLE_KEY);
+    expect(platformAdmin!.permissionKeys).toContain("operations.overview");
+    // campus 角色零变化：无任何 CAMPUS 角色携带 operations.overview
+    for (const role of SYSTEM_ROLES) {
+      if (role.scope === "CAMPUS") {
+        expect(role.permissionKeys).not.toContain("operations.overview");
+      }
+    }
+  });
+});

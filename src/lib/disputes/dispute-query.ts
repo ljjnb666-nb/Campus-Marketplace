@@ -98,7 +98,7 @@ export function decodeDisputeCursor(raw: string): DisputeCursor | null {
 }
 
 /** 授权分支集合（fail-closed：无有效 scope 时返回空数组 → 永远空页）。 */
-async function authorizedDisputeBranches(
+export async function authorizedDisputeBranches(
   access: DisputeReviewAccess,
 ): Promise<Array<{ campusId: string; scopeKey: string }>> {
   if (access.global) {

@@ -103,7 +103,7 @@ export function decodeReportCursor(raw: string): ReportCursor | null {
 }
 
 /** 授权分支集合（fail-closed：无有效 scope 时返回空数组 → 永远空页）。 */
-async function authorizedReportBranches(
+export async function authorizedReportBranches(
   access: ReportReviewAccess,
 ): Promise<Array<{ campusId: string | null; scopeKey: string }>> {
   if (access.global) {

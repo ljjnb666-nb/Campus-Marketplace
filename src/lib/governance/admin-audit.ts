@@ -50,6 +50,10 @@ const ALLOWED_METADATA_KEYS = new Set([
   "resolutionCode",
   "resolutionAction",
   "ticketId",
+  // Phase 7H：campus isActive 切换的机器字段（布尔值，§28 冻结 metadata：
+  // 仅 previousIsActive/newIsActive，禁止自由文本）
+  "previousIsActive",
+  "newIsActive",
 ]);
 
 function sanitizeMetadata(

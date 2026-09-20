@@ -64,8 +64,13 @@ export async function registerUser(
     };
   }
 
-  const campus = await prisma.campus.findUnique({
-    where: { id: parsed.data.campusId },
+  // Phase 7H §23 最小一致性修复：注册页 selector 只展示启用校区
+  // （listActiveCampuses 呈现层过滤），服务端 admission gate 同语义收敛——
+  // 直发 campusId 的已停用校区注册拒绝（Campus.isActive = campus
+  // availability / admission configuration 冻结语义的最小补齐，非 kill
+  // switch：不影响既有成员与在途义务）。
+  const campus = await prisma.campus.findFirst({
+    where: { id: parsed.data.campusId, isActive: true },
   });
 
   if (!campus) {
