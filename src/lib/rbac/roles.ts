@@ -38,6 +38,20 @@ export const CAMPUS_REPORT_REVIEWER_ROLE_KEY = "CAMPUS_REPORT_REVIEWER";
 // SYSTEM_ROLES 同一定义）。
 export const CAMPUS_VERIFICATION_REVIEWER_ROLE_KEY = "CAMPUS_VERIFICATION_REVIEWER";
 
+// Phase 7G：校区纠纷审核员。permission set 必须恰好为
+// { dispute.review, dispute.evidence.read }（指令冻结，禁止增删）：
+// 纠纷处理权与"查看该纠纷绑定证据材料"的窄读取权捆绑供给，但不获得任何
+// 其它私有资产读取权（dispute.evidence.read 对非 dispute 绑定资产恒 DENY）。
+// 两 key 均不在 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS 内（R1 冻结不动）。
+// 生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）。
+export const CAMPUS_DISPUTE_REVIEWER_ROLE_KEY = "CAMPUS_DISPUTE_REVIEWER";
+
+// Phase 7G：校区支持专员。permission set 必须恰好为 { support.manage }
+// （指令冻结，禁止增删）。SupportTicket ≠ Dispute（两个独立 workflow 域）。
+// support.manage 不在 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS 内（R1 冻结
+// 不动）。生产既有库经 data-only migration 收敛（与 SYSTEM_ROLES 同一定义）。
+export const CAMPUS_SUPPORT_AGENT_ROLE_KEY = "CAMPUS_SUPPORT_AGENT";
+
 export const GLOBAL_SCOPE_KEY = "GLOBAL";
 
 /** CAMPUS 角色授予行的 scopeKey 编码（assignment service 维护与 campusId 一致）。 */
@@ -82,5 +96,17 @@ export const SYSTEM_ROLES: SystemRoleDefinition[] = [
     name: "校区认证审核员",
     scope: "CAMPUS",
     permissionKeys: ["verification.review", "verification.evidence.read"],
+  },
+  {
+    key: CAMPUS_DISPUTE_REVIEWER_ROLE_KEY,
+    name: "校区纠纷审核员",
+    scope: "CAMPUS",
+    permissionKeys: ["dispute.review", "dispute.evidence.read"],
+  },
+  {
+    key: CAMPUS_SUPPORT_AGENT_ROLE_KEY,
+    name: "校区支持专员",
+    scope: "CAMPUS",
+    permissionKeys: ["support.manage"],
   },
 ];

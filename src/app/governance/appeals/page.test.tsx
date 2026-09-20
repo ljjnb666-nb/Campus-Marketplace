@@ -4,10 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const {
   requireAppealReviewer,
   loadAuthorizedAppealQueue,
+  decodeAppealReviewCursor,
   beginGovernanceAppealReview,
 } = vi.hoisted(() => ({
   requireAppealReviewer: vi.fn(),
   loadAuthorizedAppealQueue: vi.fn(),
+  decodeAppealReviewCursor: vi.fn(),
   beginGovernanceAppealReview: vi.fn(),
 }));
 
@@ -17,6 +19,7 @@ vi.mock("@/lib/appeals/reviewer-access", () => ({
 
 vi.mock("@/lib/appeals/review-queue", () => ({
   loadAuthorizedAppealQueue,
+  decodeAppealReviewCursor,
 }));
 
 vi.mock("@/actions/governance-appeals", () => ({
@@ -44,6 +47,9 @@ function baseItem(overrides: Record<string, unknown> = {}) {
     id: "appeal-1",
     status: "SUBMITTED",
     createdAt: new Date("2026-09-12T08:00:00.000Z").toISOString(),
+    // Phase 7G：队列 DTO 增加 reviewDueAt/overdue（SLA 只读）
+    reviewDueAt: new Date("2026-09-14T08:00:00.000Z").toISOString(),
+    overdue: false,
     enforcementType: "MEMBERSHIP_SUSPEND",
     scopeKind: "CAMPUS",
     campusName: "主校区",

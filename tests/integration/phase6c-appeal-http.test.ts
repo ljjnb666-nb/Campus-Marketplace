@@ -512,7 +512,13 @@ describe.skipIf(!integrationDatabaseUrl)(
           type: "MARKETPLACE_RESTRICT",
         });
         const appeal = await rawClient!.appeal.create({
-          data: { enforcementActionId: action.id, status, statement: "x" },
+          data: {
+            enforcementActionId: action.id,
+            status,
+            statement: "x",
+            // Phase 7G：reviewDueAt NOT NULL
+            reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+          },
         });
         createdAppealIds.push(appeal.id);
       }

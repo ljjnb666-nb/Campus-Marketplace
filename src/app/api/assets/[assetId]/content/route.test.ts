@@ -14,7 +14,10 @@ vi.mock("@/lib/server-auth", () => ({
     LEGAL_ACCEPTANCE_REQUIRED: 403,
   },
 }));
-vi.mock("@/lib/asset-service", () => ({ readPrivateAssetObject }));
+vi.mock("@/lib/asset-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/asset-service")>();
+  return { ...actual, readPrivateAssetObject };
+});
 vi.mock("@/lib/governance/admin-audit", () => ({ recordAdminAudit }));
 
 vi.mock("@/lib/logger", () => ({

@@ -162,93 +162,97 @@ enum AssetStatus {
 }
 
 model User {
-  id                    String                    @id @default(cuid())
-  name                  String
-  email                 String                    @unique
-  passwordHash          String
-  avatarUrl             String?
-  bio                   String?
-  schoolName            String
-  college               String?
-  grade                 String?
-  studentIdLast4        String?
-  phone                 String?
+  id                      String                    @id @default(cuid())
+  name                    String
+  email                   String                    @unique
+  passwordHash            String
+  avatarUrl               String?
+  bio                     String?
+  schoolName              String
+  college                 String?
+  grade                   String?
+  studentIdLast4          String?
+  phone                   String?
   // Phase 6A 起本字段不再作为授权依据（deprecated for authorization）：
   // 授权一律经中央 RBAC（UserRole → Role → RolePermission → Permission）判断；
   // 字段仅保留用于展示与迁移 bootstrap（migration/seed 会按 role=ADMIN
   // 同步授予 PLATFORM_ADMIN 角色）。禁止新增任何 `role === "ADMIN"` 业务判断。
-  role                  UserRole                  @default(STUDENT)
-  status                UserStatus                @default(ACTIVE)
-  verificationStatus    VerificationStatus        @default(UNVERIFIED)
-  creditScore           Int                       @default(100)
-  completedOrdersCount  Int                       @default(0)
-  positiveReviewRate    Float                     @default(0)
+  role                    UserRole                  @default(STUDENT)
+  status                  UserStatus                @default(ACTIVE)
+  verificationStatus      VerificationStatus        @default(UNVERIFIED)
+  creditScore             Int                       @default(100)
+  completedOrdersCount    Int                       @default(0)
+  positiveReviewRate      Float                     @default(0)
   // 租赁统计字段
-  rentalOwnerCount      Int                       @default(0)
-  rentalRenterCount     Int                       @default(0)
-  onTimeReturnRate      Float                     @default(0)
-  rentalPositiveRate    Float                     @default(0)
-  rentalDisputeCount    Int                       @default(0)
+  rentalOwnerCount        Int                       @default(0)
+  rentalRenterCount       Int                       @default(0)
+  onTimeReturnRate        Float                     @default(0)
+  rentalPositiveRate      Float                     @default(0)
+  rentalDisputeCount      Int                       @default(0)
   // 上传存储配额：已占用字节数（含 PENDING_DELETE 待回收部分）。
   // 预留/释放走条件原子 UPDATE，见 src/lib/asset-service.ts
-  storageUsedBytes      Int                       @default(0)
-  lastLoginAt           DateTime?
-  campusId              String
-  campus                Campus                    @relation(fields: [campusId], references: [id])
-  accounts              Account[]
-  sessions              Session[]
-  verification          UserVerification?
-  products              Product[]
-  favoriteProducts      Favorite[]
-  errandFavorites       ErrandFavorite[]
-  serviceFavorites      ServiceFavorite[]
-  createdErrandTasks    ErrandTask[]              @relation("ErrandTaskPublisher")
-  acceptedErrandTasks   ErrandTask[]              @relation("ErrandTaskAccepter")
-  serviceListings       ServiceListing[]
-  buyerOrders           Order[]                   @relation("OrderBuyer")
-  sellerOrders          Order[]                   @relation("OrderSeller")
-  sentMessages          Message[]                 @relation("MessageSender")
-  conversationLinks     ConversationParticipant[]
-  writtenReviews        Review[]                  @relation("ReviewAuthor")
-  receivedReviews       Review[]                  @relation("ReviewTarget")
-  reports               Report[]                  @relation("ReportReporter")
-  receivedReports       Report[]                  @relation("ReportTargetUser")
-  notifications         Notification[]
-  blockedUsers          BlockedUser[]             @relation("BlockedByUser")
-  blockedByUsers        BlockedUser[]             @relation("BlockedTargetUser")
-  adminLogs             AdminLog[]                @relation("AdminActor")
-  uploadedAssets        UploadedAsset[]           @relation("AssetOwner")
+  storageUsedBytes        Int                       @default(0)
+  lastLoginAt             DateTime?
+  campusId                String
+  campus                  Campus                    @relation(fields: [campusId], references: [id])
+  accounts                Account[]
+  sessions                Session[]
+  verification            UserVerification?
+  products                Product[]
+  favoriteProducts        Favorite[]
+  errandFavorites         ErrandFavorite[]
+  serviceFavorites        ServiceFavorite[]
+  createdErrandTasks      ErrandTask[]              @relation("ErrandTaskPublisher")
+  acceptedErrandTasks     ErrandTask[]              @relation("ErrandTaskAccepter")
+  serviceListings         ServiceListing[]
+  buyerOrders             Order[]                   @relation("OrderBuyer")
+  sellerOrders            Order[]                   @relation("OrderSeller")
+  sentMessages            Message[]                 @relation("MessageSender")
+  conversationLinks       ConversationParticipant[]
+  writtenReviews          Review[]                  @relation("ReviewAuthor")
+  receivedReviews         Review[]                  @relation("ReviewTarget")
+  reports                 Report[]                  @relation("ReportReporter")
+  receivedReports         Report[]                  @relation("ReportTargetUser")
+  notifications           Notification[]
+  blockedUsers            BlockedUser[]             @relation("BlockedByUser")
+  blockedByUsers          BlockedUser[]             @relation("BlockedTargetUser")
+  adminLogs               AdminLog[]                @relation("AdminActor")
+  uploadedAssets          UploadedAsset[]           @relation("AssetOwner")
   // 租赁关联
-  rentalListings        RentalListing[]           @relation("RentalOwner")
-  rentalOrdersAsOwner   RentalOrder[]             @relation("RentalOrderOwner")
-  rentalOrdersAsRenter  RentalOrder[]             @relation("RentalOrderRenter")
-  rentalReviewsGiven    RentalReview[]            @relation("RentalReviewAuthor")
-  rentalReviewsReceived RentalReview[]            @relation("RentalReviewTarget")
-  rentalFavorites       RentalFavorite[]
-  policyAcceptances     PolicyAcceptance[]
-  privacyRequests       PrivacyRequest[]
+  rentalListings          RentalListing[]           @relation("RentalOwner")
+  rentalOrdersAsOwner     RentalOrder[]             @relation("RentalOrderOwner")
+  rentalOrdersAsRenter    RentalOrder[]             @relation("RentalOrderRenter")
+  rentalReviewsGiven      RentalReview[]            @relation("RentalReviewAuthor")
+  rentalReviewsReceived   RentalReview[]            @relation("RentalReviewTarget")
+  rentalFavorites         RentalFavorite[]
+  policyAcceptances       PolicyAcceptance[]
+  privacyRequests         PrivacyRequest[]
   // Phase 6A：身份 / RBAC 关联
-  memberships           CampusMembership[]
-  userRoles             UserRoleAssignment[]
-  reviewedVerifications UserVerification[]        @relation("VerificationReviewer")
+  memberships             CampusMembership[]
+  userRoles               UserRoleAssignment[]
+  reviewedVerifications   UserVerification[]        @relation("VerificationReviewer")
   // Phase 6B：trust / risk / enforcement 关联
-  riskStates            RiskState[]
-  riskFlags             RiskFlag[]
-  enforcementAsActor    EnforcementAction[]       @relation("EnforcementActor")
-  enforcementAsTarget   EnforcementAction[]       @relation("EnforcementTarget")
+  riskStates              RiskState[]
+  riskFlags               RiskFlag[]
+  enforcementAsActor      EnforcementAction[]       @relation("EnforcementActor")
+  enforcementAsTarget     EnforcementAction[]       @relation("EnforcementTarget")
   // Phase 6C-1B：本用户作为 terminal decision reviewer 的申诉记录
-  reviewedAppeals       Appeal[]                  @relation("AppealReviewer")
+  reviewedAppeals         Appeal[]                  @relation("AppealReviewer")
   // Phase 7C：listing 治理 overlay（provenance，Restrict：历史不可随账户删除丢失）
-  listingModerations    ListingModeration[]       @relation("ListingModerator")
-  listingRestorations   ListingModeration[]       @relation("ListingModerationResolver")
+  listingModerations      ListingModeration[]       @relation("ListingModerator")
+  listingRestorations     ListingModeration[]       @relation("ListingModerationResolver")
   // Phase 7E：举报运营 case 领用（claim/release；SetNull：领用人引用消失时 case 仍在）
-  assignedModerationCases ModerationCase[]        @relation("ModerationCaseAssignee")
-  createdAt             DateTime                  @default(now())
-  updatedAt             DateTime                  @updatedAt
-  deletedAt             DateTime?
+  assignedModerationCases ModerationCase[]          @relation("ModerationCaseAssignee")
+  // Phase 7G：dispute / support 运营领用（claim/release；SetNull 同上）
+  assignedDisputes        RentalDispute[]           @relation("DisputeAssignee")
+  assignedSupportTickets  SupportTicket[]           @relation("SupportTicketAssignee")
+  supportTickets          SupportTicket[]           @relation("SupportTicketRequester")
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  deletedAt               DateTime?
   // 账号注销完成时间。与 deletedAt 互斥使用：注销保留行（pseudonymous id
   // 维持订单/评价/举报等历史引用），仅匿名化个人字段并吊销认证。
-  erasedAt              DateTime?
+  erasedAt                DateTime?
 
   @@index([campusId, role])
   @@index([verificationStatus, status])
@@ -314,6 +318,9 @@ model Campus {
   // Phase 7E：举报 scope 快照与运营 case（Restrict：治理 provenance 不随删除丢失）
   reportedScope        Report[]                   @relation("ReportScopeCampus")
   moderationCases      ModerationCase[]           @relation("ModerationCaseCampus")
+  // Phase 7G：dispute / support scope 快照（Restrict 同上）
+  rentalDisputes       RentalDispute[]            @relation("RentalDisputeScopeCampus")
+  supportTickets       SupportTicket[]            @relation("SupportTicketScopeCampus")
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
 }
@@ -716,9 +723,9 @@ model ModerationCase {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  report     Report   @relation(fields: [reportId], references: [id], onDelete: Restrict)
-  campus     Campus?  @relation("ModerationCaseCampus", fields: [campusId], references: [id], onDelete: Restrict)
-  assignedTo User?    @relation("ModerationCaseAssignee", fields: [assignedToId], references: [id])
+  report     Report  @relation(fields: [reportId], references: [id], onDelete: Restrict)
+  campus     Campus? @relation("ModerationCaseCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  assignedTo User?   @relation("ModerationCaseAssignee", fields: [assignedToId], references: [id])
 
   // 队列排序 keyset tuple（dueAt ASC, createdAt ASC, id ASC）
   @@index([dueAt, createdAt, id])
@@ -954,6 +961,59 @@ enum RentalDisputeStatus {
   CLOSED // 已关闭
 }
 
+// Phase 7G：纠纷终局时对订单的机器可读收敛动作。
+// RESTORE_PREVIOUS = 订单回到 openedFromOrderStatus（null 时 DENY，绝不猜历史）；
+// CLOSE_ORDER = 订单进入 CLOSED。禁止在此层表达 refund / 押金 / payout 等
+// payment 语义（金额字段不由 dispute resolution 修改，GATE C 冻结）。
+enum DisputeResolutionAction {
+  RESTORE_PREVIOUS
+  CLOSE_ORDER
+}
+
+// Phase 7G：纠纷处理结果的中性运营原因码。
+// 刻意不设 OWNER_GUILTY / RENTER_GUILTY / FRAUD_CONFIRMED 之类的
+// 越权码——dispute resolution 不是 enforcement truth；需要处罚必须
+// 单独走 canonical enforcement service，本域不得产生 EnforcementAction。
+enum DisputeResolutionCode {
+  MUTUAL_AGREEMENT
+  OPERATIONAL_REMEDIATION
+  EVIDENCE_INSUFFICIENT
+  DUPLICATE
+  INVALID
+  OTHER
+}
+
+// ============================================================
+// Phase 7G：Support Ticket（支持工单域）
+// ============================================================
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum SupportTicketCategory {
+  ACCOUNT
+  VERIFICATION
+  MARKETPLACE
+  SAFETY
+  OTHER
+}
+
+// 支持工单处理结果原因码（与 DisputeResolutionCode 是独立 taxonomy，
+// 禁止 cast/复用）。USER_VISIBLE 的 resolutionMessage / OPERATOR_ONLY 的
+// internalNote 是两个分离字段，读面必须分别授权。
+enum SupportResolutionCode {
+  ANSWERED
+  USER_GUIDED
+  DUPLICATE
+  INVALID
+  OUT_OF_SCOPE
+  OTHER
+}
+
 enum ExtensionRequestStatus {
   PENDING // 待审核
   APPROVED // 已同意
@@ -1183,6 +1243,18 @@ model RentalDamageClaim {
   @@index([orderId])
 }
 
+// Phase 7G：租赁纠纷治理域。RentalDispute = dispute workflow / resolution
+// truth（≠ Order / ≠ Enforcement / ≠ Payment）。订单仍是 fulfillment truth。
+// - campus 快照（campusId + scopeKey exact pair）创建时从
+//   RentalOrder → RentalListing.campusId 派生，immutable（DB CHECK 兜底）；
+//   禁止以 User.campusId / 当事人 membership 作为 dispute authorization truth。
+// - openedFromOrderStatus：进入 IN_DISPUTE 前的订单状态快照；运行时写入恒
+//   non-null（历史行由迁移从 RentalOrderStatusLog 回填，不可靠还原 → NULL，
+//   禁止伪造）；RESTORE_PREVIOUS 语义以本列为唯一依据（NULL → DENY）。
+// - 同一订单至多一个 active dispute（OPEN/IN_REVIEW）——由迁移中的
+//   PostgreSQL partial unique index 强制（terminal 历史不阻断未来新 episode）。
+// - resolutionAction/code 为中性运营 taxonomy：本域绝不产生 EnforcementAction，
+//   绝不修改任何金额字段（refund/押金/payout 均为 Phase 8+/payment 禁区）。
 model RentalDispute {
   id             String              @id @default(cuid())
   orderId        String
@@ -1191,14 +1263,46 @@ model RentalDispute {
   reason         String              @db.Text
   evidencePhotos String[]
   status         RentalDisputeStatus @default(OPEN)
-  adminNote      String?             @db.Text
-  resolvedBy     String?
-  resolvedAt     DateTime?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
+
+  // Phase 7G：campus scope 快照（immutable；创建时 snapshot，绝不回猜）
+  campusId String
+  campus   Campus @relation("RentalDisputeScopeCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  scopeKey String
+
+  // 进入 IN_DISPUTE 前的订单状态（RESTORE_PREVIOUS 唯一依据；null = 历史残缺）
+  openedFromOrderStatus RentalOrderStatus?
+
+  // 运营领用（claim/release；SetNull：领用人引用消失时 dispute 仍在）
+  assignedToId String?
+  assignedTo   User?   @relation("DisputeAssignee", fields: [assignedToId], references: [id])
+
+  // 处理 SLA：创建时 = createdAt + 48h（唯一运行时写路径；历史行由迁移回填）。
+  // OVERDUE 只读判定 = status IN (OPEN, IN_REVIEW) ∧ dueAt < now，
+  // 不驱动任何自动决定 / restriction / suspension。
+  dueAt DateTime
+
+  // 终局（RESOLVED / CLOSED）写入；dispute state machine 禁止 reopen
+  resolutionCode   DisputeResolutionCode?
+  resolutionAction DisputeResolutionAction?
+
+  // 正名：列名保持历史 "resolvedBy" 不变（@map 避免无必要 DB rename）；
+  // 治理 provenance 裸字符串（无 FK），不随 reviewer 账户消失被改写
+  resolvedById String?   @map("resolvedBy")
+  resolvedAt   DateTime?
+
+  // 操作员内部备注（OPERATOR_ONLY；queue 结构性不返回，仅授权详情面）
+  adminNote String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([orderId])
   @@index([status, createdAt])
+  // 治理队列排序 keyset tuple（dueAt ASC, createdAt ASC, id ASC）
+  @@index([dueAt, createdAt, id])
+  // campus reviewer exact-pair 授权谓词
+  @@index([campusId, scopeKey])
+  @@index([assignedToId])
 }
 
 model RentalReview {
@@ -1230,6 +1334,60 @@ model RentalReview {
   @@unique([orderId, authorId])
   @@index([targetUserId, createdAt])
   @@index([orderId])
+}
+
+// Phase 7G：支持工单域（SupportTicket = support workflow truth；≠ Dispute）。
+// - scope：用户创建时 campusId 省略 → UNSCOPED（campusId null + scopeKey
+//   'UNSCOPED'）；提供 campusId 时 requester 必须持有该校区 ACTIVE membership，
+//   然后 snapshot (campusId, 'CAMPUS:<id>')。禁止从 User.campusId 自动猜 scope
+//   （DB CHECK 强制 exact pair / UNSCOPED 二选一）。
+// - 字段分离冻结：resolutionMessage = USER_VISIBLE（requester 读面可返回）；
+//   internalNote = OPERATOR_ONLY（任何 requester 读面结构性不返回）。
+// - SLA：创建时 dueAt = createdAt + 72h；OVERDUE 只读判定 =
+//   status IN (OPEN, IN_PROGRESS) ∧ dueAt < now；绝不自动 resolve/close/
+//   escalate/enforce（Phase 9 才有 scheduled reminders）。
+// - 终局（RESOLVED / CLOSED）不可 reopen；claim/release 不重置 dueAt。
+// - 同一用户 active（OPEN/IN_PROGRESS）工单数上限 3 由服务层在
+//   USER:requester 治理锁内强制（并发不得绕过）。
+model SupportTicket {
+  id          String @id @default(cuid())
+  requesterId String
+  requester   User   @relation("SupportTicketRequester", fields: [requesterId], references: [id])
+
+  // scope 快照（immutable；UNSCOPED = null + 'UNSCOPED'）
+  campusId String?
+  campus   Campus? @relation("SupportTicketScopeCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  scopeKey String
+
+  category    SupportTicketCategory
+  status      SupportTicketStatus   @default(OPEN)
+  subject     String
+  description String                @db.Text
+
+  // 运营领用（claim/release；SetNull：领用人引用消失时 ticket 仍在）
+  assignedToId String?
+  assignedTo   User?   @relation("SupportTicketAssignee", fields: [assignedToId], references: [id])
+
+  // 处理 SLA：创建时 = createdAt + 72h（唯一运行时写路径）
+  dueAt DateTime
+
+  // 终局（RESOLVED / CLOSED）写入；terminal 不可 reopen
+  resolutionCode    SupportResolutionCode?
+  resolutionMessage String?                @db.Text // USER_VISIBLE
+  internalNote      String?                @db.Text // OPERATOR_ONLY
+  resolvedById      String? // 治理 provenance 裸字符串（无 FK）
+  resolvedAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 治理队列排序 keyset tuple（dueAt ASC, createdAt ASC, id ASC）
+  @@index([dueAt, createdAt, id])
+  // campus agent exact-pair 授权谓词
+  @@index([campusId, scopeKey])
+  @@index([assignedToId])
+  // requester 侧 active 计数（创建上限 3 的锁内复查）
+  @@index([requesterId, status])
 }
 
 // ============================================================
@@ -1316,6 +1474,12 @@ model DataHold {
   subjectType  String         @default("USER")
   subjectId    String
   reasonCode   String
+  // Phase 7G：source provenance（如 sourceType=RENTAL_DISPUTE + sourceId=
+  // disputeId）。非空时同一 (type, subjectType, subjectId, source) 至多一个
+  // ACTIVE 行（迁移 partial unique index 强制）；terminal release 按 source
+  // 精确解除，绝不触碰无关 LEGAL hold。
+  sourceType   String?
+  sourceId     String?
   note         String?
   createdById  String?
   createdAt    DateTime       @default(now())
@@ -1324,6 +1488,8 @@ model DataHold {
 
   @@index([subjectType, subjectId, status])
   @@index([status, type, createdAt])
+  // source-linked release / 重复防护查询
+  @@index([sourceType, sourceId, status])
 }
 
 // ============================================================
@@ -1657,6 +1823,11 @@ model Appeal {
   enforcementActionId String                    @unique
   status              AppealStatus              @default(SUBMITTED)
   statement           String                    @db.Text
+  // Phase 7G 审核 SLA：提交时 = createdAt（提交时刻）+ 48h（唯一运行时写路径；
+  // 历史行由 migration backfill 以行自身 createdAt 为 origin，绝不用迁移执行
+  // 时刻）。OVERDUE 只读判定 = status IN (SUBMITTED, IN_REVIEW) ∧ reviewDueAt
+  // < now；SLA 不改变 Appeal state machine / enforcement reversal 语义。
+  reviewDueAt         DateTime
   reviewedById        String?
   reviewedAt          DateTime?
   decisionReasonCode  AppealDecisionReasonCode?
@@ -1668,6 +1839,8 @@ model Appeal {
   reviewedBy        User?             @relation("AppealReviewer", fields: [reviewedById], references: [id], onDelete: Restrict)
 
   @@index([status, createdAt])
+  // 队列排序 keyset tuple（reviewDueAt ASC, createdAt ASC, id ASC）
+  @@index([reviewDueAt, createdAt, id])
 }
 
 // ============================================================

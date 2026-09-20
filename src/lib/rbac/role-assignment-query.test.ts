@@ -163,6 +163,8 @@ describe("loadManagedRoleAssignments prisma 路径", () => {
           "CAMPUS_CONTENT_MODERATOR",
           "CAMPUS_REPORT_REVIEWER",
           "CAMPUS_VERIFICATION_REVIEWER",
+          "CAMPUS_DISPUTE_REVIEWER",
+          "CAMPUS_SUPPORT_AGENT",
         ],
       },
     });

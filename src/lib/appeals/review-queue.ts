@@ -1,6 +1,6 @@
 import type { AppealDecisionReasonCode, AppealStatus, EnforcementActionType, EnforcementReasonCode, Prisma } from "@prisma/client";
 
-import { encodeAppealCursor, type AppealCursor } from "@/validators/appeal";
+import { isAppealReviewOverdue } from "@/lib/appeals/appeal-sla";
 import {
   appealReviewCampusBranch,
   appealReviewGlobalBranch,
@@ -12,6 +12,10 @@ import {
   type AppealReviewAccess,
   type AppealReviewCapabilities,
 } from "@/lib/appeals/reviewer-access";
+import {
+  parseCanonicalCursorDate,
+  parseCanonicalCursorJson,
+} from "@/lib/governance/canonical-cursor";
 import { prisma } from "@/lib/prisma";
 import type { AuthorizationContext } from "@/lib/rbac/service";
 
@@ -42,6 +46,10 @@ export type AppealQueueItemDto = {
   id: string;
   status: AppealStatus;
   createdAt: string;
+  /** Phase 7G：审核 SLA 到期（创建时 = createdAt + 48h；只读） */
+  reviewDueAt: string;
+  /** Phase 7G：OVERDUE 只读判定 = status ∈ {SUBMITTED, IN_REVIEW} ∧ reviewDueAt < now */
+  overdue: boolean;
   enforcementType: EnforcementActionType;
   scopeKind: "GLOBAL" | "CAMPUS";
   /** CAMPUS 行的校区显示名；GLOBAL 行恒 null */
@@ -56,6 +64,43 @@ export type AppealQueuePage = {
   nextCursor: string | null;
 };
 
+// ── Phase 7G：队列 cursor（canonical 纪律，SSOT helper）───────────────────────
+// 排序冻结：reviewDueAt ASC, createdAt ASC, id ASC（SLA 优先；替换 7A 的
+// createdAt DESC 排序——7G SLA 收口指令）。user-facing own-list cursor
+// （validators/appeal.ts 的 AppealCursor，createdAt DESC）语义不变。
+
+export type AppealReviewCursor = { reviewDueAt: Date; createdAt: Date; id: string };
+
+/** 由实际返回的最后一条生成下一页 cursor（base64url(JSON)）。 */
+export function encodeAppealReviewCursor(cursor: AppealReviewCursor): string {
+  return Buffer.from(
+    JSON.stringify({
+      reviewDueAt: cursor.reviewDueAt.toISOString(),
+      createdAt: cursor.createdAt.toISOString(),
+      id: cursor.id,
+    }),
+  ).toString("base64url");
+}
+
+/** 解码客户端回传 cursor（FR03 canonical 纪律：exact keys / canonical ISO /
+ * re-encode equality）；任何解析/校验失败返回 null（调用方安全失败态）。 */
+export function decodeAppealReviewCursor(raw: string): AppealReviewCursor | null {
+  const payload = parseCanonicalCursorJson(raw, ["reviewDueAt", "createdAt", "id"]);
+  if (!payload) {
+    return null;
+  }
+  const reviewDueAt = parseCanonicalCursorDate(payload.reviewDueAt);
+  const createdAt = parseCanonicalCursorDate(payload.createdAt);
+  if (!reviewDueAt || !createdAt || payload.id.length === 0) {
+    return null;
+  }
+  const cursor: AppealReviewCursor = { reviewDueAt, createdAt, id: payload.id };
+  if (encodeAppealReviewCursor(cursor) !== raw) {
+    return null;
+  }
+  return cursor;
+}
+
 /** 授权分支集合（fail-closed：无有效 scope 时返回不可能命中的空数组）。 */
 async function authorizedEnforcementBranches(
   access: AppealReviewAccess,
@@ -67,12 +112,16 @@ async function authorizedEnforcementBranches(
   return access.campusIds.map((campusId) => appealReviewCampusBranch(campusId));
 }
 
-function keysetCondition(cursor: AppealCursor): Prisma.AppealWhereInput {
+/** keyset 条件（ASC 全 tuple：reviewDueAt > ∨ (=∧createdAt >) ∨ (=∧=∧id >)）。 */
+function keysetCondition(cursor: AppealReviewCursor): Prisma.AppealWhereInput {
   return {
     OR: [
-      { createdAt: { lt: cursor.createdAt } },
+      { reviewDueAt: { gt: cursor.reviewDueAt } },
+      { reviewDueAt: { equals: cursor.reviewDueAt }, createdAt: { gt: cursor.createdAt } },
       {
-        AND: [{ createdAt: { equals: cursor.createdAt } }, { id: { lt: cursor.id } }],
+        reviewDueAt: { equals: cursor.reviewDueAt },
+        createdAt: { equals: cursor.createdAt },
+        id: { gt: cursor.id },
       },
     ],
   };
@@ -81,7 +130,7 @@ function keysetCondition(cursor: AppealCursor): Prisma.AppealWhereInput {
 export async function loadAuthorizedAppealQueue(input: {
   viewerId: string;
   access: AppealReviewAccess;
-  cursor?: AppealCursor;
+  cursor?: AppealReviewCursor;
   limit: number;
 }): Promise<AppealQueuePage> {
   const branches = await authorizedEnforcementBranches(input.access);
@@ -98,12 +147,13 @@ export async function loadAuthorizedAppealQueue(input: {
       ...(input.cursor ? keysetCondition(input.cursor) : {}),
       enforcementAction: { OR: branches },
     },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    orderBy: [{ reviewDueAt: "asc" }, { createdAt: "asc" }, { id: "asc" }],
     take: input.limit + 1,
     select: {
       id: true,
       status: true,
       createdAt: true,
+      reviewDueAt: true,
       enforcementAction: {
         select: {
           type: true,
@@ -119,12 +169,15 @@ export async function loadAuthorizedAppealQueue(input: {
   const hasMore = rows.length > input.limit;
   const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
   const last = pageRows[pageRows.length - 1];
+  const now = new Date();
 
   return {
     items: pageRows.map((row) => ({
       id: row.id,
       status: row.status,
       createdAt: row.createdAt.toISOString(),
+      reviewDueAt: row.reviewDueAt.toISOString(),
+      overdue: isAppealReviewOverdue({ status: row.status, reviewDueAt: row.reviewDueAt }, now),
       enforcementType: row.enforcementAction.type,
       scopeKind: row.enforcementAction.campusId === null ? "GLOBAL" : "CAMPUS",
       campusName: row.enforcementAction.campus?.name ?? null,
@@ -132,7 +185,13 @@ export async function loadAuthorizedAppealQueue(input: {
       selfReview: row.enforcementAction.actorId === input.viewerId,
     })),
     nextCursor:
-      hasMore && last ? encodeAppealCursor({ createdAt: last.createdAt, id: last.id }) : null,
+      hasMore && last
+        ? encodeAppealReviewCursor({
+            reviewDueAt: last.reviewDueAt,
+            createdAt: last.createdAt,
+            id: last.id,
+          })
+        : null,
   };
 }
 
@@ -143,6 +202,10 @@ export type AppealDetailDto = {
   status: AppealStatus;
   statement: string;
   createdAt: string;
+  /** Phase 7G：审核 SLA 到期（只读） */
+  reviewDueAt: string;
+  /** Phase 7G：OVERDUE 只读判定（不驱动任何自动决定） */
+  overdue: boolean;
   /** 申诉终局原因码（terminal 后展示；机器码，隐私导出 v2 对 appellant 同样披露） */
   decisionReasonCode: AppealDecisionReasonCode | null;
   enforcement: {
@@ -181,6 +244,7 @@ export async function loadAuthorizedAppealDetail(input: {
       status: true,
       statement: true,
       createdAt: true,
+      reviewDueAt: true,
       decisionReasonCode: true,
       enforcementAction: {
         select: {
@@ -226,6 +290,8 @@ export async function loadAuthorizedAppealDetail(input: {
       status: row.status,
       statement: row.statement,
       createdAt: row.createdAt.toISOString(),
+      reviewDueAt: row.reviewDueAt.toISOString(),
+      overdue: isAppealReviewOverdue({ status: row.status, reviewDueAt: row.reviewDueAt }),
       decisionReasonCode: row.decisionReasonCode,
       enforcement: {
         type: action.type,

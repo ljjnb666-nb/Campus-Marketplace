@@ -13,6 +13,16 @@ export async function listActiveCampuses() {
   });
 }
 
+// Phase 7G：用户 ACTIVE membership 的校区（/support 创建表单校区下拉用，
+// 仅呈现；scope 授权真相由 canonical 服务在锁内独立复核）
+export async function listActiveMembershipCampuses(userId: string) {
+  return prisma.campusMembership.findMany({
+    where: { userId, status: "ACTIVE" },
+    select: { campus: { select: { id: true, name: true } } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+}
+
 export async function getProfileDashboard(userId: string) {
   const user = await prisma.user.findFirst({
     where: {

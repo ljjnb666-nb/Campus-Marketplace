@@ -1,8 +1,19 @@
 import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
 import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
+import {
+  DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE,
+  DISPUTE_HOLD_REASON_CODE,
+  createHoldTxLocked,
+} from "@/lib/privacy/data-hold-service";
+import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { createNotifications } from "@/repositories/notification-repository";
+import { computeDisputeDueAt } from "@/lib/disputes/dispute-sla";
+import {
+  DISPUTE_ACTIVE_STATUSES,
+  disputeCampusScopeKey,
+} from "@/lib/disputes/dispute-scope";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
 import { withObligationGuard, type ObligationRacePoint } from "@/lib/governance/obligation-guard";
@@ -761,36 +772,145 @@ export async function respondDamageClaimTx(
   return { success: true };
 }
 
+/**
+ * Phase 7G：发起租赁纠纷（serialization 修复版）。
+ *
+ * 修复既有 read → create → update 无锁模式（TOCTOU：并发双 dispute、
+ * 锁外状态校验）。冻结流程（directive §INITIATE DISPUTE SERIALIZATION）：
+ *
+ *   1. candidate order pre-read（无锁，仅发现 ownerId/renterId/campusId）
+ *   2. acquire ONE sorted governance subject lock set：USER:owner + USER:renter
+ *      （与 role revoke / account suspend / erasure / 其它 dispute 决策同锁序串行）
+ *   3. RentalOrder FOR UPDATE
+ *   4. locked re-read / revalidate：同一 owner/renter/campus、disputable 状态、
+ *      无 active dispute（pre-read 仅 discovery，绝不信任其快照）
+ *   5. create RentalDispute：status=OPEN、openedFromOrderStatus=当前订单状态
+ *      （恒 non-null）、campus snapshot（order → listing.campusId）、
+ *      dueAt = createdAt + 48h
+ *   6. create dispute DataHolds（owner + renter，source-linked）经
+ *      createHoldTxLocked seam（调用方锁前置条件在本事务内已满足）
+ *   7. RentalOrder.status = IN_DISPUTE
+ *   8. status log
+ *   9. notifications
+ *
+ * 不使用 sleep 排序；同一订单的 active dispute 唯一性另由 DB partial unique
+ * index（RentalDispute_order_active_key）兜底。DISPUTE_AUTO_RISK_FLAG =
+ * DISABLED（dispute 是双边关系，RiskFlag.userId 是单边的——禁止自动把
+ * initiator/counterparty 变成 risk signal target）；也不产生任何
+ * EnforcementAction / 审计行（用户侧动作，非治理 mutation）。
+ */
 export async function initiateDisputeTx(
   tx: Prisma.TransactionClient,
-  input: { orderId: string; userId: string; reason: string; evidencePhotos: string[] },
+  input: {
+    orderId: string;
+    userId: string;
+    reason: string;
+    evidencePhotos: string[];
+    /** 测试 seam：锁 + 复查之后、首个写入之前（D-RACE waiter 注入；生产不传） */
+    racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
+  },
 ): Promise<RentalOrderTxError | { success: true }> {
-  const order = await tx.rentalOrder.findFirst({
-    where: { id: input.orderId, OR: [{ ownerId: input.userId }, { renterId: input.userId }] },
-  });
+  // ---- 步骤 1：candidate pre-read（无锁，仅用于发现锁键与 campus）----
+  const candidates = await tx.$queryRaw<
+    { id: string; ownerId: string; renterId: string; campusId: string }[]
+  >`
+    SELECT o."id", o."ownerId", o."renterId", l."campusId"
+    FROM "RentalOrder" o
+    JOIN "RentalListing" l ON o."rentalListingId" = l."id"
+    WHERE o."id" = ${input.orderId}
+      AND (o."ownerId" = ${input.userId} OR o."renterId" = ${input.userId})
+  `;
+  const candidate = candidates[0];
+  if (!candidate) return { error: "无效请求" };
+
+  // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter（全局锁序）----
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.ownerId },
+    { subjectType: "USER", subjectId: candidate.renterId },
+  ]);
+
+  // ---- 步骤 3：RentalOrder FOR UPDATE（行锁下重验证）----
+  const rows = await tx.$queryRaw<
+    { id: string; ownerId: string; renterId: string; status: string; campusId: string }[]
+  >`
+    SELECT o."id", o."ownerId", o."renterId", o."status", l."campusId"
+    FROM "RentalOrder" o
+    JOIN "RentalListing" l ON o."rentalListingId" = l."id"
+    WHERE o."id" = ${input.orderId}
+    FOR UPDATE
+  `;
+  const order = rows[0];
   if (!order) return { error: "无效请求" };
 
-  if (!isDisputableStatus(order.status)) return { error: "状态不允许纠纷" };
+  // ---- 步骤 4：locked revalidate（不信任 pre-read snapshot，fail closed）----
+  if (order.ownerId !== candidate.ownerId || order.renterId !== candidate.renterId) {
+    return { error: "订单状态已变化，请重试" };
+  }
+  if (order.campusId !== candidate.campusId) {
+    return { error: "订单状态已变化，请重试" };
+  }
+  if (order.ownerId !== input.userId && order.renterId !== input.userId) {
+    return { error: "无效请求" };
+  }
+  if (!isDisputableStatus(order.status as RentalOrderStatus)) {
+    return { error: "状态不允许纠纷" };
+  }
+  const activeDispute = await tx.rentalDispute.findFirst({
+    where: { orderId: input.orderId, status: { in: [...DISPUTE_ACTIVE_STATUSES] } },
+    select: { id: true },
+  });
+  if (activeDispute) return { error: "该订单已有进行中的纠纷" };
 
-  await tx.rentalDispute.create({
+  if (input.racePoint) {
+    await input.racePoint(tx);
+  }
+
+  // ---- 步骤 5-9：dispute + source-linked holds + order 状态 + log + 通知 ----
+  const now = new Date();
+  const dispute = await tx.rentalDispute.create({
     data: {
       orderId: input.orderId,
       initiatorId: input.userId,
       reason: input.reason,
       evidencePhotos: input.evidencePhotos,
-      status: 'OPEN',
+      status: "OPEN",
+      campusId: order.campusId,
+      scopeKey: disputeCampusScopeKey(order.campusId),
+      openedFromOrderStatus: order.status as RentalOrderStatus,
+      dueAt: computeDisputeDueAt(now),
+      createdAt: now,
     },
+    select: { id: true },
+  });
+
+  // 步骤 6：owner + renter 各一条 source-linked DISPUTE hold（TxLocked seam，
+  // 本事务已持有双方 subject 锁 → 前置条件满足；partial unique 兜底重复）
+  await createHoldTxLocked(tx, {
+    type: "DISPUTE",
+    subjectType: "USER",
+    subjectId: order.ownerId,
+    reasonCode: DISPUTE_HOLD_REASON_CODE,
+    sourceType: DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE,
+    sourceId: dispute.id,
+  });
+  await createHoldTxLocked(tx, {
+    type: "DISPUTE",
+    subjectType: "USER",
+    subjectId: order.renterId,
+    reasonCode: DISPUTE_HOLD_REASON_CODE,
+    sourceType: DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE,
+    sourceId: dispute.id,
   });
 
   await tx.rentalOrder.update({
     where: { id: input.orderId },
-    data: { status: 'IN_DISPUTE' },
+    data: { status: "IN_DISPUTE" },
   });
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
-    fromStatus: order.status,
-    toStatus: 'IN_DISPUTE',
+    fromStatus: order.status as RentalOrderStatus,
+    toStatus: "IN_DISPUTE",
     operatorId: input.userId,
     note: `发起纠纷: ${input.reason}`,
   });

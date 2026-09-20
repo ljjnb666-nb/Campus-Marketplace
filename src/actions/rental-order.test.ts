@@ -29,6 +29,8 @@ const {
   txExtensionRequestUpdate,
   txDamageClaimCreate,
   txDisputeCreate,
+  txDisputeFindFirst,
+  txDataHoldCreate,
 } = vi.hoisted(() => {
   const txExecuteRaw = vi.fn();
   const txUserFindMany = vi.fn();
@@ -52,6 +54,8 @@ const {
   const txExtensionRequestUpdate = vi.fn();
   const txDamageClaimCreate = vi.fn();
   const txDisputeCreate = vi.fn();
+  const txDisputeFindFirst = vi.fn();
+  const txDataHoldCreate = vi.fn();
 
   const transactionClient = {
     $queryRaw: txQueryRaw,
@@ -84,7 +88,9 @@ const {
       create: txExtensionRequestCreate,
       update: txExtensionRequestUpdate,
     },
-    rentalDispute: { create: txDisputeCreate },
+    rentalDispute: { create: txDisputeCreate, findFirst: txDisputeFindFirst },
+    // Phase 7G：dispute 创建的 source-linked holds（TxLocked seam）
+    dataHold: { create: txDataHoldCreate, findFirst: vi.fn(async () => null) },
     rentalReview: {
       findFirst: txRentalReviewFindFirst,
       create: txRentalReviewCreate,
@@ -122,6 +128,8 @@ const {
     txExtensionRequestUpdate,
     txDamageClaimCreate,
     txDisputeCreate,
+    txDisputeFindFirst,
+    txDataHoldCreate,
   };
 });
 
@@ -306,6 +314,8 @@ describe("rental-order actions", () => {
     txExtensionRequestUpdate.mockReset();
     txDamageClaimCreate.mockReset();
     txDisputeCreate.mockReset();
+    txDisputeFindFirst.mockReset();
+    txDataHoldCreate.mockReset();
     uploadImageAsset.mockReset();
     uploadImageAsset.mockResolvedValue({
       assetId: "asset-1",
@@ -330,6 +340,9 @@ describe("rental-order actions", () => {
     txExtensionRequestUpdate.mockResolvedValue({});
     txDamageClaimCreate.mockResolvedValue({});
     txDisputeCreate.mockResolvedValue({});
+    // Phase 7G：默认无 active dispute、hold 创建成功
+    txDisputeFindFirst.mockResolvedValue(null);
+    txDataHoldCreate.mockResolvedValue({ id: "hold-1" });
 
     // participant governance guard 默认全绿（锁查询 + 全员 ACTIVE）
     txExecuteRaw.mockReset().mockResolvedValue(0);
@@ -1045,11 +1058,25 @@ describe("rental-order actions", () => {
   });
 
   it("initiates a dispute on a completed order and flips its status", async () => {
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "COMPLETED",
-      ownerId: "user-owner",
-      renterId: "user-renter",
+    // Phase 7G serialization 重写：pre-read（无锁发现）与 FOR UPDATE（锁内重读）
+    // 均走 $queryRaw——按 SQL 形状区分（锁读含 FOR UPDATE）
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes("FOR UPDATE")) {
+        return [{
+          id: "order-1",
+          ownerId: "user-owner",
+          renterId: "user-renter",
+          status: "COMPLETED",
+          campusId: "campus-1",
+        }];
+      }
+      return [{
+        id: "order-1",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+        campusId: "campus-1",
+      }];
     });
 
     const formData = new FormData();
@@ -1059,25 +1086,95 @@ describe("rental-order actions", () => {
     const result = await initiateDispute(formData);
 
     expect(result).toEqual({ success: true, message: "已发起纠纷" });
-    expect(txDisputeCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        orderId: "order-1",
-        initiatorId: "user-renter",
-        status: "OPEN",
+    expect(txDisputeCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          orderId: "order-1",
+          initiatorId: "user-renter",
+          status: "OPEN",
+          campusId: "campus-1",
+          scopeKey: "CAMPUS:campus-1",
+          openedFromOrderStatus: "COMPLETED",
+        }),
       }),
-    });
+    );
+    // source-linked holds：owner + renter 各一条（TxLocked seam，partial unique 兜底）
+    expect(txDataHoldCreate).toHaveBeenCalledTimes(2);
     expect(txRentalOrderUpdate).toHaveBeenCalledWith({
       where: { id: "order-1" },
       data: { status: "IN_DISPUTE" },
     });
   });
 
+  it("Phase 7G：锁内 revalidate 失败臂——owner/renter/campus 漂移或非当事人 → 拒绝（fail closed）", async () => {
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("reason", "锁内复查竞争描述");
+
+    function row(overrides: Record<string, unknown>) {
+      return {
+        id: "order-1",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+        campusId: "campus-1",
+        ...overrides,
+      };
+    }
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes("FOR UPDATE")) {
+        return [
+          row({
+            ownerId: "user-owner-changed",
+            status: "COMPLETED",
+          }),
+        ];
+      }
+      return [row({})];
+    });
+    // pre-read owner 与锁内 owner 漂移 → fail closed
+    const drifted = await initiateDispute(formData);
+    expect(drifted).toEqual({ success: false, message: "订单状态已变化，请重试" });
+
+    // 锁内 campus 漂移
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes("FOR UPDATE")) {
+        return [row({ status: "COMPLETED", campusId: "campus-x" })];
+      }
+      return [row({})];
+    });
+    const campusDrift = await initiateDispute(formData);
+    expect(campusDrift).toEqual({ success: false, message: "订单状态已变化，请重试" });
+
+    // 锁内行消失
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes("FOR UPDATE")) return [];
+      return [row({})];
+    });
+    const vanished = await initiateDispute(formData);
+    expect(vanished).toEqual({ success: false, message: "无效请求" });
+  });
+
   it("rejects disputes in non-disputable states", async () => {
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "PENDING_APPROVAL",
-      ownerId: "user-owner",
-      renterId: "user-renter",
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes("FOR UPDATE")) {
+        return [{
+          id: "order-1",
+          ownerId: "user-owner",
+          renterId: "user-renter",
+          status: "PENDING_APPROVAL",
+          campusId: "campus-1",
+        }];
+      }
+      return [{
+        id: "order-1",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+        campusId: "campus-1",
+      }];
     });
 
     const formData = new FormData();

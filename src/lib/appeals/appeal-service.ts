@@ -2,6 +2,7 @@ import { Prisma, type AppealStatus } from "@prisma/client";
 
 import { isPunitive } from "@/lib/enforcement/enforcement-sequence";
 import { appealError } from "@/lib/appeals/errors";
+import { computeAppealReviewDueAt } from "@/lib/appeals/appeal-sla";
 import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
@@ -168,13 +169,17 @@ export async function submitAppeal(
       throw appealError("APPEAL_NOT_ALLOWED", { userMessage: "该执法记录不可申诉" });
     }
 
-    // 7. create；unique enforcementActionId 冲突精确收敛
+    // 7. create；unique enforcementActionId 冲突精确收敛。
+    //    Phase 7G：reviewDueAt = 提交时刻 + 48h（唯一运行时写路径，与
+    //    migration backfill 的 origin 语义一致；OVERDUE 只读，不改变
+    //    state machine / enforcement reversal 语义）。
     try {
       const appeal = await tx.appeal.create({
         data: {
           enforcementActionId: action.id,
           status: "SUBMITTED",
           statement,
+          reviewDueAt: computeAppealReviewDueAt(new Date()),
         },
       });
       return { appeal, targetUserId: action.targetId };

@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { readPrivateAssetObject } from "@/lib/asset-service";
+import {
+  readPrivateAssetObject,
+  recordDisputeEvidenceAuditIfNeeded,
+} from "@/lib/asset-service";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import {
   getVerifiedSession,
@@ -82,6 +85,12 @@ async function getHandler(
         },
       });
     }
+
+    // Phase 7G：permission 路径实际读取 dispute evidence（REPORT 且被某
+    // dispute 的 evidencePhotos 精确引用）本身即审计事件（DE07）。owner /
+    // 订单参与者的常规访问不产生 governance audit（disputeEvidence 恒 null）。
+    // metadata 仅机器可读白名单键：不含 dispute reason / evidence URL。
+    await recordDisputeEvidenceAuditIfNeeded(userId, result, assetId);
 
     logger.info("私有资产内容同源转发", "GET /api/assets/[assetId]/content", {
       operation: "asset-content",

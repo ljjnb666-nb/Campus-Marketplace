@@ -36,6 +36,10 @@ const txStub = {
   rentalOrder: {
     count: vi.fn(),
   },
+  supportTicket: {
+    count: vi.fn(),
+    updateMany: vi.fn(),
+  },
   dataHold: {
     findMany: vi.fn(),
   },
@@ -54,7 +58,11 @@ vi.mock("@/lib/logger", () => ({
   },
 }));
 
-import { ERASED_USER_DISPLAY_NAME, eraseAccount } from "@/lib/privacy/account-erasure";
+import {
+  ERASED_SUPPORT_TICKET_TEXT_MARKER,
+  ERASED_USER_DISPLAY_NAME,
+  eraseAccount,
+} from "@/lib/privacy/account-erasure";
 
 const ACTIVE_USER = {
   id: "user-1",
@@ -88,6 +96,8 @@ beforeEach(() => {
   txStub.session.deleteMany.mockResolvedValue({ count: 0 });
   txStub.order.count.mockResolvedValue(0);
   txStub.rentalOrder.count.mockResolvedValue(0);
+  txStub.supportTicket.count.mockResolvedValue(0);
+  txStub.supportTicket.updateMany.mockResolvedValue({ count: 0 });
   txStub.dataHold.findMany.mockResolvedValue([]);
 });
 
@@ -169,6 +179,32 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
       code: "ACCOUNT_ALREADY_DELETED",
     });
     expect(txStub.user.update).not.toHaveBeenCalled();
+  });
+
+  it("Phase 7G：active 支持工单阻断注销（ACTIVE_SUPPORT_TICKET，零写回滚）", async () => {
+    txStub.supportTicket.count.mockResolvedValue(2);
+
+    await expect(eraseAccount("user-1")).rejects.toMatchObject({
+      code: "ACTIVE_SUPPORT_TICKET",
+    });
+    expect(txStub.user.update).not.toHaveBeenCalled();
+  });
+
+  it("Phase 7G：terminal 工单不阻断；注销清理 user free text（subject/description → 标记，message/note → null）", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.supportTicket.count).toHaveBeenCalledWith({
+      where: { requesterId: "user-1", status: { in: ["OPEN", "IN_PROGRESS"] } },
+    });
+    expect(txStub.supportTicket.updateMany).toHaveBeenCalledWith({
+      where: { requesterId: "user-1" },
+      data: {
+        subject: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        resolutionMessage: null,
+        internalNote: null,
+      },
+    });
   });
 
   it("blocks without any write while a hold is active (HOLD_BLOCKS_ERASURE)", async () => {

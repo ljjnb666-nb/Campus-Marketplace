@@ -1265,6 +1265,8 @@ describe.skipIf(!integrationDatabaseUrl)(
           enforcementActionId: ea.id,
           status: "SUBMITTED",
           statement: "RACE-6 集成测试申诉陈述",
+          // Phase 7G：reviewDueAt NOT NULL
+          reviewDueAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
         },
       });
 

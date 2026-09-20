@@ -22,6 +22,7 @@ import {
   parseAssetReference,
 } from "@/lib/asset-ref";
 import { isUploadCategory, UPLOAD_LIMITS, type UploadCategory } from "@/lib/upload-limits";
+import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
 
 export { buildAssetReference, isAssetReference, parseAssetReference };
@@ -740,6 +741,13 @@ export type PrivateAssetAccessResult =
         rentalOrder: { renterId: string; ownerId: string; rentalListing: { campusId: string } | null } | null;
       };
       grantedBy: PrivateAssetGrantedBy;
+      /**
+       * Phase 7G：dispute 绑定标记（仅 permission 路径且 category==REPORT 时
+       * 解析）。非 null = 该资产被某 dispute 的 evidencePhotos 精确引用（内容
+       * 读取路径据此写 DISPUTE_EVIDENCE_ACCESSED 审计）；owner / order
+       * participant / 非 REPORT 路径恒 null（常规访问不产生 governance audit）。
+       */
+      disputeEvidence: { disputeId: string; campusId: string } | null;
     }
   | { ok: false; reason: "not_found" | "not_private" | "expired" | "forbidden" };
 
@@ -803,7 +811,7 @@ export async function resolvePrivateAssetAccess(
   }
 
   if (asset.ownerId === user.id) {
-    return { ok: true, asset, grantedBy: "owner" };
+    return { ok: true, asset, grantedBy: "owner", disputeEvidence: null };
   }
 
   const order = asset.rentalOrder;
@@ -812,7 +820,7 @@ export async function resolvePrivateAssetAccess(
 
   const categoryAllowsOrderParticipants: AssetCategory[] = ["HANDOVER", "RETURN", "REPORT"];
   if (orderParticipant && categoryAllowsOrderParticipants.includes(asset.category)) {
-    return { ok: true, asset, grantedBy: "order_participant" };
+    return { ok: true, asset, grantedBy: "order_participant", disputeEvidence: null };
   }
 
   const targetCampusId =
@@ -847,13 +855,42 @@ export async function resolvePrivateAssetAccess(
         asset.verification?.membership.campusId ?? null,
       )
     ) {
-      return { ok: true, asset, grantedBy: "permission" };
+      return { ok: true, asset, grantedBy: "permission", disputeEvidence: null };
+    }
+    return { ok: false, reason: "forbidden" };
+  }
+
+  if (asset.category === "REPORT") {
+    // Phase 7G：dispute.evidence.read 窄授权——放行条件必须全部成立：
+    // (1) asset.category == REPORT；(2) asset token 精确出现在某 dispute 的
+    // evidencePhotos 内（绝不能因 asset.rentalOrderId == orderId 就放行同订单
+    // 全部 REPORT assets——否则会顺便暴露 damage-claim 等非 dispute 证据）；
+    // (3) dispute scope campus 精确匹配（GLOBAL grant 覆盖全部校区）。
+    // 与既有 asset.sensitive.read 并列（OR）——其原语义不变（DE06）。
+    const disputeBinding = await prisma.rentalDispute.findFirst({
+      where: {
+        evidencePhotos: { has: buildAssetReference(asset.id) },
+      },
+      select: { id: true, campusId: true },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
+    const disputeEvidence =
+      disputeBinding && disputeBinding.campusId !== null
+        ? { disputeId: disputeBinding.id, campusId: disputeBinding.campusId }
+        : null;
+
+    if (
+      (disputeEvidence !== null &&
+        hasPermission(context, "dispute.evidence.read", disputeEvidence.campusId)) ||
+      hasPermission(context, "asset.sensitive.read", permissionTargetCampusId)
+    ) {
+      return { ok: true, asset, grantedBy: "permission", disputeEvidence };
     }
     return { ok: false, reason: "forbidden" };
   }
 
   if (hasPermission(context, "asset.sensitive.read", permissionTargetCampusId)) {
-    return { ok: true, asset, grantedBy: "permission" };
+    return { ok: true, asset, grantedBy: "permission", disputeEvidence: null };
   }
 
   return { ok: false, reason: "forbidden" };
@@ -897,6 +934,8 @@ export async function readPrivateAssetObject(
       sizeBytes: number;
       grantedBy: PrivateAssetGrantedBy;
       category: AssetCategory;
+      /** Phase 7G：dispute 绑定标记（非 null = dispute evidence，内容路径须审计） */
+      disputeEvidence: { disputeId: string; campusId: string } | null;
     }
   | { ok: false; reason: "not_found" | "forbidden" | "expired" }
 > {
@@ -921,7 +960,40 @@ export async function readPrivateAssetObject(
     sizeBytes: object.sizeBytes,
     grantedBy: access.grantedBy,
     category: access.asset.category,
+    disputeEvidence: access.disputeEvidence,
   };
+}
+
+/**
+ * Phase 7G：dispute evidence 的治理读取审计（DE07 合同，content 路由消费）。
+ * 仅当读取结果是"REPORT 且被某 dispute 的 evidencePhotos 精确绑定"时写
+ * DISPUTE_EVIDENCE_ACCESSED；owner / order participant 常规访问
+ * （disputeEvidence=null）不产生 governance audit。metadata 仅机器可读
+ * 白名单键（不含 dispute reason / evidence URL）。
+ */
+export async function recordDisputeEvidenceAuditIfNeeded(
+  actorId: string,
+  read: {
+    category: AssetCategory;
+    grantedBy: PrivateAssetGrantedBy;
+    disputeEvidence: { disputeId: string; campusId: string } | null;
+  },
+  assetId: string,
+): Promise<void> {
+  if (read.category === "REPORT" && read.disputeEvidence !== null) {
+    await recordAdminAudit({
+      actorId,
+      action: "DISPUTE_EVIDENCE_ACCESSED",
+      targetType: "UPLOADED_ASSET",
+      targetId: assetId,
+      campusId: read.disputeEvidence.campusId,
+      metadata: {
+        assetCategory: read.category,
+        grantedBy: read.grantedBy,
+        disputeId: read.disputeEvidence.disputeId,
+      },
+    });
+  }
 }
 
 /**

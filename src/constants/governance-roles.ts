@@ -1,6 +1,8 @@
 import {
   CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
   CAMPUS_CONTENT_MODERATOR_ROLE_KEY,
+  CAMPUS_DISPUTE_REVIEWER_ROLE_KEY,
+  CAMPUS_SUPPORT_AGENT_ROLE_KEY,
 } from "@/lib/rbac/roles";
 
 /**
@@ -14,6 +16,9 @@ export const GOVERNANCE_ROLE_LABELS: Record<string, string> = {
   [CAMPUS_APPEAL_REVIEWER_ROLE_KEY]: "校区申诉审核员",
   // Phase 7C：内容审核员（allowlist 显式扩列的第二个可管角色）
   [CAMPUS_CONTENT_MODERATOR_ROLE_KEY]: "校区内容审核员",
+  // Phase 7G：纠纷审核员 / 支持专员（allowlist 显式扩列）
+  [CAMPUS_DISPUTE_REVIEWER_ROLE_KEY]: "校区纠纷审核员",
+  [CAMPUS_SUPPORT_AGENT_ROLE_KEY]: "校区支持专员",
 };
 
 export const GOVERNANCE_ROLE_GRANT_HINT = "将授予：校区申诉审核员";
@@ -21,6 +26,8 @@ export const GOVERNANCE_ROLE_GRANT_HINT = "将授予：校区申诉审核员";
 export const GOVERNANCE_ROLE_GRANT_HINTS: Record<string, string> = {
   [CAMPUS_APPEAL_REVIEWER_ROLE_KEY]: "将授予：校区申诉审核员",
   [CAMPUS_CONTENT_MODERATOR_ROLE_KEY]: "将授予：校区内容审核员",
+  [CAMPUS_DISPUTE_REVIEWER_ROLE_KEY]: "将授予：校区纠纷审核员",
+  [CAMPUS_SUPPORT_AGENT_ROLE_KEY]: "将授予：校区支持专员",
 };
 
 export const ROLE_MANAGE_PAGE_TITLE = "角色管理";

@@ -15,6 +15,7 @@ const {
   transactionMock,
   loadAuthorizationContextMock,
   campusMembershipFindFirstMock,
+  rentalDisputeFindFirstMock,
 } = vi.hoisted(() => ({
   putObject: vi.fn(),
   deleteObject: vi.fn(),
@@ -30,6 +31,7 @@ const {
   transactionMock: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   campusMembershipFindFirstMock: vi.fn(),
+  rentalDisputeFindFirstMock: vi.fn(),
 }));
 
 vi.mock("@/lib/storage", async (importOriginal) => {
@@ -74,6 +76,8 @@ vi.mock("@/lib/prisma", () => ({
     },
     user: { findUnique: userFindUnique },
     campusMembership: { findFirst: campusMembershipFindFirstMock },
+    // Phase 7G：dispute evidence 绑定解析
+    rentalDispute: { findFirst: rentalDisputeFindFirstMock },
   },
 }));
 
@@ -948,6 +952,178 @@ describe("resolvePrivateAssetAccess", () => {
       reason: "expired",
     });
     expect(getObject).not.toHaveBeenCalled();
+  });
+});
+
+// ── Phase 7G：dispute evidence 窄读取（dispute.evidence.read）─────────────────
+
+describe("resolvePrivateAssetAccess（Phase 7G dispute evidence）", () => {
+  const orderAssetBase = {
+    ...baseAsset,
+    category: "REPORT",
+    rentalOrder: {
+      renterId: "user-renter",
+      ownerId: "user-owner",
+      rentalListing: { campusId: "campus-a" },
+    },
+  };
+
+  function ctxWith(
+    grants: AuthorizationContext["grants"],
+    activeCampusIds: string[] = [],
+  ): AuthorizationContext {
+    return {
+      userId: "caller-1",
+      accountActive: true,
+      activeCampusIds,
+      grants,
+    };
+  }
+
+  function disputeEvidenceGrant(campusId: string | null): AuthorizationContext["grants"][number] {
+    return {
+      roleKey: "CAMPUS_DISPUTE_REVIEWER",
+      scope: campusId === null ? "GLOBAL" : "CAMPUS",
+      campusId,
+      permissionKeys: ["dispute.review", "dispute.evidence.read"],
+    };
+  }
+
+  const globalSensitiveGrant: AuthorizationContext["grants"][number] = {
+    roleKey: "PLATFORM_ADMIN",
+    scope: "GLOBAL",
+    campusId: null,
+    permissionKeys: ["asset.sensitive.read"],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([], []));
+    campusMembershipFindFirstMock.mockResolvedValue(null);
+    rentalDisputeFindFirstMock.mockResolvedValue(null);
+  });
+
+  it("DE01：campus dispute reviewer exact campus 绑定证据放行（disputeEvidence 标记回传）", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue({ id: "dispute-1", campusId: "campus-a" });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([disputeEvidenceGrant("campus-a")], ["campus-a"]),
+    );
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
+    expect(granted.ok).toBe(true);
+    if (granted.ok) {
+      expect(granted.grantedBy).toBe("permission");
+      expect(granted.disputeEvidence).toEqual({ disputeId: "dispute-1", campusId: "campus-a" });
+    }
+    // 绑定解析必须按 asset token 精确匹配 dispute.evidencePhotos
+    expect(rentalDisputeFindFirstMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          evidencePhotos: { has: "asset:asset-1" },
+        }),
+      }),
+    );
+  });
+
+  it("DE02：cross-campus dispute reviewer 拒绝（exact binding fail closed）", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue({ id: "dispute-1", campusId: "campus-a" });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([disputeEvidenceGrant("campus-b")], ["campus-b"]),
+    );
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("DE03：同订单 REPORT 资产但未被 dispute 引用 → dispute.evidence.read 恒拒绝", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    // 关键：绑定查询返回 null（该资产不在任何 dispute.evidencePhotos 内）
+    rentalDisputeFindFirstMock.mockResolvedValue(null);
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([disputeEvidenceGrant("campus-a")], ["campus-a"]),
+    );
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("DE05：dispute.review 而无 dispute.evidence.read → 绑定证据拒绝", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue({ id: "dispute-1", campusId: "campus-a" });
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith(
+        [
+          {
+            roleKey: "CAMPUS_DISPUTE_REVIEWER",
+            scope: "CAMPUS",
+            campusId: "campus-a",
+            permissionKeys: ["dispute.review"],
+          },
+        ],
+        ["campus-a"],
+      ),
+    );
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("DE06：GLOBAL asset.sensitive.read 既有语义不变（非绑定 REPORT 放行、无 dispute 标记）", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue(null);
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
+    expect(granted.ok).toBe(true);
+    if (granted.ok) {
+      expect(granted.grantedBy).toBe("permission");
+      // 非绑定 REPORT：sensitive.read 放行但不产生 dispute 审计标记
+      expect(granted.disputeEvidence).toBeNull();
+    }
+  });
+
+  it("DE06b：绑定证据经 asset.sensitive.read 放行时同样携带 disputeEvidence 标记（审计面）", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue({ id: "dispute-1", campusId: "campus-a" });
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
+    expect(granted.ok).toBe(true);
+    if (granted.ok) {
+      expect(granted.disputeEvidence).toEqual({ disputeId: "dispute-1", campusId: "campus-a" });
+    }
+  });
+
+  it("owner / order participant 常规访问不携带 disputeEvidence 标记（零 governance audit）", async () => {
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    rentalDisputeFindFirstMock.mockResolvedValue({ id: "dispute-1", campusId: "campus-a" });
+
+    // asset.ownerId = "user-1"（owner 路径）
+    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-1" });
+    expect(owner.ok).toBe(true);
+    if (owner.ok) {
+      expect(owner.grantedBy).toBe("owner");
+      expect(owner.disputeEvidence).toBeNull();
+    }
+
+    // order participant 路径（REPORT 类别允许双方当事人）
+    assetFindFirst.mockResolvedValue(orderAssetBase);
+    const participant = await resolvePrivateAssetAccess("asset-1", { id: "user-owner" });
+    expect(participant.ok).toBe(true);
+    if (participant.ok) {
+      expect(participant.grantedBy).toBe("order_participant");
+      expect(participant.disputeEvidence).toBeNull();
+    }
+    // owner/participant 路径不触发绑定解析（零额外查询）
+    expect(rentalDisputeFindFirstMock).not.toHaveBeenCalled();
   });
 });
 

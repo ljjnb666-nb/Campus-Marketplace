@@ -1,7 +1,9 @@
 import {
   CAMPUS_APPEAL_REVIEWER_ROLE_KEY,
   CAMPUS_CONTENT_MODERATOR_ROLE_KEY,
+  CAMPUS_DISPUTE_REVIEWER_ROLE_KEY,
   CAMPUS_REPORT_REVIEWER_ROLE_KEY,
+  CAMPUS_SUPPORT_AGENT_ROLE_KEY,
   CAMPUS_VERIFICATION_REVIEWER_ROLE_KEY,
 } from "@/lib/rbac/roles";
 import type { AuthorizationContext } from "@/lib/rbac/service";
@@ -40,6 +42,10 @@ export const MANAGEABLE_GOVERNANCE_ROLE_KEYS = [
   // Phase 7F：显式扩列（同上冻结纪律）——校区认证审核员进入 /governance/roles
   // 供给面；仅 allowlist 扩列，不改变任何授权判定语义。
   CAMPUS_VERIFICATION_REVIEWER_ROLE_KEY,
+  // Phase 7G：显式扩列（同上冻结纪律）——校区纠纷审核员 / 校区支持专员进入
+  // /governance/roles 供给面；仅 allowlist 扩列，不改变任何授权判定语义。
+  CAMPUS_DISPUTE_REVIEWER_ROLE_KEY,
+  CAMPUS_SUPPORT_AGENT_ROLE_KEY,
 ] as const;
 
 export type ManageableGovernanceRoleKey = (typeof MANAGEABLE_GOVERNANCE_ROLE_KEYS)[number];

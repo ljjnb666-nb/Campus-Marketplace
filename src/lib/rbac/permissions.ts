@@ -32,6 +32,20 @@ export const PERMISSIONS = {
   // VERIFICATION 且 campus 精确匹配；其它 category 一律 NO ACCESS）——
   // 不构成任何其它私有资产的读取权，也不进入 legacy 11-key 等价集合。
   "verification.evidence.read": "读取校园认证绑定的私有证据材料（仅认证材料）",
+  // Phase 7G：租赁纠纷运营（mutation capability：claim/release/resolve/close）。
+  // dispute resolution 不是 enforcement truth——本 permission 不授予任何
+  // 执法/处罚权（需要处罚必须单独走 canonical enforcement service）；
+  // 刻意不进入 LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（R1 冻结不动）。
+  "dispute.review": "受理与处理租赁纠纷（claim/release/resolve/close）",
+  // Phase 7G：纠纷证据窄读取（纯 read capability）。语义严格限定为
+  // "仅访问 dispute-bound private evidence"（UploadedAsset.category == REPORT
+  // 且 asset token 出现在该 dispute 的 evidencePhotos 内、campus 精确匹配）；
+  // 同订单未绑定的其它 REPORT 资产（如 damage-claim 照片）恒 NO ACCESS。
+  "dispute.evidence.read": "读取租赁纠纷绑定的私有证据材料（仅纠纷证据照片）",
+  // Phase 7G：支持工单运营（mutation capability：claim/release/resolve/close）。
+  // SupportTicket ≠ Dispute（两个独立 workflow 域）；刻意不进入
+  // LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（R1 冻结不动）。
+  "support.manage": "处理支持工单（claim/release/resolve/close）",
 } as const;
 
 export type PermissionKey = keyof typeof PERMISSIONS;
