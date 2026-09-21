@@ -28,6 +28,26 @@ import { uniqueTag } from "./helpers/e2e";
 
 test.describe.configure({ retries: 0 });
 
+/**
+ * P7_UI_DUPLICATE_DOM_01（Final Review Repair 2，Case C 证据-backed 稳定化）：
+ *
+ * Next 16 App Router 水合防闪烁语义——SSR 树在 hydration 完成前保持
+ * [hidden]，hydration 新树构建完成后旧树被移除。窗口内 DOM 短暂存在
+ * 两份（visible SSR + hidden hydration 副本，诊断探针实测
+ * RAW=1 / DOM=2 / visible=1 / hidden=1 → settled DOM=1）。
+ *
+ * 用户可见性恒唯一（hidden 副本不可见/不可聚焦/不可交互），无产品缺陷；
+ * 但 strict locator 在窗口内会双命中。本 helper 以语义稳定化合同
+ * （§16：await expect(marker).toHaveCount(1)）等待窗口收敛，并把
+ * "可访问副本恒 1"固化为回归断言（§15）——绝无 .first()/timeout 掩盖。
+ */
+async function expectLabelHydrationSettled(page: Page, name: string) {
+  // 可访问（a11y-tree 派生）副本恰 1：hidden 副本结构性不进入 a11y tree
+  await expect(page.getByRole("textbox", { name })).toHaveCount(1);
+  // 全量 DOM 副本收敛到 1：等待水合替换窗口关闭（hidden 副本随壳移除）
+  await expect(page.getByLabel(name)).toHaveCount(1);
+}
+
 const TEST_PASSWORD_PREFIX = process.env.E2E_TEST_PASSWORD_PREFIX ?? "E2e";
 const ADMIN_STORAGE_STATE = "tests/e2e/.auth/admin.json";
 
@@ -267,8 +287,9 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
 
   await page.goto(`/governance/campuses/${campus.id}`);
   await expect(page.getByRole("heading", { name: `E2E7H策略校区-${tag}` })).toBeVisible();
+  await expectLabelHydrationSettled(page, "策略标题");
 
-  await page.getByLabel("策略标题").fill("E2E7H 认证规则");
+  await page.getByRole("textbox", { name: "策略标题" }).fill("E2E7H 认证规则");
   await page.getByLabel("认证说明（发布后不可修改）").fill("初版说明：上传学生证");
   await page.getByRole("button", { name: "创建草稿" }).click();
   await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
@@ -294,7 +315,12 @@ test("7H-E2E06 /governance/system → release + 安全依赖状态 → 无 secre
 
   await page.goto("/governance/system");
   await expect(page.getByRole("heading", { name: "系统状态" })).toBeVisible();
-  await expect(page.getByTestId("release-sha")).toHaveText(/.+/);
+  // §18：release-sha 作用域到唯一 active semantic region（隐藏副本不进入
+  // a11y tree，region 角色恒唯一）；§16：全量 DOM 副本收敛断言
+  const readinessRegion = page.getByRole("region", { name: "平台就绪状态" });
+  await expect(readinessRegion.getByTestId("release-sha")).toHaveCount(1);
+  await expect(page.getByTestId("release-sha")).toHaveCount(1);
+  await expect(readinessRegion.getByTestId("release-sha")).toHaveText(/.+/);
   await expect(page.getByText("数据库")).toBeVisible();
   await expect(page.getByText("Redis")).toBeVisible();
   await expect(page.getByText("对象存储")).toBeVisible();

@@ -5,8 +5,9 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
-    // tests/e2e 属于 Playwright（真实浏览器 + 真实服务），不能被 vitest jsdom 吞掉
-    exclude: ["**/node_modules/**", "**/dist/**", "tests/e2e/**"],
+    // tests/e2e 属于 Playwright（真实浏览器 + 真实服务），不能被 vitest jsdom 吞掉；
+    // tests/diagnostics 是 Playwright 诊断 harness（playwright.diagnostic.config.ts）
+    exclude: ["**/node_modules/**", "**/dist/**", "tests/e2e/**", "tests/diagnostics/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],

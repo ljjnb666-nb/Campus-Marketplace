@@ -1,0 +1,398 @@
+{
+  "label": "CAMPUS-D1b-1789984871210",
+  "path": "/governance/campuses/cmub2aob600007bgsmdewewnq",
+  "mode": "D1-direct-goto",
+  "rawStatus": 200,
+  "rawMarkerCount": 1,
+  "rawHtmlCount": 1,
+  "rawMainCount": 1,
+  "early": {
+    "allCount": 1,
+    "visibleCount": 0,
+    "hiddenCount": 1,
+    "nodes": [
+      {
+        "index": 0,
+        "outerHTML": "<input required=\"\" maxlength=\"120\" class=\"rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-400\" name=\"title\">",
+        "isConnected": true,
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "rect": {
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0
+        },
+        "insideHidden": true,
+        "insideAriaHidden": false,
+        "ancestorChain": [
+          {
+            "tag": "LABEL",
+            "id": "",
+            "cls": "flex flex-col gap-1 text-xs font-medium text-slate-600",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "FORM",
+            "id": "",
+            "cls": "space-y-3",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "mb-6 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "SECTION",
+            "id": "",
+            "cls": "mt-10",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "mx-auto w-full max-w-6xl px-4 py-12 sm:px-6",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "min-h-screen bg-slate-50",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "S:0",
+            "cls": "",
+            "hidden": true,
+            "ariaHidden": null,
+            "dataMarkers": "id=S:0"
+          },
+          {
+            "tag": "BODY",
+            "id": "",
+            "cls": "min-h-full bg-slate-50/50 text-slate-900 selection:bg-indigo-500 selection:text-white dark:bg-slate-950 dark:text-slate-100",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "HTML",
+            "id": "",
+            "cls": "__variable_246ccd __variable_c29908 h-full antialiased",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": "data-scroll-behavior=smooth"
+          }
+        ]
+      }
+    ],
+    "htmlCount": 1,
+    "bodyCount": 1,
+    "mainCount": 1,
+    "governanceNavCount": 1,
+    "h1Count": 1,
+    "h1Texts": [
+      "主校区"
+    ]
+  },
+  "settled": {
+    "allCount": 1,
+    "visibleCount": 1,
+    "hiddenCount": 0,
+    "nodes": [
+      {
+        "index": 0,
+        "outerHTML": "<input required=\"\" maxlength=\"120\" class=\"rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-400\" name=\"title\">",
+        "isConnected": true,
+        "display": "block",
+        "visibility": "visible",
+        "opacity": "1",
+        "rect": {
+          "x": 113,
+          "y": 957,
+          "width": 1054,
+          "height": 38
+        },
+        "insideHidden": false,
+        "insideAriaHidden": false,
+        "ancestorChain": [
+          {
+            "tag": "LABEL",
+            "id": "",
+            "cls": "flex flex-col gap-1 text-xs font-medium text-slate-600",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "FORM",
+            "id": "",
+            "cls": "space-y-3",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "mb-6 rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "SECTION",
+            "id": "",
+            "cls": "mt-10",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "mx-auto w-full max-w-6xl px-4 py-12 sm:px-6",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "min-h-screen bg-slate-50",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "MAIN",
+            "id": "",
+            "cls": "flex-1",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "DIV",
+            "id": "",
+            "cls": "flex min-h-screen flex-col pb-16 lg:pb-0",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "BODY",
+            "id": "",
+            "cls": "min-h-full bg-slate-50/50 text-slate-900 selection:bg-indigo-500 selection:text-white dark:bg-slate-950 dark:text-slate-100",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": ""
+          },
+          {
+            "tag": "HTML",
+            "id": "",
+            "cls": "__variable_246ccd __variable_c29908 h-full antialiased",
+            "hidden": false,
+            "ariaHidden": null,
+            "dataMarkers": "data-scroll-behavior=smooth"
+          }
+        ]
+      }
+    ],
+    "htmlCount": 1,
+    "bodyCount": 1,
+    "mainCount": 1,
+    "governanceNavCount": 1,
+    "h1Count": 1,
+    "h1Texts": [
+      "主校区"
+    ]
+  },
+  "duplicateLifetime": {
+    "everDuplicated": false,
+    "durationMs": 0
+  },
+  "mutationLogLength": 0,
+  "network": [
+    {
+      "kind": "responsedoc",
+      "detail": "200 http://localhost:3000/governance/campuses/cmub2aob600007bgsmdewewnq"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/services?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/products?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/errands?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/appeals?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/listings?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/roles?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/audit?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/enforcement?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/reports?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/verifications?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/users?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/disputes?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/support?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/campuses?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/system?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/products/new?_rsc=0SF7aLIAOKvl0ynx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/appeals?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/roles?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/enforcement?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/listings?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/audit?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/reports?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/verifications?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/users?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/disputes?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/support?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/system?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/governance/campuses?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/products?_rsc=bQiifY0Q9paWKZP- :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/rentals?_rsc=FRzjdxflZwOGxPoR :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/services?_rsc=5SS-jqaBOMjvQ9Qx :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/errands?_rsc=aMlncM8v0wLYqyts :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/legal/rules?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/messages?_rsc=ydvgkF7kkB2qURMw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/products/new?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    },
+    {
+      "kind": "requestfailed",
+      "detail": "GET http://localhost:3000/notifications?_rsc=lqqCPGoG5WUuE3Sw :: net::ERR_ABORTED"
+    }
+  ]
+}
