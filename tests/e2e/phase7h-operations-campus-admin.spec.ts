@@ -238,8 +238,9 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   // limit=50：E2E09 并行批量创建的校区可能把本测试的卡片挤出默认 25 行首页
   await page.goto("/governance/campuses?limit=50");
   await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
+  await expectLabelHydrationSettled(page, "校区名称");
 
-  await page.getByLabel("校区名称").fill(`E2E7H校区-${tag}`);
+  await page.getByRole("textbox", { name: "校区名称" }).fill(`E2E7H校区-${tag}`);
   await page.getByLabel("校区标识符（slug，创建后不可修改）").fill(`e2e7h-${tag}`);
   await page.getByLabel("学校名称").fill("E2E 大学");
   await page.getByLabel("所在区域（可选）").fill("海淀区");
@@ -254,8 +255,9 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   // 详情：slug 展示且结构性无修改入口
   await expect(page.getByTestId("campus-slug")).toHaveText(`e2e7h-${tag}`);
   const slugValue = await page.getByTestId("campus-slug").textContent();
+  await expectLabelHydrationSettled(page, "校区名称");
 
-  await page.getByLabel("校区名称").fill(`E2E7H校区改名-${tag}`);
+  await page.getByRole("textbox", { name: "校区名称" }).fill(`E2E7H校区改名-${tag}`);
   await page.getByRole("button", { name: "保存修改" }).click();
   await expect(page.getByText("校区信息已更新")).toBeVisible();
   await expect(page.getByTestId("campus-slug")).toHaveText(slugValue!);
@@ -357,7 +359,8 @@ test("7H-E2E08 浏览器时区 Asia/Shanghai：本地 09:00 → DB 绝对 instan
   const page = await context.newPage();
 
   await page.goto(`/governance/campuses/${campus.id}`);
-  await page.getByLabel("策略标题").fill("E2E7H 时区规则");
+  await expectLabelHydrationSettled(page, "策略标题");
+  await page.getByRole("textbox", { name: "策略标题" }).fill("E2E7H 时区规则");
   await page.getByLabel("认证说明（发布后不可修改）").fill("时区合同验证说明");
   // Playwright datetime-local fill 只接受分钟精度；秒/毫秒合同由
   // jsdom 单测（fireEvent + ms 值）与 hidden-initial 保持语义承担
