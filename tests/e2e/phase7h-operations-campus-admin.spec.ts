@@ -31,21 +31,26 @@ test.describe.configure({ retries: 0 });
 /**
  * P7_UI_DUPLICATE_DOM_01（Final Review Repair 2，Case C 证据-backed 稳定化）：
  *
- * Next 16 App Router 水合防闪烁语义——SSR 树在 hydration 完成前保持
- * [hidden]，hydration 新树构建完成后旧树被移除。窗口内 DOM 短暂存在
- * 两份（visible SSR + hidden hydration 副本，诊断探针实测
- * RAW=1 / DOM=2 / visible=1 / hidden=1 → settled DOM=1）。
+ * Next 16 App Router 水合防闪烁语义——水合窗口内 SSR 树保持在
+ * [hidden] 壳中（transient hidden hydration shell：不可见/不可聚焦/
+ * 不可交互/不进入 a11y tree），hydration 新树构建完成后旧壳整体移除。
+ * 探针实测 RAW=1 / DOM=2 / visible=1 / hidden=1 → settled DOM=1。
  *
- * 用户可见性恒唯一（hidden 副本不可见/不可聚焦/不可交互），无产品缺陷；
- * 但 strict locator 在窗口内会双命中。本 helper 以语义稳定化合同
- * （§16：await expect(marker).toHaveCount(1)）等待窗口收敛，并把
- * "可访问副本恒 1"固化为回归断言（§15）——绝无 .first()/timeout 掩盖。
+ * 用户可见副本恒唯一，无产品缺陷；但 strict locator 在窗口内会命中
+ * hidden 壳。系统性稳定化合同（Independent Review APPROVED）：
+ * await expect(marker).toHaveCount(1) 等待窗口收敛，并把"可访问副本
+ * 恒 1"固化为回归断言——绝无 .first()/timeout 掩盖。
  */
 async function expectLabelHydrationSettled(page: Page, name: string) {
-  // 可访问（a11y-tree 派生）副本恰 1：hidden 副本结构性不进入 a11y tree
+  // 可访问（a11y-tree 派生）副本恰 1：hidden 壳结构性不进入 a11y tree
   await expect(page.getByRole("textbox", { name })).toHaveCount(1);
-  // 全量 DOM 副本收敛到 1：等待水合替换窗口关闭（hidden 副本随壳移除）
+  // 全量 DOM 副本收敛到 1：等待水合替换窗口关闭（hidden 壳随壳移除）
   await expect(page.getByLabel(name)).toHaveCount(1);
+}
+
+/** 页面级稳定化：唯一 h1 收敛到 1（窗口内为 2——hidden 壳含整页副本）。 */
+async function expectHeadingSettled(page: Page, name: string) {
+  await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
 }
 
 const TEST_PASSWORD_PREFIX = process.env.E2E_TEST_PASSWORD_PREFIX ?? "E2e";
@@ -159,6 +164,7 @@ test("7H-E2E01 campus report reviewer → /governance 仅见授权 summary；跨
 
   await page.goto("/governance");
   // 落地页可见：举报处理 summary 卡片（专属 campusB 恰 1）
+  await expectHeadingSettled(page, "治理总览");
   await expect(page.getByRole("heading", { name: "治理总览" })).toBeVisible();
   const reportCard = page.getByRole("heading", { name: "举报处理" });
   await expect(reportCard).toBeVisible();
@@ -171,8 +177,8 @@ test("7H-E2E01 campus report reviewer → /governance 仅见授权 summary；跨
   await expect(page.getByRole("link", { name: "系统状态" })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "校区管理" })).toHaveCount(0);
 
-  // summary → queue 链路
-  await page.getByRole("link", { name: "查看队列" }).first().click();
+  // summary → queue 链路（report reviewer 仅一张 summary 卡 → 唯一链接）
+  await page.getByRole("link", { name: "查看队列" }).click();
   await expect(page.getByRole("heading", { name: "举报处理", level: 1 })).toBeVisible();
 
   await context.close();
@@ -201,6 +207,7 @@ test("7H-E2E02 multi-capability reviewer → 授权卡片并集；未授权 sibl
   );
 
   await page.goto("/governance");
+  await expectHeadingSettled(page, "治理总览");
   await expect(page.getByRole("heading", { name: "治理总览" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "举报处理" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "支持工单" })).toBeVisible();
@@ -218,6 +225,7 @@ test("7H-E2E03 PLATFORM_ADMIN → /governance → 校区管理 + 系统状态链
   const page = await context.newPage();
 
   await page.goto("/governance");
+  await expectHeadingSettled(page, "治理总览");
   await expect(page.getByRole("heading", { name: "治理总览" })).toBeVisible();
   const nav = page.getByRole("navigation", { name: "治理控制台" });
   await expect(nav.getByRole("link", { name: "总览" })).toBeVisible();
@@ -237,6 +245,7 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
 
   // limit=50：E2E09 并行批量创建的校区可能把本测试的卡片挤出默认 25 行首页
   await page.goto("/governance/campuses?limit=50");
+  await expectHeadingSettled(page, "校区管理");
   await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
   await expectLabelHydrationSettled(page, "校区名称");
 
@@ -316,6 +325,7 @@ test("7H-E2E06 /governance/system → release + 安全依赖状态 → 无 secre
   const page = await context.newPage();
 
   await page.goto("/governance/system");
+  await expectHeadingSettled(page, "系统状态");
   await expect(page.getByRole("heading", { name: "系统状态" })).toBeVisible();
   // §18：release-sha 作用域到唯一 active semantic region（隐藏副本不进入
   // a11y tree，region 角色恒唯一）；§16：全量 DOM 副本收敛断言
@@ -408,6 +418,7 @@ test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区
   const page = await context.newPage();
 
   await page.goto("/governance/campuses?limit=25");
+  await expectHeadingSettled(page, "校区管理");
   await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
   // PAGE：第一页恰 25 张卡片 + 下一页
   await expect(page.locator("article")).toHaveCount(25);
@@ -434,6 +445,7 @@ test("7H-E2E07 /admin → redirects to /governance", async ({ browser }) => {
   await page.goto("/admin");
   await page.waitForURL((url) => url.pathname === "/governance", { timeout: 15_000 });
   await expect(page).toHaveURL(/\/governance$/);
+  await expectHeadingSettled(page, "治理总览");
 
   await context.close();
 });

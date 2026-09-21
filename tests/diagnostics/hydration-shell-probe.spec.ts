@@ -5,13 +5,19 @@ import { loginViaUI } from "../e2e/helpers/auth";
 import { E2E_ACCOUNTS } from "../e2e/helpers/e2e";
 
 /**
- * PHASE 7H FINAL REPAIR 2 — DUPLICATE DOM DIAGNOSTIC PROBE（§4-§12）。
+ * PHASE 7H FINAL REPAIR 2 — HYDRATION SHELL PROBE（水合替换隐藏壳探针，§4-§12）。
  *
- * 目标：把"transient duplicate DOM"从截图猜测升级为可判定证据：
- *   RAW_SSR_COUNT（原始 HTTP HTML 中 marker 出现次数）
- *   HYDRATED_DOM_COUNT（live DOM 全量节点数）
- *   VISIBLE / HIDDEN（决定 Case B vs Case C）
- *   DUPLICATE_LIFETIME_MS（MutationObserver 全程记录 firstDuplicate→returnedToSingle）
+ * 术语修正（Independent Review ACCEPTED_WITH_TERMINOLOGY_CORRECTION）：
+ * 现象不是"用户可见的 duplicate DOM"，而是 Next 16 App Router 水合替换
+ * 语义下的 **transient hidden hydration shell**——水合窗口内 SSR 树保持在
+ * [hidden] 壳中（不可见/不可聚焦/不可交互/不进入 a11y tree），hydration
+ * 树并行构建，完成后旧壳整体移除。用户可见副本恒为 1。
+ *
+ * 目标：把该现象从截图猜测升级为可判定证据：
+ *   RAW_SSR_COUNT（原始 HTTP HTML 中 marker 出现次数；=1 证明服务端零复制）
+ *   HYDRATED_DOM_COUNT（live DOM 全量节点数；窗口期 =2）
+ *   VISIBLE / HIDDEN（Case B vs Case C 判定；实测 1/1 → Case C）
+ *   SHELL_LIFETIME_MS（MutationObserver 全程记录壳出现→移除）
  *   console/pageerror/requestfailed（hydration/router/abort 证据，不含任何凭据）
  *   html/body/main/nav/heading 结构计数
  *
@@ -59,17 +65,17 @@ type LogEntry = { t: number; kind: string; totalAfter: number };
 
 declare global {
   interface Window {
-    __dupLog?: LogEntry[];
+    __shellLog?: LogEntry[];
   }
 }
 
 const PROBE_SCRIPT = (selector: string) => {
-  const log: { t: number; kind: string; totalAfter: number }[] = [];
+  const log: LogEntry[] = [];
   const push = (kind: string) => {
     const total = document.querySelectorAll(selector).length;
     const entry = { t: Math.round(performance.now()), kind, totalAfter: total };
     log.push(entry);
-    window.__dupLog = log;
+    window.__shellLog = log;
   };
   const observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
@@ -230,8 +236,8 @@ async function probeNavigation(input: {
   // 观察窗口：hydration 完成后再取一次（MutationObserver 已全程记录）
   await page.waitForTimeout(2_500);
   const settled = await collectDomEvidence(page, markerSelector);
-  const dupLog: LogEntry[] = await page.evaluate(
-    () => (window as unknown as { __dupLog: LogEntry[] }).__dupLog ?? [],
+  const shellLog: LogEntry[] = await page.evaluate(
+    () => (window as unknown as { __shellLog?: LogEntry[] }).__shellLog ?? [],
   );
 
   const rawMarkerCount = rawHtml === null ? null : countOccurrences(rawHtml, rawMarkerNeedle);
@@ -248,22 +254,20 @@ async function probeNavigation(input: {
     rawMainCount,
     early,
     settled,
-    duplicateLifetime: (() => {
-      const duplicateEntries = dupLog.filter((entry) => entry.totalAfter > 1);
-      if (duplicateEntries.length === 0) return { everDuplicated: false, durationMs: 0 };
-      const first = duplicateEntries[0]!.t;
-      const last = duplicateEntries[duplicateEntries.length - 1]!.t;
-      const logLength = dupLog.length;
-      const lastEntry = dupLog[logLength - 1]!;
+    shellLifetime: (() => {
+      const shellEntries = shellLog.filter((entry) => entry.totalAfter > 1);
+      if (shellEntries.length === 0) return { shellObserved: false, durationMs: 0 };
+      const first = shellEntries[0]!.t;
+      const lastEntry = shellLog[shellLog.length - 1]!;
       return {
-        everDuplicated: true,
-        durationMs: lastEntry.totalAfter > 1 ? -1 : Math.max(0, last - first),
-        firstDuplicateAt: first,
+        shellObserved: true,
+        durationMs: lastEntry.totalAfter > 1 ? -1 : Math.max(0, lastEntry.t - first),
+        firstShellAt: first,
         returnedToSingleAt: lastEntry.totalAfter > 1 ? null : lastEntry.t,
         finalCount: lastEntry.totalAfter,
       };
     })(),
-    mutationLogLength: dupLog.length,
+    mutationLogLength: shellLog.length,
     network: network.slice(0, 80),
   };
 
@@ -273,13 +277,13 @@ async function probeNavigation(input: {
 
   // 诊断可见性输出（list reporter 直显）
   console.log(
-    `[PROBE] ${input.label} mode=${evidence.mode} raw=${rawMarkerCount} domEarly=${early.allCount}(v${early.visibleCount}/h${early.hiddenCount}) domSettled=${settled.allCount}(v${settled.visibleCount}/h${settled.hiddenCount}) lifetime=${JSON.stringify(evidence.duplicateLifetime)}`,
+    `[PROBE] ${input.label} mode=${evidence.mode} raw=${rawMarkerCount} domEarly=${early.allCount}(v${early.visibleCount}/h${early.hiddenCount}) domSettled=${settled.allCount}(v${settled.visibleCount}/h${settled.hiddenCount}) shell=${JSON.stringify(evidence.shellLifetime)}`,
   );
 
   return { page, evidence };
 }
 
-test.describe("duplicate DOM probe（诊断，不入 release gate）", () => {
+test.describe("hydration shell probe（诊断，不入 release gate）", () => {
   test("SYS-D1: /governance/system 直接 goto", async ({ browser }) => {
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -293,9 +297,9 @@ test.describe("duplicate DOM probe（诊断，不入 release gate）", () => {
       rawMarkerNeedle: 'data-testid="release-sha"',
     });
 
-    // 诊断断言：重复未复现 → allCount 恒 1；复现 → 输出证据并标记
-    const duplicated = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
-    console.log(`[PROBE] SYS-D1 duplicated=${duplicated}`);
+    // 诊断断言：壳窗口未复现 → allCount 恒 1；复现 → 输出证据并标记
+    const shellObserved = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
+    console.log(`[PROBE] SYS-D1 shellObserved=${shellObserved}`);
     await context.close();
   });
 
@@ -314,8 +318,8 @@ test.describe("duplicate DOM probe（诊断，不入 release gate）", () => {
       clientNavigationLinkName: "系统状态",
     });
 
-    const duplicated = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
-    console.log(`[PROBE] SYS-D2 duplicated=${duplicated}`);
+    const shellObserved = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
+    console.log(`[PROBE] SYS-D2 shellObserved=${shellObserved}`);
     await context.close();
   });
 
@@ -331,15 +335,15 @@ test.describe("duplicate DOM probe（诊断，不入 release gate）", () => {
 
     const markerSelector = 'input[name="title"]';
     const { evidence } = await probeNavigation({
-      label: `CAMPUS-D1b-${Date.now()}`,
+      label: `CAMPUS-D1-${Date.now()}`,
       context,
       path: href!,
       markerSelector,
       rawMarkerNeedle: 'name="title"',
     });
 
-    const duplicated = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
-    console.log(`[PROBE] CAMPUS-D1b duplicated=${duplicated}`);
+    const shellObserved = evidence.early.allCount > 1 || evidence.settled.allCount > 1;
+    console.log(`[PROBE] CAMPUS-D1 shellObserved=${shellObserved}`);
     await context.close();
   });
 });

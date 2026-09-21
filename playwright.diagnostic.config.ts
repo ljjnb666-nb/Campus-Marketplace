@@ -1,9 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * PHASE 7H FINAL REPAIR 2 — DUPLICATE DOM DIAGNOSTIC HARNESS（独立于正式 config）。
+ * PHASE 7H FINAL REPAIR 2 — HYDRATION SHELL DIAGNOSTIC HARNESS（独立于正式 config）。
  *
  * 仅用于根因诊断（§4-§12 stress matrix / D1-D2 / RAW-vs-DOM 证据采集）。
+ * 术语（Independent Review 修正）：现象为 Next 16 水合替换的 transient
+ * hidden hydration shell（非用户可见 duplicate DOM）。
  * 正式 playwright.config.ts 零改动；本 config 不进入 release gate。
  * webServer 环境与正式 config 逐字段镜像（E2E 专用库 / MinIO / token）。
  */
