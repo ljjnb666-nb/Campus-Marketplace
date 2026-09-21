@@ -7,7 +7,9 @@ import { CreateCampusForm } from "@/components/governance/campus-admin-forms";
 import { requireCampusManager } from "@/lib/campus/campus-admin-access";
 import {
   CAMPUS_LIST_DEFAULT_PAGE_SIZE,
+  decodeGovernanceCampusCursor,
   listGovernanceCampuses,
+  type GovernanceCampusCursor,
 } from "@/lib/campus/campus-governance-query";
 import { governanceCampusListLimitSchema } from "@/validators/governance-campus";
 
@@ -55,7 +57,40 @@ export default async function GovernanceCampusesPage({
     }
   }
 
-  const campuses = await listGovernanceCampuses({ limit });
+  // FR04：cursor 是 UNTRUSTED 分页位置——malformed 一律 fail closed
+  // （统一 governance queue 的 malformed-cursor 行为：专用提示面板 +
+  // 不执行列表查询，绝不静默回第一页）
+  let cursor: GovernanceCampusCursor | null = null;
+  let cursorInvalid = false;
+  const rawCursor = readParam(params, "cursor");
+  if (rawCursor !== undefined) {
+    const decoded = decodeGovernanceCampusCursor(rawCursor);
+    if (!decoded) {
+      cursorInvalid = true;
+    } else {
+      cursor = decoded;
+    }
+  }
+
+  const page = cursorInvalid
+    ? { items: [], nextCursor: null }
+    : await listGovernanceCampuses({ limit, cursor: cursor ?? undefined });
+  const campuses = page.items;
+
+  function buildPageHref(overrides: Record<string, string | undefined>) {
+    const merged: Record<string, string | undefined> = {
+      limit: String(limit),
+      ...overrides,
+    };
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(merged)) {
+      if (value) {
+        search.set(key, value);
+      }
+    }
+    const qs = search.toString();
+    return qs ? `/governance/campuses?${qs}` : "/governance/campuses";
+  }
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-12 sm:px-6">
@@ -74,7 +109,15 @@ export default async function GovernanceCampusesPage({
         <CreateCampusForm action={createGovernanceCampusAction} />
       </section>
 
-      {campuses.length === 0 ? (
+      {cursorInvalid ? (
+        <div className="rounded-[28px] border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
+          分页链接无效，请返回
+          <Link href="/governance/campuses" className="ml-1 text-slate-900 underline">
+            校区列表首页
+          </Link>
+          重新进入。
+        </div>
+      ) : campuses.length === 0 ? (
         <div className="rounded-[28px] border border-slate-200 bg-white p-10 text-center text-sm text-slate-500">
           暂无校区。
         </div>
@@ -119,6 +162,17 @@ export default async function GovernanceCampusesPage({
           ))}
         </div>
       )}
+
+      {page.nextCursor ? (
+        <div className="mt-6 flex justify-end">
+          <Link
+            href={buildPageHref({ cursor: page.nextCursor })}
+            className="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:border-slate-300 hover:text-slate-950"
+          >
+            下一页
+          </Link>
+        </div>
+      ) : null}
     </div>
   );
 }

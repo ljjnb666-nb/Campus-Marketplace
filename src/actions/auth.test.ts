@@ -2,20 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   hash,
-  campusFindFirst,
-  userCreate,
-  membershipCreate,
+  registerActiveCampusUser,
   mockHeaders,
-  transactionMock,
-  recordSignupAcceptances,
+  isRateLimited,
 } = vi.hoisted(() => ({
   hash: vi.fn(),
-  campusFindFirst: vi.fn(),
-  userCreate: vi.fn(),
-  membershipCreate: vi.fn(),
+  registerActiveCampusUser: vi.fn(),
   mockHeaders: vi.fn(),
-  transactionMock: vi.fn(),
-  recordSignupAcceptances: vi.fn(),
+  isRateLimited: vi.fn(),
 }));
 
 vi.mock("bcryptjs", () => ({
@@ -26,20 +20,16 @@ vi.mock("next/headers", () => ({
   headers: mockHeaders,
 }));
 
-vi.mock("@/lib/prisma", () => ({
-  prisma: {
-    campus: {
-      findFirst: campusFindFirst,
-    },
-  },
-  withTransaction: transactionMock,
+vi.mock("@/lib/rate-limit", () => ({
+  isRateLimited,
 }));
 
-vi.mock("@/lib/legal/policy-service", () => ({
-  recordSignupAcceptances,
+vi.mock("@/lib/registration-service", () => ({
+  registerActiveCampusUser,
 }));
 
 import { Prisma } from "@prisma/client";
+import { governanceError } from "@/lib/governance/domain-errors";
 import { registerUser } from "@/actions/auth";
 
 // 合成测试凭据（拼接生成，非真实账号）
@@ -66,43 +56,35 @@ function buildRegisterFormData(overrides?: { agreeLegal?: string; documentIds?: 
   return formData;
 }
 
-describe("auth actions", () => {
+describe("auth actions（FR01：薄适配层；事务权威在 registration-service）", () => {
   beforeEach(() => {
     hash.mockReset();
-    campusFindFirst.mockReset();
-    userCreate.mockReset();
-    membershipCreate.mockReset().mockResolvedValue({ id: "membership-1" });
+    registerActiveCampusUser.mockReset();
     mockHeaders.mockReset();
-    transactionMock.mockReset();
-    recordSignupAcceptances.mockReset();
+    isRateLimited.mockReset();
     mockHeaders.mockImplementation(async () => ({
       get: () => null,
     }));
-    userCreate.mockResolvedValue({ id: "user-1" });
-    recordSignupAcceptances.mockResolvedValue({ created: 4, skipped: 0 });
-    transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
-      callback({
-        user: { create: userCreate },
-        campusMembership: { create: membershipCreate },
-      }),
-    );
+    isRateLimited.mockResolvedValue({ limited: false });
+    hash.mockResolvedValue("hashed-password");
+    registerActiveCampusUser.mockResolvedValue({
+      ok: true,
+      user: { id: "user-1", email: "student1@campus.local" },
+    });
   });
 
   it("rejects registration without the explicit legal consent checkbox", async () => {
-    campusFindFirst.mockResolvedValue({ id: "campus-1" });
-
     const result = await registerUser(
       { success: false, message: "" },
       buildRegisterFormData({ agreeLegal: "" }),
     );
 
     expect(result.success).toBe(false);
-    expect(userCreate).not.toHaveBeenCalled();
-    expect(recordSignupAcceptances).not.toHaveBeenCalled();
+    expect(registerActiveCampusUser).not.toHaveBeenCalled();
   });
 
-  it("rejects registration when the selected campus does not exist", async () => {
-    campusFindFirst.mockResolvedValue(null);
+  it("rejects registration when the selected campus does not exist（ok:false 同形拒绝）", async () => {
+    registerActiveCampusUser.mockResolvedValue({ ok: false, reason: "CAMPUS_NOT_AVAILABLE" });
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
@@ -110,33 +92,27 @@ describe("auth actions", () => {
       success: false,
       message: "校区不存在",
     });
-    expect(userCreate).not.toHaveBeenCalled();
   });
 
-  it("rejects registration for a deactivated campus（Phase 7H §23 admission 一致性）", async () => {
-    // 服务端 admission gate 与注册页 selector（listActiveCampuses）同谓词：
-    // isActive: true 过滤后未命中 → 与不存在同形拒绝
-    campusFindFirst.mockResolvedValue(null);
+  it("rejects registration for a deactivated campus（FR01：锁内 locked recheck 的 ok:false 同形拒绝）", async () => {
+    // 停用校区与不存在校区统一 CAMPUS_NOT_AVAILABLE reason → 同一面文案
+    // （无存在性 oracle）；锁内 isActive: true recheck 由
+    // registration-service 单测 + 真 PG C-RACE-06 证明。
+    registerActiveCampusUser.mockResolvedValue({ ok: false, reason: "CAMPUS_NOT_AVAILABLE" });
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
     expect(result).toEqual({
       success: false,
       message: "校区不存在",
-    });
-    expect(userCreate).not.toHaveBeenCalled();
-    expect(campusFindFirst).toHaveBeenCalledWith({
-      where: { id: "campus-1", isActive: true },
     });
   });
 
   it("returns a friendly message when the email is already registered", async () => {
-    campusFindFirst.mockResolvedValue({ id: "campus-1" });
-    hash.mockResolvedValue("hashed-password");
-    userCreate.mockRejectedValue(
+    registerActiveCampusUser.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
         code: "P2002",
-        clientVersion: "6.19.3",
+        clientVersion: "test",
       }),
     );
 
@@ -148,31 +124,18 @@ describe("auth actions", () => {
     });
   });
 
-  it("creates the user and bound acceptance evidence in the same transaction", async () => {
-    campusFindFirst.mockResolvedValue({ id: "campus-1" });
-    hash.mockResolvedValue("hashed-password");
-
+  it("hashes outside any transaction/lock window and delegates to the registration service", async () => {
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
+    // FR01 hash discipline：bcrypt 在 CAMPUS 锁窗口之外完成后再进 service
     expect(hash).toHaveBeenCalledWith(TEST_PASSWORD, 10);
-    expect(userCreate).toHaveBeenCalledWith({
-      data: {
-        name: "张同学",
-        email: "student1@campus.local",
-        passwordHash: "hashed-password",
-        schoolName: "示例大学",
-        campusId: "campus-1",
-      },
-    });
-    // 同意证据与用户创建同事务，绑定实际提交的当前 required 文档集合
-    expect(recordSignupAcceptances).toHaveBeenCalledWith(
-      expect.anything(),
-      "user-1",
-      CURRENT_POLICY_IDS,
-    );
-    // Phase 6A：注册同事务建立 ACTIVE campus membership
-    expect(membershipCreate).toHaveBeenCalledWith({
-      data: { userId: "user-1", campusId: "campus-1", status: "ACTIVE" },
+    expect(registerActiveCampusUser).toHaveBeenCalledWith({
+      name: "张同学",
+      email: "student1@campus.local",
+      passwordHash: "hashed-password",
+      schoolName: "示例大学",
+      campusId: "campus-1",
+      acceptedDocumentIds: CURRENT_POLICY_IDS,
     });
     expect(result).toEqual({
       success: true,
@@ -181,26 +144,30 @@ describe("auth actions", () => {
   });
 
   it("surfaces policy version conflicts as registration failures (fail closed)", async () => {
-    campusFindFirst.mockResolvedValue({ id: "campus-1" });
-    hash.mockResolvedValue("hashed-password");
-    // 提交期间 required 集合变化：同意记录失败 → 整体失败（事务回滚，不留无同意的账号）
-    recordSignupAcceptances.mockRejectedValue(
-      Object.assign(new Error("协议版本已更新，请重新查看并确认"), {
-        code: "LEGAL_DOCUMENT_VERSION_CHANGED",
-      }),
+    registerActiveCampusUser.mockRejectedValue(
+      governanceError("LEGAL_DOCUMENT_VERSION_CHANGED"),
     );
 
     const result = await registerUser({ success: false, message: "" }, buildRegisterFormData());
 
-    expect(result.success).toBe(false);
+    expect(result).toEqual({
+      success: false,
+      message: "协议版本已更新，请重新查看并确认",
+    });
   });
 
   it("rate limits repeated registrations from the same ip", async () => {
     mockHeaders.mockImplementation(async () => ({
       get: (name: string) => (name === "x-forwarded-for" ? "203.0.113.9" : null),
     }));
-    campusFindFirst.mockResolvedValue({ id: "campus-1" });
-    hash.mockResolvedValue("hashed-password");
+    isRateLimited
+      .mockResolvedValue({ limited: false })
+      .mockResolvedValueOnce({ limited: false })
+      .mockResolvedValueOnce({ limited: false })
+      .mockResolvedValueOnce({ limited: false })
+      .mockResolvedValueOnce({ limited: false })
+      .mockResolvedValueOnce({ limited: false })
+      .mockResolvedValueOnce({ limited: true });
 
     let result = { success: true, message: "" };
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -214,6 +181,6 @@ describe("auth actions", () => {
       success: false,
       message: "注册操作过于频繁，请稍后再试",
     });
-    expect(userCreate).toHaveBeenCalledTimes(5);
+    expect(registerActiveCampusUser).toHaveBeenCalledTimes(5);
   });
 });

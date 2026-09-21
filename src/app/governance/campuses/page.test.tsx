@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const {
   requireCampusManager,
   listGovernanceCampuses,
+  decodeGovernanceCampusCursor,
   getGovernanceCampusExists,
   getGovernanceCampusDetail,
   createGovernanceCampusAction,
@@ -17,6 +18,7 @@ const {
 } = vi.hoisted(() => ({
   requireCampusManager: vi.fn(),
   listGovernanceCampuses: vi.fn(),
+  decodeGovernanceCampusCursor: vi.fn(),
   getGovernanceCampusExists: vi.fn(),
   getGovernanceCampusDetail: vi.fn(),
   createGovernanceCampusAction: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("@/lib/campus/campus-governance-query", () => ({
   CAMPUS_LIST_DEFAULT_PAGE_SIZE: 25,
   CAMPUS_LIST_MAX_PAGE_SIZE: 50,
   listGovernanceCampuses,
+  decodeGovernanceCampusCursor,
   getGovernanceCampusExists,
   getGovernanceCampusDetail,
 }));
@@ -80,8 +83,9 @@ afterEach(() => {
 describe("GovernanceCampusesPage（/governance/campuses 列表）", () => {
   it("CA01：GLOBAL campus.manage → 渲染创建表单与 campus metadata 列表（无 PII）", async () => {
     requireCampusManager.mockResolvedValue({ user: { id: "mgr-1" } });
-    listGovernanceCampuses.mockResolvedValue([
-      {
+    listGovernanceCampuses.mockResolvedValue({
+      items: [
+        {
         id: "campus-a",
         name: "主校区",
         slug: "main-campus",
@@ -92,7 +96,9 @@ describe("GovernanceCampusesPage（/governance/campuses 列表）", () => {
         activeMembershipCount: 12,
         pendingVerificationCount: 3,
       },
-    ]);
+      ],
+      nextCursor: null,
+    });
 
     render(await GovernanceCampusesPage({ searchParams: Promise.resolve({}) }));
 
@@ -125,11 +131,55 @@ describe("GovernanceCampusesPage（/governance/campuses 列表）", () => {
 
   it("空校区列表 → 友好空态", async () => {
     requireCampusManager.mockResolvedValue({ user: { id: "mgr-1" } });
-    listGovernanceCampuses.mockResolvedValue([]);
+    listGovernanceCampuses.mockResolvedValue({ items: [], nextCursor: null });
 
     render(await GovernanceCampusesPage({ searchParams: Promise.resolve({}) }));
 
     expect(screen.getByText("暂无校区。")).toBeTruthy();
+  });
+});
+
+describe("GovernanceCampusesPage FR04 分页合同", () => {
+  function campusItem(index: number) {
+    return {
+      id: `campus-${index}`,
+      name: `校区${index}`,
+      slug: `campus-${index}`,
+      schoolName: "示例大学",
+      district: null,
+      isActive: true,
+      createdAt: new Date(Date.UTC(2026, 8, 1, 0, 0, index)).toISOString(),
+      activeMembershipCount: 0,
+      pendingVerificationCount: 0,
+    };
+  }
+
+  it("PAGE：nextCursor 存在 → 渲染「下一页」链接（保 limit 参数）", async () => {
+    requireCampusManager.mockResolvedValue({ user: { id: "mgr-1" } });
+    listGovernanceCampuses.mockResolvedValue({
+      items: Array.from({ length: 25 }, (_, index) => campusItem(index)),
+      nextCursor: "VALID_CURSOR",
+    });
+
+    render(await GovernanceCampusesPage({ searchParams: Promise.resolve({}) }));
+
+    const next = screen.getByRole("link", { name: "下一页" });
+    expect(next.getAttribute("href")).toBe("/governance/campuses?limit=25&cursor=VALID_CURSOR");
+    expect(listGovernanceCampuses).toHaveBeenCalledWith({ limit: 25, cursor: undefined });
+  });
+
+  it("PAGE-06/07/08：malformed cursor → fail closed 专用面板，零列表查询、零静默回第一页", async () => {
+    requireCampusManager.mockResolvedValue({ user: { id: "mgr-1" } });
+    decodeGovernanceCampusCursor.mockReturnValue(null);
+
+    render(
+      await GovernanceCampusesPage({
+        searchParams: Promise.resolve({ cursor: "!!!not-base64url!!!" }),
+      }),
+    );
+
+    expect(screen.getByText(/分页链接无效/)).toBeTruthy();
+    expect(listGovernanceCampuses).not.toHaveBeenCalled();
   });
 });
 
@@ -205,6 +255,38 @@ describe("GovernanceCampusDetailPage（两阶段读 + 策略管理面）", () =>
       GovernanceCampusDetailPage({ params: Promise.resolve({ campusId }) }),
     ).rejects.toThrow("NOT_FOUND");
     expect(getGovernanceCampusDetail).not.toHaveBeenCalled();
+  });
+
+  it("FR03 TIME 客户端合同：datetime-local 改动 → hidden effectiveAt 即时转为绝对 ISO；未改 → 保持原 instant", async () => {
+    mockDetail();
+
+    const { container } = render(
+      await GovernanceCampusDetailPage({ params: Promise.resolve({ campusId }) }),
+    );
+
+    // 作用域：v3 草稿卡片（页面上还有创建表单的同名字段）
+    const draftArticle = Array.from(container.querySelectorAll("article")).find((article) =>
+      article.textContent?.includes("认证规则 v3"),
+    );
+    expect(draftArticle).toBeTruthy();
+
+    // 未改动：hidden 保持数据库绝对 instant（零 timezone drift）
+    const readHidden = () =>
+      (
+        draftArticle!.querySelector(
+          'input[type="hidden"][name="effectiveAt"]',
+        ) as HTMLInputElement
+      ).value;
+    expect(readHidden()).toBe("2026-10-01T00:00:00.000Z");
+
+    // 用户改动（本地时区值）→ onChange 即时 toISOString
+    const visible = draftArticle!.querySelector(
+      'input[type="datetime-local"]',
+    ) as HTMLInputElement;
+    fireEvent.change(visible, { target: { value: "2026-12-01T09:00:00.000" } });
+
+    const expected = new Date("2026-12-01T09:00:00.000").toISOString();
+    expect(readHidden()).toBe(expected);
   });
 
   it("停用状态校区 → 渲染启用按钮（same-state 幂等由 service 承接）", async () => {

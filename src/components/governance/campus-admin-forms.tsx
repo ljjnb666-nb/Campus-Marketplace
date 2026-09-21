@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import type { GovernanceCampusActionState } from "@/actions/governance-campus";
@@ -176,10 +176,41 @@ export function CampusToggleForm({
   );
 }
 
+/**
+ * Final Review Repair 1（FR03）：effectiveAt 提交合同。
+ *
+ * 可见 datetime-local 输入只是浏览器本地时区的展示面，绝不作为提交
+ * authority（name 缺席 → 浏览器不提交）；提交 authority 恒为 hidden
+ * effectiveAt，值为绝对 ISO：
+ *   - 初始 = 既有绝对 instant（编辑不改 → 提交同一 instant，零 drift）；
+ *   - 用户改动可见输入 → onChange 即时转换 local → Date → toISOString()。
+ * 毫秒精度（step=0.001）保证 local 显示 ↔ 绝对 instant 双向无损往返。
+ */
 function toDatetimeLocalValue(iso: string): string {
   const date = new Date(iso);
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${ms}`;
+}
+
+function AbsoluteEffectiveAtField({ initialIso }: { initialIso?: string }) {
+  const [absoluteIso, setAbsoluteIso] = useState(initialIso ?? "");
+
+  return (
+    <>
+      <input type="hidden" name="effectiveAt" value={absoluteIso} />
+      <input
+        type="datetime-local"
+        step={0.001}
+        defaultValue={initialIso ? toDatetimeLocalValue(initialIso) : undefined}
+        onChange={(event) => {
+          const raw = event.target.value;
+          setAbsoluteIso(raw ? new Date(raw).toISOString() : "");
+        }}
+        className={inputClassName}
+      />
+    </>
+  );
 }
 
 /** 创建认证策略草稿表单（§33：version 服务器锁内分配，客户端不指定）。 */
@@ -207,8 +238,8 @@ export function CreatePolicyDraftForm({
         <textarea name="instructions" required rows={6} maxLength={5000} className={inputClassName} />
       </label>
       <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
-        生效时间（可选，默认立即）
-        <input type="datetime-local" name="effectiveAt" className={inputClassName} />
+        生效时间（可选，默认立即；按浏览器本地时区显示，提交为绝对时间）
+        <AbsoluteEffectiveAtField />
       </label>
       <SubmitButton label="创建草稿" pendingLabel="提交中..." />
       <Feedback state={state} />
@@ -269,13 +300,8 @@ export function DraftPolicyForm({
           />
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
-          生效时间
-          <input
-            type="datetime-local"
-            name="effectiveAt"
-            defaultValue={toDatetimeLocalValue(policy.effectiveAt)}
-            className={inputClassName}
-          />
+          生效时间（按浏览器本地时区显示，提交为绝对时间）
+          <AbsoluteEffectiveAtField initialIso={policy.effectiveAt} />
         </label>
         <div className="flex flex-wrap gap-3">
           <SubmitButton label="保存草稿" pendingLabel="提交中..." variant="secondary" />

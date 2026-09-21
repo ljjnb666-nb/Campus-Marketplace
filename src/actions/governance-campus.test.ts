@@ -157,6 +157,33 @@ describe("createGovernanceCampusAction", () => {
     );
   });
 
+  it("DISTRICT-01：create 空串 → 归一化 null 透传 service（SUCCESS）", async () => {
+    createGovernanceCampus.mockResolvedValue({ id: "c1", name: "主校区" });
+
+    const state = await createGovernanceCampusAction(
+      { success: false },
+      formData({ name: "主校区", slug: "main-campus", schoolName: "示例大学", district: "" }),
+    );
+
+    expect(state.success).toBe(true);
+    expect(createGovernanceCampus).toHaveBeenCalledWith(
+      expect.objectContaining({ district: null }),
+    );
+  });
+
+  it("DISTRICT-04：纯空白 → 归一化 null", async () => {
+    createGovernanceCampus.mockResolvedValue({ id: "c1", name: "主校区" });
+
+    await createGovernanceCampusAction(
+      { success: false },
+      formData({ name: "主校区", slug: "main-campus", schoolName: "示例大学", district: "   " }),
+    );
+
+    expect(createGovernanceCampus).toHaveBeenCalledWith(
+      expect.objectContaining({ district: null }),
+    );
+  });
+
   it("CAMPUS_SLUG_CONFLICT（GovernanceError）→ 稳定 userMessage", async () => {
     createGovernanceCampus.mockRejectedValue(governanceError("CAMPUS_SLUG_CONFLICT"));
 
@@ -213,6 +240,42 @@ describe("updateGovernanceCampusMetadataAction", () => {
     );
 
     expect(state).toEqual({ success: false, error: "校区不存在" });
+  });
+
+  it("DISTRICT-02：null-district 校区仅改 name（表单 district 提交空串）→ district:null 透传", async () => {
+    updateGovernanceCampusMetadata.mockResolvedValue({ id: "c1" });
+
+    const state = await updateGovernanceCampusMetadataAction(
+      { success: false },
+      formData({ campusId: "c1", name: "新名", district: "" }),
+    );
+
+    expect(state.success).toBe(true);
+    expect(updateGovernanceCampusMetadata).toHaveBeenCalledWith({
+      actorId: ACTOR.id,
+      campusId: "c1",
+      name: "新名",
+      schoolName: undefined,
+      district: null,
+    });
+  });
+
+  it("DISTRICT-03：清空既有 district（空串）→ null 透传（显式清空）", async () => {
+    updateGovernanceCampusMetadata.mockResolvedValue({ id: "c1" });
+
+    const state = await updateGovernanceCampusMetadataAction(
+      { success: false },
+      formData({ campusId: "c1", district: "" }),
+    );
+
+    expect(state.success).toBe(true);
+    expect(updateGovernanceCampusMetadata).toHaveBeenCalledWith({
+      actorId: ACTOR.id,
+      campusId: "c1",
+      name: undefined,
+      schoolName: undefined,
+      district: null,
+    });
   });
 
   it("零字段（refine 拒绝）→ 首条 issue 文案，零 service 调用", async () => {
@@ -411,6 +474,56 @@ describe("policy governance actions", () => {
     );
 
     expect(state).toEqual({ success: false, error: "没有权限执行该校区管理操作" });
+  });
+
+  it("TIME-04：编辑未改时间（hidden 携带原绝对 ISO）→ service 收到同一绝对 instant", async () => {
+    updateGovernanceVerificationPolicyDraft.mockResolvedValue({ id: "p1", version: 3 });
+
+    await updateVerificationPolicyDraftAction(
+      { success: false },
+      formData({
+        campusId: "c1",
+        policyId: "p1",
+        title: "新标题",
+        effectiveAt: "2026-10-01T00:00:00.000Z",
+      }),
+    );
+
+    expect(updateGovernanceVerificationPolicyDraft).toHaveBeenCalledWith({
+      actorId: ACTOR.id,
+      policyId: "p1",
+      title: "新标题",
+      instructions: undefined,
+      // Date 相等断言：同一绝对 instant，零 timezone drift
+      effectiveAt: new Date("2026-10-01T00:00:00.000Z"),
+    });
+  });
+
+  it("TIME 编辑清空时间 → effectiveAt 缺省透传（row 原值不被触碰）", async () => {
+    updateGovernanceVerificationPolicyDraft.mockResolvedValue({ id: "p1", version: 3 });
+
+    await updateVerificationPolicyDraftAction(
+      { success: false },
+      formData({ campusId: "c1", policyId: "p1", title: "新标题", effectiveAt: "" }),
+    );
+
+    expect(updateGovernanceVerificationPolicyDraft).toHaveBeenCalledWith({
+      actorId: ACTOR.id,
+      policyId: "p1",
+      title: "新标题",
+      instructions: undefined,
+      effectiveAt: undefined,
+    });
+  });
+
+  it("TIME-01 action 层：timezone-less 输入 → validator fail closed 零 service 调用", async () => {
+    const state = await updateVerificationPolicyDraftAction(
+      { success: false },
+      formData({ campusId: "c1", policyId: "p1", effectiveAt: "2026-10-01T09:00" }),
+    );
+
+    expect(state.success).toBe(false);
+    expect(updateGovernanceVerificationPolicyDraft).not.toHaveBeenCalled();
   });
 
   it("update schema 拒绝（policyId 缺失）→ uniform deny 零 service 调用", async () => {

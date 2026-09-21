@@ -215,7 +215,8 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   const context = await browser.newContext({ storageState: ADMIN_STORAGE_STATE });
   const page = await context.newPage();
 
-  await page.goto("/governance/campuses");
+  // limit=50：E2E09 并行批量创建的校区可能把本测试的卡片挤出默认 25 行首页
+  await page.goto("/governance/campuses?limit=50");
   await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
 
   await page.getByLabel("校区名称").fill(`E2E7H校区-${tag}`);
@@ -225,7 +226,7 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   await page.getByRole("button", { name: "创建校区" }).click();
   await expect(page.getByText(`校区已创建：E2E7H校区-${tag}`)).toBeVisible();
 
-  await page.goto("/governance/campuses");
+  await page.goto("/governance/campuses?limit=50");
   // 并发确定性：以唯一 slug 定位本测试创建的卡片，再点其详情链接
   const createdCard = page.locator("article", { hasText: `e2e7h-${tag}` });
   await createdCard.getByRole("link", { name: "管理详情" }).click();
@@ -305,6 +306,93 @@ test("7H-E2E06 /governance/system → release + 安全依赖状态 → 无 secre
   expect(body).not.toContain("METRICS_BEARER_TOKEN");
   expect(body).not.toContain("NEXTAUTH_SECRET");
   expect(body).not.toContain("Error:");
+
+  await context.close();
+});
+
+test("7H-E2E08 浏览器时区 Asia/Shanghai：本地 09:00 → DB 绝对 instant 01:00Z（零 timezone drift）", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const tag = uniqueTag("p7h-08");
+  const db = e2eDb();
+  const campus = await db.campus.create({
+    data: {
+      name: `E2E7H时区校区-${tag}`,
+      slug: `e2e7h-tz-${tag}`,
+      schoolName: "E2E 大学",
+      isActive: true,
+    },
+  });
+
+  // 独立浏览器时区：Asia/Shanghai（不依赖 CI server timezone）
+  const context = await browser.newContext({
+    storageState: ADMIN_STORAGE_STATE,
+    timezoneId: "Asia/Shanghai",
+  });
+  const page = await context.newPage();
+
+  await page.goto(`/governance/campuses/${campus.id}`);
+  await page.getByLabel("策略标题").fill("E2E7H 时区规则");
+  await page.getByLabel("认证说明（发布后不可修改）").fill("时区合同验证说明");
+  // Playwright datetime-local fill 只接受分钟精度；秒/毫秒合同由
+  // jsdom 单测（fireEvent + ms 值）与 hidden-initial 保持语义承担
+  await page.getByLabel(/生效时间/).fill("2026-12-01T09:00");
+  await page.getByRole("button", { name: "创建草稿" }).click();
+  await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
+
+  const policy = await db.campusVerificationPolicy.findFirstOrThrow({
+    where: { campusId: campus.id },
+    orderBy: { version: "desc" },
+  });
+  // Asia/Shanghai 的 09:00 本地 == UTC 01:00（同一绝对 instant）
+  expect(policy.effectiveAt.toISOString()).toBe("2026-12-01T01:00:00.000Z");
+
+  await context.close();
+});
+
+test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区详情可达", async ({ browser }) => {
+  test.setTimeout(120_000);
+  const tag = uniqueTag("p7h-09");
+  const db = e2eDb();
+  const markerSlug = `e2e7h-page-marker-${tag}`;
+
+  // 直接 fixture 建 30 个校区（无需 UI 点击 30 次）
+  for (let index = 0; index < 30; index += 1) {
+    await db.campus.create({
+      data: {
+        name: `E2E7H分页-${tag}-${index}`,
+        slug: `e2e7h-page-${tag}-${index}`,
+        schoolName: "E2E 大学",
+        isActive: true,
+      },
+    });
+  }
+  await db.campus.create({
+    data: {
+      name: `E2E7H分页标记-${tag}`,
+      slug: markerSlug,
+      schoolName: "E2E 大学",
+      isActive: true,
+    },
+  });
+
+  const context = await browser.newContext({ storageState: ADMIN_STORAGE_STATE });
+  const page = await context.newPage();
+
+  await page.goto("/governance/campuses?limit=25");
+  await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
+  // PAGE：第一页恰 25 张卡片 + 下一页
+  await expect(page.locator("article")).toHaveCount(25);
+  const next = page.getByRole("link", { name: "下一页" });
+  await expect(next).toBeVisible();
+
+  // 第二页：包含本测试的标记校区（createdSet 无重复无跳过的精确遍历由集成 PAGE-01..05 承担）
+  await next.click();
+  await expect(page).toHaveURL(/cursor=/);
+  const markerCard = page.locator("article", { hasText: markerSlug });
+  await expect(markerCard).toBeVisible();
+  await markerCard.getByRole("link", { name: "管理详情" }).click();
+
+  await expect(page.getByTestId("campus-slug")).toHaveText(markerSlug);
 
   await context.close();
 });

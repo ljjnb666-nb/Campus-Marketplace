@@ -23,10 +23,18 @@ import { withTransaction } from "@/lib/prisma";
  * - 授权：campus.manage = GLOBAL ONLY（§17——Campus entity mutation 修改的
  *   是租户边界本身）。actor account ACTIVE 由 requirePermissionInContext 在
  *   锁内复核（AUTH_ACCOUNT_INACTIVE）；绝不使用 requireAdmin() / User.role。
- * - 锁序（§25 冻结）：USER:actor → CAMPUS:<targetCampus>（governance subject
- *   锁命名空间 730501 的稳定 campus 键）→ 锁定授权重读（loadAuthorizationContext
- *   (actorId, tx) + requirePermissionInContext）→ mutation → audit。禁止
- *   "授权 pre-read only → long work → raw update"（role revoke TOCTOU 同源）。
+ * - 锁纪律（§25 / Final Review Repair 1 FR01 冻结）：ONE COMPLETE SUBJECT
+ *   SET → deterministic sorted acquisition——acquireGovernanceSubjectLocks()
+ *   对完整 subject 集合去重后按组合键升序逐一加锁（"CAMPUS:<id>" <
+ *   "USER:<id>" 字典序，campus 键恒先于 user 键），绝不做手工反向逐锁。
+ *   共享 CAMPUS:<id> serialization boundary 的路径：本 service 的
+ *   campus mutations（USER:actor + CAMPUS:<targetCampus> 完整集合）与
+ *   注册 admission（registration-service，仅 CAMPUS:<campusId>）——同一
+ *   helper、同一 730501 namespace，无第二套 campus lock。
+ * - 锁定授权重读（锁后）：loadAuthorizationContext(actorId, tx) +
+ *   requirePermissionInContext——错误存在的 campus.manage @ CAMPUS:A
+ *   grant 在这里被拒绝（无 targetCampusId 时仅 GLOBAL grant 放行），
+ *   actor 停用同样在此 fail closed。
  * - server action 绝不直接 prisma.campus.update()（§24）：authorization/
  *   locking/validation/mutation/audit 全部收敛在本 service。
  * - slug 冻结（§21/§26/§27）：slug 仅 create 时接受，create/update 的任何

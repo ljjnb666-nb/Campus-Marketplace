@@ -1,5 +1,9 @@
-import type { CampusVerificationPolicy } from "@prisma/client";
+import type { CampusVerificationPolicy, Prisma } from "@prisma/client";
 
+import {
+  parseCanonicalCursorDate,
+  parseCanonicalCursorJson,
+} from "@/lib/governance/canonical-cursor";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -33,21 +37,73 @@ export type GovernanceCampusListItem = {
   pendingVerificationCount: number;
 };
 
+// ── Final Review Repair 1（FR04）：bounded keyset pagination ─────────────────
+// 排序冻结：createdAt ASC, id ASC；cursor = canonical base64url(JSON)
+// { createdAt: canonical ISO, id }，沿用 canonical-cursor SSOT 纪律
+// （raw 白名单 / exact JSON keys / canonical ISO / non-empty id /
+// re-encode equality）；malformed cursor 一律 fail closed，绝不静默回第一页。
+
+export type GovernanceCampusCursor = { createdAt: Date; id: string };
+
+/** 由实际返回的最后一条生成下一页 cursor（base64url(JSON)）。 */
+export function encodeGovernanceCampusCursor(cursor: GovernanceCampusCursor): string {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: cursor.createdAt.toISOString(),
+      id: cursor.id,
+    }),
+  ).toString("base64url");
+}
+
+/** 解码客户端回传 cursor；任何解析/校验失败返回 null（调用方 fail closed）。 */
+export function decodeGovernanceCampusCursor(raw: string): GovernanceCampusCursor | null {
+  const payload = parseCanonicalCursorJson(raw, ["createdAt", "id"]);
+  if (!payload) {
+    return null;
+  }
+  const createdAt = parseCanonicalCursorDate(payload.createdAt);
+  if (!createdAt || payload.id.length === 0) {
+    return null;
+  }
+  const cursor: GovernanceCampusCursor = { createdAt, id: payload.id };
+  if (encodeGovernanceCampusCursor(cursor) !== raw) {
+    return null;
+  }
+  return cursor;
+}
+
 /**
- * campus 列表 + 轻量 summary（§19）。三条查询并行：campus 有界页、
- * ACTIVE membership 按 campus 聚合、PENDING verification 按 campus 聚合
- * （verification 的 campus 归属经 membership 关联，raw GROUP BY 一次聚合，
- * 绝不逐 campus N+1）。
+ * campus 列表 + 轻量 summary（§19）。keyset 条件（ASC 全 tuple：
+ * createdAt > ∨ (=∧id >)）；take limit+1 探测 hasMore。三条查询并行：
+ * campus 有界页、ACTIVE membership 按 campus 聚合、PENDING verification
+ * 按 campus 聚合（raw GROUP BY 一次聚合，绝不逐 campus N+1）。
  */
 export async function listGovernanceCampuses(input: {
   limit: number;
-}): Promise<GovernanceCampusListItem[]> {
+  cursor?: GovernanceCampusCursor;
+}): Promise<{
+  items: GovernanceCampusListItem[];
+  nextCursor: string | null;
+}> {
   const limit = Math.min(Math.max(1, input.limit), CAMPUS_LIST_MAX_PAGE_SIZE);
 
-  const [campuses, membershipCounts, verificationCounts] = await Promise.all([
+  const keyset: Prisma.CampusWhereInput = input.cursor
+    ? {
+        OR: [
+          { createdAt: { gt: input.cursor.createdAt } },
+          {
+            createdAt: { equals: input.cursor.createdAt },
+            id: { gt: input.cursor.id },
+          },
+        ],
+      }
+    : {};
+
+  const [rows, membershipCounts, verificationCounts] = await Promise.all([
     prisma.campus.findMany({
+      where: keyset,
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      take: limit,
+      take: limit + 1,
       select: {
         id: true,
         name: true,
@@ -71,6 +127,10 @@ export async function listGovernanceCampuses(input: {
       GROUP BY m."campusId"`,
   ]);
 
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows[pageRows.length - 1];
+
   const activeMembershipByCampus = new Map(
     membershipCounts.map((row) => [row.campusId, row._count._all]),
   );
@@ -78,7 +138,8 @@ export async function listGovernanceCampuses(input: {
     verificationCounts.map((row) => [row.campusId, Number(row.pending)]),
   );
 
-  return campuses.map((campus) => ({
+  return {
+    items: pageRows.map((campus) => ({
     id: campus.id,
     name: campus.name,
     slug: campus.slug,
@@ -86,9 +147,14 @@ export async function listGovernanceCampuses(input: {
     district: campus.district,
     isActive: campus.isActive,
     createdAt: campus.createdAt.toISOString(),
-    activeMembershipCount: activeMembershipByCampus.get(campus.id) ?? 0,
-    pendingVerificationCount: pendingVerificationByCampus.get(campus.id) ?? 0,
-  }));
+      activeMembershipCount: activeMembershipByCampus.get(campus.id) ?? 0,
+      pendingVerificationCount: pendingVerificationByCampus.get(campus.id) ?? 0,
+    })),
+    nextCursor:
+      hasMore && last
+        ? encodeGovernanceCampusCursor({ createdAt: last.createdAt, id: last.id })
+        : null,
+  };
 }
 
 /**

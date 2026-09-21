@@ -559,6 +559,7 @@ describe.skipIf(!integrationDatabaseUrl)(
           rawClient.rentalListing.deleteMany({ where: { id: { in: createdListingIds } } }),
           rawClient.rentalCategory.deleteMany({ where: { id: { in: createdCategoryIds } } }),
           rawClient.enforcementAction.deleteMany({ where: { id: { in: createdEnforcementIds } } }),
+          rawClient.policyAcceptance.deleteMany({ where: { user: { email: { contains: RUN_TAG } } } }),
           rawClient.notification.deleteMany({ where: { userId: { in: createdUserIds } } }),
           rawClient.userRoleAssignment.deleteMany({ where: { id: { in: createdAssignmentIds } } }),
           rawClient.rolePermission.deleteMany({ where: { roleId: { in: createdRoleIds } } }),
@@ -1564,6 +1565,199 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(globalByDomain.get("support")!.activeCount).toBeGreaterThan(
         byDomain.get("support")!.activeCount,
       );
+    });
+
+    // ── FR01：C-RACE-06 registration vs campus deactivation（真 PG 双方向）──
+
+    /** 解析当前 required legal documents（registration acceptances 输入）。 */
+    async function requiredDocumentIds(): Promise<string[]> {
+      const { getRequiredPolicies } = await import("@/lib/legal/policy-service");
+      const required = await getRequiredPolicies(new Date());
+      return required.map((document) => document.id);
+    }
+
+    async function countRegistration(email: string) {
+      return rawClient!.user.count({ where: { email } });
+    }
+
+    it("C-RACE-06 方向 A：registration 先取得 CAMPUS 锁 → 注册提交 → 停用随后提交（注册被接受）", async () => {
+      const { registerActiveCampusUser } = await import("@/lib/registration-service");
+      const { deactivateGovernanceCampus } = await import("@/lib/campus/campus-governance-service");
+
+      const campus = await createFixtureCampus("P7H-RACE06A");
+      const docIds = await requiredDocumentIds();
+      const email = `${RUN_TAG}-race06a@it.local`;
+
+      const campusKey = `CAMPUS:${campus.id}`;
+      const release = await holdAdvisoryLock(rawClient!, GOVERNANCE_LOCK_NAMESPACE, campusKey);
+      try {
+        // 注册事务在锁等待队列（locked recheck 尚未发生）
+        const guarded = registerActiveCampusUser({
+          name: "竞速注册A",
+          email,
+          passwordHash: FIXTURE_PASSWORD_HASH,
+          schoolName: "集成测试大学",
+          campusId: campus.id,
+          acceptedDocumentIds: docIds,
+        }).then(
+          (outcome) => outcome,
+          (error: unknown) => error,
+        );
+        await waitForAdvisoryLockWaiter(rawClient!, [campusKey], GOVERNANCE_LOCK_NAMESPACE);
+
+        // 放行：注册先线性化（active recheck 通过 → 提交）
+        await release();
+
+        const outcome = (await guarded) as
+          | { ok: true; user: { id: string } }
+          | { ok: false; reason: string }
+          | Error;
+        expect((outcome as { ok?: boolean }).ok).toBe(true);
+        if ((outcome as { ok?: boolean }).ok) {
+          createdUserIds.push((outcome as { user: { id: string } }).user.id);
+        }
+        expect(await countRegistration(email)).toBe(1);
+        expect(
+          await rawClient!.campusMembership.count({
+            where: { campusId: campus.id, status: "ACTIVE" },
+          }),
+        ).toBe(1);
+        expect(await rawClient!.policyAcceptance.count({ where: { user: { email } } })).toBe(
+          docIds.length,
+        );
+
+        // 停用随后线性化：注册成果保留（合法终态 A）
+        await deactivateGovernanceCampus({ actorId: platformAdmin.id, campusId: campus.id });
+        const row = await rawClient!.campus.findUniqueOrThrow({ where: { id: campus.id } });
+        expect(row.isActive).toBe(false);
+        expect(await countRegistration(email)).toBe(1);
+      } finally {
+        await release();
+      }
+    });
+
+    it("C-RACE-06 方向 B：deactivation 先提交 → 注册 locked recheck 见 inactive → 拒绝且零部分注册", async () => {
+      const { registerActiveCampusUser } = await import("@/lib/registration-service");
+      const { deactivateGovernanceCampus } = await import("@/lib/campus/campus-governance-service");
+
+      const campus = await createFixtureCampus("P7H-RACE06B");
+      const docIds = await requiredDocumentIds();
+      const email = `${RUN_TAG}-race06b@it.local`;
+
+      const campusKey = `CAMPUS:${campus.id}`;
+      const release = await holdAdvisoryLock(rawClient!, GOVERNANCE_LOCK_NAMESPACE, campusKey);
+      try {
+        // 停用先入队（USER:actor + CAMPUS:<id> 完整集合，等待落在 campus 键上）
+        const guarded = deactivateGovernanceCampus({
+          actorId: platformAdmin.id,
+          campusId: campus.id,
+        }).then(
+          (outcome) => outcome,
+          (error: unknown) => error,
+        );
+        await waitForAdvisoryLockWaiter(
+          rawClient!,
+          [campusKey, `USER:${platformAdmin.id}`],
+          GOVERNANCE_LOCK_NAMESPACE,
+        );
+        await release();
+
+        const outcome = (await guarded) as { isActive?: boolean };
+        expect(outcome.isActive).toBe(false);
+
+        // 停用已提交：注册随后取得锁 → locked recheck 见 inactive → 拒绝
+        const registration = await registerActiveCampusUser({
+          name: "竞速注册B",
+          email,
+          passwordHash: FIXTURE_PASSWORD_HASH,
+          schoolName: "集成测试大学",
+          campusId: campus.id,
+          acceptedDocumentIds: docIds,
+        });
+        expect(registration).toEqual({ ok: false, reason: "CAMPUS_NOT_AVAILABLE" });
+
+        // ZERO 部分注册：User / CampusMembership / PolicyAcceptance 全零
+        expect(await countRegistration(email)).toBe(0);
+        expect(await rawClient!.campusMembership.count({ where: { campusId: campus.id } })).toBe(0);
+        expect(await rawClient!.policyAcceptance.count({ where: { user: { email } } })).toBe(0);
+      } finally {
+        await release();
+      }
+    });
+
+    // ── FR04：PAGE-01..05（真 PG keyset pagination 全量遍历合同）───────────
+
+    it("PAGE-01..05：26 campuses 有界遍历——页界、无重复、无跳过、同 createdAt 由 id 决断", async () => {
+      const { decodeGovernanceCampusCursor, listGovernanceCampuses } = await import(
+        "@/lib/campus/campus-governance-query"
+      );
+
+      // 26 个新校区：其中 3 个显式同一 createdAt（PAGE-05 tie-by-id），
+      // 其余使用更晚的默认 createdAt
+      const tiedCreatedAt = new Date("2026-08-01T00:00:00.000Z");
+      const tiedIds: string[] = [];
+      for (let index = 0; index < 3; index += 1) {
+        const campus = await rawClient!.campus.create({
+          data: {
+            name: `P7H-PAGE-tied-${index}-${RUN_TAG}`,
+            slug: `p7h-page-tied-${index}-${RUN_TAG}`,
+            schoolName: "集成测试大学",
+            createdAt: tiedCreatedAt,
+          },
+        });
+        createdCampusIds.push(campus.id);
+        tiedIds.push(campus.id);
+      }
+      for (let index = 0; index < 23; index += 1) {
+        const campus = await rawClient!.campus.create({
+          data: {
+            name: `P7H-PAGE-${index}-${RUN_TAG}`,
+            slug: `p7h-page-${index}-${RUN_TAG}`,
+            schoolName: "集成测试大学",
+          },
+        });
+        createdCampusIds.push(campus.id);
+      }
+      const createdSet = new Set(createdCampusIds.slice(-26));
+
+      // 全量遍历（有界迭代上限防脏数据死循环）
+      const walkedIds: string[] = [];
+      const walkedKeys: string[] = [];
+      let cursor: string | undefined;
+      let sawCursor = false;
+      for (let step = 0; step < 20; step += 1) {
+        const result = await listGovernanceCampuses({
+          limit: 25,
+          cursor: cursor ? decodeGovernanceCampusCursor(cursor)! : undefined,
+        });
+        if (step === 0) {
+          // PAGE-01：26+ 行时第一页恰 25 且 nextCursor 存在（PAGE-02 前提）
+          expect(result.items).toHaveLength(25);
+        }
+        for (const item of result.items) {
+          walkedIds.push(item.id);
+          walkedKeys.push(`${item.createdAt}-${item.id}`);
+        }
+        if (result.nextCursor === null) break;
+        sawCursor = true;
+        cursor = result.nextCursor;
+      }
+      expect(sawCursor).toBe(true);
+
+      // PAGE-03：无重复
+      expect(new Set(walkedIds).size).toBe(walkedIds.length);
+      // PAGE-04：无跳过——本测试创建的 26 个全部到达
+      for (const id of createdSet) {
+        expect(walkedIds).toContain(id);
+      }
+      // PAGE-05：同 createdAt tie 由 id 升序决断且相邻（tied 三元组内无插入）
+      const tiedPositions = tiedIds.map((id) => walkedIds.indexOf(id));
+      expect(tiedPositions.every((position) => position >= 0)).toBe(true);
+      const sorted = [...tiedPositions].sort((a, b) => a - b);
+      expect(sorted).toEqual(tiedPositions);
+      // 全局序：walkedKeys 非降（createdAt,id 字典序）
+      const sortedKeys = [...walkedKeys].sort();
+      expect(walkedKeys).toEqual(sortedKeys);
     });
   },
 );
