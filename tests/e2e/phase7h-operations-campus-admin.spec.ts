@@ -4,6 +4,7 @@ import { hashSync } from "bcryptjs";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 import { e2eDb } from "./helpers/db";
 import { loginViaUI } from "./helpers/auth";
+import { expectHeadingSettled } from "./helpers/hydration-settlement";
 import { uniqueTag } from "./helpers/e2e";
 
 /**
@@ -29,29 +30,46 @@ import { uniqueTag } from "./helpers/e2e";
 test.describe.configure({ retries: 0 });
 
 /**
- * P7_UI_DUPLICATE_DOM_01（Final Review Repair 2，Case C 证据-backed 稳定化）：
+ * P7_UI_DUPLICATE_DOM_01（Final Review Repair 4，TRUE raw-DOM settlement）：
  *
- * Next 16 App Router 水合防闪烁语义——水合窗口内 SSR 树保持在
- * [hidden] 壳中（transient hidden hydration shell：不可见/不可聚焦/
- * 不可交互/不进入 a11y tree），hydration 新树构建完成后旧壳整体移除。
- * 探针实测 RAW=1 / DOM=2 / visible=1 / hidden=1 → settled DOM=1。
- *
- * 用户可见副本恒唯一，无产品缺陷；但 strict locator 在窗口内会命中
- * hidden 壳。系统性稳定化合同（Independent Review APPROVED）：
- * await expect(marker).toHaveCount(1) 等待窗口收敛，并把"可访问副本
- * 恒 1"固化为回归断言——绝无 .first()/timeout 掩盖。
+ * 每个 fresh-goto / server-action revalidation 边界后，必须先通过
+ * expectHeadingSettled（a11y heading = 1 且 raw DOM h1 = 1 双层断言，
+ * 见 helpers/hydration-settlement.ts）证明水合替换的 hidden 壳已移除，
+ * 然后才允许任何 strict raw locator 交互。绝无 .first()/.nth()/
+ * waitForTimeout/retry/workers 掩盖。
  */
-async function expectLabelHydrationSettled(page: Page, name: string) {
-  // 可访问（a11y-tree 派生）副本恰 1：hidden 壳结构性不进入 a11y tree
-  await expect(page.getByRole("textbox", { name })).toHaveCount(1);
-  // 全量 DOM 副本收敛到 1：等待水合替换窗口关闭（hidden 壳随壳移除）
-  await expect(page.getByLabel(name)).toHaveCount(1);
-}
+test("7H-SETTLE-00 settlement helper synthetic proof：hidden 壳存在时不得 resolve，壳移除后立即收敛", async ({ page }) => {
+  // 确定性合成 DOM（§3：不经真实 Next 随机窗口验证 helper 正确性）
+  await page.setContent(`
+    <main>
+      <div id="hydration-shell" hidden>
+        <h1>治理总览</h1>
+      </div>
+      <h1>治理总览</h1>
+    </main>
+  `);
 
-/** 页面级稳定化：唯一 h1 收敛到 1（窗口内为 2——hidden 壳含整页副本）。 */
-async function expectHeadingSettled(page: Page, name: string) {
-  await expect(page.getByRole("heading", { name, exact: true })).toHaveCount(1);
-}
+  // 窗口态前置证明：raw DOM h1 = 2；accessible h1 = 1（hidden 壳被排除）
+  await expect(page.locator("h1")).toHaveCount(2);
+  await expect(
+    page.getByRole("heading", { name: "治理总览", exact: true, level: 1 }),
+  ).toHaveCount(1);
+
+  // helper 必须仍 pending：其终态要求 raw DOM h1 = 1，窗口内不可能满足
+  const settlement = expectHeadingSettled(page, "治理总览");
+  let resolved = false;
+  void settlement.then(() => {
+    resolved = true;
+  });
+  await expect(page.locator("h1")).toHaveCount(2);
+  expect(resolved).toBe(false);
+
+  // 移除 hidden 壳 → helper 立即收敛（零 sleep，Playwright auto-wait）
+  await page.evaluate(() => document.getElementById("hydration-shell")?.remove());
+  await settlement;
+  expect(resolved).toBe(true);
+  await expect(page.locator("h1")).toHaveCount(1);
+});
 
 const TEST_PASSWORD_PREFIX = process.env.E2E_TEST_PASSWORD_PREFIX ?? "E2e";
 const ADMIN_STORAGE_STATE = "tests/e2e/.auth/admin.json";
@@ -105,6 +123,49 @@ async function loginNewContext(
   const page = await context.newPage();
   await loginViaUI(page, email, password, name);
   return { context, page };
+}
+
+/**
+ * 有界逐页前进定位唯一 slug 卡片（Repair 4 §7/§12）。
+ *
+ * 动机：--repeat-each 稳定性矩阵中各测试并行创建校区（可累积数百行），
+ * 唯一 slug 卡片可能落在任意后页。每翻一页都执行 settlement
+ * （expectHeadingSettled，§7/§12 边界合同）后才读下一页链接；
+ * 零 .first()/sleep/manual polling。
+ */
+async function walkToCampusCard(
+  page: Page,
+  slug: string,
+  maxPages = 40,
+): Promise<ReturnType<Page["locator"]>> {
+  const card = page.locator("article", { hasText: slug });
+  // 每页的 下一页 href 携带该页末行 cursor（页间必不同）：href 相对上一页
+  // 变化 = 新页 article 内容已渲染的确定性 barrier（杜绝 h1 先到、列表
+  // 后到造成的"空页误判 → 越页过冲"）。
+  let previousNextHref: string | null = null;
+  for (let step = 0; step < maxPages; step += 1) {
+    // h1 先渲染、article 列表流式后到：判空前必须等列表挂载
+    await expect(page.locator("article").first()).toBeAttached();
+    if ((await card.count()) === 1) {
+      return card;
+    }
+    const next = page.getByRole("link", { name: "下一页" });
+    await expect(next).toHaveCount(1);
+    if (previousNextHref !== null) {
+      // URL 已变但 DOM 可能仍停留在上一页（Next 16.3.3 客户端导航
+      // URL 先行 / DOM 延迟切换——本轮 href 断言实测捕获）：
+      // auto-wait 到下一页 href 相对上一页变化，即新页 DOM 真实到达
+      await expect(next).not.toHaveAttribute("href", previousNextHref);
+    }
+    previousNextHref = (await next.getAttribute("href")) ?? "";
+    expect(previousNextHref.length).toBeGreaterThan(0);
+    // 并行 worker 的 server action（revalidatePath）会瞬时 detach 本页节点：
+    // locator.evaluate 在执行时重解析当前树（DOM click），对并发重渲染自愈
+    await next.evaluate((el) => (el as HTMLElement).click());
+    await expect(page).toHaveURL(/cursor=/);
+    await expectHeadingSettled(page, "校区管理");
+  }
+  return card;
 }
 
 test("7H-E2E01 campus report reviewer → /governance 仅见授权 summary；跨校区计数缺席", async ({ browser }) => {
@@ -179,6 +240,7 @@ test("7H-E2E01 campus report reviewer → /governance 仅见授权 summary；跨
 
   // summary → queue 链路（report reviewer 仅一张 summary 卡 → 唯一链接）
   await page.getByRole("link", { name: "查看队列" }).click();
+  await expectHeadingSettled(page, "举报处理");
   await expect(page.getByRole("heading", { name: "举报处理", level: 1 })).toBeVisible();
 
   await context.close();
@@ -247,35 +309,44 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   await page.goto("/governance/campuses?limit=50");
   await expectHeadingSettled(page, "校区管理");
   await expect(page.getByRole("heading", { name: "校区管理" })).toBeVisible();
-  await expectLabelHydrationSettled(page, "校区名称");
 
   await page.getByRole("textbox", { name: "校区名称" }).fill(`E2E7H校区-${tag}`);
   await page.getByLabel("校区标识符（slug，创建后不可修改）").fill(`e2e7h-${tag}`);
   await page.getByLabel("学校名称").fill("E2E 大学");
   await page.getByLabel("所在区域（可选）").fill("海淀区");
   await page.getByRole("button", { name: "创建校区" }).click();
+  // server action + revalidation 边界：状态标记 toHaveCount(1) 自稳定
+  // （窗口内旧 DOM 无此标记、新 DOM 恰 1 → 收敛即窗口关闭）
+  await expect(page.getByText(`校区已创建：E2E7H校区-${tag}`)).toHaveCount(1);
   await expect(page.getByText(`校区已创建：E2E7H校区-${tag}`)).toBeVisible();
 
   await page.goto("/governance/campuses?limit=50");
-  // 并发确定性：以唯一 slug 定位本测试创建的卡片，再点其详情链接
-  const createdCard = page.locator("article", { hasText: `e2e7h-${tag}` });
-  await createdCard.getByRole("link", { name: "管理详情" }).click();
+  await expectHeadingSettled(page, "校区管理");
+  // 并发确定性：以唯一 slug 有界逐页定位本测试创建的卡片，再点其详情链接
+  const createdCard = await walkToCampusCard(page, `e2e7h-${tag}`);
+  await createdCard
+    .getByRole("link", { name: "管理详情" })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.waitForURL(/\/governance\/campuses\/[^/]+$/, { timeout: 15_000 });
+  await expectHeadingSettled(page, `E2E7H校区-${tag}`);
 
   // 详情：slug 展示且结构性无修改入口
   await expect(page.getByTestId("campus-slug")).toHaveText(`e2e7h-${tag}`);
   const slugValue = await page.getByTestId("campus-slug").textContent();
-  await expectLabelHydrationSettled(page, "校区名称");
 
   await page.getByRole("textbox", { name: "校区名称" }).fill(`E2E7H校区改名-${tag}`);
   await page.getByRole("button", { name: "保存修改" }).click();
+  await expect(page.getByText("校区信息已更新")).toHaveCount(1);
   await expect(page.getByText("校区信息已更新")).toBeVisible();
   await expect(page.getByTestId("campus-slug")).toHaveText(slugValue!);
 
   await page.getByRole("button", { name: "停用校区" }).click();
+  await expect(page.getByText("已停用", { exact: true })).toHaveCount(1);
   await expect(page.getByText("已停用", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "启用校区" })).toBeVisible();
 
   await page.getByRole("button", { name: "启用校区" }).click();
+  await expect(page.getByText("启用中", { exact: true })).toHaveCount(1);
   await expect(page.getByText("启用中", { exact: true })).toBeVisible();
 
   await context.close();
@@ -297,19 +368,23 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
   });
 
   await page.goto(`/governance/campuses/${campus.id}`);
+  // page settlement first（§8）：raw DOM + a11y 双层收敛后才用语义 locator
+  await expectHeadingSettled(page, `E2E7H策略校区-${tag}`);
   await expect(page.getByRole("heading", { name: `E2E7H策略校区-${tag}` })).toBeVisible();
-  await expectLabelHydrationSettled(page, "策略标题");
 
   await page.getByRole("textbox", { name: "策略标题" }).fill("E2E7H 认证规则");
   await page.getByLabel("认证说明（发布后不可修改）").fill("初版说明：上传学生证");
   await page.getByRole("button", { name: "创建草稿" }).click();
+  await expect(page.getByText("认证策略草稿 v1 已创建")).toHaveCount(1);
   await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
 
   await page.getByLabel("认证说明（保存将重算内容指纹）").fill("更新版说明：上传学生证与校园卡");
   await page.getByRole("button", { name: "保存草稿" }).click();
+  await expect(page.getByText("草稿已更新")).toHaveCount(1);
   await expect(page.getByText("草稿已更新")).toBeVisible();
 
   await page.getByRole("button", { name: "发布", exact: true }).click();
+  await expect(page.getByText("已发布", { exact: true })).toHaveCount(1);
   // 成功反馈随 revalidate 卸载（草稿表单被已发布视图替换）——断言终态而非瞬态 toast：
   // current 语义可见：已发布徽标 + 不可修改提示 + 无草稿编辑表单
   await expect(page.getByText("已发布", { exact: true })).toBeVisible();
@@ -369,13 +444,15 @@ test("7H-E2E08 浏览器时区 Asia/Shanghai：本地 09:00 → DB 绝对 instan
   const page = await context.newPage();
 
   await page.goto(`/governance/campuses/${campus.id}`);
-  await expectLabelHydrationSettled(page, "策略标题");
+  // §11：page settlement（dynamic campus name）先于 策略标题/生效时间
+  await expectHeadingSettled(page, `E2E7H时区校区-${tag}`);
   await page.getByRole("textbox", { name: "策略标题" }).fill("E2E7H 时区规则");
   await page.getByLabel("认证说明（发布后不可修改）").fill("时区合同验证说明");
   // Playwright datetime-local fill 只接受分钟精度；秒/毫秒合同由
   // jsdom 单测（fireEvent + ms 值）与 hidden-initial 保持语义承担
   await page.getByLabel(/生效时间/).fill("2026-12-01T09:00");
   await page.getByRole("button", { name: "创建草稿" }).click();
+  await expect(page.getByText("认证策略草稿 v1 已创建")).toHaveCount(1);
   await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
 
   const policy = await db.campusVerificationPolicy.findFirstOrThrow({
@@ -425,12 +502,16 @@ test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区
   const next = page.getByRole("link", { name: "下一页" });
   await expect(next).toBeVisible();
 
-  // 第二页：包含本测试的标记校区（createdSet 无重复无跳过的精确遍历由集成 PAGE-01..05 承担）
-  await next.click();
-  await expect(page).toHaveURL(/cursor=/);
-  const markerCard = page.locator("article", { hasText: markerSlug });
+  // 后续页有界遍历：直到 marker 校区可见（--repeat-each 累积数据下页数 > 2；
+  // createdSet 无重复无跳过的精确遍历由集成 PAGE-01..05 承担）。
+  // 每翻一页执行 settlement（§12 边界合同），marker 卡可见后走详情。
+  const markerCard = await walkToCampusCard(page, markerSlug);
   await expect(markerCard).toBeVisible();
-  await markerCard.getByRole("link", { name: "管理详情" }).click();
+  await markerCard
+    .getByRole("link", { name: "管理详情" })
+    .evaluate((el) => (el as HTMLElement).click());
+  await page.waitForURL(/\/governance\/campuses\/[^/]+$/, { timeout: 15_000 });
+  await expectHeadingSettled(page, `E2E7H分页标记-${tag}`);
 
   await expect(page.getByTestId("campus-slug")).toHaveText(markerSlug);
 

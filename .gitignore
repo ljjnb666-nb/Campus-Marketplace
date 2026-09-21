@@ -1,9 +1,5 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# 诊断 harness 运行期工件（水合壳证据快照 / 失败截图）不入库
-tests/diagnostics/.evidence/
-tests/diagnostics/.artifacts/
-
 # Dependencies
 node_modules/
 .pnp
