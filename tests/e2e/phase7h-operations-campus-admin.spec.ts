@@ -172,6 +172,7 @@ async function walkToCampusCard(
   let previousNextHref: string | null = null;
   for (let step = 0; step < maxPages; step += 1) {
     // h1 先渲染、article 列表流式后到：判空前必须等列表挂载
+    // （locator 集合 auto-wait 非空语义，无 .first()）
     await expect(page.locator("article").first()).toBeAttached();
     if ((await card.count()) === 1) {
       return card;
@@ -375,13 +376,23 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
 
   await page.getByRole("textbox", { name: "校区名称" }).fill(`E2E7H校区改名-${tag}`);
   await page.getByRole("button", { name: "保存修改" }).click();
+  // UI success invariant（toast 仅存在于新树 → count=1 证 revalidation 已渲染）
   await expect(page.getByText("校区信息已更新")).toHaveCount(1);
   await expect(page.getByText("校区信息已更新")).toBeVisible();
+  // raw DOM 旧壳移除证明：改名前 h1（旧名）归零——新名 h1=1 无法单独证明
+  // 壳已消失（旧壳 h1 为旧名，不与新名匹配）
+  await expect(
+    page.locator("h1").filter({ hasText: `E2E7H校区-${tag}` }),
+  ).toHaveCount(0);
+  await expectHeadingSettled(page, `E2E7H校区改名-${tag}`);
   await expect(page.getByTestId("campus-slug")).toHaveText(slugValue!);
 
+  // ONLY THEN：deactivate（停用校区按钮在旧壳/新树各有一份的窗口已关闭）
   await page.getByRole("button", { name: "停用校区" }).click();
   await expect(page.getByText("已停用", { exact: true })).toHaveCount(1);
   await expect(page.getByText("已停用", { exact: true })).toBeVisible();
+  // 统一 contract：deactivate revalidation → settlement → activate
+  await expectHeadingSettled(page, `E2E7H校区改名-${tag}`);
   await expect(page.getByRole("button", { name: "启用校区" })).toBeVisible();
 
   await page.getByRole("button", { name: "启用校区" }).click();
@@ -423,6 +434,8 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
       })) ?? null,
     ).toBeTruthy();
   }).toPass({ timeout: 20_000 });
+  // 统一 contract：create-draft revalidation → settlement → draft interaction
+  await expectHeadingSettled(page, `E2E7H策略校区-${tag}`);
 
   await page.getByLabel("认证说明（保存将重算内容指纹）").fill("更新版说明：上传学生证与校园卡");
   await page.getByRole("button", { name: "保存草稿" }).click();
@@ -433,7 +446,11 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
     });
     expect(row.instructions).toBe("更新版说明：上传学生证与校园卡");
   }).toPass({ timeout: 20_000 });
+  // BLOCKER 2：save 前后 draft 树都含 发布/保存草稿 按钮——hidden 旧壳可制造
+  // strict duplicate；same-name raw h1 在窗口内 = 2，settlement 等待其归 1
+  await expectHeadingSettled(page, `E2E7H策略校区-${tag}`);
 
+  // ONLY THEN：publish
   await page.getByRole("button", { name: "发布", exact: true }).click();
   await expect(async () => {
     const row = await db.campusVerificationPolicy.findFirstOrThrow({
