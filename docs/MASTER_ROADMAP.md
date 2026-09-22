@@ -50,6 +50,9 @@
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
 | Phase 6A | Identity / Campus Membership / Verification / RBAC Foundation（Phase 6 第一实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10，经独立验收 Repair 1 + post-merge master CI 收口） |
 | Phase 6B | Trust / Risk / Enforcement Foundation（Phase 6 第二实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12，经多轮独立验收 Repair 1–3 + Final Repair + post-merge master CI 收口） |
+| Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，Phase 6A/6B/6C 全部关闭） |
+| Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
@@ -58,6 +61,10 @@ Phase 6A master-green reference：`d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`
 （PR #10 合并提交——Phase 6A 代码范围的固定引用点，**不随 master 前进而改写**）；
 Phase 6B master-green reference：`d5f8e19151184f7b5ce5660103cc5632f183e9b9`
 （PR #12 合并提交——Phase 6B 代码范围的固定引用点，**不随 master 前进而改写**）；
+Phase 6C master-green reference：`ed63d20850259ee7bcc6674c8d6836bc5b0a56f9`
+（PR #19 合并提交——Phase 6C 代码范围的固定引用点，**不随 master 前进而改写**）；
+Phase 7 canonical baseline：`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`
+（PR #27 合并提交——Phase 7 代码范围的固定引用点，**不随 master 前进而改写**）；
 Phase 6B Closure Recovery current master reference：`97f53cd3494b24854a56b19e0418d50a5b5efeb6`
 （PR #14 合并提交——RBAC bootstrap 并发修复的固定引用点，**不随 master 前进而改写**；
 两者语义不同：d5f8e19 = 6B core code merge，97f53cd = closure recovery merge）；
@@ -159,8 +166,8 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 4 | Observability / Monitoring / Recovery | DONE / MERGED / MASTER-GREEN / CLOSED |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | IN_PROGRESS |
-| Phase 7 | Operations Admin Foundation | NOT_STARTED |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，6A/6B/6C 全部关闭，见 §5.2） |
+| Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
@@ -356,14 +363,43 @@ Trust / risk / enforcement invariants（closure 时最终合同）：
   **attempt = 1**
 - Old failed CI rerun：**NO**
 
-**Phase 6B 之后**：
+**Phase 6B 之后（historical snapshot at Phase 6B closure）**：
 
 - `PHASE_6B = DONE / MERGED / MASTER-GREEN / CLOSED`
-- `PHASE_6 = IN_PROGRESS`（6B 关闭不等于 Phase 6 完成）
-- `PHASE_6C = NOT_STARTED`（Phase 6 内部实施拆分，不是新的 canonical
-  roadmap row）：appeal 完整生命周期、enforcement completion /
-  safety hardening、hard-suspension 隐私例外路径、受限/停用用户的
-  listing / enforcement policy completion
+- 以下为 Phase 6B 收口时点的历史快照（当时 `PHASE_6 = IN_PROGRESS`、
+  `PHASE_6C = NOT_STARTED`；6C 预留 appeal 完整生命周期、enforcement
+  completion / safety hardening、hard-suspension 隐私例外路径、受限/停用
+  用户的 listing / enforcement policy completion）——该表述仅是历史记录，
+  6C 现已关闭（见下方 Closure record），不得解读为当前状态。
+
+**Phase 6C Closure record（2026-09-10）**：
+
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
+- 实施链（四段拆分，全部经独立验收 + exact-head CI 后合并）：
+  - PR #16（Phase 6C-1A，Provenance / enforcement seq foundation）：
+    merge commit `c4ea90802972123d2d89ffc0ff5b77f3736246f8`
+  - PR #17（Phase 6C-1B，Appeal domain）：merge commit
+    `f2bff2089f88ba336f785acf773250e2eafff226`
+  - PR #18（Phase 6C-2，Appeal HTTP surface）：merge commit
+    `9cb94700dc08db443fe2492b4caee9241351420c`
+  - PR #19（Phase 6C-3，Marketplace capability + dispute/support 收口）：
+    final merge commit `ed63d20850259ee7bcc6674c8d6836bc5b0a56f9`
+    （Phase 6C master-green reference）
+- Final reviewed PR head：`640121baf0e5aa8a8e630734ecc1873679574358`
+- Post-merge master CI：run 34673546585 —— event = push、branch = master、
+  verify = success、e2e = success、**attempt = 1**
+- Final scope（精炼记录）：enforcement provenance / seq causal ordering、
+  appeal 完整生命周期（含 HTTP self-service surface）、marketplace capability
+  taxonomy + 参与方限制、dispute / support 运营队列收口、
+  rental dispute convergence
+- **`PHASE_6C = DONE / MERGED / MASTER-GREEN / CLOSED`**
+
+**Phase 6 Closure（2026-09-10）**：
+
+- `PHASE_6A = DONE / MERGED / MASTER-GREEN / CLOSED`
+- `PHASE_6B = DONE / MERGED / MASTER-GREEN / CLOSED`
+- `PHASE_6C = DONE / MERGED / MASTER-GREEN / CLOSED`
+- **`PHASE_6 = DONE / MERGED / MASTER-GREEN / CLOSED`**
 
 ### 5.3 Phase 7 — Operations Admin Foundation
 
@@ -377,6 +413,61 @@ campus configuration、system / operational overview。
 
 **重要**：未来的支付运营能力将**扩展本阶段建立的运营后台**，
 而不是另建一套互不相关的第二个 admin console。
+
+**Phase 7 Final Closure Record（2026-09-22）**：
+
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**（canonical Phase 7
+  code baseline：`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，PR #27 合并提交）
+- 实施链（八个切片，全部经独立验收 + exact-head CI 后合并）：
+
+  | 切片 | PR | Merge commit |
+  | --- | --- | --- |
+  | 7A Appeals | #20 | `f2d5aeaa644f9b77e1afea24abbecabc89b4dea9` |
+  | 7B Roles | #21 | `f5a29f2caf9c159d5a47a8b76f1e42f74b5cef96` |
+  | 7C Moderation | #22 | `caf8c22d650d70f738e5ce3056d1c187f6d17c50` |
+  | 7D Visibility | #23 | `85fcee88431a99585911803f7d78eb083eb90fe0` |
+  | 7E Reports / Cases | #24 | `6aeda72d1f2d91ab4f59b8b1a0b9db4fa90f32b0` |
+  | 7F User Verification Ops | #25 | `585c94ba86b1488478146b0995a94503cc1b4dfc` |
+  | 7G Disputes / Support | #26 | `8a0355cc7fabe6c8652983dc299e83161cd441b5` |
+  | 7H Ops Overview / Campus Admin | #27 | `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5` |
+
+- Post-merge master CI：run 35713347538 —— event = push、branch = master、
+  **attempt = 1**、verify = SUCCESS（353 files / 2840 tests）、e2e = SUCCESS
+  （72 passed）、coverage 88.94 / 85.57 / 89.44 / 88.94
+- **Capability closure（`PHASE_7_CANONICAL_CAPABILITY_CLOSURE = 18 / 18`）**：
+  TOTAL = 18、COMPLETE = 18、PARTIAL = 0、FOUNDATION_ONLY = 0、
+  LEGACY_ONLY = 0（within canonical Phase 7 scope）、MISSING = 0——
+  operations dashboard、user management、campus verification review、
+  product / errand / service / rental moderation、reports、moderation cases、
+  enforcement actions、appeals、disputes、support tickets、operations queues、
+  SLA / dueAt、audit visibility、campus configuration、
+  system / operational overview
+- Legacy admin audit：`/admin`、`/admin/users`、`/admin/verifications`、
+  `/admin/reports`、`/admin/products`、`/admin/errands`、`/admin/services`
+  均已退役为 `/governance/*` redirect——canonical governance operations
+  console = `/governance`，**不存在第二套 active Phase 7 governance
+  authority**；剩余 legacy maintenance surface：`/admin/categories`、
+  `/admin/keywords`（OUTSIDE Phase 7 canonical 18-capability scope、
+  NON_BLOCKING，见 [BACKLOG.md](BACKLOG.md)
+  P7-BACKLOG-LEGACY-MAINT-01）
+- Closure debts（详见 [BACKLOG.md](BACKLOG.md)）：
+  `P7-CLOSURE-DEBT-01 = CLOSED`（Phase 6C RACE-1 test start-order
+  nondeterminism；修复 = deterministic lock-holder signal 先于竞争 waiter
+  启动；production bug = NO EVIDENCE）；
+  `P7_UI_DUPLICATE_DOM_01 = DOWNGRADED_WITH_PROOF`（transient hidden
+  streamed/hydration shell；PRODUCT_BUG = NO EVIDENCE；
+  USER_VISIBLE_DUPLICATION = NO；release test contract = a11y exact page
+  h1 = 1 + raw DOM exact page h1 = 1 before strict interaction；
+  框架行为仍存在，非"Next.js bug fixed"——temp-worktree A/B 实测
+  16.3.3 ≡ 16.3.5，依赖保持冻结）；
+  `P7-DEBT-E2E-SETUP-01`、`P7-DEBT-E2E-LOAD-01`（NON_BLOCKING，
+  candidate phase = Full-System Adversarial Audit）
+
+**Phase 7 之后（development workflow guard，非新增 canonical Phase）**：
+
+- `PHASE_7 = DONE / MERGED / MASTER-GREEN / CLOSED`
+- `NEXT = FULL-SYSTEM ADVERSARIAL AUDIT`（仅 audit PASS 后才进入
+  Phase 8；Master Roadmap Phase 顺序不变）
 
 ### 5.4 Phase 8 — Marketplace Lifecycle Hardening
 
@@ -765,6 +856,7 @@ Master Roadmap v1.0 一旦被接受即视为冻结。
 ## 附：文档索引
 
 - 阶段任务明细与测试基线：[TODO.md](TODO.md)
+- 非阻塞债务/Backlog 登记：[BACKLOG.md](BACKLOG.md)
 - 部署与拓扑：[PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)
 - 备份/恢复：[BACKUP_RESTORE.md](BACKUP_RESTORE.md)；回滚：[ROLLBACK.md](ROLLBACK.md)
 - 生产安全：[PRODUCTION_SECURITY.md](PRODUCTION_SECURITY.md)；安全设计：[SECURITY.md](SECURITY.md)
