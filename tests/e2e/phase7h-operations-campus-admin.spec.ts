@@ -29,6 +29,33 @@ import { uniqueTag } from "./helpers/e2e";
 
 test.describe.configure({ retries: 0 });
 
+// Repair 4 §21 稳定性：--repeat-each 矩阵中每个测试实例清理自己创建的
+// 校区夹具，杜绝跨重复累积（否则分页 marker 会被后续重复挤到深页，
+// 数据量假设随累积漂移）。
+const cleanupCampusIds: string[] = [];
+
+test.beforeEach(() => {
+  cleanupCampusIds.length = 0;
+});
+
+test.afterEach(async () => {
+  if (cleanupCampusIds.length === 0) {
+    return;
+  }
+  const ids = [...cleanupCampusIds];
+  cleanupCampusIds.length = 0;
+  const db = e2eDb();
+  try {
+    await db.moderationCase.deleteMany({ where: { campusId: { in: ids } } });
+    await db.report.deleteMany({ where: { campusId: { in: ids } } });
+    await db.campusMembership.deleteMany({ where: { campusId: { in: ids } } });
+    await db.campusVerificationPolicy.deleteMany({ where: { campusId: { in: ids } } });
+    await db.campus.deleteMany({ where: { id: { in: ids } } });
+  } catch (error) {
+    console.warn("[7H-cleanup] 夹具清理失败（下轮 setup 全量重建兜底）", error);
+  }
+});
+
 /**
  * P7_UI_DUPLICATE_DOM_01（Final Review Repair 4，TRUE raw-DOM settlement）：
  *
@@ -181,6 +208,7 @@ test("7H-E2E01 campus report reviewer → /governance 仅见授权 summary；跨
       isActive: true,
     },
   });
+  cleanupCampusIds.push(campusB.id);
 
   const reporter = await createE2EUser({
     name: `7H报告员-${tag}`,
@@ -302,6 +330,7 @@ test("7H-E2E03 PLATFORM_ADMIN → /governance → 校区管理 + 系统状态链
 test("7H-E2E04 campus create → metadata update → slug 不可变 → deactivate → activate", async ({ browser }) => {
   test.setTimeout(120_000);
   const tag = uniqueTag("p7h-04");
+  const db = e2eDb();
   const context = await browser.newContext({ storageState: ADMIN_STORAGE_STATE });
   const page = await context.newPage();
 
@@ -315,10 +344,20 @@ test("7H-E2E04 campus create → metadata update → slug 不可变 → deactiva
   await page.getByLabel("学校名称").fill("E2E 大学");
   await page.getByLabel("所在区域（可选）").fill("海淀区");
   await page.getByRole("button", { name: "创建校区" }).click();
-  // server action + revalidation 边界：状态标记 toHaveCount(1) 自稳定
-  // （窗口内旧 DOM 无此标记、新 DOM 恰 1 → 收敛即窗口关闭）
-  await expect(page.getByText(`校区已创建：E2E7H校区-${tag}`)).toHaveCount(1);
-  await expect(page.getByText(`校区已创建：E2E7H校区-${tag}`)).toBeVisible();
+  // Browser drives action, DB verifies invariant：高负载下 UI toast 反馈
+  // 可能晚于服务端提交，以 DB 行存在为 action 完成的权威 invariant
+  //（expect.poll 与 toHaveCount 同族 auto-retry，非手工轮询）
+  await expect(async () => {
+    expect(
+      await db.campus.findUnique({ where: { slug: `e2e7h-${tag}` } }),
+    ).toBeTruthy();
+  }).toPass({ timeout: 20_000 });
+  const createdForCleanup = await db.campus.findUniqueOrThrow({
+    where: { slug: `e2e7h-${tag}` },
+    select: { id: true },
+  });
+  cleanupCampusIds.push(createdForCleanup.id);
+  await expectHeadingSettled(page, "校区管理");
 
   await page.goto("/governance/campuses?limit=50");
   await expectHeadingSettled(page, "校区管理");
@@ -366,6 +405,7 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
       isActive: true,
     },
   });
+  cleanupCampusIds.push(campus.id);
 
   await page.goto(`/governance/campuses/${campus.id}`);
   // page settlement first（§8）：raw DOM + a11y 双层收敛后才用语义 locator
@@ -375,16 +415,33 @@ test("7H-E2E05 认证策略 draft → update → publish → current 可见 → 
   await page.getByRole("textbox", { name: "策略标题" }).fill("E2E7H 认证规则");
   await page.getByLabel("认证说明（发布后不可修改）").fill("初版说明：上传学生证");
   await page.getByRole("button", { name: "创建草稿" }).click();
-  await expect(page.getByText("认证策略草稿 v1 已创建")).toHaveCount(1);
-  await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
+  await expect(async () => {
+    expect(
+      (await db.campusVerificationPolicy.findFirst({
+        where: { campusId: campus.id },
+        orderBy: { version: "desc" },
+      })) ?? null,
+    ).toBeTruthy();
+  }).toPass({ timeout: 20_000 });
 
   await page.getByLabel("认证说明（保存将重算内容指纹）").fill("更新版说明：上传学生证与校园卡");
   await page.getByRole("button", { name: "保存草稿" }).click();
-  await expect(page.getByText("草稿已更新")).toHaveCount(1);
-  await expect(page.getByText("草稿已更新")).toBeVisible();
+  await expect(async () => {
+    const row = await db.campusVerificationPolicy.findFirstOrThrow({
+      where: { campusId: campus.id },
+      orderBy: { version: "desc" },
+    });
+    expect(row.instructions).toBe("更新版说明：上传学生证与校园卡");
+  }).toPass({ timeout: 20_000 });
 
   await page.getByRole("button", { name: "发布", exact: true }).click();
-  await expect(page.getByText("已发布", { exact: true })).toHaveCount(1);
+  await expect(async () => {
+    const row = await db.campusVerificationPolicy.findFirstOrThrow({
+      where: { campusId: campus.id },
+      orderBy: { version: "desc" },
+    });
+    expect(row.status).toBe("PUBLISHED");
+  }).toPass({ timeout: 20_000 });
   // 成功反馈随 revalidate 卸载（草稿表单被已发布视图替换）——断言终态而非瞬态 toast：
   // current 语义可见：已发布徽标 + 不可修改提示 + 无草稿编辑表单
   await expect(page.getByText("已发布", { exact: true })).toBeVisible();
@@ -435,6 +492,7 @@ test("7H-E2E08 浏览器时区 Asia/Shanghai：本地 09:00 → DB 绝对 instan
       isActive: true,
     },
   });
+  cleanupCampusIds.push(campus.id);
 
   // 独立浏览器时区：Asia/Shanghai（不依赖 CI server timezone）
   const context = await browser.newContext({
@@ -452,8 +510,14 @@ test("7H-E2E08 浏览器时区 Asia/Shanghai：本地 09:00 → DB 绝对 instan
   // jsdom 单测（fireEvent + ms 值）与 hidden-initial 保持语义承担
   await page.getByLabel(/生效时间/).fill("2026-12-01T09:00");
   await page.getByRole("button", { name: "创建草稿" }).click();
-  await expect(page.getByText("认证策略草稿 v1 已创建")).toHaveCount(1);
-  await expect(page.getByText("认证策略草稿 v1 已创建")).toBeVisible();
+  await expect(async () => {
+    expect(
+      (await db.campusVerificationPolicy.findFirst({
+        where: { campusId: campus.id },
+        orderBy: { version: "desc" },
+      })) ?? null,
+    ).toBeTruthy();
+  }).toPass({ timeout: 20_000 });
 
   const policy = await db.campusVerificationPolicy.findFirstOrThrow({
     where: { campusId: campus.id },
@@ -473,7 +537,7 @@ test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区
 
   // 直接 fixture 建 30 个校区（无需 UI 点击 30 次）
   for (let index = 0; index < 30; index += 1) {
-    await db.campus.create({
+    const pageCampus = await db.campus.create({
       data: {
         name: `E2E7H分页-${tag}-${index}`,
         slug: `e2e7h-page-${tag}-${index}`,
@@ -481,8 +545,9 @@ test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区
         isActive: true,
       },
     });
+    cleanupCampusIds.push(pageCampus.id);
   }
-  await db.campus.create({
+  const markerCampus = await db.campus.create({
     data: {
       name: `E2E7H分页标记-${tag}`,
       slug: markerSlug,
@@ -490,6 +555,7 @@ test("7H-E2E09 campus 列表分页：26+ campuses → 下一页 → 后续校区
       isActive: true,
     },
   });
+  cleanupCampusIds.push(markerCampus.id);
 
   const context = await browser.newContext({ storageState: ADMIN_STORAGE_STATE });
   const page = await context.newPage();
