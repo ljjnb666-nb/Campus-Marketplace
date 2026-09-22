@@ -38,7 +38,8 @@
 
 ## 2. Current Production State（当前生产状态）
 
-正式记录（截至冻结基线）：
+正式记录（路线结构冻结于 2026-09-02；Phase / Gate 状态持续按后续独立验收结果更新——
+ROADMAP STRUCTURE FREEZE != PHASE STATUS FREEZE）：
 
 | 阶段 | 名称 | 状态 |
 | --- | --- | --- |
@@ -50,8 +51,8 @@
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8，经多轮独立验收 + post-merge master CI 收口） |
 | Phase 6A | Identity / Campus Membership / Verification / RBAC Foundation（Phase 6 第一实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10，经独立验收 Repair 1 + post-merge master CI 收口） |
 | Phase 6B | Trust / Risk / Enforcement Foundation（Phase 6 第二实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12，经多轮独立验收 Repair 1–3 + Final Repair + post-merge master CI 收口） |
-| Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，Phase 6A/6B/6C 全部关闭） |
+| Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，Phase 6A/6B/6C 全部关闭） |
 | Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
@@ -80,11 +81,17 @@ Phase 6B Closure Recovery current master reference：`97f53cd3494b24854a56b19e04
 不是"已具备公开生产运营资格"（见 §9）。
 
 当前测试基线（来自最近一次成功的 master CI，非本地估算；source = master CI
-34132745423，Closure Recovery merge `97f53cd3494b24854a56b19e0418d50a5b5efeb6`）：
-243 个测试文件 / 1580 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
-集成测试全部真实执行，无环境门控 skip），覆盖率 lines 85.72% / branches 83.50% /
-functions 84.76% / statements 85.72%；Playwright E2E 关键链路 36 条全绿；
-真实 PostgreSQL 集成测试：Phase 6A 19 条 + Phase 6B 27 条。
+35713347538，Phase 7 Final Closure canonical merge
+`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`）：
+353 个测试文件 / 2840 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
+集成测试全部真实执行，无环境门控 skip），覆盖率 lines 88.94% / branches 85.57% /
+functions 89.44% / statements 88.94%；Playwright E2E 关键链路 72 条全绿；
+真实 PostgreSQL 集成测试：Phase 6A/6B/6C + Phase 7A–7H 全链保留
+（含 Phase 7H 26 条：C-RACE-01..06、P-RACE-01..05、PAGE-01..08、
+RBAC/campus/policy/settlement 合同）。
+历史基线：Closure Recovery 时点 243 文件 / 1580 tests / E2E 36 /
+coverage 85.72 / 83.50 / 84.76 / 85.72（master CI 34132745423，merge
+`97f53cd3494b24854a56b19e0418d50a5b5efeb6`）——仅作历史记录，非当前基线。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
 
 ---
@@ -166,7 +173,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 4 | Observability / Monitoring / Recovery | DONE / MERGED / MASTER-GREEN / CLOSED |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，6A/6B/6C 全部关闭，见 §5.2） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
@@ -372,7 +379,7 @@ Trust / risk / enforcement invariants（closure 时最终合同）：
   用户的 listing / enforcement policy completion）——该表述仅是历史记录，
   6C 现已关闭（见下方 Closure record），不得解读为当前状态。
 
-**Phase 6C Closure record（2026-09-10）**：
+**Phase 6C Closure record（2026-09-12）**：
 
 - Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
 - 实施链（四段拆分，全部经独立验收 + exact-head CI 后合并）：
@@ -394,7 +401,7 @@ Trust / risk / enforcement invariants（closure 时最终合同）：
   rental dispute convergence
 - **`PHASE_6C = DONE / MERGED / MASTER-GREEN / CLOSED`**
 
-**Phase 6 Closure（2026-09-10）**：
+**Phase 6 Closure（2026-09-12）**：
 
 - `PHASE_6A = DONE / MERGED / MASTER-GREEN / CLOSED`
 - `PHASE_6B = DONE / MERGED / MASTER-GREEN / CLOSED`

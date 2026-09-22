@@ -17,7 +17,8 @@
   `ListingModeration_productId_fkey` FK 失败（2026-09-21/22 本地实测多次）。
 - **priority**：MEDIUM
 - **dependency**：E2E infrastructure（scripts/e2e-setup.ts）
-- **candidate phase**：Full-System Adversarial Audit / pre-Phase 8 cleanup
+- **candidate phase**：Phase 8
+- **review_at**：Full-System Adversarial Audit / pre-Phase 8
 - **blocker**：NON_BLOCKING for Phase 7
 - **CI IMPACT**：NOT ESTABLISHED——fresh CI DB 无残留行，不受影响
 
@@ -32,7 +33,8 @@
   CI 均保持稳定（Phase 7H 期间多次实测记录）。
 - **priority**：MEDIUM
 - **dependency**：E2E infrastructure / local resource scheduling
-- **candidate phase**：Full-System Adversarial Audit
+- **candidate phase**：Later
+- **review_at**：Full-System Adversarial Audit
 - **blocker**：NON_BLOCKING for Phase 7
 - **PRODUCTION_IMPACT**：NOT ESTABLISHED
 

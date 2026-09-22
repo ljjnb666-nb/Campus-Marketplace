@@ -15,7 +15,7 @@
 | Phase 4 | Observability / Monitoring / Recovery | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-02，经独立验收三轮收口） |
 | **GATE A** | Engineering Reliability | **PASS**（Phase 4 收口即达成） |
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8 经多轮独立验收合并，post-merge master CI 双绿） |
-| Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**） |
+| Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**） |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`） |
 | Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
@@ -159,7 +159,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
 - [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
-- [x] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-10：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12；merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`；post-merge master CI run 34113125694 双绿，见下节）；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-10，PR #16/#17/#18/#19 实施链，final merge commit `ed63d20850259ee7bcc6674c8d6836bc5b0a56f9`；post-merge master CI run 34673546585 attempt=1 双绿，见下节））
+- [x] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-12：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12；merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`；post-merge master CI run 34113125694 双绿，见下节）；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链，final merge commit `ed63d20850259ee7bcc6674c8d6836bc5b0a56f9`；post-merge master CI run 34673546585 attempt=1 双绿，见下节））
 - [x] Production Phase 7：Operations Admin Foundation（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`；post-merge master CI run 35713347538 attempt=1 双绿，见下节）
 - [ ] Production Phase 3B：真实服务器部署（当前保持 DEFERRED；只有 GATE B PASS 才允许重开；重开后必须完成并验收真实 external deployment gates，之后才允许进入 Phase 12）
 - [ ] 继续做少量低频页面文案与体验收尾（Backlog 项按 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §11 Backlog Policy 管理）
@@ -332,7 +332,7 @@ REPAIR_REQUIRED = NO）。范围与不变量权威记录见
 appeal 完整生命周期、enforcement completion / safety hardening、
 hard-suspension 隐私例外路径、受限/停用用户 listing / enforcement policy
 completion。**该表述仅是 Phase 6B 收口时点的历史记录；Phase 6C 已于
-2026-09-10 关闭（PR #16–#19，final merge `ed63d20`），Phase 6 整体
+2026-09-12 关闭（PR #16–#19，final merge `ed63d20`），Phase 6 整体
 DONE / MERGED / MASTER-GREEN / CLOSED（见 Production 阶段总览）。**
 
 ## 当前测试基线
@@ -358,32 +358,19 @@ attempt = 1）：
   全链保留（含 7H 26 条：C-RACE-01..06、P-RACE-01..05、PAGE-01..08、
   RBAC/campus/policy/settlement 合同）**
 - 历史基线：Phase 6B Closure Recovery 合并时 243 文件 / 1580 用例 / E2E 36 条
-  （master CI 34132745423，`97f53cd3`）；后续以最近一次成功的 master CI
-  为准，不以历史快照为准
+  （master CI 34132745423，`97f53cd3`）
+- 历史基线：Phase 6B core 合并时 243 文件 / 1567 用例 / E2E 36 条
+  （master CI 34113125694，d5f8e19；真实 PG 6A 17 + 6B 27）
 - 历史基线：Phase 6B final reviewed 基线（Final Repair 验证轮，集成
   env-gated 本地运行；历史证据）：243 文件 / 1567 测试 = 1463 passed +
   104 env-gated skip、coverage 83.33 / 82.36 / 82.27 / 83.33、
   Playwright 36/36 × 3（workers=2、retry=0）、Mimosa NEW_HIGH = 0 /
   NEW_CRITICAL = 0
 - 历史基线：Phase 6A 合并时 235 文件 / 1452 用例 / E2E 34 条
-  （master CI 33968202720）；后续以最近一次成功的 master CI 为准，不以本文快照为准
-- 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）；
-  后续以最近一次成功的 master CI 为准，不以本文快照为准
-- 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
-  后续以最近一次成功的 master CI 为准，不以本文快照为准
-- 历史基线：Phase 6B core 合并时 243 文件 / 1567 用例 / E2E 36 条
-  （master CI 34113125694，d5f8e19；真实 PG 6A 17 + 6B 27）；后续以最近一次
-  成功的 master CI 为准，不以本文快照为准
-- Phase 6B final reviewed 基线（Final Repair 验证轮，集成 env-gated 本地运行；
-  历史证据）：243 文件 / 1567 测试 = 1463 passed + 104 env-gated skip、
-  coverage 83.33 / 82.36 / 82.27 / 83.33、Playwright 36/36 × 3
-  （workers=2、retry=0）、Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
-- 历史基线：Phase 6A 合并时 235 文件 / 1452 用例 / E2E 34 条
-  （master CI 33968202720）；后续以最近一次成功的 master CI 为准，不以本文快照为准
-- 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）；
-  后续以最近一次成功的 master CI 为准，不以本文快照为准
-- 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）；
-  后续以最近一次成功的 master CI 为准，不以本文快照为准
+  （master CI 33968202720）
+- 历史基线：Phase 5 合并时 226 文件 / 1322 用例 / E2E 33 条（master CI 33943242174）
+- 历史基线：Phase 4 合并时 215 文件 / 1216 用例 / E2E 24 条（master CI 33637075278）
+- 历史基线均只保留一次；后续以最近一次成功的 master CI 为准，不以历史快照为准
 
 <details>
 <summary>历史基线：master be0fd94（Production Phase 4 合并提交，2026-09-02）</summary>
