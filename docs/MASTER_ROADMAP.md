@@ -467,8 +467,10 @@ campus configuration、system / operational overview。
   h1 = 1 + raw DOM exact page h1 = 1 before strict interaction；
   框架行为仍存在，非"Next.js bug fixed"——temp-worktree A/B 实测
   16.3.3 ≡ 16.3.5，依赖保持冻结）；
-  `P7-DEBT-E2E-SETUP-01`、`P7-DEBT-E2E-LOAD-01`（NON_BLOCKING，
-  candidate phase = Full-System Adversarial Audit）
+  `P7-DEBT-E2E-SETUP-01`（NON_BLOCKING；candidate phase = Phase 8；
+  review_at = Full-System Adversarial Audit / pre-Phase 8）、
+  `P7-DEBT-E2E-LOAD-01`（NON_BLOCKING；candidate phase = Later；
+  review_at = Full-System Adversarial Audit）
 
 **Phase 7 之后（development workflow guard，非新增 canonical Phase）**：
 

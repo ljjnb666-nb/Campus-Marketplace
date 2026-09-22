@@ -48,5 +48,6 @@
   子树（requireAdmin 桥 + `category.manage` / `moderation.keyword.manage`）。
 - **priority**：MEDIUM
 - **dependency**：`category.manage` / `moderation.keyword.manage` 既有 permission
-- **candidate phase**：Phase 11 / pilot operational-readiness cleanup
+- **candidate phase**：Phase 11
+- **review_at**：Phase 11 planning / pilot operational-readiness cleanup
 - **blocker**：NON_BLOCKING for Phase 7
