@@ -5,12 +5,8 @@ import { hash } from "bcryptjs";
 import { Prisma } from "@prisma/client";
 import { registerSchema } from "@/validators/auth";
 import { isRateLimited } from "@/lib/rate-limit";
-import { prisma, withTransaction } from "@/lib/prisma";
-import { createActiveMembership } from "@/lib/campus/membership-service";
-import {
-  isGovernanceError,
-} from "@/lib/governance/domain-errors";
-import { recordSignupAcceptances } from "@/lib/legal/policy-service";
+import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { registerActiveCampusUser } from "@/lib/registration-service";
 
 export type ActionState = {
   success: boolean;
@@ -64,39 +60,32 @@ export async function registerUser(
     };
   }
 
-  const campus = await prisma.campus.findUnique({
-    where: { id: parsed.data.campusId },
-  });
-
-  if (!campus) {
-    return { success: false, message: "校区不存在" };
-  }
+  // Final Review Repair 1（FR01 hash discipline）：bcrypt 哈希在事务与
+  // CAMPUS 锁窗口之外计算——锁持有时间最小化。
+  const passwordHash = await hash(parsed.data.password, 10);
 
   try {
-    // 用户创建与同意证据同事务：不存在"已注册但无同意记录"的中间态，
-    // 也不存在"同意记录指向非当前版本"的中间态（recordSignupAcceptances
-    // 内部 fail-closed 校验当前 required 集合）。
-    // Phase 6A：注册同事务建立 ACTIVE CampusMembership（加入校区开放，
-    // 学生认证是独立的更高信任层级）；后续一切 campus-scoped 逻辑
-    // 经中央 membership resolver，不再裸读 User.campusId 判资格。
-    await withTransaction(async (tx) => {
-      const user = await tx.user.create({
-        data: {
-          name: parsed.data.name,
-          email: parsed.data.email,
-          passwordHash: await hash(parsed.data.password, 10),
-          schoolName: parsed.data.schoolName,
-          campusId: parsed.data.campusId,
-        },
-      });
-
-      await createActiveMembership(tx, {
-        userId: user.id,
-        campusId: parsed.data.campusId,
-      });
-
-      await recordSignupAcceptances(tx, user.id, parsed.data.acceptedDocumentIds);
+    // Phase 7H Final Review Repair 1（FR01 TOCTOU 关闭）：isActive admission
+    // 判定移入注册事务内的 CAMPUS:<campusId> governance 锁之后（locked
+    // re-read），与 deactivateGovernanceCampus 共享同一 serialization
+    // boundary——只有"注册先提交"或"停用先提交"两种线性化终态，绝无
+    // "停用先提交且注册后提交"的交错。注册页 selector 只展示启用校区
+    // （listActiveCampuses 呈现层过滤），服务端 admission gate 同语义。
+    // 用户创建 / ACTIVE CampusMembership / legal acceptances 同事务原子
+    // 提交（零部分注册）。
+    const result = await registerActiveCampusUser({
+      name: parsed.data.name,
+      email: parsed.data.email,
+      passwordHash,
+      schoolName: parsed.data.schoolName,
+      campusId: parsed.data.campusId,
+      acceptedDocumentIds: parsed.data.acceptedDocumentIds,
     });
+
+    if (!result.ok) {
+      // 校区不存在与已停用同形拒绝（无存在性 oracle）
+      return { success: false, message: "校区不存在" };
+    }
   } catch (error) {
     if (isGovernanceError(error)) {
       return { success: false, message: error.message };

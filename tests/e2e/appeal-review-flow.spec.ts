@@ -102,9 +102,11 @@ test("申诉审核治理面：campus reviewer 队列 → 详情 → 开始审核
   const reviewerPage = await reviewerContext.newPage();
   await loginViaUI(reviewerPage, reviewerEmail, `${TEST_PASSWORD_PREFIX}Reviewer#2026`, "E2E审核员");
 
-  // legacy /admin 隔离：requireAdmin 零修改 → campus reviewer 被弹回首页
+  // Phase 7H §40：legacy /admin root 退役 → canonical /governance redirect；
+  // campus reviewer（持有 governance capability）可入治理总览，
+  // legacy dashboard（管理后台）永久不可见
   await reviewerPage.goto("/admin");
-  await reviewerPage.waitForURL((url) => url.pathname === "/");
+  await reviewerPage.waitForURL((url) => url.pathname === "/governance");
   await expect(reviewerPage.getByRole("heading", { name: "管理后台" })).toHaveCount(0);
 
   // 队列：仅授权行可见（canonical scope 过滤后呈现）
@@ -187,8 +189,11 @@ test("申诉审核治理面：campus reviewer 队列 → 详情 → 开始审核
   );
   await adminPage.goto("/governance/appeals");
   await expect(adminPage.getByRole("heading", { name: "申诉审核" })).toBeVisible();
+  // Phase 7H §40：legacy /admin root 退役 → canonical /governance redirect；
+  // PLATFORM_ADMIN 落地治理总览，legacy 管理后台永久不可见
   await adminPage.goto("/admin");
-  await expect(adminPage.getByRole("heading", { name: "管理后台" })).toBeVisible();
+  await expect(adminPage.getByRole("heading", { name: "治理总览" })).toBeVisible();
+  await expect(adminPage.getByRole("heading", { name: "管理后台" })).toHaveCount(0);
   await adminContext.close();
 
   // ---------- 未授权用户：/governance/appeals → 用户可见 404（无存在性 oracle） ----------

@@ -490,3 +490,160 @@ describe("GovernanceLayout Phase 7F union gate（认证审核 / 用户运营）"
     expect(notFound).toHaveBeenCalled();
   });
 });
+
+// ── Phase 7H：root gate 十二元 union（+ operationsOverview ∨ campusManage）───
+describe("GovernanceLayout Phase 7H union gate（总览 / 校区管理 / 系统状态）", () => {
+  const activeUser = { id: "r1", email: "r@x", name: "R", role: "STUDENT" };
+
+  it("O09：GLOBAL campus.manage alone → 入树；总览+校区管理 导航可见；系统状态不可见", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "P", scope: "GLOBAL", campusId: null, permissionKeys: ["campus.manage"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "总览" }).getAttribute("href")).toBe("/governance");
+    expect(screen.getByRole("link", { name: "校区管理" }).getAttribute("href")).toBe(
+      "/governance/campuses",
+    );
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "申诉审核" })).toBeNull();
+  });
+
+  it("O10：GLOBAL operations.overview alone → 入树；总览+系统状态 导航可见；校区管理不可见", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        { roleKey: "OP", scope: "GLOBAL", campusId: null, permissionKeys: ["operations.overview"] },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByTestId("content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "系统状态" }).getAttribute("href")).toBe(
+      "/governance/system",
+    );
+    expect(screen.queryByRole("link", { name: "校区管理" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "举报处理" })).toBeNull();
+  });
+
+  it("SO02：CAMPUS-scoped operations.overview（误配）→ 不构成任何 capability → notFound", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        { roleKey: "BAD", scope: "CAMPUS", campusId: "A", permissionKeys: ["operations.overview"] },
+      ],
+    });
+
+    await expect(
+      GovernanceLayout({ children: <div>治理内容</div> }),
+    ).rejects.toThrow("NOT_FOUND");
+    expect(notFound).toHaveBeenCalled();
+  });
+
+  it("CA02：CAMPUS-scoped campus.manage（误配）→ 不构成任何 capability → notFound（§17 租户边界 GLOBAL only）", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        { roleKey: "CAMPUS_ADMIN", scope: "CAMPUS", campusId: "A", permissionKeys: ["campus.manage"] },
+      ],
+    });
+
+    await expect(
+      GovernanceLayout({ children: <div>治理内容</div> }),
+    ).rejects.toThrow("NOT_FOUND");
+    expect(notFound).toHaveBeenCalled();
+  });
+
+  it("legacy 全量 11-key GLOBAL（PLATFORM_ADMIN-like）→ 12 链接中的 legacy 五链接 + 总览 + 校区管理（campus.manage 在 legacy 集内）", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: [],
+      grants: [
+        {
+          roleKey: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: [
+            "verification.review",
+            "report.review",
+            "listing.moderate",
+            "category.manage",
+            "moderation.keyword.manage",
+            "user.suspend",
+            "appeal.review",
+            "asset.sensitive.read",
+            "campus.manage",
+            "rbac.role.assign",
+            "audit.read",
+          ],
+        },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByRole("link", { name: "总览" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "校区管理" })).toBeTruthy();
+    // R1 语义分离不因 7H 改变：legacy 集不含 operations.overview / enforcement.read
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+  });
+
+  it("多 capability（report.review@A + operations.overview）→ 总览 + 两 sibling 链接并集", async () => {
+    requireUser.mockResolvedValue(activeUser);
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "r1",
+      accountActive: true,
+      activeCampusIds: ["A"],
+      grants: [
+        {
+          roleKey: "MIX",
+          scope: "CAMPUS",
+          campusId: "A",
+          permissionKeys: ["report.review"],
+        },
+        {
+          roleKey: "OP",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: ["operations.overview"],
+        },
+      ],
+    });
+
+    render(
+      await GovernanceLayout({ children: <div data-testid="content">治理内容</div> }),
+    );
+
+    expect(screen.getByRole("link", { name: "总览" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "举报处理" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "系统状态" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "校区管理" })).toBeNull();
+  });
+});

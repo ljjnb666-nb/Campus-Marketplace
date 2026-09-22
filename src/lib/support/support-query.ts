@@ -90,7 +90,7 @@ export function decodeSupportCursor(raw: string): SupportCursor | null {
 type SupportBranch = { campusId: string | null; scopeKey: string };
 
 /** 授权分支集合（fail-closed：无有效 scope 时返回空数组 → 永远空页）。 */
-async function authorizedSupportBranches(
+export async function authorizedSupportBranches(
   access: SupportManageAccess,
 ): Promise<SupportBranch[]> {
   if (access.global) {

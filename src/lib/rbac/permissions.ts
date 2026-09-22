@@ -46,6 +46,13 @@ export const PERMISSIONS = {
   // SupportTicket ≠ Dispute（两个独立 workflow 域）；刻意不进入
   // LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（R1 冻结不动）。
   "support.manage": "处理支持工单（claim/release/resolve/close）",
+  // Phase 7H：运营级系统概览窄读取（纯 read capability，GLOBAL ONLY——
+  // CAMPUS grant 即使误配也绝不生效，见 operations-overview-access）。
+  // 语义严格限定为"读取平台运行就绪状态与安全的运营级系统概览"
+  // （readiness status enum + release 标识），绝不暴露端点/凭据/原始错误，
+  // 也不是 /api/internal/metrics 的代理。刻意不进入
+  // LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS（R1 冻结不动，恰 11 key 不变）。
+  "operations.overview": "读取平台运行状态与安全的运营级系统概览",
 } as const;
 
 export type PermissionKey = keyof typeof PERMISSIONS;

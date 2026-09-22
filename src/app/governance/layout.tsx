@@ -32,6 +32,14 @@ import {
   deriveUserOperationsAccess,
   hasAnyUserOperationsAccess,
 } from "@/lib/governance/user-operations-access";
+import {
+  deriveOperationsOverviewAccess,
+  hasAnyOperationsOverviewAccess,
+} from "@/lib/governance/operations-overview-access";
+import {
+  deriveCampusManageAccess,
+  hasAnyCampusManageAccess,
+} from "@/lib/campus/campus-admin-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 
@@ -52,15 +60,23 @@ import { requireUser } from "@/lib/server-auth";
  * Phase 7G：root gate 扩为十元 union（OR disputeReview ∨ supportManage——
  * 两者均为 7G 新增 permission 的治理面供给，不进 legacy 11-key，requireAdmin
  * 资格与 privileged-target 分类零变化）。
+ * Phase 7H：root gate 扩为十二元 union（OR operationsOverview ∨ campusManage
+ * ——两者均为 GLOBAL ONLY 的窄 capability：operations.overview 是 7H 新增
+ * permission（不进 legacy 11-key），campus.manage 是既有 permission 首次获得
+ * canonical governance surface；requireAdmin 资格与 privileged-target 分类
+ * 零变化），并新增 canonical 落地页 /governance 与 校区管理/系统状态 导航。
  *
- * 十棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
+ * 十二棵子树仍各自自守（双层纵深不变，sibling 互不扩权）：
  * /governance/appeals 走 requireAppealReviewer，/governance/roles 自守
  * roleManage access，/governance/listings 自守 listing moderation access，
  * /governance/audit 自守 audit read access，/governance/enforcement 自守
  * enforcement read access，/governance/reports 自守 report review access，
  * /governance/verifications 自守 verification review access，
  * /governance/users 自守 GLOBAL user.suspend，/governance/disputes 自守
- * dispute review access，/governance/support 自守 support manage access。
+ * dispute review access，/governance/support 自守 support manage access，
+ * /governance/campuses 自守 GLOBAL campus.manage，/governance/system 自守
+ * GLOBAL operations.overview。root access ≠ sibling access：总览仅是导航
+ * 落点，绝不聚合未授权 sibling 的任何数据。
  * requireAdmin() 零修改，legacy /admin 隔离不变（hasFullAdminSurfaceAccess
  * 对 campus grant / 非全量 GLOBAL grant 恒 false）。私有治理数据：强制动态
  * 渲染，零缓存。
@@ -84,6 +100,8 @@ export default async function GovernanceLayout({
   const userOperationsAccess = deriveUserOperationsAccess(context);
   const disputeAccess = deriveDisputeReviewAccess(context);
   const supportAccess = deriveSupportManageAccess(context);
+  const operationsOverviewAccess = deriveOperationsOverviewAccess(context);
+  const campusManageAccess = deriveCampusManageAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
@@ -97,13 +115,18 @@ export default async function GovernanceLayout({
     !hasAnyVerificationReviewAccess(verificationAccess) &&
     !hasAnyUserOperationsAccess(userOperationsAccess) &&
     !hasAnyDisputeReviewAccess(disputeAccess) &&
-    !hasAnySupportManageAccess(supportAccess)
+    !hasAnySupportManageAccess(supportAccess) &&
+    !hasAnyOperationsOverviewAccess(operationsOverviewAccess) &&
+    !hasAnyCampusManageAccess(campusManageAccess)
   ) {
     notFound();
   }
 
-  // 导航可见性 = 精确 capability（root union 放行 ≠ sibling 可见）
+  // 导航可见性 = 精确 capability（root union 放行 ≠ sibling 可见）。
+  // 总览 = canonical 落地页：任何 governance capability 皆可见（root gate
+  // 已保证至少一个 capability，恒 true）。
   const navItems = [
+    { href: "/governance", label: "总览", visible: true },
     { href: "/governance/appeals", label: "申诉审核", visible: hasAppealAccess },
     {
       href: "/governance/roles",
@@ -145,6 +168,16 @@ export default async function GovernanceLayout({
       href: "/governance/support",
       label: "支持工单",
       visible: hasAnySupportManageAccess(supportAccess),
+    },
+    {
+      href: "/governance/campuses",
+      label: "校区管理",
+      visible: hasAnyCampusManageAccess(campusManageAccess),
+    },
+    {
+      href: "/governance/system",
+      label: "系统状态",
+      visible: hasAnyOperationsOverviewAccess(operationsOverviewAccess),
     },
   ].filter((item) => item.visible);
 
