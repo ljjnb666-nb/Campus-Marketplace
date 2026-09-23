@@ -759,7 +759,11 @@ export type PrivateAssetAccessResult =
  *   campus-scoped 授权必须与资产所属校区精确匹配（默认拒绝；
  *   资产校区不可解析时仅 GLOBAL 授权放行）；
  *   Phase 7F：VERIFICATION 绑定资产额外接受 `verification.evidence.read`
- *   （同样 campus 精确匹配）——该窄权限对其它 category 恒 NO ACCESS
+ *   （同样 campus 精确匹配）——该窄权限对其它 category 恒 NO ACCESS。
+ *   RB-01 review fix：非 owner 的 VERIFICATION operator 访问还必须满足
+ *   ATTACHED + verification 绑定 + membership ACTIVE（scope truth 唯一取
+ *   verification.membership.campusId，无 owner-campus 回退）——"已上传未
+ *   提交"的孤儿认证资产对任何 operator 都不可读（owner 本人除外）
  * - UPLOADING（上传中）/已删除/待删除 → not_found；已过保留期 → expired
  *
  * 资产校区解析（按绑定关系）：认证材料 → membership.campusId；
@@ -781,7 +785,7 @@ export async function resolvePrivateAssetAccess(
           rentalListing: { select: { campusId: true } },
         },
       },
-      verification: { select: { membership: { select: { campusId: true } } } },
+      verification: { select: { membership: { select: { campusId: true, status: true } } } },
       rentalListing: { select: { campusId: true } },
       product: { select: { campusId: true } },
       serviceListing: { select: { campusId: true } },
@@ -823,8 +827,39 @@ export async function resolvePrivateAssetAccess(
     return { ok: true, asset, grantedBy: "order_participant", disputeEvidence: null };
   }
 
+  if (asset.category === "VERIFICATION") {
+    // RB-01 Repair 2 review fix（VERIFICATION_ASSET_OPERATOR_ACCESS_INVARIANT）：
+    // 非 owner 的认证材料 operator 授权必须全部满足——
+    //   access = PRIVATE（非 PRIVATE 已在上方 not_private 分支统一处理）
+    //   + status = ATTACHED（UPLOADED = 尚未提交认证的孤儿上传，禁止任何
+    //     operator 读取）
+    //   + 存在 verification 绑定（asset.verification !== null）
+    //   + membership.status = ACTIVE（与 Phase 7F 审核读模型同一 scope
+    //     truth：审核详情对非 ACTIVE membership fail closed，直连内容
+    //     不得更宽，防止 "review page = deny / direct content = allow"）
+    //   + 授权 campus 唯一取 asset.verification.membership.campusId。
+    // 禁止 owner-campus 回退推导（GLOBAL grant 因此不再能读取未绑定上传）。
+    // owner 本人路径不受影响（上传后、提交前的预览能力为既有合同）。
+    const verificationBinding = asset.verification;
+    if (
+      asset.status !== "ATTACHED" ||
+      !verificationBinding ||
+      verificationBinding.membership.status !== "ACTIVE"
+    ) {
+      return { ok: false, reason: "forbidden" };
+    }
+
+    const evidenceCampusId = verificationBinding.membership.campusId;
+    if (
+      hasPermission(context, "asset.sensitive.read", evidenceCampusId) ||
+      hasPermission(context, "verification.evidence.read", evidenceCampusId)
+    ) {
+      return { ok: true, asset, grantedBy: "permission", disputeEvidence: null };
+    }
+    return { ok: false, reason: "forbidden" };
+  }
+
   const targetCampusId =
-    asset.verification?.membership.campusId ??
     asset.rentalOrder?.rentalListing.campusId ??
     asset.rentalListing?.campusId ??
     asset.product?.campusId ??
@@ -841,24 +876,6 @@ export async function resolvePrivateAssetAccess(
       })
     )?.campusId ??
     null;
-
-  if (asset.category === "VERIFICATION") {
-    // Phase 7F：verification.evidence.read 窄授权——仅对 VERIFICATION 绑定资产
-    // 放行，campus 精确匹配 asset.verification.membership.campusId（GLOBAL grant
-    // 自然覆盖全部对应 evidence；campus unresolvable 时仅 GLOBAL 放行）。
-    // 与 asset.sensitive.read 并列（OR），不改变其既有语义。
-    if (
-      hasPermission(context, "asset.sensitive.read", permissionTargetCampusId) ||
-      hasPermission(
-        context,
-        "verification.evidence.read",
-        asset.verification?.membership.campusId ?? null,
-      )
-    ) {
-      return { ok: true, asset, grantedBy: "permission", disputeEvidence: null };
-    }
-    return { ok: false, reason: "forbidden" };
-  }
 
   if (asset.category === "REPORT") {
     // Phase 7G：dispute.evidence.read 窄授权——放行条件必须全部成立：

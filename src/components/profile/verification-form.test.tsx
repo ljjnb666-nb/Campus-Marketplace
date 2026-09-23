@@ -36,7 +36,7 @@ afterEach(() => {
 });
 
 describe("VerificationForm", () => {
-  it("renders initial verification values and upload inputs", () => {
+  it("renders initial verification values with upload-only evidence input（RB-01）", () => {
     const { container } = render(
       <VerificationForm
         action={async () => ({ success: false, message: "" })}
@@ -44,7 +44,6 @@ describe("VerificationForm", () => {
           schoolName: "示例大学",
           campusName: "主校区",
           studentIdLast4: "2048",
-          studentCardImage: "/uploads/verification/card.jpg",
         }}
       />,
     );
@@ -52,9 +51,12 @@ describe("VerificationForm", () => {
     expect(screen.getByDisplayValue("示例大学")).toBeTruthy();
     expect(screen.getByDisplayValue("主校区")).toBeTruthy();
     expect(screen.getByDisplayValue("2048")).toBeTruthy();
-    expect(screen.getByDisplayValue("/uploads/verification/card.jpg")).toBeTruthy();
     expect(screen.getByPlaceholderText("例如 2048")).toHaveAttribute("maxlength", "4");
-    expect(container.querySelector('input[type="file"][name="studentCardImageFile"]')).toBeInTheDocument();
+    const fileInput = container.querySelector('input[type="file"][name="studentCardImageFile"]');
+    expect(fileInput).toBeInTheDocument();
+    expect(fileInput).toHaveAttribute("required");
+    // RB-01：不再提供 raw URL / 历史路径文本入口
+    expect(container.querySelector('input[name="studentCardImage"]')).toBeNull();
   });
 
   it("shows the action error message from server state", () => {

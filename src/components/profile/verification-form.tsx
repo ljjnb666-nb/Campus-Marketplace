@@ -9,7 +9,6 @@ type VerificationFormValues = {
   schoolName: string;
   campusName?: string | null;
   studentIdLast4?: string | null;
-  studentCardImage?: string | null;
 };
 
 function SubmitButton() {
@@ -86,16 +85,13 @@ export function VerificationForm({
         </label>
         <div className="flex flex-col gap-2 text-sm">
           <span>学生证图片</span>
-          <input
-            name="studentCardImage"
-            defaultValue={initialValues.studentCardImage ?? ""}
-            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none transition focus:border-slate-400"
-            placeholder="也可以填写外部图片 URL"
-          />
+          {/* RB-01 Repair 2：认证材料仅支持平台上传（产生受控 asset 引用），
+              不再提供外部 URL / 历史路径文本入口 */}
           <input
             name="studentCardImageFile"
             type="file"
             accept="image/*"
+            required
             className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600"
           />
         </div>

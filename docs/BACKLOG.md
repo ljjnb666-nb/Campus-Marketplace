@@ -70,3 +70,22 @@
 - **candidate phase**：Phase 8
 - **review_at**：Phase 8 planning / listing lifecycle review
 - **blocker**：NON_BLOCKING（字段不被读取，无正确性影响）
+
+---
+
+## AUDIT_DEBT_LEGACY_UPLOADS_PUBLIC_DIR
+
+- **title**：`public/uploads/` 仍是公开静态目录（历史本地上传姿态）
+- **motivation**：Full-System Audit Repair 2（RB-01）runtime + data closure
+  已保证历史认证证据值不再被渲染为可点击链接（migration
+  `20260923120000_repair2_verification_evidence_closure` 清空 DB 引用 +
+  `PrivateAssetViewer`/读模型 fail-closed）。但 `public/uploads/` 目录本身
+  仍被 Next 静态服务（`src/proxy.ts` matcher 显式排除 `/uploads`），
+  其下历史文件（如旧头像）保持公开可直达。文件级 posture（目录退役 /
+  存量对象迁移到私有桶）属于存储生命周期治理，非认证证据引用问题。
+- **priority**：LOW
+- **dependency**：storage lifecycle / proxy matcher
+- **candidate phase**：Phase 8
+- **review_at**：Phase 8 planning（与 RB-04 privacy lifecycle 同批）
+- **blocker**：NON_BLOCKING（无证据表明其下存在学生证类材料；本地实测
+  仅头像/占位文件）

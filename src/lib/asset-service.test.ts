@@ -160,9 +160,13 @@ const baseAsset: UploadedAsset & {
   rentalOrder: null,
 };
 
-/** 以指定类别/状态派生测试资产 */
-function assetWith(overrides: Partial<UploadedAsset>): UploadedAsset {
-  return { ...baseAsset, ...overrides };
+/** 以指定类别/状态派生测试资产（verification 为 include 形状的关联载荷） */
+function assetWith(
+  overrides: Partial<UploadedAsset> & {
+    verification?: { membership: { campusId: string; status: string } } | null;
+  },
+): UploadedAsset {
+  return { ...baseAsset, ...overrides } as UploadedAsset;
 }
 
 describe("uploadImageAsset（可恢复状态机）", () => {
@@ -748,7 +752,14 @@ describe("resolvePrivateAssetAccess", () => {
   });
 
   it("forbids strangers without any permission grant（DEFAULT_DENY）", async () => {
-    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-a", status: "ACTIVE" } },
+      }),
+    );
 
     expect(await resolvePrivateAssetAccess("asset-1", { id: "user-2" })).toEqual({
       ok: false,
@@ -756,14 +767,89 @@ describe("resolvePrivateAssetAccess", () => {
     });
   });
 
-  it("grants governance access via global asset.sensitive.read（取代旧 role 判定）", async () => {
-    assetFindFirst.mockResolvedValue({ ...baseAsset, category: "VERIFICATION" });
+  it("grants governance access via global asset.sensitive.read（bound + ATTACHED）", async () => {
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-a", status: "ACTIVE" } },
+      }),
+    );
     loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
 
     const granted = await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
     expect(granted.ok).toBe(true);
     if (granted.ok) {
       expect(granted.grantedBy).toBe("permission");
+    }
+  });
+
+  // RB-01 review fix：GLOBAL 权限不再能读取"已上传但未提交绑定"的孤儿认证资产
+  it("RB-01 review fix：GLOBAL asset.sensitive.read + UPLOADED unbound → DENY", async () => {
+    assetFindFirst.mockResolvedValue(assetWith({ category: "VERIFICATION" }));
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("RB-01 review fix：GLOBAL verification.evidence.read + ATTACHED 无绑定 → DENY", async () => {
+    assetFindFirst.mockResolvedValue(
+      assetWith({ category: "VERIFICATION", status: "ATTACHED", verification: null }),
+    );
+    loadAuthorizationContextMock.mockResolvedValue(
+      ctxWith([
+        {
+          roleKey: "PLATFORM_ADMIN",
+          scope: "GLOBAL",
+          campusId: null,
+          permissionKeys: ["verification.evidence.read"],
+        },
+      ]),
+    );
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("RB-01 review fix：UPLOADED unbound 不触发 owner-campus 回退查询（fallback 结构性排除）", async () => {
+    assetFindFirst.mockResolvedValue(assetWith({ category: "VERIFICATION" }));
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" });
+
+    expect(campusMembershipFindFirstMock).not.toHaveBeenCalled();
+  });
+
+  it("RB-01 review fix：bound 但 membership 非 ACTIVE → DENY（与审核读模型同一 scope truth）", async () => {
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-a", status: "SUSPENDED" } },
+      }),
+    );
+    loadAuthorizationContextMock.mockResolvedValue(ctxWith([globalSensitiveGrant]));
+
+    expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-1" })).toEqual({
+      ok: false,
+      reason: "forbidden",
+    });
+  });
+
+  it("RB-01 review fix：owner 本人 UPLOADED unbound 资产保持既有 owner 合同", async () => {
+    assetFindFirst.mockResolvedValue(assetWith({ category: "VERIFICATION" }));
+
+    const owner = await resolvePrivateAssetAccess("asset-1", { id: "user-1" });
+    expect(owner.ok).toBe(true);
+    if (owner.ok) {
+      expect(owner.grantedBy).toBe("owner");
     }
   });
 
@@ -787,11 +873,14 @@ describe("resolvePrivateAssetAccess", () => {
   });
 
   it("grants campus-scoped access only within the asset's campus（+ ACTIVE membership）", async () => {
-    assetFindFirst.mockResolvedValue({
-      ...baseAsset,
-      category: "VERIFICATION",
-      verification: { membership: { campusId: "campus-a" } },
-    });
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-a", status: "ACTIVE" } },
+      }),
+    );
     loadAuthorizationContextMock.mockResolvedValue(
       ctxWith([campusScopedGrant("campus-a")], ["campus-a"]),
     );
@@ -801,11 +890,14 @@ describe("resolvePrivateAssetAccess", () => {
   });
 
   it("denies campus-scoped readers whose membership is inactive（Repair 1：SUSPENDED/LEFT → DENY）", async () => {
-    assetFindFirst.mockResolvedValue({
-      ...baseAsset,
-      category: "VERIFICATION",
-      verification: { membership: { campusId: "campus-a" } },
-    });
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-a", status: "ACTIVE" } },
+      }),
+    );
     // membership SUSPENDED/LEFT → 不进入 activeCampusIds
     loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
 
@@ -816,11 +908,14 @@ describe("resolvePrivateAssetAccess", () => {
   });
 
   it("denies cross-campus reviewers（关键安全不变量 negative test）", async () => {
-    assetFindFirst.mockResolvedValue({
-      ...baseAsset,
-      category: "VERIFICATION",
-      verification: { membership: { campusId: "campus-b" } },
-    });
+    assetFindFirst.mockResolvedValue(
+      assetWith({
+        category: "VERIFICATION",
+        status: "ATTACHED",
+        verificationId: "verification-1",
+        verification: { membership: { campusId: "campus-b", status: "ACTIVE" } },
+      }),
+    );
     loadAuthorizationContextMock.mockResolvedValue(ctxWith([campusScopedGrant("campus-a")]));
 
     expect(await resolvePrivateAssetAccess("asset-1", { id: "reviewer-a" })).toEqual({

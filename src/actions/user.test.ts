@@ -175,7 +175,8 @@ describe("user actions", () => {
     formData.set("schoolName", "示例大学");
     formData.set("campusName", "主校区");
     formData.set("studentIdLast4", "1234");
-    formData.set("studentCardImage", "https://example.com/student-card.jpg");
+    // RB-01：认证证据只接受受控 asset 引用（上传体系产生）
+    formData.set("studentCardImage", "asset:asset-7");
 
     const result = await submitVerification({ success: false, message: "" }, formData);
 
@@ -184,7 +185,7 @@ describe("user actions", () => {
       schoolName: "示例大学",
       campusName: "主校区",
       studentIdLast4: "1234",
-      studentCardImageToken: "https://example.com/student-card.jpg",
+      studentCardImageToken: "asset:asset-7",
     });
     expect(result).toEqual({
       success: true,
@@ -252,7 +253,7 @@ describe("user actions", () => {
     formData.set("schoolName", "示例大学");
     formData.set("campusName", "主校区");
     formData.set("studentIdLast4", "1234");
-    formData.set("studentCardImage", "/uploads/verification/card.jpg");
+    formData.set("studentCardImage", "asset:asset-1");
     submitMembershipVerification.mockRejectedValue(new Error("db down"));
 
     const result = await submitVerification({ success: false, message: "" }, formData);

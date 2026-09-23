@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isManageableImageValue } from "@/lib/asset-ref";
+import { isManageableImageValue, isControlledVerificationEvidence } from "@/lib/asset-ref";
 
 const optionalImage = z
   .string()
@@ -10,12 +10,14 @@ const optionalImage = z
     message: "请填写合法的图片地址",
   });
 
-const requiredImage = z
+// RB-01 Repair 2：认证证据只接受受控 asset:<id> 引用（上传体系产生）；
+// 历史 /uploads/ 直链与外链不再是合法的新提交形态，防止绕过私有资产模型
+const requiredControlledEvidence = z
   .string()
   .trim()
-  .min(1, "请上传学生证图片或填写图片地址")
-  .refine((value) => isManageableImageValue(value), {
-    message: "请填写合法的学生证图片地址",
+  .min(1, "请上传学生证图片")
+  .refine((value) => isControlledVerificationEvidence(value), {
+    message: "学生证材料必须通过平台上传后提交",
   });
 
 export const profileFormSchema = z.object({
@@ -51,5 +53,5 @@ export const verificationFormSchema = z.object({
   schoolName: z.string().trim().min(2, "学校名称至少 2 个字").max(40, "学校名称不能超过 40 个字"),
   campusName: z.string().trim().min(2, "校区名称至少 2 个字").max(40, "校区名称不能超过 40 个字"),
   studentIdLast4: z.string().trim().regex(/^\d{4}$/, "学号后四位必须是 4 位数字"),
-  studentCardImage: requiredImage,
+  studentCardImage: requiredControlledEvidence,
 });

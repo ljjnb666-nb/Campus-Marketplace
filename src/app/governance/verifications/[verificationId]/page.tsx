@@ -91,6 +91,12 @@ export default async function GovernanceVerificationDetailPage({
           <div className="mt-4 text-sm text-slate-600">
             <PrivateAssetViewer value={detail.studentCardImageRef} label="查看学生证材料" />
           </div>
+        ) : detail.evidenceUnavailable ? (
+          // RB-01：历史证据值（legacy 直链/外链/未知串/失效引用）fail closed，
+          // 仅显示非泄露状态，绝不输出原始 URL / 对象路径
+          <div className="mt-4 text-sm text-slate-500" data-evidence-unavailable="true">
+            历史认证材料不可用（仅支持平台加密材料）
+          </div>
         ) : null}
       </section>
 

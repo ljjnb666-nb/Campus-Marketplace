@@ -6,6 +6,10 @@ import {
   parseCanonicalCursorJson,
 } from "@/lib/governance/canonical-cursor";
 import { prisma } from "@/lib/prisma";
+import {
+  isControlledVerificationEvidence,
+  parseAssetReference,
+} from "@/lib/asset-ref";
 import { isVerificationReviewOverdue } from "@/lib/campus/verification-sla";
 import {
   canReviewVerificationCampus,
@@ -231,6 +235,47 @@ export async function loadAuthorizedVerificationQueue(input: {
 
 // ── 详情（每请求独立重授权，绝不信任队列可见性）──────────────────────────────
 
+export type VerificationEvidenceDisplay =
+  | { state: "CONTROLLED"; ref: string }
+  | { state: "UNAVAILABLE" };
+
+/**
+ * RB-01 Repair 2：证据渲染解析（read-model 层 fail-closed）。
+ *
+ * 仅当引用为受控 `asset:<id>` 且对应 UploadedAsset 确实存在、
+ * category=VERIFICATION、access=PRIVATE、绑定到本认证记录、状态存活且
+ * 未过保留期时，才返回 CONTROLLED 引用；其余一切形态（历史 /uploads/
+ * 直链、http(s) 外链、任意未知/畸形串、伪造 asset id、跨类别绑定、
+ * 已过期/已删除对象）一律 UNAVAILABLE——历史证据值绝不进入 DOM。
+ *
+ * 注意分层：本函数只决定"是否展示查看入口"；实际内容读取仍必须经
+ * /api/assets/:assetId/access + content 的独立鉴权（含 sensitive access
+ * audit），此处绝不签发任何内容 URL。
+ */
+export async function resolveVerificationEvidenceDisplay(
+  verificationId: string,
+  value: string,
+): Promise<VerificationEvidenceDisplay> {
+  const assetId = isControlledVerificationEvidence(value) ? parseAssetReference(value) : null;
+  if (!assetId) {
+    return { state: "UNAVAILABLE" };
+  }
+
+  const asset = await prisma.uploadedAsset.findFirst({
+    where: {
+      id: assetId,
+      category: "VERIFICATION",
+      access: "PRIVATE",
+      verificationId,
+      status: { in: ["UPLOADED", "ATTACHED"] },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
+    select: { id: true },
+  });
+
+  return asset ? { state: "CONTROLLED", ref: value } : { state: "UNAVAILABLE" };
+}
+
 export type VerificationDetailDto = {
   verificationId: string;
   status: VerificationStatus;
@@ -251,10 +296,18 @@ export type VerificationDetailDto = {
   /** policy 快照的安全展示字段（不含 raw policy metadata / contentHash） */
   policyVersion: number | null;
   /**
-   * 私有证据引用（asset: token）——仅授权通过后返回；实际读取必须经
-   * /api/assets/:assetId/access + content 独立鉴权（含 sensitive access audit）
+   * 受控私有证据引用（严格合法的 asset: token，且已通过 RB-01 渲染解析：
+   * 存在 / VERIFICATION 类别 / PRIVATE / 绑定本认证 / 未过期）——仅授权
+   * 通过后返回；实际读取必须经 /api/assets/:assetId/access + content
+   * 独立鉴权（含 sensitive access audit）
    */
   studentCardImageRef: string | null;
+  /**
+   * RB-01：证据值存在但不是可渲染的受控引用（legacy 直链/外链/未知串/
+   * 伪造或失效 asset 引用/已清空）→ true，页面渲染非泄露的不可用状态，
+   * 绝不输出原始值
+   */
+  evidenceUnavailable: boolean;
 };
 
 export type VerificationDetailResult = { ok: true; detail: VerificationDetailDto } | { ok: false };
@@ -331,6 +384,13 @@ export async function loadAuthorizedVerificationDetail(input: {
     [row.userId, row.reviewedById].filter((id): id is string => id !== null),
   );
 
+  // RB-01：证据引用仅在"受控 asset 引用 ∧ 资产校验通过"时进入 DTO；
+  // 其余值以 evidenceUnavailable 表达，原始值绝不离开服务端
+  const evidenceDisplay = await resolveVerificationEvidenceDisplay(
+    row.id,
+    row.studentCardImage,
+  );
+
   return {
     ok: true,
     detail: {
@@ -351,7 +411,9 @@ export async function loadAuthorizedVerificationDetail(input: {
         ? (identities.get(row.reviewedById)?.displayName ?? UNAVAILABLE_USER_DISPLAY_NAME)
         : null,
       policyVersion: row.policyVersion,
-      studentCardImageRef: row.studentCardImage,
+      studentCardImageRef:
+        evidenceDisplay.state === "CONTROLLED" ? evidenceDisplay.ref : null,
+      evidenceUnavailable: evidenceDisplay.state === "UNAVAILABLE",
     },
   };
 }

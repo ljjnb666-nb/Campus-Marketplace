@@ -2,32 +2,35 @@
 
 import { useState } from "react";
 
+import {
+  parseAssetReference,
+  parseVerificationEvidenceReference,
+  CONTROLLED_EVIDENCE,
+} from "@/lib/asset-ref";
+
 interface PrivateAssetViewerProps {
-  /** 业务字段保存的图片值：asset:<id>、公开 URL 或历史 /uploads/ 路径 */
+  /** 业务字段保存的图片值：仅受控 asset:<id> 可查看；其余值 fail closed */
   value: string;
   label?: string;
 }
 
 /**
- * 私有资源查看入口：asset:<id> 经签名接口换取短时 URL 后展示；
- * 历史 /uploads/ 或外链值直接作为链接打开（存量兼容）。
- * 签名 URL 短期有效（默认 5 分钟），过期后重新点击即可。
+ * 私有资源查看入口（RB-01 Repair 2 fail-closed）：
+ * - 仅严格合法的 asset:<id> 经签名接口换取同源代理 URL 后展示；
+ * - 历史 /uploads/ 直链、外链、任意未知/畸形字符串一律渲染为
+ *   "历史认证材料不可用" 的非交互状态——绝不进入 href/src/DOM，
+ *   使历史证据值无法绕过 /api/assets 的鉴权边界。
  */
 export function PrivateAssetViewer({ value, label = "查看材料" }: PrivateAssetViewerProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
   const [signedUrl, setSignedUrl] = useState<string>("");
 
-  if (!value.startsWith("asset:")) {
+  if (parseVerificationEvidenceReference(value) !== CONTROLLED_EVIDENCE) {
     return (
-      <a
-        href={value}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-block text-slate-950 underline"
-      >
-        {label}
-      </a>
+      <span className="inline-block text-sm text-slate-500" data-evidence-unavailable="true">
+        历史认证材料不可用
+      </span>
     );
   }
 
@@ -40,7 +43,10 @@ export function PrivateAssetViewer({ value, label = "查看材料" }: PrivateAss
     setLoading(true);
     setError("");
     try {
-      const assetId = value.slice("asset:".length);
+      const assetId = parseAssetReference(value);
+      if (!assetId) {
+        throw new Error("无法获取材料访问权限");
+      }
       const response = await fetch(`/api/assets/${encodeURIComponent(assetId)}/access`);
       const result = (await response.json()) as { url?: string; message?: string };
       if (!response.ok || !result.url) {
