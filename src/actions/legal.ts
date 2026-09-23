@@ -2,9 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { isRbacError } from "@/lib/rbac/errors";
 import { logger } from "@/lib/logger";
 import { getVerifiedSession } from "@/lib/server-auth";
-import { recordAcceptances } from "@/lib/legal/policy-service";
+import { recordReconsentAcceptances } from "@/lib/legal/policy-service";
 
 export type LegalAcceptanceState = {
   success: boolean;
@@ -17,12 +18,13 @@ export type LegalAcceptanceState = {
  * 重新同意当前 required 政策集合（consent gate 的解除入口）。
  *
  * 身份校验：getVerifiedSession（requireConsent=false——re-consent 本身
- * 不能被 consent gate 阻断），但账号 active 校验永远执行：注销/停用
- * 账号的残留旧 JWT 无法提交同意。
+ * 不能被 consent gate 阻断）只是 entry identity check，不是 mutation
+ * authority。RB-03 REVIEW FIX：最终写权威 = recordReconsentAcceptances
+ * （USER 治理锁 → 锁内 fresh ACTIVE 复核 → POLICY 锁 → 校验/写入），
+ * 注销/停用账号的残留旧 JWT 或 entry 后竞态失效均无法提交同意。
  *
  * fail-closed：提交的集合与服务器解析的当前 required 集合不一致
  * （例如页面打开期间发布了新版本）时拒绝并要求重新加载。
- * 解析/校验/写入在同一持 policy 锁事务内完成（见 policy-service）。
  */
 export async function acceptRequiredPolicies(
   _prevState: LegalAcceptanceState,
@@ -45,12 +47,18 @@ export async function acceptRequiredPolicies(
     .filter((value) => value.length > 0);
 
   try {
-    await recordAcceptances({
+    await recordReconsentAcceptances({
       userId: verified.user.id,
       documentIds,
-      source: "RECONSENT",
     });
   } catch (error) {
+    // RB-03 race-loss：entry 时 ACTIVE 但 USER 锁内 fresh 复核前
+    // erase/suspend 先提交 → 与入口失效完全同形，不区分
+    // erased/deleted/suspended/race-lost
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return { success: false, message: "请先登录" };
+    }
+
     if (isGovernanceError(error)) {
       return {
         success: false,

@@ -6,10 +6,11 @@ import {
   getVerifiedSession,
 } from "@/lib/server-auth";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { isRbacError } from "@/lib/rbac/errors";
 import {
   getUserAcceptanceStatus,
   listUserAcceptances,
-  recordAcceptances,
+  recordReconsentAcceptances,
 } from "@/lib/legal/policy-service";
 import { isRateLimited } from "@/lib/rate-limit";
 
@@ -116,10 +117,12 @@ async function postHandler(request: NextRequest) {
   }
 
   try {
-    const result = await recordAcceptances({
+    // RB-03 REVIEW FIX：权威 RECONSENT 服务（USER 治理锁 + 锁内 fresh
+    // ACTIVE 复核 → POLICY 锁 → 校验/写入）。与 Server Action 共用同一
+    // authority，禁止 adapter 各自实现。
+    const result = await recordReconsentAcceptances({
       userId: verified.user.id,
       documentIds: parsed.data.documentIds,
-      source: "RECONSENT",
     });
 
     const status = await getUserAcceptanceStatus(verified.user.id);
@@ -129,6 +132,19 @@ async function postHandler(request: NextRequest) {
       { headers: privateCache() },
     );
   } catch (error) {
+    // RB-03 race-loss：entry ACTIVE 但 USER 锁内 fresh 复核前 erase/suspend
+    // 先提交 → 与 entry-level 失效完全同形（401 ACCOUNT_INACTIVE），
+    // 不因 race timing 暴露不同 machine code/status
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return NextResponse.json(
+        { error: "未登录或账号不可用", code: "ACCOUNT_INACTIVE" },
+        {
+          status: VERIFIED_SESSION_HTTP_STATUS.ACCOUNT_INACTIVE,
+          headers: privateCache(),
+        },
+      );
+    }
+
     if (isGovernanceError(error)) {
       return NextResponse.json(
         { error: error.message, code: error.code },

@@ -109,7 +109,7 @@ export async function acquireGovernanceSubjectLocks(
 /**
  * 法务政策锁：对给定 document types 按固定顺序取得事务级互斥锁。
  *
- * publish / retire 必须锁自己操作的 type；recordAcceptances 必须
+ * publish / retire 必须锁自己操作的 type；recordSignup/ReconsentAcceptances 必须
  * 按本函数的同一固定顺序锁全部 required types（一次 acceptance 覆盖
  * 四类文档）。固定顺序保证并发 acceptance / publish 之间无死锁环。
  */

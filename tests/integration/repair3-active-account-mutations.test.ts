@@ -348,4 +348,153 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     // withTransaction 引用保持真实（防 tree-shake 误报）
     expect(realWithTransaction).toBeTypeOf("function");
   });
+
+  it("LOGIN-RACE-01 erase wins：bcrypt 后 beforeLock 挂起 → erase 提交 → finalizer DENY，无 lastLoginAt resurrection", async () => {
+    const { hash } = await import("bcryptjs");
+    const { finalizeCredentialLogin } = await import("@/lib/credential-login-service");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const password = ["RB03", "Correct", "Password1"].join("-");
+    const passwordHash = await hash(password, 10);
+    const user = await createFixtureUser("RB03 登录竞态A");
+    await rawClient!.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    const candidate = { id: user.id, passwordHash, email: user.email };
+
+    let signalCredentialed!: () => void;
+    const credentialed = new Promise<void>((resolve) => {
+      signalCredentialed = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    // T1：bcrypt 已逻辑完成，USER 锁之前挂起
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      finalizeCredentialLogin(candidate, {
+        beforeLock: async () => {
+          signalCredentialed();
+          await t1Gate;
+        },
+      }),
+    );
+    await credentialed;
+
+    // T2：erasure 提交（替换 hash / 清 lastLoginAt / 匿名化）
+    await eraseAccount(user.id);
+
+    releaseT1();
+    // 锁内 fresh：erasedAt + hash 变化 → DENY
+    await expect(t1).resolves.toBeNull();
+
+    const finalState = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(finalState.erasedAt).not.toBeNull();
+    expect(finalState.lastLoginAt).toBeNull();
+    expect(finalState.name).toBe("已注销用户");
+    expect(finalState.passwordHash).not.toBe(passwordHash);
+  });
+
+  it("LOGIN-RACE-02 login wins：finalizer 持锁提交 → erase 排队后执行 → erasure 最终权威（lastLoginAt 归零）", async () => {
+    const { hash } = await import("bcryptjs");
+    const { finalizeCredentialLogin } = await import("@/lib/credential-login-service");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { waitForAdvisoryLockWaiter } = await import("./helpers/lock-barrier");
+
+    const password = ["RB03", "Correct", "Password2"].join("-");
+    const passwordHash = await hash(password, 10);
+    const user = await createFixtureUser("RB03 登录竞态B");
+    await rawClient!.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    const candidate = { id: user.id, passwordHash, email: user.email };
+
+    let signalChecked!: () => void;
+    const checked = new Promise<void>((resolve) => {
+      signalChecked = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      finalizeCredentialLogin(candidate, {
+        afterCheck: async () => {
+          signalChecked();
+          await t1Gate;
+        },
+      }),
+    );
+    await checked;
+
+    const t2 = eraseAccount(user.id);
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${user.id}`]);
+
+    releaseT1();
+    const identity = await t1;
+    expect(identity).toEqual(
+      expect.objectContaining({ id: user.id, email: user.email }),
+    );
+    const eraseResult = await t2;
+    expect(eraseResult.userId).toBe(user.id);
+
+    // erasure 最终权威：login 先提交的 lastLoginAt 被 erasure 清零
+    const finalState = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(finalState.erasedAt).not.toBeNull();
+    expect(finalState.lastLoginAt).toBeNull();
+    expect(finalState.name).toBe("已注销用户");
+  });
+
+  it("BLOCK-RACE-01 erase wins：entry 后 beforeLock 挂起 → erase actor 提交 → block 被拒，行 ABSENT", async () => {
+    const { blockUserTx } = await import("@/lib/trust/block-service");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const actor = await createFixtureUser("RB03 拉黑竞态操作者");
+    const target = await createFixtureUser("RB03 拉黑竞态目标");
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      blockUserTx(
+        tx,
+        actor.id,
+        { targetUserId: target.id, reason: "RB03 race" },
+        {
+          beforeLock: async () => {
+            signalEntered();
+            await t1Gate;
+          },
+        },
+      ),
+    );
+    await entered;
+
+    await eraseAccount(actor.id);
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    const blockRow = await rawClient!.blockedUser.findUnique({
+      where: {
+        blockerId_blockedUserId: { blockerId: actor.id, blockedUserId: target.id },
+      },
+    });
+    expect(blockRow).toBeNull();
+  });
 });

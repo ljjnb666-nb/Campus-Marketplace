@@ -7,6 +7,10 @@ import type {
 } from "@prisma/client";
 
 import { governanceError } from "@/lib/governance/domain-errors";
+import {
+  prepareActiveAccountMutation,
+  type ActiveAccountMutationSeams,
+} from "@/lib/governance/active-account-mutation";
 import { acquirePolicyLocks } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
@@ -167,155 +171,152 @@ export async function assertRequiredPoliciesAccepted(
 export type AcceptanceRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
 
 /**
- * 记录同意证据（幂等）。
+ * RB-03 REVIEW FIX：RECONSENT_SERIALIZATION_CONTRACT ——
+ * A RECONSENT evidence row may only be created while the requesting user
+ * is ACTIVE under the same USER lifecycle serialization boundary used by
+ * erase/suspend.
  *
- * Serialization contract（Phase 5 REPAIR）：
- * "resolve current → resolve user pending → validate → insert" 全部在
- * 同一个持有 policy advisory 锁的事务内完成（锁按 LEGAL_DOCUMENT_TYPES
- * 固定顺序获取，publish/retire 用同一锁命名空间）。因此并发
- * publishLegalDocument 只能线性化在本次 acceptance 之前（stale 提交被
- * NOT_CURRENT / VERSION_CHANGED 拒绝）或之后（本次为成功的 v1 同意，
- * publish 随后发生、用户随即 OUTDATED）——不存在"v2 已发布而 v1 同意
- * 仍以 latest 成功提交"的交错。
+ * 三层结构（单一权威 RECONSENT 服务，Server Action 与 HTTP API 两个
+ * adapter 共用，杜绝 authority divergence）：
  *
- * fail-closed 契约：
- * - 提交的每个 documentId 都必须是"当前 required 集合"成员（缺、旧版本、
- *   杜撰 id 一律拒绝 → LEGAL_DOCUMENT_NOT_FOUND / LEGAL_DOCUMENT_NOT_CURRENT）；
- * - 提交集合必须覆盖用户当前全部 pending 文档；已接受当前版本的文档
- *   可以随集提交（幂等跳过）；
- * - (userId, documentId) 唯一约束 + 事务：并发双击最多产生一条证据。
- * - 证据固化 type/version/hash 三元组快照，审计自足。
- *
- * @param tx 可选事务客户端（注册流程与用户创建同事务时传入；
- *           注册事务同样先取 policy 锁，遵循同一 consistency contract）
+ * - recordAcceptancesCore（module-internal）：policy-domain 实现，
+ *   acquirePolicyLocks → resolve → validate → racePoint → insert/skip。
+ *   不做任何 lifecycle 判断。
+ * - recordSignupAcceptances：SIGNUP 入口（tx 由 registration 事务提供；
+ *   NO USER active guard——User 就在当前事务中刚创建，不存在并发
+ *   lifecycle；保持 CAMPUS → POLICY 既有锁序与注册原子性）。
+ * - recordReconsentAcceptances：RECONSENT 权威入口，自持完整事务：
+ *   USER subject lock（prepareActiveAccountMutation，与 erase/suspend
+ *   同锁域）→ fresh ACTIVE 复核 → POLICY locks → resolve/validate →
+ *   write → commit。锁序 USER → POLICY（全局冻结：绝不 POLICY → SUBJECT）。
  */
-export async function recordAcceptances(input: {
-  userId: string;
-  documentIds: string[];
-  source: PolicyAcceptanceSource;
-  tx?: Prisma.TransactionClient;
-  now?: Date;
-  racePoint?: AcceptanceRacePoint;
-}): Promise<{ created: number; skipped: number }> {
-  const now = input.now ?? new Date();
 
-  const run = async (tx: Prisma.TransactionClient): Promise<{ created: number; skipped: number }> => {
-    // ---- serialization boundary：按固定顺序锁全部 policy types ----
-    await acquirePolicyLocks(tx, LEGAL_DOCUMENT_TYPES);
+/** policy-domain core（module-internal，不做 lifecycle 判断）。 */
+async function recordAcceptancesCore(
+  tx: Prisma.TransactionClient,
+  input: {
+    userId: string;
+    documentIds: string[];
+    source: PolicyAcceptanceSource;
+    now: Date;
+    racePoint?: AcceptanceRacePoint;
+  },
+): Promise<{ created: number; skipped: number }> {
+  const now = input.now;
 
-    // ---- resolve + validate + write 全部在锁内同一事务 ----
-    const required = await getRequiredPolicies(now, tx);
-    const requiredById = new Map(required.map((document) => [document.id, document]));
+  // ---- serialization boundary：按固定顺序锁全部 policy types ----
+  await acquirePolicyLocks(tx, LEGAL_DOCUMENT_TYPES);
 
-    const requestedIds = [...new Set(input.documentIds)];
+  // ---- resolve + validate + write 全部在锁内同一事务 ----
+  const required = await getRequiredPolicies(now, tx);
+  const requiredById = new Map(required.map((document) => [document.id, document]));
 
-    for (const documentId of requestedIds) {
-      const document = requiredById.get(documentId);
+  const requestedIds = [...new Set(input.documentIds)];
 
-      if (!document) {
-        // 不在当前 required 集合内：可能是已退役/未发布/未来生效/杜撰的 id
-        const exists = await tx.legalDocument.findUnique({ where: { id: documentId } });
+  for (const documentId of requestedIds) {
+    const document = requiredById.get(documentId);
 
-        if (!exists || exists.status !== "PUBLISHED") {
-          throw governanceError("LEGAL_DOCUMENT_NOT_FOUND");
-        }
+    if (!document) {
+      // 不在当前 required 集合内：可能是已退役/未发布/未来生效/杜撰的 id
+      const exists = await tx.legalDocument.findUnique({ where: { id: documentId } });
 
-        throw governanceError("LEGAL_DOCUMENT_NOT_CURRENT");
+      if (!exists || exists.status !== "PUBLISHED") {
+        throw governanceError("LEGAL_DOCUMENT_NOT_FOUND");
       }
+
+      throw governanceError("LEGAL_DOCUMENT_NOT_CURRENT");
+    }
+  }
+
+  const status = await buildAcceptanceStatus(
+    input.userId,
+    required,
+    await tx.policyAcceptance.findMany({
+      where: {
+        userId: input.userId,
+        documentType: { in: required.map((document) => document.type) },
+      },
+      orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+    }),
+  );
+
+  // 必须覆盖全部 pending（旧版本同意不能绕过：只补缺口，不留欠账）
+  for (const pending of status.pending) {
+    if (!requestedIds.includes(pending.id)) {
+      throw governanceError("LEGAL_DOCUMENT_VERSION_CHANGED");
+    }
+  }
+
+  // 测试 seam：锁 + 解析 + 校验之后、写之前（并发 publish 在此点发起会被
+  // policy 锁阻塞直到本事务结束——用于 publish/acceptance 线性化的真实
+  // PG 竞态测试）。生产路径不传该参数。
+  if (input.racePoint) {
+    await input.racePoint(tx);
+  }
+
+  let created = 0;
+  let skipped = 0;
+
+  for (const documentId of requestedIds) {
+    const document = requiredById.get(documentId);
+
+    if (!document) {
+      continue;
     }
 
-    const status = await buildAcceptanceStatus(
-      input.userId,
-      required,
-      await tx.policyAcceptance.findMany({
-        where: {
-          userId: input.userId,
-          documentType: { in: required.map((document) => document.type) },
-        },
-        orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
-      }),
-    );
+    const existing = await tx.policyAcceptance.findUnique({
+      where: { userId_documentId: { userId: input.userId, documentId } },
+      select: { id: true, documentVersion: true },
+    });
 
-    // 必须覆盖全部 pending（旧版本同意不能绕过：只补缺口，不留欠账）
-    for (const pending of status.pending) {
-      if (!requestedIds.includes(pending.id)) {
-        throw governanceError("LEGAL_DOCUMENT_VERSION_CHANGED");
+    if (existing) {
+      if (existing.documentVersion !== document.version) {
+        // 不可能路径（证据不可改写），防御性兜底：绝不覆盖旧证据
+        throw governanceError("PRIVACY_REQUEST_INVALID_TRANSITION");
       }
+
+      skipped += 1;
+      continue;
     }
 
-    // 测试 seam：锁 + 解析 + 校验之后、写之前（并发 publish 在此点发起会被
-    // policy 锁阻塞直到本事务结束——用于 publish/acceptance 线性化的真实
-    // PG 竞态测试）。生产路径不传该参数。
-    if (input.racePoint) {
-      await input.racePoint(tx);
-    }
-
-    let created = 0;
-    let skipped = 0;
-
-    for (const documentId of requestedIds) {
-      const document = requiredById.get(documentId);
-
-      if (!document) {
-        continue;
-      }
-
-      const existing = await tx.policyAcceptance.findUnique({
-        where: { userId_documentId: { userId: input.userId, documentId } },
-        select: { id: true, documentVersion: true },
-      });
-
-      if (existing) {
-        if (existing.documentVersion !== document.version) {
-          // 不可能路径（证据不可改写），防御性兜底：绝不覆盖旧证据
-          throw governanceError("PRIVACY_REQUEST_INVALID_TRANSITION");
-        }
-
-        skipped += 1;
-        continue;
-      }
-
-      try {
-        await tx.policyAcceptance.create({
-          data: {
-            userId: input.userId,
-            documentId,
-            documentType: document.type,
-            documentVersion: document.version,
-            documentHash: document.contentHash,
-            source: input.source,
-            acceptedAt: now,
-          },
-        });
-        created += 1;
-
-        logger.info("policy_acceptance_created", "legal", {
+    try {
+      await tx.policyAcceptance.create({
+        data: {
           userId: input.userId,
           documentId,
           documentType: document.type,
           documentVersion: document.version,
+          documentHash: document.contentHash,
           source: input.source,
-        });
-      } catch (error) {
-        // 并发双击：唯一约束冲突视为幂等成功（另一请求已创建同一证据）
-        if (
-          typeof error === "object" &&
-          error !== null &&
-          "code" in error &&
-          (error as { code?: string }).code === "P2002"
-        ) {
-          skipped += 1;
-          continue;
-        }
+          acceptedAt: now,
+        },
+      });
+      created += 1;
 
-        throw error;
+      logger.info("policy_acceptance_created", "legal", {
+        userId: input.userId,
+        documentId,
+        documentType: document.type,
+        documentVersion: document.version,
+        source: input.source,
+      });
+    } catch (error) {
+      // 并发双击：唯一约束冲突视为幂等成功（另一请求已创建同一证据）
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: string }).code === "P2002"
+      ) {
+        skipped += 1;
+        continue;
       }
+
+      throw error;
     }
+  }
 
-    return { created, skipped };
-  };
-
-  return input.tx ? run(input.tx) : withTransaction(run);
+  return { created, skipped };
 }
 
 /** 用户的全部接受历史（隐私设置页 / 导出使用）。 */
@@ -329,6 +330,9 @@ export async function listUserAcceptances(userId: string): Promise<AcceptanceRec
 /**
  * 注册流程专用：在给定事务内先取 policy 锁，再校验并写入 SIGNUP 同意证据
  * （与用户创建同事务提交，且遵循同一 policy consistency contract）。
+ *
+ * RB-03：SIGNUP 入口不加 USER active guard——User 就在本 registration
+ * 事务中刚刚创建，不存在并发 lifecycle；锁序保持 CAMPUS → POLICY。
  */
 export async function recordSignupAcceptances(
   tx: Prisma.TransactionClient,
@@ -336,11 +340,44 @@ export async function recordSignupAcceptances(
   documentIds: string[],
   now: Date = new Date(),
 ): Promise<{ created: number; skipped: number }> {
-  return recordAcceptances({
+  return recordAcceptancesCore(tx, {
     userId,
     documentIds,
     source: "SIGNUP",
-    tx,
     now,
+  });
+}
+
+/**
+ * RECONSENT 权威入口（RB-03 REVIEW FIX）：自持完整事务，USER lifecycle
+ * 序列化覆盖 fresh ACTIVE 复核 → policy resolution → validation →
+ * acceptance write → commit 全区间。
+ *
+ * 唯一生产 RECONSENT 权威服务——Server Action（acceptRequiredPolicies）
+ * 与 HTTP API（POST /api/legal/acceptances）两个 adapter 必须都经过本
+ * 入口，禁止各自实现 USER lock / fresh check / policy validation。
+ *
+ * @param activeAccountSeams 仅测试注入（beforeLock/afterCheck，生产不传）
+ * @param racePoint 仅测试注入（policy 锁 + 校验后、写入前）
+ */
+export async function recordReconsentAcceptances(input: {
+  userId: string;
+  documentIds: string[];
+  now?: Date;
+  activeAccountSeams?: ActiveAccountMutationSeams;
+  racePoint?: AcceptanceRacePoint;
+}): Promise<{ created: number; skipped: number }> {
+  const now = input.now ?? new Date();
+
+  return withTransaction(async (tx) => {
+    await prepareActiveAccountMutation(tx, input.userId, input.activeAccountSeams);
+
+    return recordAcceptancesCore(tx, {
+      userId: input.userId,
+      documentIds: input.documentIds,
+      source: "RECONSENT",
+      now,
+      racePoint: input.racePoint,
+    });
   });
 }

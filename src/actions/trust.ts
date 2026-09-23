@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import { blockUserTx, unblockUserTx } from "@/lib/trust/block-service";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -306,22 +307,9 @@ export async function blockUser(
       return { success: false, message: "无效的拉黑目标" };
     }
 
-    await prisma.blockedUser.upsert({
-      where: {
-        blockerId_blockedUserId: {
-          blockerId: user.id,
-          blockedUserId: targetUserId,
-        },
-      },
-      create: {
-        blockerId: user.id,
-        blockedUserId: targetUserId,
-        reason,
-      },
-      update: {
-        reason,
-      },
-    });
+    // RB-03 REVIEW FIX：durable 关系写入经 active-account 序列化
+    // （仅 USER:<actor>；不锁 target）
+    await withTransaction((tx) => blockUserTx(tx, user.id, { targetUserId, reason }));
 
     revalidatePath("/messages");
     return { success: true, message: "已成功拉黑该用户" };
@@ -342,12 +330,8 @@ export async function unblockUser(
       return { success: false, message: "参数缺失" };
     }
 
-    await prisma.blockedUser.deleteMany({
-      where: {
-        blockerId: user.id,
-        blockedUserId: targetUserId,
-      },
-    });
+    // RB-03 REVIEW FIX：与 blockUser 对称的 lifecycle 序列化
+    await withTransaction((tx) => unblockUserTx(tx, user.id, targetUserId));
 
     revalidatePath("/messages");
     return { success: true, message: "已解除拉黑" };
