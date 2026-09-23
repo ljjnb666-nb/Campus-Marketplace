@@ -210,6 +210,28 @@ describe("submitMembershipVerification（学生侧提交）", () => {
     expect(result).toEqual({ id: "verification-1" });
   });
 
+  it("RB-01：legacy 直链 / 外链 / 未知串证据一律拒绝（fail closed，零写入）", async () => {
+    for (const studentCardImageToken of [
+      "/uploads/student-card-old.jpg",
+      "https://example.com/card.jpg",
+      "legacy",
+      "erased",
+      "javascript:alert(1)",
+      "asset:",
+      "asset:***",
+      "",
+    ]) {
+      await expect(
+        submitMembershipVerification({ ...input, studentCardImageToken }),
+      ).rejects.toMatchObject({ code: "VERIFICATION_EVIDENCE_INVALID" });
+    }
+
+    // fail closed 发生在任何锁/写之前
+    expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
+    expect(txVerificationUpsert).not.toHaveBeenCalled();
+    expect(txUserUpdate).not.toHaveBeenCalled();
+  });
+
   it("rebinds membershipId on resubmission（Repair 1：A→B 重绑）", async () => {
     txVerificationFindUnique.mockResolvedValue({ status: "VERIFIED" });
 

@@ -45,3 +45,56 @@ export function isManageableImageValue(value: string): boolean {
   }
   return /^https?:\/\//.test(value) || isStoredImagePath(value);
 }
+
+// ============================================================
+// RB-01：认证证据引用分类（runtime fail-closed 的单一判定点）
+// ============================================================
+
+/** UserVerification.studentCardImage 的受控引用形态（唯一可渲染形态） */
+export const CONTROLLED_EVIDENCE = "CONTROLLED_ASSET" as const;
+export const LEGACY_LOCAL_EVIDENCE = "LEGACY_LOCAL" as const;
+export const LEGACY_EXTERNAL_EVIDENCE = "LEGACY_EXTERNAL" as const;
+export const UNKNOWN_EVIDENCE = "UNKNOWN" as const;
+export const UNAVAILABLE_EVIDENCE = "UNAVAILABLE" as const;
+
+export type VerificationEvidenceReferenceKind =
+  | typeof CONTROLLED_EVIDENCE
+  | typeof LEGACY_LOCAL_EVIDENCE
+  | typeof LEGACY_EXTERNAL_EVIDENCE
+  | typeof UNKNOWN_EVIDENCE
+  | typeof UNAVAILABLE_EVIDENCE;
+
+/**
+ * 认证证据引用分类（RB-01 Repair 2）：
+ * - CONTROLLED_ASSET：严格合法的 asset:<id> —— 唯一允许经受保护路由查看的形态
+ * - LEGACY_LOCAL：历史 /uploads/ 直链（存量兼容形态，禁止渲染为链接）
+ * - LEGACY_EXTERNAL：http(s) 外链（禁止渲染为链接）
+ * - UNKNOWN：其它任意字符串（含 "erased" 注销哨兵、"legacy" 历史哨兵、
+ *   javascript: 等恶意/畸形串；一律 fail closed）
+ * - UNAVAILABLE：空值（迁移清空 / 未提交材料）
+ *
+ * 认证证据不得再散落 startsWith("asset:") 判断——渲染、读模型、
+ * 提交校验必须经由本函数，防止 legacy 直链绕过私有资产模型再次发生。
+ */
+export function parseVerificationEvidenceReference(value: string | null | undefined): VerificationEvidenceReferenceKind {
+  if (!value) {
+    return UNAVAILABLE_EVIDENCE;
+  }
+  if (value.startsWith(ASSET_REFERENCE_PREFIX)) {
+    // asset: 前缀但格式非法（含 "asset:" 纯前缀）按 UNKNOWN fail closed，
+    // 绝不回退任何 raw 兼容渲染
+    return parseAssetReference(value) !== null ? CONTROLLED_EVIDENCE : UNKNOWN_EVIDENCE;
+  }
+  if (isStoredImagePath(value)) {
+    return LEGACY_LOCAL_EVIDENCE;
+  }
+  if (/^https?:\/\//.test(value)) {
+    return LEGACY_EXTERNAL_EVIDENCE;
+  }
+  return UNKNOWN_EVIDENCE;
+}
+
+/** 是否为可经受保护路由查看的受控认证证据引用 */
+export function isControlledVerificationEvidence(value: string | null | undefined): boolean {
+  return parseVerificationEvidenceReference(value) === CONTROLLED_EVIDENCE;
+}

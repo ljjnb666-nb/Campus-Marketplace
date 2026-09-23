@@ -381,12 +381,40 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 审核 SLA", () => {
     );
 
     const student = await createFixtureUser("SLA学生");
+    // RB-01：提交只接受受控 asset 引用——为本用例创建真实 UPLOADED 资产
+    const cardAsset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: student.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/sla-card-${randomUUID().slice(0, 8)}.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "UPLOADED",
+      },
+    });
+    createdAssetIds.push(cardAsset.id);
+    const card2Asset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: student.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/sla-card2-${randomUUID().slice(0, 8)}.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "UPLOADED",
+      },
+    });
+    createdAssetIds.push(card2Asset.id);
+
     const submitted = await submitMembershipVerification({
       userId: student.id,
       schoolName: "集成测试大学",
       campusName: "A校区",
       studentIdLast4: "1111",
-      studentCardImageToken: "https://example.com/card.jpg",
+      studentCardImageToken: `asset:${cardAsset.id}`,
     });
     createdVerificationIds.push(submitted.id);
     expect(
@@ -406,7 +434,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 审核 SLA", () => {
       schoolName: "集成测试大学",
       campusName: "A校区",
       studentIdLast4: "1111",
-      studentCardImageToken: "https://example.com/card2.jpg",
+      studentCardImageToken: `asset:${card2Asset.id}`,
     });
     expect(resubmitted.status).toBe("PENDING");
     expect(resubmitted.submittedAt.getTime()).toBeGreaterThan(submitted.submittedAt.getTime());
@@ -1437,6 +1465,21 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 认证审核并发（真实 P
 
     const { reviewer, student, verification } = await createRaceScenario();
 
+    // RB-01：重提交 token 必须是受控 asset 引用（竞态开始前创建）
+    const resubmitAsset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: student.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/vrace7-${randomUUID().slice(0, 8)}.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "UPLOADED",
+      },
+    });
+    createdAssetIds.push(resubmitAsset.id);
+
     const t1 = raceGate();
     const reviewPromise = decideMembershipVerification({
       actorId: reviewer.id,
@@ -1452,7 +1495,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 7F 认证审核并发（真实 P
       schoolName: "集成测试大学",
       campusName: "A校区",
       studentIdLast4: "7777",
-      studentCardImageToken: "https://example.com/card-again.jpg",
+      studentCardImageToken: `asset:${resubmitAsset.id}`,
     });
     await waitForAdvisoryLockWaiter(rawClient!, [`USER:${student.id}`]);
 

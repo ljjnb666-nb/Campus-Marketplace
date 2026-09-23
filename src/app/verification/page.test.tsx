@@ -29,14 +29,12 @@ vi.mock("@/components/profile/verification-form", () => ({
       schoolName: string;
       campusName: string;
       studentIdLast4?: string | null;
-      studentCardImage?: string | null;
     };
   }) => (
     <div data-action={action === submitVerification ? "matched" : "unmatched"}>
       <p>学校 {initialValues.schoolName}</p>
       <p>校区 {initialValues.campusName}</p>
       <p>学号后四位 {initialValues.studentIdLast4}</p>
-      <p>证件图 {initialValues.studentCardImage}</p>
     </div>
   ),
 }));
@@ -75,12 +73,15 @@ describe("VerificationPage", () => {
     expect(screen.getByText("学校 示例大学")).toBeTruthy();
     expect(screen.getByText("校区 主校区")).toBeTruthy();
     expect(screen.getByText("学号后四位 1234")).toBeTruthy();
-    expect(screen.getByText("证件图 /uploads/verification/card.jpg")).toBeTruthy();
+    // RB-01：证据值不再回填表单（不进入 DOM/表单默认值）
+    expect(screen.queryByText(/证件图/)).toBeNull();
+    expect(
+      screen.getByText(/学生证材料仅支持通过平台上传提交/),
+    ).toBeTruthy();
     expect(screen.getByText("学校 示例大学").parentElement?.getAttribute("data-action")).toBe(
       "matched",
     );
     expect(screen.getByText(/提交说明：/)).toBeTruthy();
-    expect(screen.getByText(/学生证材料目前通过图片链接提交/)).toBeTruthy();
   });
 
   it("shows placeholders for users without any verification record", async () => {

@@ -60,6 +60,7 @@ function baseDetail(overrides: Record<string, unknown> = {}) {
     reviewedByName: null,
     policyVersion: 1,
     studentCardImageRef: "asset:asset-1",
+    evidenceUnavailable: false,
     ...overrides,
   };
 }
@@ -95,6 +96,29 @@ describe("GovernanceVerificationDetailPage（认证详情，两阶段读）", ()
     expect(screen.getByText("认证策略版本：v1")).toBeTruthy();
     expect(screen.getAllByText(/审核时限/).length).toBeGreaterThan(0);
     expect(screen.getByText("查看学生证材料")).toBeTruthy();
+  });
+
+  it("RB-01：legacy 证据行渲染非泄露不可用状态（绝不输出原始值）", async () => {
+    mockReviewer();
+    loadAuthorizedVerificationDetail.mockResolvedValue({
+      ok: true,
+      detail: baseDetail({
+        studentCardImageRef: null,
+        evidenceUnavailable: true,
+      }),
+    });
+
+    const { container } = await renderDetail();
+
+    expect(screen.getByText(/历史认证材料不可用/)).toBeTruthy();
+    // 页面仅有合法的"返回队列"内链；不得出现指向原始证据值的链接
+    for (const anchor of Array.from(container.querySelectorAll("a"))) {
+      expect(anchor.getAttribute("href")).not.toContain("/uploads/");
+      expect(anchor.getAttribute("href")).not.toContain("https://");
+      expect(anchor.getAttribute("href")).not.toContain("javascript:");
+    }
+    expect(container.innerHTML).not.toContain("/uploads/");
+    expect(container.innerHTML).not.toContain("https://");
   });
 
   it("PENDING → 通过/驳回可用、吊销禁用；overdue 徽标呈现", async () => {

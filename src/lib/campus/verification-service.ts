@@ -1,10 +1,8 @@
 import type { Prisma, UserVerification, VerificationStatus } from "@prisma/client";
 
 import { applyVerificationAssetRetention, resolveImageTokens } from "@/lib/upload";
-import {
-  acquireCampusVerificationPolicyLocks,
-  acquireGovernanceSubjectLocks,
-} from "@/lib/governance/governance-lock";
+import { isControlledVerificationEvidence } from "@/lib/asset-ref";
+import { acquireCampusVerificationPolicyLocks, acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { getCurrentVerificationPolicy } from "@/lib/campus/verification-policy-service";
 import { computeVerificationReviewDueAt } from "@/lib/campus/verification-sla";
@@ -152,6 +150,13 @@ export async function submitMembershipVerification(
   input: SubmitVerificationInput,
 ): Promise<UserVerification> {
   return withTransaction(async (tx) => {
+    // RB-01 Repair 2：认证证据只接受受控 asset:<id> 引用（zod 为第一道门，
+    // 此处为直接调用方的防御层）。legacy 直链/外链/未知串一律 fail closed，
+    // 防止绕过私有资产模型。
+    if (!isControlledVerificationEvidence(input.studentCardImageToken)) {
+      throw rbacError("VERIFICATION_EVIDENCE_INVALID");
+    }
+
     const prepared = await prepareVerificationSubmission(tx, input.userId);
     const submittedAt = new Date();
 

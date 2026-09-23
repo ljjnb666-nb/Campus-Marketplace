@@ -348,12 +348,25 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6B trust/risk/enforcement 集成
 
     const member = await createFixtureUser("被停成员", campusA.id);
     const { submitMembershipVerification } = await import("@/lib/campus/verification-service");
+    // RB-01 Repair 2：提交只接受受控 asset:<id> 引用
+    const evidenceAsset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: member.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/ms-evidence.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "UPLOADED",
+      },
+    });
     const verification = await submitMembershipVerification({
       userId: member.id,
       schoolName: "集成测试大学",
       campusName: "集成校区A",
       studentIdLast4: "8888",
-      studentCardImageToken: `it-ref-${RUN_TAG}-ms`,
+      studentCardImageToken: `asset:${evidenceAsset.id}`,
     });
 
     // 跨校区拒绝：campus-B 经理不能动 campus-A 的成员

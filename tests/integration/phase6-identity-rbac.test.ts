@@ -37,6 +37,7 @@ const createdUserIds: string[] = [];
 const createdPolicyIds: string[] = [];
 const createdRoleIds: string[] = [];
 const createdCampusIds: string[] = [];
+let assetTokenSeq = 0;
 
 async function createFixtureCampus(name: string) {
   const campus = await rawClient!.campus.create({
@@ -71,6 +72,26 @@ async function createFixtureUser(
   return user;
 }
 
+/**
+ * RB-01 Repair 2：提交只接受受控 asset:<id> 引用——
+ * 为 fixture 用户创建真实 UPLOADED 证据资产并返回其引用。
+ */
+async function createEvidenceAssetToken(userId: string, tag: string) {
+  const asset = await rawClient!.uploadedAsset.create({
+    data: {
+      ownerId: userId,
+      category: "VERIFICATION",
+      access: "PRIVATE",
+      bucket: "campus-private",
+      objectKey: `it/${RUN_TAG}/${tag}-${createdUserIds.length}-${assetTokenSeq++}.webp`,
+      mimeType: "image/webp",
+      sizeBytes: 1024,
+      status: "UPLOADED",
+    },
+  });
+  return `asset:${asset.id}`;
+}
+
 /** 通过服务层创建 PENDING 认证（真实状态机 + policy 证据） */
 async function createPendingVerification(userId: string) {
   const { submitMembershipVerification } = await import("@/lib/campus/verification-service");
@@ -86,7 +107,7 @@ async function createPendingVerification(userId: string) {
     schoolName: "集成测试大学",
     campusName: "集成校区",
     studentIdLast4: "1234",
-    studentCardImageToken: `it-ref-${RUN_TAG}`,
+    studentCardImageToken: await createEvidenceAssetToken(userId, "pending"),
   });
 }
 
@@ -401,7 +422,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       schoolName: "集成测试大学",
       campusName: "集成校区",
       studentIdLast4: "4321",
-      studentCardImageToken: `it-ref-${RUN_TAG}-a`,
+      studentCardImageToken: await createEvidenceAssetToken(userA.id, "race-a"),
     });
 
     let erasureHoldingLock!: () => void;
@@ -452,7 +473,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       schoolName: "集成测试大学",
       campusName: "集成校区",
       studentIdLast4: "5678",
-      studentCardImageToken: `it-ref-${RUN_TAG}-b`,
+      studentCardImageToken: await createEvidenceAssetToken(userB.id, "race-b"),
     });
 
     let decisionHoldingLock!: () => void;
@@ -815,7 +836,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       schoolName: "集成测试大学",
       campusName: "集成校区A",
       studentIdLast4: "1111",
-      studentCardImageToken: `it-ref-${RUN_TAG}-ab1`,
+      studentCardImageToken: await createEvidenceAssetToken(abStudent.id, "ab1"),
     });
     expect(first.membershipId).toBe(membershipA.id);
     expect(first.policyId).toBe(policyA.id);
@@ -852,7 +873,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
       schoolName: "集成测试大学",
       campusName: "集成校区B",
       studentIdLast4: "2222",
-      studentCardImageToken: `it-ref-${RUN_TAG}-ab2`,
+      studentCardImageToken: await createEvidenceAssetToken(abStudent.id, "ab2"),
     });
 
     expect(resubmitted.membershipId).toBe(membershipB.id);

@@ -58,7 +58,7 @@ export default async function VerificationPage() {
           <div className="rounded-[24px] border border-slate-200 p-5 text-sm leading-7 text-slate-600">
             <p>提交说明：</p>
             <p>1. 请填写真实学校、校区和学号后四位信息。</p>
-            <p>2. 学生证材料目前通过图片链接提交，方便管理员核验。</p>
+            <p>2. 学生证材料仅支持通过平台上传提交，平台加密存储，仅授权审核员可查看。</p>
             <p>3. 提交后可在当前页面持续查看审核状态与备注。</p>
           </div>
         </section>
@@ -76,7 +76,6 @@ export default async function VerificationPage() {
               schoolName: user.verification?.schoolName ?? user.schoolName,
               campusName: user.verification?.campusName ?? user.campus.name,
               studentIdLast4: user.verification?.studentIdLast4 ?? user.studentIdLast4,
-              studentCardImage: user.verification?.studentCardImage,
             }}
           />
         </section>
