@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
@@ -105,6 +106,9 @@ export async function createService(
 
     // Phase 6B/6C-3：subject 治理锁 + marketplace 能力门与服务创建同事务
     const service = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（能力门之前）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(tx, user.id, provider.campusId);
 
       return tx.serviceListing.create({
@@ -221,6 +225,10 @@ export async function updateService(
     // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
     // ServiceListing 权威行，客户端不可伪造）
     await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
+      // 修改公开服务内容）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(
         tx,
         user.id,

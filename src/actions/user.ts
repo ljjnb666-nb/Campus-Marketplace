@@ -2,13 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma } from "@/lib/prisma";
+import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import { submitMembershipVerification } from "@/lib/campus/verification-service";
+import { updateOwnProfileTx } from "@/lib/user/profile-service";
 import {
   buildAssetReference,
   markAssetsForValuesPendingDelete,
-  resolveSingleImageToken,
   uploadImageAsset,
 } from "@/lib/upload";
 import { profileFormSchema, verificationFormSchema } from "@/validators/profile";
@@ -66,7 +66,11 @@ export async function updateProfile(
   formData: FormData,
 ): Promise<UserActionState> {
   try {
+    // entry auth = 身份发现；active-account 序列化在事务内
+    // prepareActiveAccountMutation 完成（RB-03，与 erasure 同锁域）
     const user = await requireUser();
+    // 头像上传是外部副作用（S3 PUT），保持在事务外；mutation 被生命周期
+    // 守卫拒绝时上传资产停留 UPLOADED，由既有 stale-upload cleanup 兜底
     const avatarToken = await buildSingleImageToken(
       formData,
       "avatarUrl",
@@ -91,47 +95,27 @@ export async function updateProfile(
       };
     }
 
-    const previousUser = await prisma.user.findUnique({
-      where: { id: user.id },
-      select: { avatarUrl: true },
-    });
-
-    // 头像 token 规范化并绑定新上传资源（avatar 无独立实体，仅标记 ATTACHED）
-    const avatarUrl = await resolveSingleImageToken({
-      ownerId: user.id,
-      token: parsed.data.avatarUrl,
-      target: { type: "avatar" },
-    });
-
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: {
+    const result = await withTransaction((tx) =>
+      updateOwnProfileTx(tx, user.id, {
         name: parsed.data.name,
-        bio: parsed.data.bio || null,
-        college: parsed.data.college || null,
-        grade: parsed.data.grade || null,
-        phone: parsed.data.phone || null,
-        avatarUrl: avatarUrl || null,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        avatarUrl: true,
-        bio: true,
-        college: true,
-        grade: true,
-        phone: true,
-      },
-    });
+        bio: parsed.data.bio,
+        college: parsed.data.college,
+        grade: parsed.data.grade,
+        phone: parsed.data.phone,
+        avatarToken: parsed.data.avatarUrl,
+      }),
+    );
 
-    // 头像被替换时标记旧资源待删除
-    const previousAvatar = previousUser?.avatarUrl;
-    if (previousAvatar && previousAvatar !== avatarUrl) {
+    // 头像被替换时标记旧资源待删除（事务外 best-effort 清理；
+    // 清理失败不回滚 profile——ASSET_CLEANUP_FAILURE 为已知 non-blocking gap）
+    const previousAvatar = result.previousAvatarUrl;
+    if (previousAvatar && previousAvatar !== result.avatarUrl) {
       await markAssetsForValuesPendingDelete(user.id, [previousAvatar]).catch(() => undefined);
     }
 
     revalidateUserPages();
+
+    const { previousAvatarUrl: _ignored, ...updatedUser } = result;
 
     return {
       success: true,

@@ -100,6 +100,10 @@ const {
   };
 });
 
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),

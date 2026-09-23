@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { isEnforcementError } from "@/lib/enforcement/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { getOrCreateConversationSafe } from "@/lib/conversation-creation";
 import type { ConversationBizType } from "@/lib/conversation-key";
 import { rereadListingForConversation } from "@/lib/moderation/listing-moderation-query";
@@ -444,27 +445,38 @@ export async function sendMessage(
 
   // 4. 发送消息并更新会话更新时间
   // 项目标准交互事务包装（TRANSACTION_TIMEOUT_MS 超时保护）；既有义务沟通
-  // 路径不做 marketplace 能力门（Phase 6C-3 冻结语义）
-  await withTransaction(async (tx) => {
-    await tx.message.create({
-      data: {
-        conversationId,
-        senderId: user.id,
-        type: "DIRECT",
-        content,
-      },
-    });
+  // 路径不做 marketplace 能力门（Phase 6C-3 冻结语义）。
+  // RB-03：USER 治理锁 + 锁内 fresh active 复核——已注销/停用账号不得
+  // 再产生新的 durable 消息内容
+  try {
+    await withTransaction(async (tx) => {
+      await prepareActiveAccountMutation(tx, user.id);
 
-    await tx.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    });
+      await tx.message.create({
+        data: {
+          conversationId,
+          senderId: user.id,
+          type: "DIRECT",
+          content,
+        },
+      });
 
-    await tx.conversationParticipant.updateMany({
-      where: { conversationId, userId: user.id },
-      data: { lastReadAt: new Date() },
+      await tx.conversation.update({
+        where: { id: conversationId },
+        data: { updatedAt: new Date() },
+      });
+
+      await tx.conversationParticipant.updateMany({
+        where: { conversationId, userId: user.id },
+        data: { lastReadAt: new Date() },
+      });
     });
-  });
+  } catch (error) {
+    if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
+      return { success: false, message: error.message };
+    }
+    throw error;
+  }
 
   revalidateConversationPages(conversationId);
   return { success: true, message: "发送成功" };

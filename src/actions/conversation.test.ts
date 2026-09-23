@@ -147,6 +147,10 @@ const {
   };
 });
 
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));

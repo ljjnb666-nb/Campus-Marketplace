@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
@@ -112,6 +113,9 @@ export async function createRentalListing(
     // 事务内完成：subject 治理锁 + marketplace 能力门（Phase 6B/6C-3）→
     // listing 落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库
     const listing = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（能力门之前）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(tx, user.id, owner.campusId);
 
       const created = await tx.rentalListing.create({
@@ -239,6 +243,10 @@ export async function updateRentalListing(
     if (!category || !category.isActive) return { ...initialState, message: "分类不存在或已停用" };
 
     const imageUrls = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
+      // 修改公开租赁物品内容）
+      await prepareActiveAccountMutation(tx, user.id);
+
       // Phase 6C-3：编辑自己租赁物品内容 = MODIFY_PUBLIC_LISTING_CONTENT
       // 能力（campus 取 RentalListing 权威行，客户端不可伪造）
       await enforceMarketplaceCapability(

@@ -5,6 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { claimErrandTx } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
@@ -113,6 +114,9 @@ export async function createErrand(
     // Phase 6B/6C-3：subject 治理锁 + marketplace 能力门（account/membership/risk）
     // 与任务创建同事务——membership 停用 vs 任务发布严格先后线性化
     const errand = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（能力门之前）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(tx, user.id, publisher.campusId);
 
       return tx.errandTask.create({
@@ -226,6 +230,10 @@ export async function updateErrand(
     // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
     // ErrandTask 权威行，客户端不可伪造）
     await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
+      // 修改公开跑腿任务内容）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(
         tx,
         user.id,

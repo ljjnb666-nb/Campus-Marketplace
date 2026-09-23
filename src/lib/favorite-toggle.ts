@@ -26,11 +26,17 @@ function isUniqueConstraintViolation(
  * Ops 是零参工厂，让未走到的分支完全不执行。
  */
 export async function applyFavoriteToggle(ops: {
+  /** RB-03：可选的 active-account 序列化（同事务内，切换发生前执行） */
+  beforeToggle?: () => Promise<void>;
   deleteFavorite: () => Promise<{ count: number }>;
   createFavorite: () => Promise<unknown>;
   decrementCount: () => Promise<unknown>;
   incrementCount: () => Promise<unknown>;
 }): Promise<FavoriteToggleResult> {
+  if (ops.beforeToggle) {
+    await ops.beforeToggle();
+  }
+
   const removed = await ops.deleteFavorite();
 
   if (removed.count > 0) {

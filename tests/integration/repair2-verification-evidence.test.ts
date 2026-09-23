@@ -479,7 +479,10 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
     expect(attached.verificationId).toBe(verification.id);
 
     // legacy token：service 层 fail closed，零写入
-    const before = await rawClient!.userVerification.count();
+    // （计数 scoped 到本夹具用户——全局 count 在并行套件内跨文件竞态）
+    const before = await rawClient!.userVerification.count({
+      where: { userId: studentB.id },
+    });
     await expect(
       submitMembershipVerification({
         userId: studentB.id,
@@ -489,7 +492,9 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
         studentCardImageToken: "https://example.com/card.jpg",
       }),
     ).rejects.toMatchObject({ code: "VERIFICATION_EVIDENCE_INVALID" });
-    expect(await rawClient!.userVerification.count()).toBe(before);
+    expect(
+      await rawClient!.userVerification.count({ where: { userId: studentB.id } }),
+    ).toBe(before);
   });
 
   it("ROUTE：伪造 asset id → not_found；停用 viewer → forbidden（TEST 5/9）", async () => {
