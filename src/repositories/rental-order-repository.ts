@@ -103,6 +103,11 @@ export async function getRentalOrderDetail(orderId: string, userId: string) {
   return order;
 }
 
+/**
+ * RB-02 租赁容量不变量：容量占用 = 重叠订单的 quantity 总和（而非订单条数）。
+ * totalQuantity 是唯一容量事实源；availableQuantity 是一次性写入的历史投影，
+ * 不参与任何容量判定（见 BACKLOG AUDIT_DEBT_RENTAL_AVAILABLE_QUANTITY）。
+ */
 export async function checkTimeConflict(
   tx: Prisma.TransactionClient,
   rentalListingId: string,
@@ -110,15 +115,15 @@ export async function checkTimeConflict(
   endTime: Date,
   quantity: number,
   excludeOrderId?: string,
-): Promise<{ available: boolean; conflictCount: number }> {
+): Promise<{ available: boolean; reservedQuantity: number }> {
   const listing = await tx.rentalListing.findUnique({
     where: { id: rentalListingId },
     select: { totalQuantity: true },
   });
 
-  if (!listing) return { available: false, conflictCount: 0 };
+  if (!listing) return { available: false, reservedQuantity: 0 };
 
-  const conflictCount = await tx.rentalOrder.count({
+  const aggregation = await tx.rentalOrder.aggregate({
     where: {
       rentalListingId,
       status: { notIn: ["CANCELLED", "REJECTED", "CLOSED"] },
@@ -128,10 +133,15 @@ export async function checkTimeConflict(
         { endTime: { gt: startTime } },
       ],
     },
+    _sum: {
+      quantity: true,
+    },
   });
 
+  const reservedQuantity = aggregation._sum.quantity ?? 0;
+
   return {
-    available: conflictCount + quantity <= listing.totalQuantity,
-    conflictCount,
+    available: reservedQuantity + quantity <= listing.totalQuantity,
+    reservedQuantity,
   };
 }

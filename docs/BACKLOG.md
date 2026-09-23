@@ -51,3 +51,22 @@
 - **candidate phase**：Phase 11
 - **review_at**：Phase 11 planning / pilot operational-readiness cleanup
 - **blocker**：NON_BLOCKING for Phase 7
+
+---
+
+## AUDIT_DEBT_RENTAL_AVAILABLE_QUANTITY
+
+- **title**：`RentalListing.availableQuantity` 是 stale 的一次性写入投影
+- **motivation**：Full-System Audit Repair 1（RB-02）确认：当前权威容量
+  判定 = `totalQuantity` + 重叠 RentalOrder 的 `quantity` SUM
+  （`checkTimeConflict`，真实 PostgreSQL 并发测试
+  `tests/integration/rental-capacity-invariant.test.ts` 证明）。
+  `availableQuantity` 仅在 listing 创建时写入一次（= totalQuantity，
+  `src/actions/rental-listing.ts`）与 seed（= 1），此后从不随订单生命周期
+  更新，也无任何业务读取——不参与容量判定。禁止将其升级为第二套
+  authoritative inventory（租赁是时间窗库存，全局计数器语义不成立）。
+- **priority**：LOW
+- **dependency**：RentalListing schema lifecycle
+- **candidate phase**：Phase 8
+- **review_at**：Phase 8 planning / listing lifecycle review
+- **blocker**：NON_BLOCKING（字段不被读取，无正确性影响）
