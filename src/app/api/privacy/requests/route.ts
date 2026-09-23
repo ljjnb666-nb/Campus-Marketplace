@@ -6,6 +6,7 @@ import {
   getVerifiedSession,
 } from "@/lib/server-auth";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { isRbacError } from "@/lib/rbac/errors";
 import {
   createAccountDeletionRequest,
   listUserPrivacyRequests,
@@ -132,6 +133,16 @@ async function postHandler(request: NextRequest) {
       { status: outcome.status === "COMPLETED" ? 201 : 409, headers: privateCache() },
     );
   } catch (error) {
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return NextResponse.json(
+        { error: "未登录或账号不可用", code: "ACCOUNT_INACTIVE" },
+        {
+          status: VERIFIED_SESSION_HTTP_STATUS.ACCOUNT_INACTIVE,
+          headers: privateCache(),
+        },
+      );
+    }
+
     if (isGovernanceError(error)) {
       return NextResponse.json(
         { error: error.message, code: error.code },

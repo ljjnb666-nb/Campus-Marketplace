@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { completeErrandOrderTx } from "@/lib/errand-completion";
+import { updateErrandStatusTx } from "@/lib/errand-status-service";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
@@ -28,25 +28,6 @@ const initialState: ErrandActionState = {
 function parseDeadline(input: string) {
   const date = new Date(input);
   return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function getErrandStatusLabel(
-  status: "OPEN" | "CLAIMED" | "IN_PROGRESS" | "PENDING_CONFIRMATION" | "COMPLETED" | "CANCELLED",
-) {
-  switch (status) {
-    case "OPEN":
-      return "待接单";
-    case "CLAIMED":
-      return "已接单";
-    case "IN_PROGRESS":
-      return "进行中";
-    case "PENDING_CONFIRMATION":
-      return "待确认完成";
-    case "COMPLETED":
-      return "已完成";
-    case "CANCELLED":
-      return "已取消";
-  }
 }
 
 export async function createErrand(
@@ -326,6 +307,10 @@ export async function claimErrand(formData: FormData) {
 
 export async function updateErrandStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：errand snapshot /
+    // isPublisher / isAccepter / canTransition 全部以 USER 锁内 fresh
+    // row 重算（updateErrandStatusTx），事务外读取仅作 zod 输入无关的
+    // discovery——此处完全不读 errand
     const user = await requireUser();
 
     const parsed = errandStatusSchema.safeParse({
@@ -337,132 +322,8 @@ export async function updateErrandStatus(formData: FormData) {
       return;
     }
 
-    const errand = await prisma.errandTask.findFirst({
-      where: { id: parsed.data.errandId, deletedAt: null },
-      select: {
-        id: true,
-        publisherId: true,
-        accepterId: true,
-        status: true,
-        campusId: true,
-      },
-    });
-
-    if (!errand) {
-      return;
-    }
-
-    const isPublisher = errand.publisherId === user.id;
-    const isAccepter = errand.accepterId === user.id;
-
-    const canTransition =
-      (parsed.data.status === "OPEN" && isPublisher && errand.status === "CLAIMED") ||
-      (parsed.data.status === "IN_PROGRESS" && isAccepter && errand.status === "CLAIMED") ||
-      (parsed.data.status === "PENDING_CONFIRMATION" &&
-        isAccepter &&
-        errand.status === "IN_PROGRESS") ||
-      (parsed.data.status === "COMPLETED" &&
-        isPublisher &&
-        errand.status === "PENDING_CONFIRMATION") ||
-      (parsed.data.status === "CANCELLED" && isPublisher && errand.status === "OPEN");
-
-    if (!canTransition) {
-      return;
-    }
-
     await withTransaction(async (tx) => {
-      // Phase 6C-3：→OPEN（CLAIMED 撤销接单）会把任务重新暴露为可接单，
-      // 属 START_NEW_MARKETPLACE_ACTIVITY；其余转换（IN_PROGRESS/
-      // PENDING_CONFIRMATION/COMPLETED/CANCELLED）为既有义务 wind-down，不 gate
-      if (parsed.data.status === "OPEN") {
-        await enforceMarketplaceCapability(tx, user.id, errand.campusId);
-      }
-
-      // COMPLETED 走唯一权威实现（completeErrandOrderTx）：硬性要求
-      // Order IN_PROGRESS + ErrandTask PENDING_CONFIRMATION，exactly-once
-      // 副作用与完成通知都在 canonical 事务内，此处不得再叠加完成副作用
-      if (parsed.data.status === "COMPLETED") {
-        const latestOrder = await tx.order.findFirst({
-          where: {
-            errandTaskId: parsed.data.errandId,
-          },
-          orderBy: { createdAt: "desc" },
-          select: { id: true, buyerId: true, sellerId: true },
-        });
-
-        if (!latestOrder) {
-          return;
-        }
-
-        const completion = await completeErrandOrderTx(tx, {
-          orderId: latestOrder.id,
-          errandTaskId: parsed.data.errandId,
-          buyerId: latestOrder.buyerId,
-          sellerId: latestOrder.sellerId,
-        });
-
-        if (!completion.completed) {
-          return;
-        }
-
-        return;
-      }
-
-      await tx.errandTask.update({
-        where: { id: parsed.data.errandId },
-        data: {
-          status: parsed.data.status,
-          ...(parsed.data.status === "OPEN" ? { accepterId: null } : {}),
-        },
-      });
-
-      const latestOrder = await tx.order.findFirst({
-        where: {
-          errandTaskId: parsed.data.errandId,
-        },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, buyerId: true, sellerId: true },
-      });
-
-      if (!latestOrder) {
-        return;
-      }
-
-      if (parsed.data.status === "OPEN") {
-        await tx.order.update({
-          where: { id: latestOrder.id },
-          data: {
-            status: "CANCELLED",
-            cancelReason: "发布者撤销接单",
-          },
-        });
-      }
-
-      if (parsed.data.status === "IN_PROGRESS") {
-        await tx.order.update({
-          where: { id: latestOrder.id },
-          data: { status: "IN_PROGRESS" },
-        });
-      }
-
-      const statusLabel = getErrandStatusLabel(parsed.data.status);
-
-      await createNotifications(tx, [
-        {
-          userId: errand.publisherId,
-          orderId: latestOrder.id,
-          type: "ORDER",
-          title: `跑腿任务状态更新：${statusLabel}`,
-          content: `当前跑腿任务状态已更新为“${statusLabel}”，请前往订单中心查看。`,
-        },
-        {
-          userId: latestOrder.sellerId,
-          orderId: latestOrder.id,
-          type: "ORDER",
-          title: `跑腿任务状态更新：${statusLabel}`,
-          content: `当前跑腿任务状态已更新为“${statusLabel}”，请前往订单中心查看。`,
-        },
-      ]);
+      await updateErrandStatusTx(tx, user.id, parsed.data.errandId, parsed.data.status);
     });
 
     revalidateErrandViews(parsed.data.errandId);

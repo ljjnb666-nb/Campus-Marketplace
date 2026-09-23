@@ -153,7 +153,12 @@ describe("rental listing actions", () => {
     transactionMock.mockImplementation(async (arg: unknown) => {
       if (typeof arg === "function") {
         return arg({
-          rentalListing: { create: rentalListingCreate, update: rentalListingUpdate },
+          rentalListing: {
+            // RB-03 REVIEW FIX：updateRentalListingStatusTx 的 fresh read 在 tx 内
+            findFirst: rentalListingFindFirst,
+            create: rentalListingCreate,
+            update: rentalListingUpdate,
+          },
           rentalListingImage: {
             deleteMany: rentalListingImageDeleteMany,
             createMany: rentalListingImageCreateMany,
@@ -321,7 +326,13 @@ describe("rental listing actions", () => {
   });
 
   describe("updateRentalListingStatus", () => {
-    it("updates an owned listing to a valid status", async () => {
+    it("updates an owned listing to a valid status via in-tx fresh authority（RB-03）", async () => {
+      rentalListingFindFirst.mockResolvedValue({
+        id: "listing-1",
+        campusId: "campus-1",
+        status: "AVAILABLE",
+      });
+
       const formData = new FormData();
       formData.set("listingId", "listing-1");
       formData.set("status", "PAUSED");
@@ -332,6 +343,38 @@ describe("rental listing actions", () => {
         where: { id: "listing-1" },
         data: { status: "PAUSED" },
       });
+    });
+
+    it("RB-03：fresh BANNED → NO-OP 零写", async () => {
+      rentalListingFindFirst.mockResolvedValue({
+        id: "listing-1",
+        campusId: "campus-1",
+        status: "BANNED",
+      });
+
+      const formData = new FormData();
+      formData.set("listingId", "listing-1");
+      formData.set("status", "PAUSED");
+
+      await updateRentalListingStatus(formData);
+
+      expect(rentalListingUpdate).not.toHaveBeenCalled();
+    });
+
+    it("RB-03：fresh PENDING_REVIEW → NO-OP 零写", async () => {
+      rentalListingFindFirst.mockResolvedValue({
+        id: "listing-1",
+        campusId: "campus-1",
+        status: "PENDING_REVIEW",
+      });
+
+      const formData = new FormData();
+      formData.set("listingId", "listing-1");
+      formData.set("status", "PAUSED");
+
+      await updateRentalListingStatus(formData);
+
+      expect(rentalListingUpdate).not.toHaveBeenCalled();
     });
 
     it("ignores invalid statuses", async () => {

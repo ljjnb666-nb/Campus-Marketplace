@@ -15,6 +15,10 @@ import {
   disputeCampusScopeKey,
 } from "@/lib/disputes/dispute-scope";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
+import {
+  assertActiveAccountMutationAllowed,
+  prepareActiveAccountMutation,
+} from "@/lib/governance/active-account-mutation";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
 import { withObligationGuard, type ObligationRacePoint } from "@/lib/governance/obligation-guard";
 
@@ -288,6 +292,8 @@ export async function approveRentalOrderTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
@@ -319,6 +325,8 @@ export async function rejectRentalOrderTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; rejectReason: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
@@ -363,6 +371,8 @@ export async function confirmPickupTx(
     knownIssues?: string;
   },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const { orderId, userId, role } = input;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: 'PENDING_PICKUP' },
@@ -415,6 +425,8 @@ export async function requestReturnTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] } },
   });
@@ -455,6 +467,8 @@ export async function confirmReturnTx(
     inspectionNote?: string;
   },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const { orderId, userId, role, photos, hasDamage, needsCleaning, accessoriesComplete } = input;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: { in: ['PENDING_RETURN', 'PENDING_INSPECTION'] } },
@@ -537,6 +551,8 @@ export async function cancelRentalOrderTx(
     cancellationNote?: string;
   },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({ where: { id: input.orderId } });
   if (!order) return { error: "订单不存在" };
   if (!canCancelRentalOrder(order, input.userId)) return { error: "当前状态不允许取消" };
@@ -574,6 +590,8 @@ export async function requestExtensionTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; newEndTime: Date },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'PICKED_UP'] } },
   });
@@ -621,6 +639,8 @@ export async function approveExtensionTx(
   tx: Prisma.TransactionClient,
   input: { extensionRequestId: string; userId: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const ext = await findPendingExtensionForOwner(tx, input.extensionRequestId, input.userId);
   if (!ext) return { error: "无效请求" };
 
@@ -661,6 +681,8 @@ export async function rejectExtensionTx(
   tx: Prisma.TransactionClient,
   input: { extensionRequestId: string; userId: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const ext = await findPendingExtensionForOwner(tx, input.extensionRequestId, input.userId);
   if (!ext) return { error: "无效请求" };
 
@@ -688,6 +710,8 @@ export async function submitDamageClaimTx(
     photos: string[];
   },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_INSPECTION' },
   });
@@ -717,6 +741,8 @@ export async function respondDamageClaimTx(
   tx: Prisma.TransactionClient,
   input: { claimId: string; userId: string; agreed: boolean; renterNote?: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const claim = await tx.rentalDamageClaim.findFirst({
     where: { id: input.claimId, resolvedAt: null },
     include: { order: true },
@@ -829,6 +855,12 @@ export async function initiateDisputeTx(
     { subjectType: "USER", subjectId: candidate.renterId },
   ]);
 
+  // RB-03 REVIEW FIX：initiator lifecycle 复核（checks-only——完整
+  // sorted {USER:owner, USER:renter} 已取得，禁止 actor-only 部分锁重取）。
+  // 只要求 initiator ACTIVE；counterparty ACTIVE 不是本轮新增条件
+  // （COMPLETED 历史交易可对已失效对手方发起合法治理 dispute）
+  await assertActiveAccountMutationAllowed(tx, input.userId);
+
   // ---- 步骤 3：RentalOrder FOR UPDATE（行锁下重验证）----
   const rows = await tx.$queryRaw<
     { id: string; ownerId: string; renterId: string; status: string; campusId: string }[]
@@ -928,6 +960,8 @@ export async function submitRentalReviewTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; overallRating: number; content?: string },
 ): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, status: 'COMPLETED', OR: [{ ownerId: input.userId }, { renterId: input.userId }] },
   });

@@ -5,6 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import { updateServiceStatusTx } from "@/lib/listing-status-service";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
@@ -271,6 +272,8 @@ export async function updateService(
 
 export async function updateServiceStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：lifecycle 序列化与
+    // fresh row authority 在事务内（事务外不读 serviceListing）
     const user = await requireUser();
 
     const parsed = serviceStatusSchema.safeParse({
@@ -282,35 +285,10 @@ export async function updateServiceStatus(formData: FormData) {
       return;
     }
 
-    const service = await prisma.serviceListing.findFirst({
-      where: {
-        id: parsed.data.serviceId,
-        providerId: user.id,
-        deletedAt: null,
-      },
-      select: { id: true, campusId: true },
+    // ACTIVE = EXPOSURE_INCREASING；PAUSED/OFFLINE = WIND_DOWN
+    await withTransaction(async (tx) => {
+      await updateServiceStatusTx(tx, user.id, parsed.data.serviceId, parsed.data.status);
     });
-
-    if (!service) {
-      return;
-    }
-
-    if (parsed.data.status === "ACTIVE") {
-      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
-      // START_NEW_MARKETPLACE_ACTIVITY（PAUSED/OFFLINE wind-down 不 gate）
-      await withTransaction(async (tx) => {
-        await enforceMarketplaceCapability(tx, user.id, service.campusId);
-        await tx.serviceListing.update({
-          where: { id: parsed.data.serviceId },
-          data: { status: parsed.data.status },
-        });
-      });
-    } else {
-      await prisma.serviceListing.update({
-        where: { id: parsed.data.serviceId },
-        data: { status: parsed.data.status },
-      });
-    }
 
     revalidateServiceViews(parsed.data.serviceId);
   } catch (error) {

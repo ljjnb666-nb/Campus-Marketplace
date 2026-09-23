@@ -28,9 +28,12 @@ const {
   const txProductUpdateMany = vi.fn();
   const txServiceListingUpdate = vi.fn();
   const txUserUpdate = vi.fn();
+  const orderFindUnique = vi.fn();
   const transactionClient = {
     order: {
       create: txOrderCreate,
+      // RB-03 REVIEW FIX：updateOrderStatusTx 的 fresh read 在 tx 内
+      findUnique: orderFindUnique,
       update: txOrderUpdate,
       updateMany: txOrderUpdateMany,
     },
@@ -90,7 +93,7 @@ const {
     productFindFirst: vi.fn(),
     serviceListingFindFirst: vi.fn(),
     orderFindFirst: vi.fn(),
-    orderFindUnique: vi.fn(),
+    orderFindUnique,
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
     ),
@@ -120,6 +123,11 @@ vi.mock("@/repositories/notification-repository", () => ({
 
 const { completeErrandOrderTxMock } = vi.hoisted(() => ({
   completeErrandOrderTxMock: vi.fn(),
+}));
+
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+  assertActiveAccountMutationAllowed: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/errand-completion", () => ({
@@ -582,7 +590,10 @@ describe("order actions", () => {
     it("ignores unknown orders and invalid payloads", async () => {
       orderFindUnique.mockResolvedValue(null);
       await updateOrderStatus(statusFormData("ACCEPTED"));
-      expect(transactionMock).not.toHaveBeenCalled();
+      // RB-03 REVIEW FIX：未知 order 仍在事务内 NO-OP（guard 先行），
+      // 但不会产生任何 Order 写
+      expect(transactionMock).toHaveBeenCalled();
+      expect(txOrderUpdateMany).not.toHaveBeenCalled();
 
       const badFormData = new FormData();
       badFormData.set("orderId", "");

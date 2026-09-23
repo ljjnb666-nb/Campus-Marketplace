@@ -48,12 +48,25 @@ export async function prepareActiveAccountMutation(
 
   await acquireGovernanceSubjectLocks(tx, [{ subjectType: "USER", subjectId: userId }]);
 
-  const context = await loadAuthorizationContext(userId, tx);
-  if (!context || !context.accountActive) {
-    throw rbacError("AUTH_ACCOUNT_INACTIVE");
-  }
+  await assertActiveAccountMutationAllowed(tx, userId);
 
   if (seams?.afterCheck) {
     await seams.afterCheck(tx);
+  }
+}
+
+/**
+ * Checks-only 变体（不加锁）：供已经持有完整 participant USER lock set
+ * 的路径（如 initiateDisputeTx 的 sorted {USER:owner, USER:renter}）复用
+ * 同一 lifecycle 复核，禁止为复用 active check 而以错误顺序重取
+ * actor-only USER lock。
+ */
+export async function assertActiveAccountMutationAllowed(
+  tx: Prisma.TransactionClient,
+  userId: string,
+): Promise<void> {
+  const context = await loadAuthorizationContext(userId, tx);
+  if (!context || !context.accountActive) {
+    throw rbacError("AUTH_ACCOUNT_INACTIVE");
   }
 }

@@ -5,6 +5,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import { updateProductStatusTx } from "@/lib/listing-status-service";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
@@ -307,6 +308,8 @@ export async function updateProduct(
 
 export async function updateProductStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：lifecycle 序列化与
+    // fresh row authority 在事务内（事务外不读 product）
     const user = await requireUser();
 
     const parsed = productStatusSchema.safeParse({
@@ -318,35 +321,12 @@ export async function updateProductStatus(formData: FormData) {
       return;
     }
 
-    const product = await prisma.product.findFirst({
-      where: {
-        id: parsed.data.productId,
-        sellerId: user.id,
-        deletedAt: null,
-      },
-      select: { id: true, campusId: true },
+    // ACTIVE = EXPOSURE_INCREASING（锁内追加 marketplace capability）；
+    // RESERVED/SOLD/OFFLINE = LIFECYCLE_SERIALIZED_WIND_DOWN（仅 lifecycle
+    // guard）；ownership/deletedAt/status 一律以锁内 fresh row 为准
+    await withTransaction(async (tx) => {
+      await updateProductStatusTx(tx, user.id, parsed.data.productId, parsed.data.status);
     });
-
-    if (!product) {
-      return;
-    }
-
-    if (parsed.data.status === "ACTIVE") {
-      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
-      // START_NEW_MARKETPLACE_ACTIVITY（下架/RESERVED/SOLD 等 wind-down 不 gate）
-      await withTransaction(async (tx) => {
-        await enforceMarketplaceCapability(tx, user.id, product.campusId);
-        await tx.product.update({
-          where: { id: parsed.data.productId },
-          data: { status: parsed.data.status },
-        });
-      });
-    } else {
-      await prisma.product.update({
-        where: { id: parsed.data.productId },
-        data: { status: parsed.data.status },
-      });
-    }
 
     revalidateProductViews(parsed.data.productId);
   } catch (error) {
