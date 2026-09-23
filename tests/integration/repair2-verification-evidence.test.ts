@@ -38,7 +38,10 @@ const rawClient = integrationDatabaseUrl
 const RUN_TAG = `rb01it-${randomUUID().slice(0, 8)}`;
 // 校区按稳定 slug 复用且 teardown 不删除（与 rental-capacity-invariant 同款
 // 纪律：避免对 phase7h CA02 全局 campus.count() 断言造成跨文件干扰）。
+// TEST_FIXTURE_NAMING_DEBT：slug 前缀 rb02-* 是历史命名笔误（本文件属
+// RB-01），保留以复用既有 Campus 行；改名会新建第二行 Campus，刻意不改。
 const RB01_CAMPUS_SLUG = "rb02-verification-it";
+const RB01_CAMPUS_SLUG_B = "rb02-verification-it-b";
 
 /**
  * §15 迁移核验查询（与 migration.sql 内注释的核验查询一致）。
@@ -82,8 +85,13 @@ async function loadMigrationUpdate() {
 
 describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, real PostgreSQL)", () => {
   let campusId = "";
+  let campusBId = "";
   let reviewerId = "";
-  let adHocRoleId = "";
+  let globalEvidenceReviewerId = "";
+  let globalSensitiveReviewerId = "";
+  let reviewerBId = "";
+  let campusEvidenceRoleId = "";
+  const adHocRoleIds: string[] = [];
   const userIds: string[] = [];
   const verificationIds: string[] = [];
   const assetIds: string[] = [];
@@ -108,6 +116,13 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
   async function createActiveMembership(userId: string) {
     const membership = await rawClient!.campusMembership.create({
       data: { userId, campusId, status: "ACTIVE" },
+    });
+    return membership;
+  }
+
+  async function createActiveMembershipForCampus(userId: string, membershipCampusId: string) {
+    const membership = await rawClient!.campusMembership.create({
+      data: { userId, campusId: membershipCampusId, status: "ACTIVE" },
     });
     return membership;
   }
@@ -169,6 +184,40 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
     });
   }
 
+  /** ad-hoc 角色（RUN_TAG 前缀，零共享状态）：绝不动 CAMPUS_VERIFICATION_REVIEWER */
+  async function createAdHocRole(
+    suffix: string,
+    scope: "GLOBAL" | "CAMPUS",
+    permissionKey: string,
+  ) {
+    const role = await rawClient!.role.create({
+      data: {
+        key: `${RUN_TAG}_${suffix}`,
+        name: `${RUN_TAG}_${suffix}`,
+        scope,
+        isSystem: false,
+        rolePermissions: {
+          create: [{ permission: { connect: { key: permissionKey } } }],
+        },
+      },
+    });
+    adHocRoleIds.push(role.id);
+    return role;
+  }
+
+  async function assignRole(userId: string, roleId: string, campusIdForScope: string | null) {
+    const assignment = await rawClient!.userRoleAssignment.create({
+      data: {
+        userId,
+        roleId,
+        campusId: campusIdForScope,
+        scopeKey: campusIdForScope ? `CAMPUS:${campusIdForScope}` : "GLOBAL",
+      },
+    });
+    assignmentIds.push(assignment.id);
+    return assignment;
+  }
+
   beforeAll(async () => {
     const campus = await rawClient!.campus.upsert({
       where: { slug: RB01_CAMPUS_SLUG },
@@ -176,33 +225,46 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
       update: {},
     });
     campusId = campus.id;
+    // campusB：跨校区 DENY 用（同样稳定 slug 复用、teardown 不删）
+    const campusB = await rawClient!.campus.upsert({
+      where: { slug: RB01_CAMPUS_SLUG_B },
+      create: { name: "RB02 认证证据集成校区B", slug: RB01_CAMPUS_SLUG_B, schoolName: "集成测试大学" },
+      update: {},
+    });
+    campusBId = campusB.id;
 
     const reviewer = await createFixtureUser("RB01 审核员");
     reviewerId = reviewer.id;
     await createActiveMembership(reviewer.id);
-    // ad-hoc 角色（RUN_TAG 前缀，零共享状态）：绝不动 CAMPUS_VERIFICATION_REVIEWER
-    const adHocRole = await rawClient!.role.create({
-      data: {
-        key: `${RUN_TAG}_EVIDENCE_READER`,
-        name: `${RUN_TAG}_EVIDENCE_READER`,
-        scope: "CAMPUS",
-        isSystem: false,
-        rolePermissions: {
-          create: [{ permission: { connect: { key: "verification.evidence.read" } } }],
-        },
-      },
-    });
-    adHocRoleId = adHocRole.id;
-    const assignment = await rawClient!.userRoleAssignment.create({
-      data: { userId: reviewer.id, roleId: adHocRole.id, campusId, scopeKey: `CAMPUS:${campusId}` },
-    });
-    assignmentIds.push(assignment.id);
+    const campusEvidenceRole = await createAdHocRole("EVIDENCE_READER", "CAMPUS", "verification.evidence.read");
+    campusEvidenceRoleId = campusEvidenceRole.id;
+    await assignRole(reviewer.id, campusEvidenceRole.id, campusId);
+
+    // AUTH-02/03/07：GLOBAL 权限审核角色
+    const globalEvidenceReviewer = await createFixtureUser("RB01 全球证据审核员");
+    globalEvidenceReviewerId = globalEvidenceReviewer.id;
+    await createActiveMembership(globalEvidenceReviewer.id);
+    const globalEvidenceRole = await createAdHocRole("GLOBAL_EVIDENCE", "GLOBAL", "verification.evidence.read");
+    await assignRole(globalEvidenceReviewer.id, globalEvidenceRole.id, null);
+
+    const globalSensitiveReviewer = await createFixtureUser("RB01 全球敏感读者");
+    globalSensitiveReviewerId = globalSensitiveReviewer.id;
+    await createActiveMembership(globalSensitiveReviewer.id);
+    const globalSensitiveRole = await createAdHocRole("GLOBAL_SENSITIVE", "GLOBAL", "asset.sensitive.read");
+    await assignRole(globalSensitiveReviewer.id, globalSensitiveRole.id, null);
+
+    // AUTH-06：campusB 校区证据审核员（ACTIVE membership @B）
+    const reviewerB = await createFixtureUser("RB01 校区B审核员");
+    reviewerBId = reviewerB.id;
+    await createActiveMembershipForCampus(reviewerB.id, campusBId);
+    const campusBEvidenceRole = await createAdHocRole("EVIDENCE_READER_B", "CAMPUS", "verification.evidence.read");
+    await assignRole(reviewerB.id, campusBEvidenceRole.id, campusBId);
   });
 
   afterAll(async () => {
     await rawClient!.userRoleAssignment.deleteMany({ where: { id: { in: assignmentIds } } });
-    await rawClient!.rolePermission.deleteMany({ where: { roleId: adHocRoleId } });
-    await rawClient!.role.deleteMany({ where: { id: adHocRoleId } });
+    await rawClient!.rolePermission.deleteMany({ where: { roleId: { in: adHocRoleIds } } });
+    await rawClient!.role.deleteMany({ where: { id: { in: adHocRoleIds } } });
     await rawClient!.uploadedAsset.deleteMany({ where: { id: { in: assetIds } } });
     await rawClient!.userVerification.deleteMany({ where: { id: { in: verificationIds } } });
     await rawClient!.notification.deleteMany({ where: { userId: { in: userIds } } });
@@ -442,7 +504,7 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
     const suspendedAssignment = await rawClient!.userRoleAssignment.create({
       data: {
         userId: suspendedReviewer.id,
-        roleId: adHocRoleId,
+        roleId: campusEvidenceRoleId,
         campusId,
         scopeKey: `CAMPUS:${campusId}`,
       },
@@ -466,5 +528,120 @@ describe.skipIf(!integrationDatabaseUrl)("verification evidence closure (RB-01, 
     // 与 content 路由 VERIFICATION_ASSET_ACCESSED 审计触发合同一致）
     const allowed = await resolvePrivateAssetAccess(asset.id, { id: reviewerId });
     expect(allowed).toMatchObject({ ok: true, grantedBy: "permission" });
+  });
+
+  it("AUTH-01..07：REVIEW_FIX 绑定门——owner 合同保留，非 owner 必须受控绑定 + campus 精确匹配", async () => {
+    const { resolvePrivateAssetAccess } = await import("@/lib/asset-service");
+
+    // AUTH-01：owner + VERIFICATION + PRIVATE + UPLOADED + unbound → ALLOW
+    // （上传完成、正式提交前的本人预览能力 = 既有 owner lifecycle 合同，不破坏）
+    const uploadOwner = await createFixtureUser("RB01 AUTH 上传者");
+    await createActiveMembership(uploadOwner.id);
+    const unboundAsset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: uploadOwner.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/auth-unbound.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "UPLOADED",
+      },
+    });
+    assetIds.push(unboundAsset.id);
+
+    const ownerView = await resolvePrivateAssetAccess(unboundAsset.id, { id: uploadOwner.id });
+    expect(ownerView).toMatchObject({ ok: true, grantedBy: "owner" });
+
+    // AUTH-02：GLOBAL verification.evidence.read + unbound UPLOADED → DENY
+    // （本次 review blocker 的最重要 regression）
+    const deniedGlobalEvidence = await resolvePrivateAssetAccess(unboundAsset.id, {
+      id: globalEvidenceReviewerId,
+    });
+    expect(deniedGlobalEvidence).toMatchObject({ ok: false, reason: "forbidden" });
+
+    // AUTH-03：GLOBAL asset.sensitive.read + unbound UPLOADED → DENY
+    const deniedGlobalSensitive = await resolvePrivateAssetAccess(unboundAsset.id, {
+      id: globalSensitiveReviewerId,
+    });
+    expect(deniedGlobalSensitive).toMatchObject({ ok: false, reason: "forbidden" });
+
+    // AUTH-04：CAMPUS reviewer + unbound → DENY（不得经 owner campus 推导）
+    const deniedCampusReviewer = await resolvePrivateAssetAccess(unboundAsset.id, {
+      id: reviewerId,
+    });
+    expect(deniedCampusReviewer).toMatchObject({ ok: false, reason: "forbidden" });
+
+    // ---- bound 正向路径 ----
+    const boundVerification = await createVerificationRow({
+      studentCardImage: "placeholder",
+      name: "RB01 AUTH 绑定行学生",
+    });
+    const boundAsset = await rawClient!.uploadedAsset.create({
+      data: {
+        ownerId: boundVerification.student.id,
+        category: "VERIFICATION",
+        access: "PRIVATE",
+        bucket: "campus-private",
+        objectKey: `it/${RUN_TAG}/auth-bound.webp`,
+        mimeType: "image/webp",
+        sizeBytes: 1024,
+        status: "ATTACHED",
+        verificationId: boundVerification.verification.id,
+        attachedAt: new Date(),
+      },
+    });
+    assetIds.push(boundAsset.id);
+
+    // AUTH-05：matching campus reviewer + bound → ALLOW（grantedBy=permission）
+    const campusAllowed = await resolvePrivateAssetAccess(boundAsset.id, { id: reviewerId });
+    expect(campusAllowed).toMatchObject({ ok: true, grantedBy: "permission" });
+
+    // AUTH-06：wrong-campus reviewer + bound → DENY
+    const wrongCampus = await resolvePrivateAssetAccess(boundAsset.id, { id: reviewerBId });
+    expect(wrongCampus).toMatchObject({ ok: false, reason: "forbidden" });
+
+    // AUTH-07：GLOBAL reviewer + bound → ALLOW（GLOBAL 仍有效，只是不再覆盖 unbound）
+    const globalAllowed = await resolvePrivateAssetAccess(boundAsset.id, {
+      id: globalEvidenceReviewerId,
+    });
+    expect(globalAllowed).toMatchObject({ ok: true, grantedBy: "permission" });
+    const globalSensitiveAllowed = await resolvePrivateAssetAccess(boundAsset.id, {
+      id: globalSensitiveReviewerId,
+    });
+    expect(globalSensitiveAllowed).toMatchObject({ ok: true, grantedBy: "permission" });
+
+    // owner（bound 资产本人）仍 ALLOW
+    const boundOwner = await resolvePrivateAssetAccess(boundAsset.id, {
+      id: boundVerification.student.id,
+    });
+    expect(boundOwner).toMatchObject({ ok: true, grantedBy: "owner" });
+  });
+
+  it("READ_MODEL_BINDING_MISMATCH：A 行引用绑定到 B 行的资产 → UNAVAILABLE（§13 回归）", async () => {
+    const { resolveVerificationEvidenceDisplay } = await import(
+      "@/lib/campus/verification-review-query"
+    );
+
+    // 资产真实绑定在 verificationB 上
+    const verificationB = await createVerificationRow({ studentCardImage: "placeholder", name: "RB01 错绑B学生" });
+    const assetB = await createEvidenceAsset({
+      ownerId: verificationB.student.id,
+      verificationId: verificationB.verification.id,
+    });
+
+    // verificationA 的 studentCardImage 指向 assetB（跨行错绑）
+    const verificationA = await createVerificationRow({
+      studentCardImage: `asset:${assetB.id}`,
+      name: "RB01 错绑A学生",
+    });
+
+    const display = await resolveVerificationEvidenceDisplay(
+      verificationA.verification.id,
+      `asset:${assetB.id}`,
+    );
+
+    expect(display).toEqual({ state: "UNAVAILABLE" });
   });
 });

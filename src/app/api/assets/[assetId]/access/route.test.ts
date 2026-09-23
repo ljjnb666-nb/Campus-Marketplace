@@ -125,6 +125,22 @@ describe("GET /api/assets/[assetId]/access", () => {
     expect(response.status).toBe(403);
   });
 
+  it("ACCESS-01（RB-01 review fix）：unbound VERIFICATION asset（GLOBAL reviewer 直连）→ 403 且零 URL", async () => {
+    // 服务层绑定门对 UPLOADED/unbound 返回 forbidden（真实 PG 见
+    // repair2-verification-evidence 集成 AUTH-02/03/04）；此处固定 HTTP 合同：
+    // 403 + 响应体不含任何 content url / 存储元数据
+    resolvePrivateAssetAccess.mockResolvedValue({ ok: false, reason: "forbidden" });
+
+    const response = await callGet();
+    const body = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(body).not.toHaveProperty("url");
+    expect(body).not.toHaveProperty("access");
+    expect(JSON.stringify(body)).not.toContain("content");
+    expect(JSON.stringify(body)).not.toContain("campus-private");
+  });
+
   it("returns 410 when the retention window has expired", async () => {
     resolvePrivateAssetAccess.mockResolvedValue({ ok: false, reason: "expired" });
 
