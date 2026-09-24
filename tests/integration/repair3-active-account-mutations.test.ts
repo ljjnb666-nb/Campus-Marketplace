@@ -1300,9 +1300,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     const { createAccountDeletionRequest } = await import("@/lib/privacy/privacy-request-service");
     const { waitForAdvisoryLockWaiter } = await import("./helpers/lock-barrier");
 
-    console.log("[DR02] stage: fixture start");
     const user = await createFixtureUser("RB03 删除竞态B");
-    console.log("[DR02] stage: fixture done");
 
     let signalLocked!: () => void;
     const locked = new Promise<void>((resolve) => {
@@ -1313,7 +1311,6 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       releaseT1 = resolve;
     });
 
-    console.log("[DR02] stage: t1 launching");
     const t1 = createAccountDeletionRequest(user.id, {
       afterCheck: async () => {
         signalLocked();
@@ -1321,9 +1318,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       },
     });
     await locked;
-    console.log("[DR02] stage: locked, t2 launching");
 
-    console.log("[DR02] t2 suspend starting");
     const enforcement = await import("@/lib/enforcement/account-enforcement-service");
     const t2 = enforcement.suspendAccount({
       actorId: suspenderId,
@@ -1332,14 +1327,10 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       note: "RB-03 DELETION-RACE-02",
     });
     void t2.catch(() => undefined);
-    console.log("[DR02] t2 launched, waiting for lock waiter");
     // pg_locks 证明 T2 真实等待 USER:<target> advisory lock
     await waitForAdvisoryLockWaiter(rawClient!, [`USER:${user.id}`]);
-    console.log("[DR02] stage: waiter detected");
-    console.log("[DR02] waiter detected");
 
     releaseT1();
-    console.log("[DR02] t1 released");
     const outcome = await t1;
     if (outcome.status !== "COMPLETED") {
       throw new Error("expected COMPLETED deletion outcome");
@@ -1348,12 +1339,10 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     expect(outcome.erasure.erasedAt).not.toBeNull();
 
     // target 已 erased：suspend fails safely（不产生 SUSPENDED 终态覆盖）
-    console.log("[DR02] stage: awaiting t2");
     const t2Outcome = await t2.then(
       (v) => ({ settled: true, v }),
       (e) => ({ settled: true as const, code: (e as { code?: string }).code }),
     );
-    console.log("[DR02] t2 settled", JSON.stringify(t2Outcome));
     expect((t2Outcome as { code?: string }).code).toBe("ENFORCEMENT_TARGET_NOT_FOUND");
 
     const finalUser = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
