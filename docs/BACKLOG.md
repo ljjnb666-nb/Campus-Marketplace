@@ -89,3 +89,23 @@
 - **review_at**：Phase 8 planning（与 RB-04 privacy lifecycle 同批）
 - **blocker**：NON_BLOCKING（无证据表明其下存在学生证类材料；本地实测
   仅头像/占位文件）
+
+---
+
+## AUDIT_DEBT_PHASE7H_CRACE06_CI_FLAKE
+
+- **title**：phase7h C-RACE-06 方向 A 在 CI 并行负载下的偶发时序抖动
+- **motivation**：Repair 4 PR #32 的 CI run 35992495910 attempt=1 中
+  `phase7h-operations-campus-admin.test.ts` C-RACE-06 方向 A
+  （registration 先取得 CAMPUS 锁 → 注册提交 → 停用随后提交）以 124ms
+  断言失败（`outcome.ok` undefined），attempt=2 同 SHA 双绿（verify + e2e）。
+  该测试域为 registration × suspension 生命周期，与 RB-04 privacy
+  lifecycle 变更零接触（两次 CI 之间该文件仅改一行注释；本地 coverage
+  全轮与前一 CI run 同文件全绿）。race 类测试在共享 CI runner 的
+  调度抖动下偶发违背 barrier 时序假设，与本仓库已知
+  "CI 跨文件并行 flake（重跑即绿）"同类。
+- **priority**：LOW
+- **dependency**：phase7h race fixture（lock barrier 时序假设）
+- **candidate phase**：Phase 8（测试基建稳定化批）
+- **review_at**：Phase 8 planning
+- **blocker**：NON_BLOCKING（attempt=2 同 SHA 双绿；本地隔离全绿）
