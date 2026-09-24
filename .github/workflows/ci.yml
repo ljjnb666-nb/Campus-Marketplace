@@ -59,8 +59,14 @@ jobs:
       # 因此 MinIO 改为步骤内显式 docker run server，并在 runner 侧等待健康端点。
       # 镜像取 MinIO 官方 quay.io 渠道：Docker Hub 匿名拉取在共享 runner IP 池上
       # 会被限流拒绝（run 34668960928 attempt=1..3 的根因）。
+      # 2026-09-24：quay.io 匿名拉取间歇性 unauthorized（run 36022272410
+      # attempt=1..3 根因）——增加 Docker Hub 官方同名镜像回退（pull + tag
+      # 成 quay.io 名，后续 docker run 零改动命中本地镜像）。
       - name: Start MinIO (S3 compatible storage)
         run: |
+          docker image inspect quay.io/minio/minio:latest > /dev/null 2>&1 \
+            || docker pull quay.io/minio/minio:latest \
+            || { docker pull minio/minio:latest && docker tag minio/minio:latest quay.io/minio/minio:latest; }
           docker run -d --name minio \
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
@@ -81,6 +87,9 @@ jobs:
         # 幂等创建 public/private bucket 并设置匿名策略：
         # public = 允许匿名读（禁止写）；private = 完全禁止匿名访问
         run: |
+          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 \
+            || docker pull quay.io/minio/mc:latest \
+            || { docker pull minio/mc:latest && docker tag minio/mc:latest quay.io/minio/mc:latest; }
           docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
@@ -208,6 +217,9 @@ jobs:
 
       - name: Bootstrap MinIO buckets
         run: |
+          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 \
+            || docker pull quay.io/minio/mc:latest \
+            || { docker pull minio/mc:latest && docker tag minio/mc:latest quay.io/minio/mc:latest; }
           docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
