@@ -25,14 +25,17 @@ import { createNotification } from "@/repositories/notification-repository";
 /**
  * Phase 6C-1B：申诉审核服务（begin review + terminal decision）。
  *
- * 锁纪律（hard invariant，Planning Repair 1–4 冻结）：
+ * 锁纪律（Repair 4 修正版；原 Planning Repair 1–4 冻结版为行锁先行）：
  *   BEGIN
- *   1. SELECT Appeal FOR UPDATE（行锁；全仓唯一触碰 Appeal 行的路径族，
- *      行锁是全局锁序中的叶节点 → 行锁在前不构成死锁环）
- *   2. load immutable EnforcementAction（解析 reviewer/target/scope）
- *   3. acquireGovernanceSubjectLocks：一次完整 sorted {USER:reviewer, USER:target}
+ *   1. immutable 链无锁预解析锁键（Appeal.enforcementActionId /
+ *      EnforcementAction.targetId 均不可变，TOCTOU 不存在）
+ *   2. acquireGovernanceSubjectLocks：一次完整 sorted {USER:reviewer, USER:target}
  *      （与 erasure / enforcement / role assignment 共享同一 serialization
  *      boundary；禁止分批取锁或反序）
+ *   3. SELECT Appeal FOR UPDATE（advisory 之后的 appeal 路径间串行化叶锁）
+ *      ——Repair 4 起 eraseAccount 也在 USER 治理锁内 redact Appeal 行；
+ *      行锁在 subject 锁之前会与注销构成死锁环（T35 实测 P2010），
+ *      故统一收敛为 subject-lock-first，随后 load immutable EA
  *   4. AFTER locks：重读 reviewer AuthorizationContext（accountActive +
  *      appeal.review 正确 scope）——角色撤销/账号停用竞态在此关闭
  *   5. reviewer != appellant/target（零例外）
@@ -103,7 +106,22 @@ type LockedAppeal = {
   };
 };
 
-/** Appeal 行锁（全局 Appeal-row 锁序第一步，参数化 raw SQL）+ 锁内全读。 */
+/**
+ * 无锁预解析 governance 锁键（immutable 链：Appeal.enforcementActionId 与
+ * EnforcementAction.targetId 均不可变）——subject-lock-first 锁序的第一步。
+ */
+async function resolveAppealLockKeys(
+  tx: Prisma.TransactionClient,
+  appealId: string,
+): Promise<{ targetId: string } | null> {
+  const located = await tx.appeal.findUnique({
+    where: { id: appealId },
+    select: { enforcementAction: { select: { targetId: true } } },
+  });
+  return located ? { targetId: located.enforcementAction.targetId } : null;
+}
+
+/** Appeal 行锁（subject 锁之后的 appeal 路径间串行化叶锁，参数化 raw SQL）+ 锁内全读。 */
 async function lockAppealRow(
   tx: Prisma.TransactionClient,
   appealId: string,
@@ -269,18 +287,20 @@ async function persistProceduralDismissal(
  */
 export async function beginAppealReview(input: AppealReviewInput): Promise<void> {
   await withTransaction(async (tx) => {
-    // 1. 行锁 + 2. immutable EA
+    // 1. immutable 链预解析锁键 → 2. sorted subject 锁先行 → 3. 行锁
+    const lockKeys = await resolveAppealLockKeys(tx, input.appealId);
+    if (!lockKeys) {
+      throw appealError("APPEAL_NOT_FOUND");
+    }
+    await acquireGovernanceSubjectLocks(tx, [
+      { subjectType: "USER", subjectId: input.reviewerId },
+      { subjectType: "USER", subjectId: lockKeys.targetId },
+    ]);
     const appeal = await lockAppealRow(tx, input.appealId);
     if (!appeal) {
       throw appealError("APPEAL_NOT_FOUND");
     }
     const action = appeal.enforcementAction;
-
-    // 3. 完整 sorted subject 锁（一次取齐）
-    await acquireGovernanceSubjectLocks(tx, [
-      { subjectType: "USER", subjectId: input.reviewerId },
-      { subjectType: "USER", subjectId: action.targetId },
-    ]);
 
     if (input.racePoint) {
       await input.racePoint(tx);
@@ -361,19 +381,22 @@ export async function decideAppeal(input: DecideAppealInput): Promise<AppealRevi
   const note = decisionNote.length > 0 ? decisionNote : null;
 
   const result = await withTransaction(async (tx) => {
-    // 1. 行锁 + 2. immutable EA（owner/target/scope 全部由此解析）
+    // 1. immutable 链预解析锁键 → 2. sorted subject 锁先行 → 3. 行锁
+    const lockKeys = await resolveAppealLockKeys(tx, input.appealId);
+    if (!lockKeys) {
+      throw appealError("APPEAL_NOT_FOUND");
+    }
+    await acquireGovernanceSubjectLocks(tx, [
+      { subjectType: "USER", subjectId: input.reviewerId },
+      { subjectType: "USER", subjectId: lockKeys.targetId },
+    ]);
+    // 3. 行锁 + immutable EA（owner/target/scope 全部由此解析）
     const appeal = await lockAppealRow(tx, input.appealId);
     if (!appeal) {
       throw appealError("APPEAL_NOT_FOUND");
     }
     const action = appeal.enforcementAction;
     const targetId = action.targetId;
-
-    // 3. 完整 sorted subject 锁
-    await acquireGovernanceSubjectLocks(tx, [
-      { subjectType: "USER", subjectId: input.reviewerId },
-      { subjectType: "USER", subjectId: targetId },
-    ]);
 
     if (input.racePoint) {
       await input.racePoint(tx);

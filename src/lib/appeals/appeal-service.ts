@@ -18,8 +18,12 @@ import { createNotification } from "@/repositories/notification-repository";
  * - submit：最小 pre-read 仅解析 target lock key → acquire USER:<targetId>
  *   governance subject lock → 锁内重读 EA / target User 才是最终资格依据
  *   （submit ‖ eraseAccount 必然线性化）；
- * - withdraw：Appeal 行 FOR UPDATE（全局 Appeal-row 锁序第一步）→ USER:<targetId>
- *   governance lock → 锁内重读 erased/deleted（post-erasure mutation = FORBIDDEN）。
+ * - withdraw（Repair 4 锁序修正）：USER:<targetId> governance lock 先行 →
+ *   Appeal 行 FOR UPDATE → 锁内重读 erased/deleted（post-erasure mutation =
+ *   FORBIDDEN）。Repair 4 起 eraseAccount 也在 USER 治理锁内 redact Appeal 行
+ *   ——行锁在前会与注销构成死锁环（T35 实测 P2010），故两条路径统一为
+ *   subject-lock-first 全局纪律；锁键经 immutable 链（Appeal.enforcementActionId
+ *   / EA.targetId 均不可变）无锁预解析。
  *
  * 提交语义：一个 EnforcementAction 永久至多一条 Appeal（DB unique 为最终权威），
  * 并发双提交由 advisory 锁 + 唯一约束共同裁决，loser 精确收敛 APPEAL_ALREADY_EXISTS。
@@ -204,15 +208,34 @@ export async function submitAppeal(
 }
 
 /**
- * 撤回申诉（仅 SUBMITTED）。锁序硬合同：Appeal 行 FOR UPDATE →
- * USER target governance lock（禁止反序）。post-erasure 撤回 = FORBIDDEN：
- * 保持 SUBMITTED，由 reviewer 走 DISMISSED(APPELLANT_ERASED)。
+ * 撤回申诉（仅 SUBMITTED）。锁序（Repair 4 修正）：USER target governance
+ * lock 先行（经 immutable 链无锁预解析锁键）→ Appeal 行 FOR UPDATE。
+ * 旧行锁先行合同与 Repair 4 erasure 的 Appeal 行 redact（advisory-first）
+ * 构成死锁环，已按全局 subject-lock-first 纪律收敛。post-erasure 撤回 =
+ * FORBIDDEN：保持 SUBMITTED，由 reviewer 走 DISMISSED(APPELLANT_ERASED)。
  */
 export async function withdrawAppeal(
   input: WithdrawAppealInput,
 ): Promise<{ appeal: AppealRecord }> {
   const appeal = await withTransaction(async (tx) => {
-    // 1. Appeal 行锁（参数化 raw SQL）
+    // 1. 无锁预解析锁键（immutable 链：Appeal.enforcementActionId /
+    //    EnforcementAction.targetId 均不可变，TOCTOU 不存在）
+    const located = await tx.appeal.findUnique({
+      where: { id: input.appealId },
+      select: { enforcementAction: { select: { targetId: true } } },
+    });
+    if (!located) {
+      throw appealError("APPEAL_NOT_FOUND");
+    }
+
+    // 2. USER target 治理锁（先于行锁——与 erasure 同序，消灭死锁环）
+    await acquireGovernanceSubjectLock(tx, "USER", located.enforcementAction.targetId);
+
+    if (input.racePoint) {
+      await input.racePoint(tx);
+    }
+
+    // 3. Appeal 行锁（advisory 之后的 appeal 路径间串行化叶锁）+ 锁内重读
     await tx.$queryRaw`SELECT "id" FROM "Appeal" WHERE "id" = ${input.appealId} FOR UPDATE`;
     const appeal = await tx.appeal.findUnique({
       where: { id: input.appealId },
@@ -222,21 +245,7 @@ export async function withdrawAppeal(
       throw appealError("APPEAL_NOT_FOUND");
     }
 
-    // 2. owner 从 immutable EnforcementAction 解析
-    const action = await tx.enforcementAction.findUnique({
-      where: { id: appeal.enforcementActionId },
-      select: { targetId: true },
-    });
-    if (!action) {
-      throw appealError("APPEAL_NOT_FOUND");
-    }
-
-    // 3. USER target 治理锁
-    await acquireGovernanceSubjectLock(tx, "USER", action.targetId);
-
-    if (input.racePoint) {
-      await input.racePoint(tx);
-    }
+    const action = { targetId: located.enforcementAction.targetId };
 
     // 4. ownership 先于 target 状态读取（Repair 1 B2 防枚举）：
     // outsider 不得通过 withdraw 错误码推断 appellant 是否已注销——

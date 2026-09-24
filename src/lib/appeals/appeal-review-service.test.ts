@@ -183,8 +183,8 @@ function installAppeal(appeal = submittedAppeal()) {
   return appeal;
 }
 
-describe("beginAppealReview（行锁 → sorted 锁 → 锁后授权重读；workflow-only）", () => {
-  it("锁序：Appeal 行锁 → 完整 sorted subject 锁 → 锁后 AuthorizationContext 重读", async () => {
+describe("beginAppealReview（subject 锁 → 行锁 → 锁后授权重读；workflow-only）", () => {
+  it("锁序（Repair 4 修正）：完整 sorted subject 锁 → Appeal 行锁 → 锁后 AuthorizationContext 重读", async () => {
     const order: string[] = [];
     installAppeal();
     txQueryRaw.mockImplementation(async () => {
@@ -201,7 +201,9 @@ describe("beginAppealReview（行锁 → sorted 锁 → 锁后授权重读；wor
 
     await beginAppealReview({ reviewerId: "reviewer-1", appealId: "ap-1" });
 
-    expect(order).toEqual(["row-lock", "subject-locks", "auth-re-read"]);
+    // Repair 4：erasure 也是 Appeal 行写入者（advisory-first）——行锁在
+    // subject 锁之前会与注销死锁，统一 subject-lock-first。
+    expect(order).toEqual(["subject-locks", "row-lock", "auth-re-read"]);
     // 完整 sorted set：reviewer + target 一次取齐
     expect(acquireGovernanceSubjectLocks).toHaveBeenCalledWith(expect.anything(), [
       { subjectType: "USER", subjectId: "reviewer-1" },
