@@ -667,10 +667,16 @@ function objectKeyFromPublicUrl(url: string): string | null {
 /**
  * 按业务字段中保存的图片值（公开 URL 或 asset: 引用）标记对应资源待删除。
  * 用于编辑业务实体时替换/移除旧图、软删除业务实体等场景。
+ *
+ * Repair 4 / RB-04：支持传入事务客户端——profile/认证材料替换的旧资源
+ * PENDING_DELETE 标记必须与业务 mutation 同一 DB transaction（不再允许
+ * "提交后 best-effort + .catch 吞错"：标记失败 = 对象永久泄漏）。
+ * 不传 tx 时保持既有全局客户端行为（历史调用方兼容）。
  */
 export async function markAssetsForValuesPendingDelete(
   ownerId: string,
   values: string[],
+  txClient?: Prisma.TransactionClient,
 ): Promise<number> {
   const assetIds = new Set<string>();
   const objectKeys: string[] = [];
@@ -698,7 +704,10 @@ export async function markAssetsForValuesPendingDelete(
     return 0;
   }
 
-  const result = await prisma.uploadedAsset.updateMany({
+  // 收窄为事务客户端类型：扩展客户端与事务客户端的联合类型会在
+  // schema 增大后触发 Prisma 扩展的类型深度超限（excessive stack depth）
+  const client = txClient ?? asAssetTx(prisma);
+  const result = await client.uploadedAsset.updateMany({
     where: {
       ownerId,
       status: { in: ["UPLOADED", "ATTACHED"] },

@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { prepareActiveAccountMutation, type ActiveAccountMutationSeams } from "@/lib/governance/active-account-mutation";
-import { resolveSingleImageToken } from "@/lib/upload";
+import { markAssetsForValuesPendingDelete, resolveSingleImageToken } from "@/lib/upload";
 
 /**
  * RB-03：个人资料 mutation 的领域逻辑（从 server action 中抽出）。
@@ -11,6 +11,11 @@ import { resolveSingleImageToken } from "@/lib/upload";
  * 权威写入，全部在同一事务边界内。与 eraseAccount 同一 USER 锁域串行：
  * erase 先提交 → 本 mutation 锁内复核失败回滚（无 PII resurrection）；
  * profile 先提交 → erase 随后执行且保持最终权威。
+ *
+ * Repair 4 / RB-04：头像替换的旧资源 PENDING_DELETE 标记在本事务内完成
+ * （fresh previousAvatar 比较 → 绑定/更新新头像 → 旧资产标记 → COMMIT）。
+ * 不再存在"profile 已提交但旧头像标记永久失败"的泄漏窗口：标记随业务
+ * mutation 同生共死，失败即整体回滚重试。
  *
  * 头像的对象存储上传（S3 PUT，外部副作用）由调用方在事务外完成；若本
  * 事务因账号失效被拒，已上传资产停留在 UPLOADED 态，由既有 stale-upload
@@ -42,6 +47,8 @@ export async function updateOwnProfileTx(
   phone: string | null;
   /** 事务内读到的旧头像值（供调用方事务外做旧资源清理比较） */
   previousAvatarUrl: string | null;
+  /** 本事务内被标记 PENDING_DELETE 的旧资源数（0 = 无替换或无需标记） */
+  replacedAssetsMarkedForDeletion: number;
 }> {
   await prepareActiveAccountMutation(tx, userId, seams);
 
@@ -82,5 +89,17 @@ export async function updateOwnProfileTx(
     },
   });
 
-  return { ...updated, previousAvatarUrl: previous?.avatarUrl ?? null };
+  // Repair 4：被替换的旧头像在同一事务内标记 PENDING_DELETE（durable
+  // deletion queue 的唯一入口），杜绝 post-commit best-effort 吞错泄漏。
+  const previousAvatarUrl = previous?.avatarUrl ?? null;
+  let replacedAssetsMarkedForDeletion = 0;
+  if (previousAvatarUrl && previousAvatarUrl !== updated.avatarUrl) {
+    replacedAssetsMarkedForDeletion = await markAssetsForValuesPendingDelete(
+      userId,
+      [previousAvatarUrl],
+      tx,
+    );
+  }
+
+  return { ...updated, previousAvatarUrl, replacedAssetsMarkedForDeletion };
 }

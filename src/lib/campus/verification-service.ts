@@ -1,6 +1,6 @@
 import type { Prisma, UserVerification, VerificationStatus } from "@prisma/client";
 
-import { applyVerificationAssetRetention, resolveImageTokens } from "@/lib/upload";
+import { applyVerificationAssetRetention, markAssetsForValuesPendingDelete, resolveImageTokens } from "@/lib/upload";
 import { isControlledVerificationEvidence } from "@/lib/asset-ref";
 import { acquireCampusVerificationPolicyLocks, acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
@@ -160,6 +160,15 @@ export async function submitMembershipVerification(
     const prepared = await prepareVerificationSubmission(tx, input.userId);
     const submittedAt = new Date();
 
+    // Repair 4 / RB-04：fresh 旧证据读取（subject 锁内）——被替换的学生证
+    // 材料必须在本 canonical lifecycle 事务内标记 PENDING_DELETE，与业务
+    // mutation 同生共死。禁止事务外 pre-read + post-commit best-effort
+    // （标记失败被吞 = 旧材料对象永久泄漏）。
+    const previousEvidence = await tx.userVerification.findUnique({
+      where: { userId: input.userId },
+      select: { studentCardImage: true },
+    });
+
     const policyEvidence = {
       policyId: prepared.policy?.id ?? null,
       policyVersion: prepared.policy?.version ?? null,
@@ -221,6 +230,13 @@ export async function submitMembershipVerification(
       where: { id: verification.id },
       data: { studentCardImage: studentCardImage ?? input.studentCardImageToken },
     });
+
+    // Repair 4：重新提交替换了证据（fresh 比较在锁内）→ 旧材料同事务标记
+    // PENDING_DELETE，进入既有 storage cleanup durable deletion workflow。
+    const previousStudentCardImage = previousEvidence?.studentCardImage ?? null;
+    if (previousStudentCardImage && previousStudentCardImage !== finalVerification.studentCardImage) {
+      await markAssetsForValuesPendingDelete(input.userId, [previousStudentCardImage], tx);
+    }
 
     await createNotification(tx, {
       userId: input.userId,
@@ -362,6 +378,10 @@ export async function decideMembershipVerification(
       tx,
     );
 
+    // Repair 4 / RB-04 secondary-copy rule：通知是事件信号，不是第二份内容
+    // 存储。reviewNote（operator 自由文本）绝不复制进 Notification.content
+    // ——拒绝/吊销原因的唯一权威在 UserVerification.reviewNote/reasonCode，
+    // 由认证页面按需展示；通知侧只允许 generic system copy。
     await createNotification(tx, {
       userId: current.userId,
       type: "SYSTEM",
@@ -375,12 +395,8 @@ export async function decideMembershipVerification(
         input.decision === "VERIFIED"
           ? "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。"
           : input.decision === "REJECTED"
-            ? `你的校园认证未通过审核。${
-                input.reviewNote ? `原因：${input.reviewNote}` : "请完善材料后重新提交。"
-              }`
-            : `你的校园认证已被平台吊销。${
-                input.reviewNote ? `原因：${input.reviewNote}` : ""
-              }`,
+            ? "你的校园认证未通过审核，请前往认证页面查看详情并完善材料后重新提交。"
+            : "你的校园认证已被平台吊销，请前往认证页面查看详情。",
     });
 
     // 敏感材料保留期：出结果后 VERIFICATION_ASSET_RETENTION_DAYS 天由 cleanup

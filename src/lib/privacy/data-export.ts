@@ -7,6 +7,7 @@ import {
 } from "@/lib/governance/active-account-mutation";
 import { ERASED_USER_DISPLAY_NAME } from "@/lib/privacy/account-erasure";
 import { transitionPrivacyRequest } from "@/lib/privacy/privacy-request-service";
+import { parseAssetReference } from "@/lib/asset-ref";
 
 /**
  * 用户数据导出（Phase 5 同步实现；Phase 9 异步化）。
@@ -31,6 +32,10 @@ export const FORBIDDEN_EXPORT_KEYS = [
   "secret",
   "accessToken",
   "refreshToken",
+  "access_token",
+  "refresh_token",
+  "idToken",
+  "id_token",
   "token",
   "authorization",
   "cookie",
@@ -46,6 +51,12 @@ export const FORBIDDEN_EXPORT_KEYS = [
   // （APPEAL_RECORDS exportable 仅覆盖 Appellant DTO 域）
   "decisionNote",
   "reviewedById",
+  // Repair 4 / RB-04：registry OPERATOR_ONLY 面与内部治理标识结构性缺席
+  "internalNote",
+  "adminNote",
+  "handledById",
+  "resolvedById",
+  "assignedToId",
   "adminLog",
   "studentCardImage",
   "NEXTAUTH_SECRET",
@@ -81,9 +92,10 @@ function pickCounterparty(
 
 export type UserExportPayload = {
   exportedAt: string;
-  // Phase 6C-1B：新增 appeals 段改变 payload shape → 升 v2
-  //（不静默变更 v1 契约）
-  format: "campus-marketplace.user-export/v2";
+  // Repair 4 / RB-04：新增 verification / notifications / supportTickets /
+  // rentalReviewsWritten 段并扩展 user-owned free text → 升 v3
+  //（不静默变更 v1/v2 契约）
+  format: "campus-marketplace.user-export/v3";
   account: {
     id: string;
     name: string;
@@ -94,6 +106,8 @@ export type UserExportPayload = {
     avatarUrl: string | null;
     college: string | null;
     grade: string | null;
+    phone: string | null;
+    studentIdLast4: string | null;
     verificationStatus: string;
     createdAt: string;
   };
@@ -104,6 +118,22 @@ export type UserExportPayload = {
     source: string;
     acceptedAt: string;
   }>;
+  // Repair 4：本人认证记录的 user-visible safe subset（DIRECT_IDENTITY +
+  // GOVERNANCE reasonCode）。reviewNote / reviewedById / 私有证据定位符
+  // 结构性缺席；学生证图片只输出受控 asset id 引用元数据，绝不生成
+  // 永久可访问 URL。
+  verification: {
+    status: string;
+    schoolName: string;
+    campusName: string;
+    studentIdLast4: string;
+    reasonCode: string | null;
+    submittedAt: string;
+    reviewedAt: string | null;
+    policyVersion: number | null;
+    policyHash: string | null;
+    evidenceAssetId: string | null;
+  } | null;
   listings: {
     products: Array<{ id: string; title: string; price: string; status: string; createdAt: string }>;
     errandTasks: Array<{ id: string; title: string; reward: string; status: string; createdAt: string }>;
@@ -117,6 +147,8 @@ export type UserExportPayload = {
     status: string;
     amount: string;
     role: "buyer" | "seller";
+    /** buyer 下单时本人留言；seller 视角不携带（作者归属明确才导出） */
+    note: string | null;
     counterparty: CounterpartyPublicRef | null;
     createdAt: string;
   }>;
@@ -125,6 +157,10 @@ export type UserExportPayload = {
     orderNumber: string;
     status: string;
     role: "owner" | "renter";
+    /** renter 本人备注；owner 视角不携带 */
+    renterNote: string | null;
+    /** 仅当 cancelledById == 本人时携带（作者归属精确才导出） */
+    cancellationNote: string | null;
     counterparty: CounterpartyPublicRef | null;
     startTime: string;
     endTime: string;
@@ -137,13 +173,57 @@ export type UserExportPayload = {
     target: CounterpartyPublicRef | null;
     createdAt: string;
   }>;
+  // Repair 4：租赁评价（本人 author only），与普通 Review 同一 include 语义
+  rentalReviewsWritten: Array<{
+    id: string;
+    orderId: string;
+    overallRating: number;
+    itemMatchDesc: number | null;
+    itemWorksWell: number | null;
+    ownerResponsive: number | null;
+    pickupEasy: number | null;
+    attitudeFriendly: number | null;
+    returnedOnTime: number | null;
+    itemWellKept: number | null;
+    accessoriesComplete: number | null;
+    goodCommunication: number | null;
+    reliable: number | null;
+    content: string | null;
+    tags: string[];
+    target: CounterpartyPublicRef | null;
+    createdAt: string;
+  }>;
   reportsFiled: Array<{
     id: string;
     targetType: string;
     reason: string;
+    /** 本人 authored 举报详情（USER_AUTHORED_CONTENT → self-export INCLUDE） */
+    detail: string | null;
     status: string;
     targetUser: CounterpartyPublicRef | null;
     createdAt: string;
+  }>;
+  // Repair 4：本人 inbox（DERIVED_EPHEMERAL safe 子集）
+  notifications: Array<{
+    id: string;
+    type: string;
+    title: string;
+    content: string;
+    isRead: boolean;
+    createdAt: string;
+  }>;
+  // Repair 4：本人 requester 工单 safe subset（internalNote/assignedToId/
+  // resolvedById 结构性缺席）
+  supportTickets: Array<{
+    id: string;
+    category: string;
+    status: string;
+    subject: string;
+    description: string;
+    resolutionCode: string | null;
+    resolutionMessage: string | null;
+    createdAt: string;
+    resolvedAt: string | null;
   }>;
   messagesSent: Array<{
     id: string;
@@ -152,12 +232,17 @@ export type UserExportPayload = {
     content: string;
     createdAt: string;
   }>;
+  // Repair 4：STORAGE_METADATA safe subset（bucket/objectKey 绝不出现）
   uploadedAssets: Array<{
     id: string;
     category: string;
     access: string;
     status: string;
+    mimeType: string;
     sizeBytes: number;
+    width: number | null;
+    height: number | null;
+    originalFileName: string | null;
     createdAt: string;
   }>;
   privacyRequests: Array<{
@@ -204,6 +289,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       avatarUrl: true,
       college: true,
       grade: true,
+      phone: true,
+      studentIdLast4: true,
       verificationStatus: true,
       createdAt: true,
       erasedAt: true,
@@ -220,6 +307,7 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
 
   const [
     acceptances,
+    verification,
     products,
     errandTasks,
     serviceListings,
@@ -229,7 +317,10 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
     rentalOrdersAsOwner,
     rentalOrdersAsRenter,
     reviewsWritten,
+    rentalReviewsWritten,
     reportsFiled,
+    notifications,
+    supportTickets,
     messagesSent,
     uploadedAssets,
     privacyRequests,
@@ -244,6 +335,23 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         documentHash: true,
         source: true,
         acceptedAt: true,
+      },
+    }),
+    // Repair 4：本人认证 safe subset。studentCardImage 仅在服务端解析为受控
+    // asset id，绝不输出原始引用串/URL/定位符。
+    prisma.userVerification.findUnique({
+      where: { userId },
+      select: {
+        status: true,
+        schoolName: true,
+        campusName: true,
+        studentIdLast4: true,
+        reasonCode: true,
+        submittedAt: true,
+        reviewedAt: true,
+        policyVersion: true,
+        policyHash: true,
+        studentCardImage: true,
       },
     }),
     prisma.product.findMany({
@@ -275,6 +383,7 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         type: true,
         status: true,
         amount: true,
+        note: true,
         createdAt: true,
         seller: {
           select: { id: true, name: true, avatarUrl: true, erasedAt: true },
@@ -317,6 +426,9 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         status: true,
         startTime: true,
         endTime: true,
+        renterNote: true,
+        cancellationNote: true,
+        cancelledById: true,
         owner: { select: { id: true, name: true, avatarUrl: true, erasedAt: true } },
       },
     }),
@@ -332,6 +444,30 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         targetUser: { select: { id: true, name: true, avatarUrl: true, erasedAt: true } },
       },
     }),
+    // Repair 4：本人 authored 租赁评价（含 rating 维度与 target 公共引用）
+    prisma.rentalReview.findMany({
+      where: { authorId: userId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        orderId: true,
+        overallRating: true,
+        itemMatchDesc: true,
+        itemWorksWell: true,
+        ownerResponsive: true,
+        pickupEasy: true,
+        attitudeFriendly: true,
+        returnedOnTime: true,
+        itemWellKept: true,
+        accessoriesComplete: true,
+        goodCommunication: true,
+        reliable: true,
+        content: true,
+        tags: true,
+        createdAt: true,
+        targetUser: { select: { id: true, name: true, avatarUrl: true, erasedAt: true } },
+      },
+    }),
     prisma.report.findMany({
       where: { reporterId: userId },
       orderBy: { createdAt: "asc" },
@@ -339,9 +475,39 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         id: true,
         targetType: true,
         reason: true,
+        detail: true,
         status: true,
         createdAt: true,
         targetUser: { select: { id: true, name: true, avatarUrl: true, erasedAt: true } },
+      },
+    }),
+    // Repair 4：本人 inbox safe 子集（id/type/title/content/isRead/createdAt）
+    prisma.notification.findMany({
+      where: { userId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        type: true,
+        title: true,
+        content: true,
+        isRead: true,
+        createdAt: true,
+      },
+    }),
+    // Repair 4：本人 requester 工单 safe subset（operator 面结构性缺席）
+    prisma.supportTicket.findMany({
+      where: { requesterId: userId },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        category: true,
+        status: true,
+        subject: true,
+        description: true,
+        resolutionCode: true,
+        resolutionMessage: true,
+        createdAt: true,
+        resolvedAt: true,
       },
     }),
     prisma.message.findMany({
@@ -357,7 +523,11 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         category: true,
         access: true,
         status: true,
+        mimeType: true,
         sizeBytes: true,
+        width: true,
+        height: true,
+        originalFileName: true,
         createdAt: true,
       },
     }),
@@ -393,7 +563,7 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
 
   const payload: UserExportPayload = {
     exportedAt: new Date().toISOString(),
-    format: "campus-marketplace.user-export/v2",
+    format: "campus-marketplace.user-export/v3",
     account: {
       id: user.id,
       name: user.name,
@@ -404,6 +574,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       avatarUrl: user.avatarUrl,
       college: user.college,
       grade: user.grade,
+      phone: user.phone,
+      studentIdLast4: user.studentIdLast4,
       verificationStatus: user.verificationStatus,
       createdAt: user.createdAt.toISOString(),
     },
@@ -414,6 +586,22 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       source: acceptance.source,
       acceptedAt: acceptance.acceptedAt.toISOString(),
     })),
+    verification: verification
+      ? {
+          status: verification.status,
+          schoolName: verification.schoolName,
+          campusName: verification.campusName,
+          studentIdLast4: verification.studentIdLast4,
+          reasonCode: verification.reasonCode,
+          submittedAt: verification.submittedAt.toISOString(),
+          reviewedAt: verification.reviewedAt?.toISOString() ?? null,
+          policyVersion: verification.policyVersion,
+          policyHash: verification.policyHash,
+          // 学生证材料只输出受控 asset id 引用元数据（不生成任何 URL；
+          // legacy 非受控值解析不出 id → null，绝不透传原串）
+          evidenceAssetId: parseAssetReference(verification.studentCardImage),
+        }
+      : null,
     listings: {
       products: products.map((product) => ({
         ...product,
@@ -444,6 +632,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         status: order.status,
         amount: String(order.amount),
         role: "buyer" as const,
+        // note 是 buyer 本人下单留言（作者归属明确 → 本人导出携带）
+        note: order.note,
         counterparty: pickCounterparty(order.seller),
         createdAt: order.createdAt.toISOString(),
       })),
@@ -454,6 +644,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         status: order.status,
         amount: String(order.amount),
         role: "seller" as const,
+        // seller 视角不携带 buyer 留言（不导出他人 user-owned 文本）
+        note: null,
         counterparty: pickCounterparty(order.buyer),
         createdAt: order.createdAt.toISOString(),
       })),
@@ -464,6 +656,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         orderNumber: order.orderNumber,
         status: order.status,
         role: "owner" as const,
+        renterNote: null,
+        cancellationNote: null,
         counterparty: pickCounterparty(order.renter),
         startTime: order.startTime.toISOString(),
         endTime: order.endTime.toISOString(),
@@ -473,6 +667,8 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
         orderNumber: order.orderNumber,
         status: order.status,
         role: "renter" as const,
+        renterNote: order.renterNote,
+        cancellationNote: order.cancelledById === userId ? order.cancellationNote : null,
         counterparty: pickCounterparty(order.owner),
         startTime: order.startTime.toISOString(),
         endTime: order.endTime.toISOString(),
@@ -486,13 +682,52 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       target: pickCounterparty(review.targetUser),
       createdAt: review.createdAt.toISOString(),
     })),
+    rentalReviewsWritten: rentalReviewsWritten.map((review) => ({
+      id: review.id,
+      orderId: review.orderId,
+      overallRating: review.overallRating,
+      itemMatchDesc: review.itemMatchDesc,
+      itemWorksWell: review.itemWorksWell,
+      ownerResponsive: review.ownerResponsive,
+      pickupEasy: review.pickupEasy,
+      attitudeFriendly: review.attitudeFriendly,
+      returnedOnTime: review.returnedOnTime,
+      itemWellKept: review.itemWellKept,
+      accessoriesComplete: review.accessoriesComplete,
+      goodCommunication: review.goodCommunication,
+      reliable: review.reliable,
+      content: review.content,
+      tags: [...review.tags],
+      target: pickCounterparty(review.targetUser),
+      createdAt: review.createdAt.toISOString(),
+    })),
     reportsFiled: reportsFiled.map((report) => ({
       id: report.id,
       targetType: report.targetType,
       reason: report.reason,
+      detail: report.detail,
       status: report.status,
       targetUser: pickCounterparty(report.targetUser),
       createdAt: report.createdAt.toISOString(),
+    })),
+    notifications: notifications.map((notification) => ({
+      id: notification.id,
+      type: notification.type,
+      title: notification.title,
+      content: notification.content,
+      isRead: notification.isRead,
+      createdAt: notification.createdAt.toISOString(),
+    })),
+    supportTickets: supportTickets.map((ticket) => ({
+      id: ticket.id,
+      category: ticket.category,
+      status: ticket.status,
+      subject: ticket.subject,
+      description: ticket.description,
+      resolutionCode: ticket.resolutionCode,
+      resolutionMessage: ticket.resolutionMessage,
+      createdAt: ticket.createdAt.toISOString(),
+      resolvedAt: ticket.resolvedAt?.toISOString() ?? null,
     })),
     messagesSent: messagesSent.map((message) => ({
       id: message.id,
@@ -506,7 +741,11 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
       category: asset.category,
       access: asset.access,
       status: asset.status,
+      mimeType: asset.mimeType,
       sizeBytes: asset.sizeBytes,
+      width: asset.width,
+      height: asset.height,
+      originalFileName: asset.originalFileName,
       createdAt: asset.createdAt.toISOString(),
     })),
     privacyRequests: privacyRequests.map((request) => ({

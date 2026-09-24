@@ -2,13 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import { submitMembershipVerification } from "@/lib/campus/verification-service";
 import { updateOwnProfileTx } from "@/lib/user/profile-service";
 import {
   buildAssetReference,
-  markAssetsForValuesPendingDelete,
   uploadImageAsset,
 } from "@/lib/upload";
 import { profileFormSchema, verificationFormSchema } from "@/validators/profile";
@@ -106,16 +105,13 @@ export async function updateProfile(
       }),
     );
 
-    // 头像被替换时标记旧资源待删除（事务外 best-effort 清理；
-    // 清理失败不回滚 profile——ASSET_CLEANUP_FAILURE 为已知 non-blocking gap）
-    const previousAvatar = result.previousAvatarUrl;
-    if (previousAvatar && previousAvatar !== result.avatarUrl) {
-      await markAssetsForValuesPendingDelete(user.id, [previousAvatar]).catch(() => undefined);
-    }
+    // Repair 4：旧头像的 PENDING_DELETE 标记已随 updateOwnProfileTx 同事务
+    // 完成——不再做事务外 best-effort 标记（.catch(() => undefined) 吞错
+    // = 对象永久泄漏，已结构性移除）。
 
     revalidateUserPages();
 
-    const { previousAvatarUrl: _ignored, ...updatedUser } = result;
+    const { previousAvatarUrl: _ignored, replacedAssetsMarkedForDeletion: _ignoredCount, ...updatedUser } = result;
 
     return {
       success: true,
@@ -156,13 +152,11 @@ export async function submitVerification(
       };
     }
 
-    const previousVerification = await prisma.userVerification.findUnique({
-      where: { userId: user.id },
-      select: { studentCardImage: true },
-    });
-
     // Phase 6A：提交走中央认证状态机（subject 锁 → 账号/membership/policy
-    // 复核 → 状态机断言 → 证据落库），policy 版本快照随证据保留
+    // 复核 → 状态机断言 → 证据落库），policy 版本快照随证据保留。
+    // Repair 4：被替换旧认证材料的 PENDING_DELETE 标记已随
+    // submitMembershipVerification 的 canonical lifecycle 事务完成——
+    // 不再做事务外 pre-read + post-commit best-effort 标记。
     await submitMembershipVerification({
       userId: user.id,
       schoolName: parsed.data.schoolName,
@@ -170,13 +164,6 @@ export async function submitVerification(
       studentIdLast4: parsed.data.studentIdLast4,
       studentCardImageToken: parsed.data.studentCardImage,
     });
-
-    // 重新提交时旧的学生证材料标记待删除（原 PENDING 审核材料被替换）
-    if (previousVerification?.studentCardImage && previousVerification.studentCardImage !== studentCardToken) {
-      await markAssetsForValuesPendingDelete(user.id, [
-        previousVerification.studentCardImage,
-      ]).catch(() => undefined);
-    }
 
     revalidateUserPages();
 
