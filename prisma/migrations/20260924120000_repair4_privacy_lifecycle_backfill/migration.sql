@@ -1,5 +1,9 @@
 -- Repair 4 / RB-04: privacy lifecycle closure — historical secondary-copy
 -- redaction + deterministic already-erased-user backfill.
+-- REVIEW FIX (R4-01/02/03): User.schoolName REDACT backfill; already-erased
+-- Notification rows DELETE before historical redaction; listing/order
+-- attached user-authored content converged (STRUCTURAL ROW RETENTION !=
+-- USER CONTENT RETENTION).
 --
 -- Hard contracts (frozen by external audit):
 -- - DATA_ONLY: zero DDL, zero network I/O, zero object-storage deletion.
@@ -9,29 +13,45 @@
 --   backfill statement attributes authorship via FK / ownership / explicit
 --   actor relation (operatorId / cancelledById / senderId / authorId /
 --   reporterId / initiatorId / enforcementAction.targetId / requesterId /
---   ownerId).
+--   ownerId / publisherId / sellerId / providerId / submittedById).
 -- - Idempotent in effect: every statement is a deterministic SET-to-constant
 --   guarded by the exact erasure predicate; re-running converges to the same
 --   end state.
--- - Historical Notification.content (DERIVED_EPHEMERAL) is redacted to a
---   generic marker: old rows have no reliable source attribution, and derived
---   copies may be sacrificed without touching authoritative business records.
---   title / type / isRead / createdAt are preserved.
 
 BEGIN;
 
 -- ------------------------------------------------------------------
--- A. Historical Notification redaction (all rows predating this migration)
+-- A. Already-erased users: Notification rows are DERIVED_EPHEMERAL
+--    inbox — registry erasure policy is DELETE (R4-02). Must run
+--    BEFORE the historical redaction so erased owners' rows are
+--    removed, not merely redacted.
+-- ------------------------------------------------------------------
+DELETE FROM "Notification"
+WHERE "userId" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+);
+
+-- ------------------------------------------------------------------
+-- B. Historical Notification redaction (surviving rows predate this
+--    migration and belong to active accounts — derived copies may be
+--    sacrificed; title / type / isRead / createdAt preserved)
 -- ------------------------------------------------------------------
 UPDATE "Notification"
 SET "content" = '历史通知详情已按隐私策略清理，请查看相关业务记录。'
 WHERE "content" <> '历史通知详情已按隐私策略清理，请查看相关业务记录。';
 
 -- ------------------------------------------------------------------
--- B. Already-erased users backfill (deterministic, FK-attributed)
+-- C. Already-erased users backfill (deterministic, FK-attributed)
 -- ------------------------------------------------------------------
 
--- B1. UserVerification: reviewer free text must not survive erasure
+-- C1. User.schoolName is NON-NULLABLE direct identity (R4-01) — REDACT
+--     with the erasure display-name marker, never NULL.
+UPDATE "User" u
+SET "schoolName" = '已注销用户'
+WHERE u."schoolName" <> '已注销用户'
+  AND u."erasedAt" IS NOT NULL;
+
+-- C2. UserVerification: reviewer free text must not survive erasure
 UPDATE "UserVerification" uv
 SET "reviewNote" = NULL
 WHERE uv."reviewNote" IS NOT NULL
@@ -40,7 +60,7 @@ WHERE uv."reviewNote" IS NOT NULL
     WHERE u."id" = uv."userId" AND u."erasedAt" IS NOT NULL
   );
 
--- B2. SupportTicket: user free text + operator free text per current
+-- C3. SupportTicket: user free text + operator free text per current
 --     erasure rules (subject/description → marker; resolution messages /
 --     internal notes → NULL) for terminal tickets of erased requesters
 --     (active tickets block erasure, so any row here is terminal).
@@ -59,7 +79,7 @@ WHERE st."requesterId" IN (
     OR st."internalNote" IS NOT NULL
   );
 
--- B3. UploadedAsset: originalFileName is potential PII — cleared for every
+-- C4. UploadedAsset: originalFileName is potential PII — cleared for every
 --     asset of an erased owner regardless of category/access/status.
 UPDATE "UploadedAsset" a
 SET "originalFileName" = NULL
@@ -68,19 +88,23 @@ WHERE a."originalFileName" IS NOT NULL
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- B4. UploadedAsset: sensitive private evidence of erased owners enters the
---     durable deletion queue (AVATAR was not covered by the legacy
---     expiresAt-based marking). UPLOADING rows stay on the stale-upload TTL
---     recovery contract (object-revival race with in-flight S3 PUT).
+-- C5. UploadedAsset: every business-mirrored asset of an erased owner
+--     enters the durable deletion queue (R4-03 §10/§18: PRODUCT / SERVICE /
+--     RENTAL listing images included; PUBLIC objects follow the same
+--     lifecycle). UPLOADING rows stay on the stale-upload TTL recovery
+--     contract (object-revival race with in-flight S3 PUT).
 UPDATE "UploadedAsset" a
 SET "status" = 'PENDING_DELETE'
 WHERE a."status" IN ('UPLOADED', 'ATTACHED')
-  AND a."category" IN ('AVATAR', 'VERIFICATION', 'HANDOVER', 'RETURN', 'REPORT')
+  AND a."category" IN (
+    'AVATAR', 'VERIFICATION', 'HANDOVER', 'RETURN', 'REPORT',
+    'PRODUCT', 'SERVICE', 'RENTAL'
+  )
   AND a."ownerId" IN (
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- B5. RentalOrderStatusLog: notes authored by erased operators (future
+-- C6. RentalOrderStatusLog: notes authored by erased operators (future
 --     writes are frozen to system-generated descriptions only).
 UPDATE "RentalOrderStatusLog" sl
 SET "note" = NULL
@@ -89,7 +113,7 @@ WHERE sl."note" IS NOT NULL
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- B6. RentalOrder free text with exact actor attribution.
+-- C7. RentalOrder free text with exact actor attribution.
 UPDATE "RentalOrder" ro
 SET "renterNote" = NULL
 WHERE ro."renterNote" IS NOT NULL
@@ -104,7 +128,7 @@ WHERE ro."cancellationNote" IS NOT NULL
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- B7. Message: rows survive (conversation/report relational history), but
+-- C8. Message: rows survive (conversation/report relational history), but
 --     free text → marker and the sender reference is dropped (nullable FK).
 UPDATE "Message" m
 SET "content" = '（该内容已随账号注销删除）',
@@ -114,7 +138,7 @@ WHERE m."senderId" IN (
 )
   AND (m."content" <> '（该内容已随账号注销删除）' OR m."senderId" IS NOT NULL);
 
--- B8. Review / RentalReview authored text cleared; structural rating
+-- C9. Review / RentalReview authored text cleared; structural rating
 --     history preserved; authorId keeps referencing the pseudonymous row.
 UPDATE "Review" r
 SET "content" = NULL,
@@ -132,9 +156,9 @@ WHERE rr."authorId" IN (
 )
   AND (rr."content" IS NOT NULL OR rr."tags" <> '{}'::text[]);
 
--- B9. Report: reporter-authored detail cleared; reason enum / status /
---     scope provenance / decision history retained. handledNote is
---     governance (RETAIN_GOVERNANCE, untouched).
+-- C10. Report: reporter-authored detail cleared; reason enum / status /
+--      scope provenance / decision history retained. handledNote is
+--      governance (RETAIN_GOVERNANCE, untouched).
 UPDATE "Report" rp
 SET "detail" = NULL
 WHERE rp."detail" IS NOT NULL
@@ -142,7 +166,7 @@ WHERE rp."detail" IS NOT NULL
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- B10. Appeal: appellant-authored statement (non-nullable column → marker);
+-- C11. Appeal: appellant-authored statement (non-nullable column → marker);
 --      status / decision machine records retained; decisionNote untouched.
 UPDATE "Appeal" ap
 SET "statement" = '（该内容已随账号注销删除）'
@@ -155,7 +179,7 @@ WHERE ap."statement" <> '（该内容已随账号注销删除）'
       )
   );
 
--- B11. General Order: no reliable cancelledBy attribution exists — when any
+-- C12. General Order: no reliable cancelledBy attribution exists — when any
 --      participant is erased, ambiguous participant free text is cleared
 --      (privacy first); amounts / status / type / timestamps retained.
 UPDATE "Order" o
@@ -169,7 +193,7 @@ WHERE (o."buyerId" IN (
        ))
   AND (o."note" IS NOT NULL OR o."cancelReason" IS NOT NULL);
 
--- B12. RentalDispute: initiator-authored reason / evidence cleared for
+-- C13. RentalDispute: initiator-authored reason / evidence cleared for
 --      terminal disputes of erased initiators (active disputes block
 --      erasure via DataHold + IN_DISPUTE status). adminNote untouched.
 UPDATE "RentalDispute" rd
@@ -181,6 +205,145 @@ WHERE rd."initiatorId" IN (
   AND (
     rd."reason" <> '（该内容已随账号注销删除）'
     OR rd."evidencePhotos" <> '{}'::text[]
+  );
+
+-- ------------------------------------------------------------------
+-- D. Listing / order-attached user-authored content (R4-03): rows and
+--    structural metadata survive; raw user content does not.
+-- ------------------------------------------------------------------
+
+-- D1. BlockedUser: blocker-authored reason (relation row behavior unchanged).
+UPDATE "BlockedUser" bu
+SET "reason" = NULL
+WHERE bu."reason" IS NOT NULL
+  AND bu."blockerId" IN (
+    SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+  );
+
+-- D2. ErrandTask: publisher is the sole author. description is NON-NULLABLE
+--     → REDACT; contactNote nullable → CLEAR.
+UPDATE "ErrandTask" et
+SET "description" = '（该内容已随账号注销删除）',
+    "contactNote" = NULL
+WHERE et."publisherId" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+)
+  AND (
+    et."description" <> '（该内容已随账号注销删除）'
+    OR et."contactNote" IS NOT NULL
+  );
+
+-- D3. Product: seller is the sole author. description NON-NULLABLE → REDACT;
+--     ProductImage rows are attached content rows (row-level CLEAR).
+UPDATE "Product" p
+SET "description" = '（该内容已随账号注销删除）'
+WHERE p."sellerId" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+)
+  AND p."description" <> '（该内容已随账号注销删除）';
+
+DELETE FROM "ProductImage" pi
+WHERE pi."productId" IN (
+  SELECT p."id" FROM "Product" p
+  WHERE p."sellerId" IN (
+    SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+  )
+);
+
+-- D4. ServiceListing: provider is the sole author. description NON-NULLABLE
+--     → REDACT; coverImageUrl nullable → CLEAR.
+UPDATE "ServiceListing" sv
+SET "description" = '（该内容已随账号注销删除）',
+    "coverImageUrl" = NULL
+WHERE sv."providerId" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+)
+  AND (
+    sv."description" <> '（该内容已随账号注销删除）'
+    OR sv."coverImageUrl" IS NOT NULL
+  );
+
+-- D5. RentalListing: owner is the sole author. description NON-NULLABLE →
+--     REDACT; RentalListingImage rows are attached content rows.
+UPDATE "RentalListing" rl
+SET "description" = '（该内容已随账号注销删除）'
+WHERE rl."ownerId" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+)
+  AND rl."description" <> '（该内容已随账号注销删除）';
+
+DELETE FROM "RentalListingImage" rli
+WHERE rli."rentalListingId" IN (
+  SELECT rl."id" FROM "RentalListing" rl
+  WHERE rl."ownerId" IN (
+    SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+  )
+);
+
+-- D6. RentalDamageClaim (terminal-only here; active obligations block
+--     erasure): damageDescription / photos attributed via submittedById
+--     (owner-only write path); renterNote via order.renterId.
+UPDATE "RentalDamageClaim" dc
+SET "damageDescription" = '（该内容已随账号注销删除）',
+    "photos" = '{}'::text[]
+WHERE dc."submittedById" IN (
+  SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+)
+  AND (
+    dc."damageDescription" <> '（该内容已随账号注销删除）'
+    OR dc."photos" <> '{}'::text[]
+  );
+
+UPDATE "RentalDamageClaim" dc
+SET "renterNote" = NULL
+WHERE dc."renterNote" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "RentalOrder" ro
+    WHERE ro."id" = dc."orderId"
+      AND ro."renterId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      )
+  );
+
+-- D7. RentalExtensionRequest: ownerNote is written by the owner
+--     (order.ownerId) when responding.
+UPDATE "RentalExtensionRequest" rx
+SET "ownerNote" = NULL
+WHERE rx."ownerNote" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "RentalOrder" ro
+    WHERE ro."id" = rx."orderId"
+      AND ro."ownerId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      )
+  );
+
+-- D8. RentalReturnRecord: inspectionNote authored by the owner
+--     (order.ownerId). photos are dual-confirmation overwrite-semantics
+--     asset locators (STORAGE_METADATA, no per-photo attribution) —
+--     objects are removed via the HANDOVER/RETURN asset lifecycle.
+UPDATE "RentalReturnRecord" rr
+SET "inspectionNote" = NULL
+WHERE rr."inspectionNote" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "RentalOrder" ro
+    WHERE ro."id" = rr."orderId"
+      AND ro."ownerId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      )
+  );
+
+-- D9. RentalUnavailablePeriod: owner-managed via the listing FK; reason
+--     cleared, structural timing retained.
+UPDATE "RentalUnavailablePeriod" up
+SET "reason" = NULL
+WHERE up."reason" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "RentalListing" rl
+    WHERE rl."id" = up."rentalListingId"
+      AND rl."ownerId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      )
   );
 
 COMMIT;

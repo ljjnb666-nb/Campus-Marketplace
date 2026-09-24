@@ -4,13 +4,15 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  APPROVED_RETENTION_EXCEPTIONS,
   DECLARED_NON_PERSONAL_FIELDS,
+  ERASURE_IMPLEMENTATION_MODELS,
   ERASURE_MODES,
   FROZEN_PERSONAL_MODELS,
   GOVERNANCE_FIELD_POLICIES,
+  LISTING_USER_CONTENT_FIELD_POLICIES,
   MODEL_PRIVACY_POLICIES,
   PRIVACY_DATA_CLASSES,
-  RETAINED_USER_CONTENT_FIELD_POLICIES,
   SENSITIVE_FIELD_EXPECTATIONS,
   SENSITIVE_FIELD_NAME_PATTERN,
   SELF_EXPORT_MODES,
@@ -157,7 +159,7 @@ describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", 
     for (const policy of [
       ...SENSITIVE_FIELD_EXPECTATIONS,
       ...GOVERNANCE_FIELD_POLICIES,
-      ...RETAINED_USER_CONTENT_FIELD_POLICIES,
+      ...LISTING_USER_CONTENT_FIELD_POLICIES,
     ]) {
       const key = `${policy.model}.${policy.field}`;
       expect(seen.has(key), `重复分类：${key}`).toBe(false);
@@ -206,7 +208,7 @@ describe("REGISTRY-02：schema 敏感字段 drift gate", () => {
     for (const policy of [
       ...SENSITIVE_FIELD_EXPECTATIONS,
       ...GOVERNANCE_FIELD_POLICIES,
-      ...RETAINED_USER_CONTENT_FIELD_POLICIES,
+      ...LISTING_USER_CONTENT_FIELD_POLICIES,
     ]) {
       expect(
         schemaFields.some(
@@ -215,5 +217,131 @@ describe("REGISTRY-02：schema 敏感字段 drift gate", () => {
         `分类条目 ${policy.model}.${policy.field} 已不存在于 schema`,
       ).toBe(true);
     }
+  });
+});
+
+describe("REGISTRY-03：USER_AUTHORED_CONTENT 不得 RETAIN_*（R4-03 语义不变量）", () => {
+  it("任何字段 policy：classification=USER_AUTHORED_CONTENT ⇒ erasure ∈ {CLEAR, REDACT}", () => {
+    const allPolicies = [
+      ...SENSITIVE_FIELD_EXPECTATIONS,
+      ...GOVERNANCE_FIELD_POLICIES,
+      ...LISTING_USER_CONTENT_FIELD_POLICIES,
+    ];
+
+    const violations = allPolicies
+      .filter(
+        (policy) =>
+          policy.classification === "USER_AUTHORED_CONTENT" &&
+          policy.erasure !== "CLEAR" &&
+          policy.erasure !== "REDACT",
+      )
+      .map((policy) => `${policy.model}.${policy.field}=${policy.erasure}`);
+
+    expect(
+      violations,
+      "STRUCTURAL ROW RETENTION != USER CONTENT RETENTION：row 保留由 MODEL policy 表达，user-authored 字段必须 CLEAR/REDACT",
+    ).toEqual([]);
+  });
+
+  it("不存在 approved retention exception（本轮 = 0）", () => {
+    expect(APPROVED_RETENTION_EXCEPTIONS.size).toBe(0);
+  });
+});
+
+describe("REGISTRY-04：DIRECT_IDENTITY 非空列不得声明不可执行的 CLEAR", () => {
+  // 切块 + 逐行解析（避免 RegExp 构造器的转义层级歧义）
+  function schemaModelBlock(model: string): string | null {
+    const marker = `model ${model} {`;
+    const start = schemaText.indexOf(marker);
+    if (start < 0) {
+      return null;
+    }
+    const end = schemaText.indexOf("\n}", start);
+    return end < 0 ? null : schemaText.slice(start, end);
+  }
+
+  function schemaFieldType(model: string, fieldName: string): string | null {
+    const block = schemaModelBlock(model);
+    if (!block) {
+      return null;
+    }
+    for (const rawLine of block.split("\n")) {
+      const line = rawLine.trim();
+      if (line.startsWith(`${fieldName} `)) {
+        return line.split(/\s+/)[1] ?? null;
+      }
+    }
+    return null;
+  }
+
+  it("DIRECT_IDENTITY 字段：非空列必须 REDACT/PSEUDONYMIZE；可空列才允许 CLEAR", () => {
+    const directIdentityFields = [
+      ...SENSITIVE_FIELD_EXPECTATIONS,
+      ...GOVERNANCE_FIELD_POLICIES,
+      ...LISTING_USER_CONTENT_FIELD_POLICIES,
+    ].filter((policy) => policy.classification === "DIRECT_IDENTITY");
+
+    expect(directIdentityFields.length).toBeGreaterThan(0);
+
+    for (const policy of directIdentityFields) {
+      const fieldType = schemaFieldType(policy.model, policy.field);
+      expect(fieldType, `${policy.model}.${policy.field} 不在 schema`).not.toBeNull();
+      const isNullable = fieldType!.endsWith("?");
+      if (!isNullable) {
+        expect(
+          policy.erasure,
+          `${policy.model}.${policy.field}（非空 ${fieldType}）不可声明 CLEAR——运行时只能 REDACT/PSEUDONYMIZE`,
+        ).not.toBe("CLEAR");
+      }
+    }
+  });
+
+  it("明确覆盖：User.schoolName = DIRECT_IDENTITY / REDACT（非空列哨兵替换）", () => {
+    const policy = getFieldPrivacyPolicy("User", "schoolName");
+    expect(policy).not.toBeNull();
+    expect(policy!.classification).toBe("DIRECT_IDENTITY");
+    expect(policy!.erasure).toBe("REDACT");
+
+    const fieldType = schemaFieldType("User", "schoolName");
+    expect(fieldType).toBe("String");
+    expect(fieldType!.endsWith("?")).toBe(false);
+  });
+});
+
+describe("REGISTRY-05：每个 user-authored 字段必须有 erasure 执行覆盖（exception=0）", () => {
+  const erasureSource = readFileSync(
+    resolve(process.cwd(), "src", "lib", "privacy", "account-erasure.ts"),
+    "utf8",
+  );
+
+  it("含 USER_AUTHORED_CONTENT 字段的 model 全部在 account-erasure 执行路径中出现", () => {
+    const allPolicies = [
+      ...SENSITIVE_FIELD_EXPECTATIONS,
+      ...GOVERNANCE_FIELD_POLICIES,
+      ...LISTING_USER_CONTENT_FIELD_POLICIES,
+    ];
+
+    const userAuthoredModels = new Set(
+      allPolicies
+        .filter((policy) => policy.classification === "USER_AUTHORED_CONTENT")
+        .map((policy) => policy.model),
+    );
+
+    const missing: string[] = [];
+    for (const model of userAuthoredModels) {
+      if (ERASURE_IMPLEMENTATION_MODELS.has(model)) {
+        // Prisma client 访问形式（camelCase）必须出现在 erasure 源码中
+        const clientAccessor = model.charAt(0).toLowerCase() + model.slice(1);
+        expect(
+          erasureSource.includes(`client.${clientAccessor}`) ||
+            erasureSource.includes(`tx.${clientAccessor}`),
+          `model ${model} 声明为 USER_AUTHORED_CONTENT 但 account-erasure.ts 无执行路径`,
+        ).toBe(true);
+      } else if (!APPROVED_RETENTION_EXCEPTIONS.has(model)) {
+        missing.push(model);
+      }
+    }
+
+    expect(missing, "未登记执行路径且无 approved exception 的 model").toEqual([]);
   });
 });

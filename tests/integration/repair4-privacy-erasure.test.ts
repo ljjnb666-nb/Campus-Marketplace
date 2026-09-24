@@ -55,10 +55,16 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
   const rentalOrderIds: string[] = [];
   const rentalListingIds: string[] = [];
   const productIds: string[] = [];
+  const errandTaskIds: string[] = [];
+  const serviceListingIds: string[] = [];
   const productCategorySlug = `${RUN_TAG}-pc`;
   const rentalCategorySlug = `${RUN_TAG}-rc`;
+  const errandCategorySlug = `${RUN_TAG}-ec`;
+  const serviceCategorySlug = `${RUN_TAG}-sc`;
   const productCategoryRef: { id: string } = { id: "" };
   const rentalCategoryRef: { id: string } = { id: "" };
+  const errandCategoryRef: { id: string } = { id: "" };
+  const serviceCategoryRef: { id: string } = { id: "" };
   const assetIds: string[] = [];
   const verificationIds: string[] = [];
   const enforcementIds: string[] = [];
@@ -200,6 +206,20 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
       update: {},
     });
     rentalCategoryRef.id = rentalCategory.id;
+
+    const errandCategory = await rawClient!.errandCategory.upsert({
+      where: { slug: errandCategorySlug },
+      create: { name: errandCategorySlug, slug: errandCategorySlug },
+      update: {},
+    });
+    errandCategoryRef.id = errandCategory.id;
+
+    const serviceCategory = await rawClient!.serviceCategory.upsert({
+      where: { slug: serviceCategorySlug },
+      create: { name: serviceCategorySlug, slug: serviceCategorySlug },
+      update: {},
+    });
+    serviceCategoryRef.id = serviceCategory.id;
   });
 
   afterAll(async () => {
@@ -218,6 +238,9 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     await rawClient!.appeal.deleteMany({ where: { enforcementActionId: { in: enforcementIds } } });
     await rawClient!.enforcementAction.deleteMany({ where: { id: { in: enforcementIds } } });
     await rawClient!.supportTicket.deleteMany({ where: { requesterId: { in: userIds } } });
+    await rawClient!.blockedUser.deleteMany({ where: { blockerId: { in: userIds } } });
+    await rawClient!.errandTask.deleteMany({ where: { id: { in: errandTaskIds } } });
+    await rawClient!.serviceListing.deleteMany({ where: { id: { in: serviceListingIds } } });
     await rawClient!.notification.deleteMany({ where: { userId: { in: userIds } } });
     await rawClient!.review.deleteMany({
       where: { OR: [{ authorId: { in: userIds } }, { targetUserId: { in: userIds } }] },
@@ -232,6 +255,8 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     await rawClient!.rentalListing.deleteMany({ where: { id: { in: rentalListingIds } } });
     await rawClient!.productCategory.deleteMany({ where: { id: productCategoryRef.id } });
     await rawClient!.rentalCategory.deleteMany({ where: { id: rentalCategoryRef.id } });
+    await rawClient!.errandCategory.deleteMany({ where: { id: errandCategoryRef.id } });
+    await rawClient!.serviceCategory.deleteMany({ where: { id: serviceCategoryRef.id } });
     await rawClient!.campusMembership.deleteMany({ where: { userId: { in: userIds } } });
     await rawClient!.user.deleteMany({ where: { id: { in: userIds } } });
     // 不删除 Campus 行（稳定 slug 复用）
@@ -585,8 +610,9 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     expect((await rawClient!.uploadedAsset.findUniqueOrThrow({ where: { id: attachedReport.id } })).status).toBe("PENDING_DELETE");
     // UPLOADING 保持既有 TTL 恢复合同（不直接切 PENDING_DELETE）
     expect((await rawClient!.uploadedAsset.findUniqueOrThrow({ where: { id: uploadingAsset.id } })).status).toBe("UPLOADING");
-    // 非 sensitive 类别行保留（listing 结构历史）
-    expect((await rawClient!.uploadedAsset.findUniqueOrThrow({ where: { id: productAsset.id } })).status).toBe("ATTACHED");
+    // REVIEW FIX §10/§18：listing 镜像资产（PRODUCT，含 PUBLIC）同样进入
+    // durable deletion queue；listing 行本身保留（结构历史）
+    expect((await rawClient!.uploadedAsset.findUniqueOrThrow({ where: { id: productAsset.id } })).status).toBe("PENDING_DELETE");
 
     // spec 41：erasure 后 stale 资产无法再 attach（fail closed）
     await expect(
@@ -596,6 +622,241 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
         target: { type: "verification", id: verification.id },
       }),
     ).rejects.toMatchObject({ code: "INVALID_ASSET_REFERENCE" });
+  });
+
+  it("REVIEW FIX R4-03/§21：listing/order 附属 user-authored canary 全清（真 PG）", async () => {
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const owner = await createFixtureUser("R4R3 注销店主");
+    const counterpart = await createFixtureUser("R4R3 对照对象");
+    await createActiveMembership(owner.id);
+    await createActiveMembership(counterpart.id);
+
+    // §21 canary：schoolName（R4-01）
+    await rawClient!.user.update({
+      where: { id: owner.id },
+      data: { schoolName: "隐私学校-DO-NOT-SURVIVE" },
+    });
+
+    // ---- listing 面（owner 唯一作者）----
+    const rentalListing = await createRentalListing(owner.id);
+    await rawClient!.rentalListing.update({
+      where: { id: rentalListing.id },
+      data: { description: "private-rental-description" },
+    });
+    await rawClient!.rentalListingImage.create({
+      data: { rentalListingId: rentalListing.id, url: "canary-rental-image", sortOrder: 0 },
+    });
+    const rentalImageAsset = await createAsset({
+      ownerId: owner.id,
+      category: "RENTAL",
+      access: "PUBLIC",
+      status: "ATTACHED",
+      originalFileName: "rental.png",
+    });
+    await rawClient!.uploadedAsset.update({
+      where: { id: rentalImageAsset.id },
+      data: { rentalListingId: rentalListing.id },
+    });
+
+    const product = await rawClient!.product.create({
+      data: {
+        title: RUN_TAG + " 店主商品",
+        description: "private-product-description",
+        price: "3.00",
+        locationText: "北门",
+        condition: "LIKE_NEW",
+        sellerId: owner.id,
+        campusId,
+        categoryId: productCategoryRef.id,
+      },
+    });
+    productIds.push(product.id);
+    await rawClient!.productImage.create({
+      data: { productId: product.id, url: "canary-product-image", sortOrder: 0 },
+    });
+    const productAsset = await createAsset({
+      ownerId: owner.id,
+      category: "PRODUCT",
+      access: "PUBLIC",
+      status: "ATTACHED",
+      originalFileName: "product.png",
+    });
+    await rawClient!.uploadedAsset.update({
+      where: { id: productAsset.id },
+      data: { productId: product.id },
+    });
+
+    const serviceListing = await rawClient!.serviceListing.create({
+      data: {
+        title: RUN_TAG + " 店主服务",
+        description: "private-service-description",
+        coverImageUrl: "canary-service-cover",
+        categoryId: serviceCategoryRef.id,
+        price: "8.00",
+        pricingUnit: "PER_SESSION",
+        locationText: "北门",
+        providerId: owner.id,
+        campusId,
+      },
+    });
+    serviceListingIds.push(serviceListing.id);
+    const serviceAsset = await createAsset({
+      ownerId: owner.id,
+      category: "SERVICE",
+      access: "PUBLIC",
+      status: "ATTACHED",
+      originalFileName: "service.png",
+    });
+    await rawClient!.uploadedAsset.update({
+      where: { id: serviceAsset.id },
+      data: { serviceListingId: serviceListing.id },
+    });
+
+    const errandTask = await rawClient!.errandTask.create({
+      data: {
+        title: RUN_TAG + " 店主跑腿",
+        description: "private-errand-description",
+        categoryId: errandCategoryRef.id,
+        reward: "2.00",
+        pickupLocation: "北门",
+        deliveryLocation: "南门",
+        contactNote: "微信 private-contact",
+        deadline: new Date(Date.now() + 24 * 3600_000),
+        publisherId: owner.id,
+        campusId,
+      },
+    });
+    errandTaskIds.push(errandTask.id);
+
+    // BlockedUser：owner blocks counterpart（reason canary）
+    await rawClient!.blockedUser.create({
+      data: { blockerId: owner.id, blockedUserId: counterpart.id, reason: "private-block-reason" },
+    });
+
+    // ---- rental terminal 附属文本（owner=owner 的订单）----
+    const orderOwnerIsTarget = await createRentalOrder({
+      ownerId: owner.id,
+      renterId: counterpart.id,
+      listingId: rentalListing.id,
+      status: "COMPLETED",
+    });
+    await rawClient!.rentalDamageClaim.create({
+      data: {
+        orderId: orderOwnerIsTarget.id,
+        submittedById: owner.id,
+        damageDescription: "private-damage-description",
+        requestedDeduction: "0",
+        photos: ["canary-damage-photo-token"],
+      },
+    });
+    await rawClient!.rentalExtensionRequest.create({
+      data: {
+        orderId: orderOwnerIsTarget.id,
+        requesterId: counterpart.id,
+        newEndTime: new Date(Date.now() + 72 * 3600_000),
+        additionalFee: "1.00",
+        ownerNote: "private-owner-note",
+      },
+    });
+    await rawClient!.rentalReturnRecord.create({
+      data: {
+        orderId: orderOwnerIsTarget.id,
+        photos: [],
+        inspectionNote: "private-inspection-note",
+      },
+    });
+    await rawClient!.rentalUnavailablePeriod.create({
+      data: {
+        rentalListingId: rentalListing.id,
+        startDate: new Date(Date.now() + 24 * 3600_000),
+        endDate: new Date(Date.now() + 48 * 3600_000),
+        reason: "private-unavailable-reason",
+      },
+    });
+
+    // renter 侧文本：counterpart 拥有订单、owner 是租客 → renterNote 归属 owner
+    const orderTargetIsRenter = await createRentalOrder({
+      ownerId: counterpart.id,
+      renterId: owner.id,
+      listingId: rentalListing.id,
+      renterNote: "private-renter-note",
+      status: "COMPLETED",
+    });
+    void orderTargetIsRenter;
+
+    await eraseAccount(owner.id);
+
+    // ERASE-SCHOOL-01 / R4-01：schoolName 非空列哨兵
+    const erasedOwner = await rawClient!.user.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(erasedOwner.schoolName).toBe("已注销用户");
+    expect(erasedOwner.schoolName).not.toContain("DO-NOT-SURVIVE");
+
+    // listing 文本 REDACT / 引用 CLEAR；结构字段保留
+    const erasedRentalListing = await rawClient!.rentalListing.findUniqueOrThrow({
+      where: { id: rentalListing.id },
+    });
+    expect(erasedRentalListing.description).toBe(ERASED_MARKER);
+    expect(erasedRentalListing.price.toFixed(2)).toBe("10.00");
+    expect(erasedRentalListing.status).toBe("OFFLINE");
+    expect(await rawClient!.rentalListingImage.count({ where: { rentalListingId: rentalListing.id } })).toBe(0);
+
+    const erasedProduct = await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } });
+    expect(erasedProduct.description).toBe(ERASED_MARKER);
+    expect(erasedProduct.status).toBe("OFFLINE");
+    expect(await rawClient!.productImage.count({ where: { productId: product.id } })).toBe(0);
+
+    const erasedService = await rawClient!.serviceListing.findUniqueOrThrow({
+      where: { id: serviceListing.id },
+    });
+    expect(erasedService.description).toBe(ERASED_MARKER);
+    expect(erasedService.coverImageUrl).toBeNull();
+
+    const erasedErrand = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errandTask.id } });
+    expect(erasedErrand.description).toBe(ERASED_MARKER);
+    expect(erasedErrand.contactNote).toBeNull();
+    expect(erasedErrand.status).toBe("CANCELLED");
+
+    // BlockedUser：reason 清，relation 行保留
+    const blockedRow = await rawClient!.blockedUser.findFirstOrThrow({
+      where: { blockerId: owner.id },
+    });
+    expect(blockedRow.reason).toBeNull();
+
+    // rental terminal 文本：owner 归属（claim/extension/return/unavailable）
+    const erasedClaim = await rawClient!.rentalDamageClaim.findFirstOrThrow({
+      where: { orderId: orderOwnerIsTarget.id },
+    });
+    expect(erasedClaim.damageDescription).toBe(ERASED_MARKER);
+    expect(erasedClaim.photos).toEqual([]);
+
+    const erasedExtension = await rawClient!.rentalExtensionRequest.findFirstOrThrow({
+      where: { orderId: orderOwnerIsTarget.id },
+    });
+    expect(erasedExtension.ownerNote).toBeNull();
+
+    const erasedReturn = await rawClient!.rentalReturnRecord.findFirstOrThrow({
+      where: { orderId: orderOwnerIsTarget.id },
+    });
+    expect(erasedReturn.inspectionNote).toBeNull();
+
+    const erasedUnavailable = await rawClient!.rentalUnavailablePeriod.findFirstOrThrow({
+      where: { rentalListingId: rentalListing.id },
+    });
+    expect(erasedUnavailable.reason).toBeNull();
+    expect(erasedUnavailable.startDate).toBeTruthy();
+
+    // renter 归属：owner 作为租客的 renterNote 清空
+    const renterOrder = await rawClient!.rentalOrder.findUniqueOrThrow({
+      where: { id: orderTargetIsRenter.id },
+    });
+    expect(renterOrder.renterNote).toBeNull();
+
+    // §10/§18：PRODUCT/SERVICE/RENTAL 资产（含 PUBLIC）→ PENDING_DELETE
+    for (const assetId of [rentalImageAsset.id, productAsset.id, serviceAsset.id]) {
+      const asset = await rawClient!.uploadedAsset.findUniqueOrThrow({ where: { id: assetId } });
+      expect(asset.status).toBe("PENDING_DELETE");
+    }
   });
 
   it("ASSET-03：profile 头像替换的旧资源标记在同一事务内（回滚 = 零标记）", async () => {

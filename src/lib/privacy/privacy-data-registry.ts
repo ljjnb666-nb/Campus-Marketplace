@@ -197,6 +197,8 @@ function field(
 }
 
 const DIRECT_IDENTITY_FIELD = entry("DIRECT_IDENTITY", "INCLUDE", "CLEAR", false, false);
+/** 非空 direct identity 列：不可 CLEAR，运行时为不可反查哨兵替换 */
+const DIRECT_IDENTITY_PSEUDONYMIZED = entry("DIRECT_IDENTITY", "INCLUDE", "PSEUDONYMIZE", false, false);
 const USER_CONTENT_FIELD = entry("USER_AUTHORED_CONTENT", "INCLUDE", "CLEAR", false, false);
 const OPERATOR_ONLY_FIELD = entry("OPERATOR_ONLY", "EXCLUDE", "RETAIN_GOVERNANCE", false, false);
 const CREDENTIAL_FIELD = entry("CREDENTIAL_SECRET", "EXCLUDE", "PSEUDONYMIZE", false, false);
@@ -204,20 +206,24 @@ const STORAGE_INTERNAL_FIELD = entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRU
 
 export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   // ---- User：direct identity + credential ----
-  field("User", "name", DIRECT_IDENTITY_FIELD),
-  field("User", "email", DIRECT_IDENTITY_FIELD),
+  // name / email 均为非空列：注销 = 不可反查哨兵替换（PSEUDONYMIZE）
+  field("User", "name", DIRECT_IDENTITY_PSEUDONYMIZED),
+  field("User", "email", DIRECT_IDENTITY_PSEUDONYMIZED),
   field("User", "phone", DIRECT_IDENTITY_FIELD),
   field("User", "bio", DIRECT_IDENTITY_FIELD),
   field("User", "avatarUrl", DIRECT_IDENTITY_FIELD),
   field("User", "college", DIRECT_IDENTITY_FIELD),
   field("User", "grade", DIRECT_IDENTITY_FIELD),
   field("User", "studentIdLast4", DIRECT_IDENTITY_FIELD),
-  field("User", "schoolName", DIRECT_IDENTITY_FIELD),
+  // R4-01：schoolName 是 NON-NULLABLE direct identity——不可 CLEAR，
+  // 注销 = REDACT（ERASED_USER_DISPLAY_NAME 哨兵；运行时与迁移一致）
+  field("User", "schoolName", entry("DIRECT_IDENTITY", "INCLUDE", "REDACT", false, false)),
   field("User", "passwordHash", entry("CREDENTIAL_SECRET", "EXCLUDE", "PSEUDONYMIZE", false, false)),
-  // ---- UserVerification：认证证据 + 审核自由文本 ----
-  field("UserVerification", "schoolName", DIRECT_IDENTITY_FIELD),
-  field("UserVerification", "campusName", DIRECT_IDENTITY_FIELD),
-  field("UserVerification", "studentIdLast4", DIRECT_IDENTITY_FIELD),
+  // ---- UserVerification：认证证据 + 审核自由文本（schoolName/campusName/
+  //      studentIdLast4 均为非空列 → REDACT 哨兵，与运行时一致）----
+  field("UserVerification", "schoolName", entry("DIRECT_IDENTITY", "SAFE_SUBSET", "REDACT", false, false)),
+  field("UserVerification", "campusName", entry("DIRECT_IDENTITY", "SAFE_SUBSET", "REDACT", false, false)),
+  field("UserVerification", "studentIdLast4", entry("DIRECT_IDENTITY", "SAFE_SUBSET", "REDACT", false, false)),
   field("UserVerification", "studentCardImage", entry("DIRECT_IDENTITY", "EXCLUDE", "REDACT", false, false)),
   field("UserVerification", "reviewNote", entry("OPERATOR_ONLY", "EXCLUDE", "CLEAR", false, false)),
   // 认证决定的机器可读原因码：GOVERNANCE decision 记录，但 spec 冻结其进入
@@ -298,26 +304,48 @@ export const GOVERNANCE_FIELD_POLICIES: FieldPrivacyPolicy[] = [
 //    分类扩展注销清理范围，必须先经外部审计修订本表。
 // ============================================================
 
-const RETAINED_LISTING_CONTENT = entry("USER_AUTHORED_CONTENT", "EXCLUDE", "RETAIN_STRUCTURAL", false, false);
+// ============================================================
+// 4) 字段级 policy：listing / order 附属 user-authored 内容
+//    （Repair 4 REVIEW FIX / R4-03：STRUCTURAL ROW RETENTION !=
+//    USER CONTENT RETENTION——row 保留由 MODEL policy 表达
+//    （TRANSACTION_HISTORY / RETAIN_STRUCTURAL），字段级
+//    USER_AUTHORED_CONTENT 一律 CLEAR / REDACT，无 approved
+//    retention exception。作者归属全部为唯一 actor 列：
+//    publisherId / sellerId / providerId / ownerId（经 listing FK）/
+//    submittedById / order.renterId / order.ownerId。）
+// ============================================================
 
-export const RETAINED_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
-  field("BlockedUser", "reason", RETAINED_LISTING_CONTENT),
-  field("ErrandTask", "description", RETAINED_LISTING_CONTENT),
-  field("ErrandTask", "contactNote", RETAINED_LISTING_CONTENT),
-  field("Product", "description", RETAINED_LISTING_CONTENT),
-  field("Product", "images", RETAINED_LISTING_CONTENT),
-  field("ServiceListing", "description", RETAINED_LISTING_CONTENT),
-  field("ServiceListing", "coverImageUrl", RETAINED_LISTING_CONTENT),
-  field("RentalListing", "description", RETAINED_LISTING_CONTENT),
-  field("RentalListing", "images", RETAINED_LISTING_CONTENT),
-  field("RentalDamageClaim", "damageDescription", RETAINED_LISTING_CONTENT),
-  field("RentalDamageClaim", "renterNote", RETAINED_LISTING_CONTENT),
-  field("RentalDamageClaim", "photos", RETAINED_LISTING_CONTENT),
-  field("RentalExtensionRequest", "ownerNote", RETAINED_LISTING_CONTENT),
-  field("RentalHandoverRecord", "photos", RETAINED_LISTING_CONTENT),
-  field("RentalReturnRecord", "inspectionNote", RETAINED_LISTING_CONTENT),
-  field("RentalReturnRecord", "photos", RETAINED_LISTING_CONTENT),
-  field("RentalUnavailablePeriod", "reason", RETAINED_LISTING_CONTENT),
+/** 可空 user-authored 文本：注销即置 null */
+const CLEARED_USER_CONTENT = entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false);
+/** 非空 user-authored 文本：注销即置 ERASED_USER_CONTENT_MARKER */
+const REDACTED_USER_CONTENT = entry("USER_AUTHORED_CONTENT", "EXCLUDE", "REDACT", false, false);
+
+export const LISTING_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
+  field("BlockedUser", "reason", CLEARED_USER_CONTENT),
+  field("ErrandTask", "description", REDACTED_USER_CONTENT),
+  field("ErrandTask", "contactNote", CLEARED_USER_CONTENT),
+  field("Product", "description", REDACTED_USER_CONTENT),
+  field("Product", "images", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  field("ServiceListing", "description", REDACTED_USER_CONTENT),
+  field("ServiceListing", "coverImageUrl", CLEARED_USER_CONTENT),
+  field("RentalListing", "description", REDACTED_USER_CONTENT),
+  field("RentalListing", "images", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  field("RentalDamageClaim", "damageDescription", REDACTED_USER_CONTENT),
+  field("RentalDamageClaim", "renterNote", CLEARED_USER_CONTENT),
+  field("RentalDamageClaim", "photos", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  field("RentalExtensionRequest", "ownerNote", CLEARED_USER_CONTENT),
+  // inspectionNote = owner 验收自由文本（order.ownerId 精确归属）
+  field("RentalReturnRecord", "inspectionNote", CLEARED_USER_CONTENT),
+  field("RentalUnavailablePeriod", "reason", CLEARED_USER_CONTENT),
+  // ---- STORAGE_METADATA 引用面（非自由文本）----
+  // RentalHandoverRecord.photos / RentalReturnRecord.photos 是双确认覆盖
+  // 语义的混合归属资产引用数组（ownerConfirmed/renterConfirmed 无 per-photo
+  // attribution）——不得按作者清空。它们不是 personal free text 而是
+  // controlled-asset locator：被引用 HANDOVER/RETURN 资产在 erasure 时
+  // PENDING_DELETE → 对象物理删除，locator 保留与 bucket/objectKey 同构
+  // （cleanup provenance）。
+  field("RentalHandoverRecord", "photos", STORAGE_INTERNAL_FIELD),
+  field("RentalReturnRecord", "photos", STORAGE_INTERNAL_FIELD),
 ];
 
 // ============================================================
@@ -348,12 +376,51 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
 // 查询 helper
 // ============================================================
 
+/**
+ * REGISTRY-05 判定依据：每个含 USER_AUTHORED_CONTENT 字段的 model 必须在
+ * account-erasure.ts 的注销执行路径中被实际处理（模型名以 Prisma client
+ * 访问形式出现在该文件源码中），或存在显式 approvedRetentionException。
+ * 本轮 approved exception = 0。
+ */
+export const ERASURE_IMPLEMENTATION_MODELS: ReadonlySet<string> = new Set([
+  "User",
+  "UserVerification",
+  "CampusMembership",
+  "UploadedAsset",
+  "Notification",
+  "Message",
+  "Review",
+  "RentalReview",
+  "Report",
+  "Appeal",
+  "Order",
+  "RentalOrder",
+  "RentalOrderStatusLog",
+  "RentalDispute",
+  "SupportTicket",
+  "Session",
+  "Product",
+  "ErrandTask",
+  "ServiceListing",
+  "RentalListing",
+  "ProductImage",
+  "RentalListingImage",
+  "BlockedUser",
+  "RentalDamageClaim",
+  "RentalExtensionRequest",
+  "RentalUnavailablePeriod",
+  "RentalReturnRecord",
+]);
+
+/** 经外部审计批准的保留例外（本轮 = 空；新增必须附审计证据） */
+export const APPROVED_RETENTION_EXCEPTIONS: ReadonlySet<string> = new Set([]);
+
 function buildFieldPolicyIndex(): Map<string, FieldPrivacyPolicy> {
   const index = new Map<string, FieldPrivacyPolicy>();
   for (const policy of [
     ...SENSITIVE_FIELD_EXPECTATIONS,
     ...GOVERNANCE_FIELD_POLICIES,
-    ...RETAINED_USER_CONTENT_FIELD_POLICIES,
+    ...LISTING_USER_CONTENT_FIELD_POLICIES,
   ]) {
     index.set(`${policy.model}.${policy.field}`, policy);
   }

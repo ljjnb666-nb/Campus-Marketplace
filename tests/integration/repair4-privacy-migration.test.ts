@@ -143,6 +143,69 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         data: { userId: survivor.id, type: "RENTAL", title: "历史标题B", content: "拒绝原因：不想租了" },
       });
 
+      // R4-01 canary：erased 用户 schoolName 仍为原值（迁移后 → marker）
+      await db.user.update({
+        where: { id: erased.id },
+        data: { schoolName: "隐私学校-DO-NOT-SURVIVE" },
+      });
+
+      // R4-03 listing/attachment：erased 拥有的 product（含 ProductImage 行）
+      // + PRODUCT 资产；errandTask；blockedUser
+      const earlyProductCategory = await db.productCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const erasedProduct = await db.product.create({
+        data: {
+          title: "历史注销商品",
+          description: "private-product-description",
+          price: "1.00",
+          locationText: "北门",
+          condition: "LIKE_NEW",
+          sellerId: erased.id,
+          campusId: campus.id,
+          categoryId: earlyProductCategory.id,
+          status: "OFFLINE",
+        },
+      });
+      await db.productImage.create({
+        data: { productId: erasedProduct.id, url: "canary-product-image", sortOrder: 0 },
+      });
+      const erasedListingAsset = await db.uploadedAsset.create({
+        data: {
+          ownerId: erased.id,
+          category: "PRODUCT",
+          access: "PUBLIC",
+          bucket: "campus-public",
+          objectKey: `rb04mig/${randomUUID().slice(0, 8)}`,
+          mimeType: "image/webp",
+          sizeBytes: 10,
+          status: "ATTACHED",
+          productId: erasedProduct.id,
+          originalFileName: "历史商品图.png",
+        },
+      });
+      const errandCategory = await db.errandCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const erasedErrand = await db.errandTask.create({
+        data: {
+          title: "历史注销跑腿",
+          description: "private-errand-description",
+          categoryId: errandCategory.id,
+          reward: "1.00",
+          pickupLocation: "北门",
+          deliveryLocation: "南门",
+          contactNote: "微信 private-contact",
+          deadline: new Date(),
+          publisherId: erased.id,
+          campusId: campus.id,
+          status: "CANCELLED",
+        },
+      });
+      await db.blockedUser.create({
+        data: { blockerId: erased.id, blockedUserId: survivor.id, reason: "private-block-reason" },
+      });
+
       // 已注销用户的未清理副本
       const verification = await db.userVerification.create({
         data: {
@@ -250,6 +313,28 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       await db.rentalOrderStatusLog.create({
         data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "REJECTED", operatorId: erased.id, note: "历史日志备注" },
       });
+
+      // damage claim（挂在既有 rentalOrder：owner=survivor, renter=erased）
+      await db.rentalDamageClaim.create({
+        data: {
+          orderId: rentalOrder.id,
+          submittedById: survivor.id,
+          damageDescription: "对照索赔描述（owner 未注销，保留）",
+          requestedDeduction: "0",
+          photos: [],
+        },
+      });
+      await db.rentalDamageClaim.create({
+        data: {
+          orderId: rentalOrder.id,
+          submittedById: survivor.id,
+          damageDescription: "对照索赔B",
+          requestedDeduction: "0",
+          photos: [],
+          renterNote: "private-renter-note（renter=erased，清）",
+          resolvedAt: new Date(),
+        },
+      });
       await db.rentalOrderStatusLog.create({
         data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "PENDING_PICKUP", operatorId: survivor.id, note: "对照日志备注" },
       });
@@ -343,15 +428,44 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       // ---- 应用新 migration SQL ----
       runPrismaDbExecute(newMigrationSql(), tempUrl);
 
-      // ---- MIGRATION-01：历史通知全量 redact，title/type/isRead/createdAt 保留 ----
+      // ---- MIGRATION-NOTIFICATION-01：already-erased owner 的 Notification = DELETE ----
+      expect(await db.notification.count({ where: { userId: erased.id } })).toBe(0);
+
+      // ---- MIGRATION-NOTIFICATION-02：active owner 的历史行保留 + content redact ----
       const notifications = await db.notification.findMany({ orderBy: { createdAt: "asc" } });
-      expect(notifications).toHaveLength(2);
-      for (const notification of notifications) {
-        expect(notification.content).toBe(HISTORICAL_NOTIFICATION_MARKER);
-      }
-      expect(notifications[0]!.title).toBe("历史标题A");
-      expect(notifications[1]!.title).toBe("历史标题B");
-      expect(notifications.map((entry) => entry.type).sort()).toEqual(["RENTAL", "SYSTEM"]);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]!.userId).toBe(survivor.id);
+      expect(notifications[0]!.content).toBe(HISTORICAL_NOTIFICATION_MARKER);
+      expect(notifications[0]!.title).toBe("历史标题B");
+      expect(notifications[0]!.type).toBe("RENTAL");
+
+      // ---- MIGRATION-SCHOOL-01：already-erased schoolName → marker；对照不变 ----
+      const schoolAfter = await db.user.findUniqueOrThrow({ where: { id: erased.id } });
+      expect(schoolAfter.schoolName).toBe("已注销用户");
+      expect(schoolAfter.schoolName).not.toContain("DO-NOT-SURVIVE");
+      const survivorAfterNotif = await db.user.findUniqueOrThrow({ where: { id: survivor.id } });
+      expect(survivorAfterNotif.schoolName).toBe("示例大学");
+
+      // ---- R4-03：listing/attachment 文本 + image 行 + owned listing 资产 ----
+      const productAfter = await db.product.findUniqueOrThrow({ where: { id: erasedProduct.id } });
+      expect(productAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(productAfter.status).toBe("OFFLINE");
+      expect(await db.productImage.count({ where: { productId: erasedProduct.id } })).toBe(0);
+      const listingAssetAfter = await db.uploadedAsset.findUniqueOrThrow({ where: { id: erasedListingAsset.id } });
+      expect(listingAssetAfter.status).toBe("PENDING_DELETE");
+      expect(listingAssetAfter.originalFileName).toBeNull();
+      const errandAfter = await db.errandTask.findUniqueOrThrow({ where: { id: erasedErrand.id } });
+      expect(errandAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.contactNote).toBeNull();
+      const blockedAfter = await db.blockedUser.findFirstOrThrow({ where: { blockerId: erased.id } });
+      expect(blockedAfter.reason).toBeNull();
+      const claimsAfter = await db.rentalDamageClaim.findMany({ where: { orderId: rentalOrder.id } });
+      expect(claimsAfter).toHaveLength(2);
+      const keptClaim = claimsAfter.find((c) => c.damageDescription.includes('对照索赔描述'));
+      const renterNoteClaim = claimsAfter.find((c) => c.damageDescription.includes('对照索赔B'));
+      expect(keptClaim!.damageDescription).toContain('对照索赔描述');
+      expect(keptClaim!.renterNote).toBeNull();
+      expect(renterNoteClaim!.renterNote).toBeNull();
 
       // ---- MIGRATION-02：already-erased 用户逐字段回填 ----
       const backfilledVerification = await db.userVerification.findUniqueOrThrow({ where: { id: verification.id } });
@@ -368,7 +482,8 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       expect(backfilledAvatar.status).toBe("PENDING_DELETE");
       const backfilledProduct = await db.uploadedAsset.findUniqueOrThrow({ where: { id: productAsset.id } });
       expect(backfilledProduct.originalFileName).toBeNull();
-      expect(backfilledProduct.status).toBe("ATTACHED");
+      // R4-03 C5：listing 镜像资产同样进入 durable deletion queue
+      expect(backfilledProduct.status).toBe("PENDING_DELETE");
 
       const logs = await db.rentalOrderStatusLog.findMany({ where: { orderId: rentalOrder.id } });
       const erasedLog = logs.find((log) => log.operatorId === erased.id)!;
@@ -415,13 +530,21 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       const notificationsAfterReplay = await db.notification.findMany();
       expect(notificationsAfterReplay.map((entry) => entry.content)).toEqual([
         HISTORICAL_NOTIFICATION_MARKER,
-        HISTORICAL_NOTIFICATION_MARKER,
       ]);
+      expect(notificationsAfterReplay[0]!.userId).toBe(survivor.id);
       const avatarAfterReplay = await db.uploadedAsset.findUniqueOrThrow({ where: { id: avatarAsset.id } });
       expect(avatarAfterReplay.status).toBe("PENDING_DELETE");
       const reviewAfterReplay = await db.review.findFirstOrThrow({ where: { authorId: erased.id } });
       expect(reviewAfterReplay.content).toBeNull();
       expect(reviewAfterReplay.tags).toEqual([]);
+      // 幂等：listing/attachment 与 school 同样收敛到相同终态
+      expect(await db.notification.count({ where: { userId: erased.id } })).toBe(0);
+      const schoolAfterReplay = await db.user.findUniqueOrThrow({ where: { id: erased.id } });
+      expect(schoolAfterReplay.schoolName).toBe("已注销用户");
+      const listingAssetAfterReplay = await db.uploadedAsset.findUniqueOrThrow({
+        where: { id: erasedListingAsset.id },
+      });
+      expect(listingAssetAfterReplay.status).toBe("PENDING_DELETE");
     } finally {
       await db.$disconnect().catch(() => undefined);
     }

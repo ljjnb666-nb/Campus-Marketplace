@@ -324,6 +324,87 @@ describe.skipIf(!runAssets)("Repair 4 asset durable deletion (real PostgreSQL + 
     }
   });
 
+  it("REVIEW FIX §22：PRODUCT/SERVICE/RENTAL 镜像资产（含 PUBLIC）→ PENDING_DELETE → cleanup 对账", async () => {
+    const { S3Storage } = await import("@/lib/storage/s3-storage");
+    const { setStorageForTests } = await import("@/lib/storage");
+    const { prisma } = await import("@/lib/prisma");
+    const { uploadImageAsset } = await import("@/lib/asset-service");
+    const { runStorageCleanup } = await import("@/lib/asset-cleanup");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    setStorageForTests(new S3Storage(s3!));
+
+    const campus = await prisma.campus.create({
+      data: {
+        name: "RB04 listing 资产校区",
+        slug: `rb04-listing-${randomUUID().slice(0, 8)}`,
+        schoolName: "集成测试大学",
+      },
+    });
+    const user = await prisma.user.create({
+      data: {
+        name: "rb04-listing",
+        email: `rb04-listing-${randomUUID().slice(0, 8)}@it.local`,
+        passwordHash: "test-only",
+        schoolName: "集成测试大学",
+        campusId: campus.id,
+      },
+    });
+
+    try {
+      // 三个 listing 镜像类资产：product / rental / service（PUBLIC 对象）
+      const uploads = await Promise.all([
+        uploadImageAsset({ userId: user.id, category: "product", file: await createTestPng() }),
+        uploadImageAsset({ userId: user.id, category: "rental", file: await createTestPng() }),
+        uploadImageAsset({ userId: user.id, category: "service", file: await createTestPng() }),
+      ]);
+      const assets = [];
+      for (const uploaded of uploads) {
+        const asset = await prisma.uploadedAsset.findUniqueOrThrow({ where: { id: uploaded.assetId } });
+        objectKeys.push({ bucket: asset.bucket, objectKey: asset.objectKey });
+        await prisma.uploadedAsset.update({
+          where: { id: asset.id },
+          data: { status: "ATTACHED", attachedAt: new Date() },
+        });
+        assets.push(await prisma.uploadedAsset.findUniqueOrThrow({ where: { id: asset.id } }));
+      }
+      expect(assets.map((a) => a.category).sort()).toEqual(["PRODUCT", "RENTAL", "SERVICE"]);
+
+      const quotaBefore = (await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).storageUsedBytes;
+      expect(quotaBefore).toBe(assets.reduce((sum, a) => sum + a.sizeBytes, 0));
+
+      const result = await eraseAccount(user.id);
+      expect(result.sensitiveAssetsMarkedForDeletion).toBe(3);
+
+      for (const asset of assets) {
+        const marked = await prisma.uploadedAsset.findUniqueOrThrow({ where: { id: asset.id } });
+        expect(marked.status).toBe("PENDING_DELETE");
+        // 对象在 DB 事务提交后仍存在（物理删除由 cleanup 收敛）
+        expect(await headObjectExists(asset.bucket, asset.objectKey)).toBe(true);
+      }
+
+      const summary = await runStorageCleanup();
+      expect(summary.failures).toBe(0);
+
+      for (const asset of assets) {
+        expect(await headObjectExists(asset.bucket, asset.objectKey)).toBe(false);
+        expect((await prisma.uploadedAsset.findUniqueOrThrow({ where: { id: asset.id } })).status).toBe("DELETED");
+      }
+      // 配额恰一次释放
+      expect((await prisma.user.findUniqueOrThrow({ where: { id: user.id } })).storageUsedBytes).toBe(0);
+      const summary2 = await runStorageCleanup();
+      expect(summary2.quotaReleasedBytes).toBe(0);
+    } finally {
+      await prisma.uploadedAsset.deleteMany({ where: { ownerId: user.id } });
+      await prisma.notification.deleteMany({ where: { userId: user.id } });
+      await prisma.privacyRequest.deleteMany({ where: { userId: user.id } });
+      await prisma.campusMembership.deleteMany({ where: { userId: user.id } });
+      await prisma.session.deleteMany({ where: { userId: user.id } });
+      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      await prisma.campus.deleteMany({ where: { id: campus.id } });
+    }
+  });
+
   it("ASSET-01/02 + §47：eraseAccount → 头像/认证资产 PENDING_DELETE → cleanup 对账（对象删除 + 配额清零）", async () => {
     const { S3Storage } = await import("@/lib/storage/s3-storage");
     const { setStorageForTests } = await import("@/lib/storage");
