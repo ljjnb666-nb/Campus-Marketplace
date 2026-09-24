@@ -64,9 +64,15 @@ jobs:
       # 成 quay.io 名，后续 docker run 零改动命中本地镜像）。
       - name: Start MinIO (S3 compatible storage)
         run: |
-          docker image inspect quay.io/minio/minio:latest > /dev/null 2>&1 \
-            || docker pull quay.io/minio/minio:latest \
-            || { docker pull minio/minio:latest && docker tag minio/minio:latest quay.io/minio/minio:latest; }
+          docker image inspect quay.io/minio/minio:latest > /dev/null 2>&1 && exit 0
+          for i in 1 2 3; do
+            docker pull quay.io/minio/minio:latest && break
+            docker pull minio/minio:latest \
+              && docker tag minio/minio:latest quay.io/minio/minio:latest && break
+            echo "image pull round $i failed; retrying"
+            sleep 15
+            [ "$i" = 3 ] && exit 1
+          done
           docker run -d --name minio \
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
@@ -87,9 +93,15 @@ jobs:
         # 幂等创建 public/private bucket 并设置匿名策略：
         # public = 允许匿名读（禁止写）；private = 完全禁止匿名访问
         run: |
-          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 \
-            || docker pull quay.io/minio/mc:latest \
-            || { docker pull minio/mc:latest && docker tag minio/mc:latest quay.io/minio/mc:latest; }
+          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 && exit 0
+          for i in 1 2 3; do
+            docker pull quay.io/minio/mc:latest && break
+            docker pull minio/mc:latest \
+              && docker tag minio/mc:latest quay.io/minio/mc:latest && break
+            echo "mc pull round $i failed; retrying"
+            sleep 15
+            [ "$i" = 3 ] && exit 1
+          done
           docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
@@ -217,9 +229,15 @@ jobs:
 
       - name: Bootstrap MinIO buckets
         run: |
-          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 \
-            || docker pull quay.io/minio/mc:latest \
-            || { docker pull minio/mc:latest && docker tag minio/mc:latest quay.io/minio/mc:latest; }
+          docker image inspect quay.io/minio/mc:latest > /dev/null 2>&1 && exit 0
+          for i in 1 2 3; do
+            docker pull quay.io/minio/mc:latest && break
+            docker pull minio/mc:latest \
+              && docker tag minio/mc:latest quay.io/minio/mc:latest && break
+            echo "mc pull round $i failed; retrying"
+            sleep 15
+            [ "$i" = 3 ] && exit 1
+          done
           docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
