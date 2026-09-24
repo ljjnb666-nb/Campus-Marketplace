@@ -60,6 +60,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
   const serviceIds: string[] = [];
   const rentalIds: string[] = [];
   const errandIds: string[] = [];
+  const orderIds: string[] = [];
   const userIds: string[] = [];
   const adHocRoleIds: string[] = [];
   const assignmentIds: string[] = [];
@@ -216,6 +217,37 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     return row;
   }
 
+  async function createRentalOrderRow(input: {
+    listingId: string;
+    ownerId: string;
+    renterId: string;
+    status: "PENDING_APPROVAL" | "IN_RENTAL" | "COMPLETED";
+  }) {
+    const now = new Date();
+    return rawClient!.rentalOrder.create({
+      data: {
+        orderNumber: `${RUN_TAG}-ro-${randomUUID().slice(0, 8)}`,
+        rentalListingId: input.listingId,
+        ownerId: input.ownerId,
+        renterId: input.renterId,
+        startTime: new Date(now.getTime() + 24 * 3600_000),
+        endTime: new Date(now.getTime() + 48 * 3600_000),
+        quantity: 1,
+        unitPriceSnapshot: "10.00",
+        pricingUnitSnapshot: "PER_DAY",
+        rentalDuration: 1,
+        rentalAmount: "10.00",
+        depositAmount: "0",
+        finalAmount: "10.00",
+        paymentStatus: "OFFLINE_PENDING",
+        depositStatus: "NOT_REQUIRED",
+        status: input.status,
+        pickupLocationSnapshot: "北门",
+        returnLocationSnapshot: "北门",
+      },
+    });
+  }
+
   beforeAll(async () => {
     const campus = await rawClient!.campus.upsert({
       where: { slug: RB03_CAMPUS_SLUG },
@@ -261,6 +293,12 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     await rawClient!.enforcementAction.deleteMany({ where: { targetId: { in: userIds } } });
     await rawClient!.adminLog.deleteMany({ where: { adminId: { in: userIds } } });
     await rawClient!.order.deleteMany({ where: { OR: [{ buyerId: { in: userIds } }, { sellerId: { in: userIds } }] } });
+    // RentalOrder（owner/renter 维度，非 general Order 表）先行清理，
+    // 否则 rentalListing 删除被 FK 阻塞
+    await rawClient!.rentalOrder.deleteMany({
+      where: { OR: [{ ownerId: { in: userIds } }, { renterId: { in: userIds } }] },
+    });
+    await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: userIds } } });
     await rawClient!.errandTask.deleteMany({ where: { id: { in: errandIds } } });
     await rawClient!.product.deleteMany({ where: { id: { in: productIds } } });
     await rawClient!.serviceListing.deleteMany({ where: { id: { in: serviceIds } } });
@@ -972,4 +1010,395 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
     ).not.toBe("ACTIVE");
   });
+
+  // ============================================================
+  // RB-03 FINAL PROOF：RENTAL / PRIVACY lifecycle races
+  // ============================================================
+
+  it("RENTAL-RACE-01 suspend wins：stale requestExtension 挂起 → suspend 提交 → 拒绝，零 extension 零通知", async () => {
+    const { requestExtensionTx } = await import("@/lib/rental-order-machine");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+
+    const owner = await createFixtureUser("RB03-PR 续租出租者");
+    const renter = await createFixtureUser("RB03-PR 续租租客");
+    const listing = await createRentalRow(owner.id, "AVAILABLE");
+    rentalIds.push(listing.id);
+    const order = await createRentalOrderRow({
+      listingId: listing.id,
+      ownerId: owner.id,
+      renterId: renter.id,
+      status: "IN_RENTAL",
+    });
+    orderIds.push(order.id);
+    const expectedEndTime = order.endTime;
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      requestExtensionTx(
+        tx,
+        {
+          orderId: order.id,
+          userId: renter.id,
+          newEndTime: new Date(Date.now() + 96 * 3600_000),
+        },
+        {
+          beforeLock: async () => {
+            signalEntered();
+            await t1Gate;
+          },
+        },
+      ),
+    );
+    await entered;
+
+    const suspendResult = await suspendAccount({
+      actorId: suspenderId,
+      targetUserId: renter.id,
+      reasonCode: "MANUAL_REVIEW",
+      note: "RB-03 RENTAL-RACE-01",
+    });
+    expect(suspendResult.status).toBe("SUSPENDED");
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    // 零 durable mutation
+    const extensions = await rawClient!.rentalExtensionRequest.count({
+      where: { orderId: order.id },
+    });
+    expect(extensions).toBe(0);
+    const finalOrder = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(finalOrder.endTime.getTime()).toBe(expectedEndTime.getTime());
+    const orderNotifications = await rawClient!.notification.count({
+      where: { orderId: order.id },
+    });
+    expect(orderNotifications).toBe(0);
+  }, 30_000);
+
+  it("RENTAL-RACE-02 erase wins：COMPLETED rental 的 stale review 挂起 → erase 提交 → 拒绝，零 RentalReview", async () => {
+    const { submitRentalReviewTx } = await import("@/lib/rental-order-machine");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const owner = await createFixtureUser("RB03-PR 评价出租者");
+    const renter = await createFixtureUser("RB03-PR 评价租客");
+    await rawClient!.user.update({
+      where: { id: owner.id },
+      data: { rentalPositiveRate: 0.83 },
+    });
+    const listing = await createRentalRow(owner.id, "OFFLINE");
+    rentalIds.push(listing.id);
+    const order = await createRentalOrderRow({
+      listingId: listing.id,
+      ownerId: owner.id,
+      renterId: renter.id,
+      status: "COMPLETED",
+    });
+    orderIds.push(order.id);
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      submitRentalReviewTx(
+        tx,
+        {
+          orderId: order.id,
+          userId: renter.id,
+          overallRating: 5,
+          content: "post-erasure resurrection attempt",
+        },
+        {
+          beforeLock: async () => {
+            signalEntered();
+            await t1Gate;
+          },
+        },
+      ),
+    );
+    await entered;
+
+    await eraseAccount(renter.id);
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    // 零 RentalReview + target positive rate 不变（post-erasure 零内容复活）
+    const reviews = await rawClient!.rentalReview.count({ where: { orderId: order.id } });
+    expect(reviews).toBe(0);
+    const target = await rawClient!.user.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(Number(target.rentalPositiveRate)).toBe(0.83);
+    const orderNotifications = await rawClient!.notification.count({
+      where: { orderId: order.id },
+    });
+    expect(orderNotifications).toBe(0);
+  }, 30_000);
+
+  it("RENTAL-RACE-03 initiator erase wins：participant 锁前挂起 → erase initiator → sorted 锁后 checks-only DENY，零 dispute/hold/status-log", async () => {
+    const { initiateDisputeTx } = await import("@/lib/rental-order-machine");
+    const { withTransaction } = await import("@/lib/prisma");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const owner = await createFixtureUser("RB03-PR 纠纷出租者");
+    const initiator = await createFixtureUser("RB03-PR 纠纷发起者");
+    const listing = await createRentalRow(owner.id, "OFFLINE");
+    rentalIds.push(listing.id);
+    const order = await createRentalOrderRow({
+      listingId: listing.id,
+      ownerId: owner.id,
+      renterId: initiator.id,
+      status: "COMPLETED",
+    });
+    orderIds.push(order.id);
+
+    let signalDiscovered!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      signalDiscovered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = withTransaction((tx: Prisma.TransactionClient) =>
+      initiateDisputeTx(tx, {
+        orderId: order.id,
+        userId: initiator.id,
+        reason: "post-erasure dispute attempt",
+        evidencePhotos: [],
+        beforeSubjectLocks: async (tx2: Prisma.TransactionClient) => {
+          void tx2;
+          signalDiscovered();
+          await t1Gate;
+        },
+      }),
+    );
+    await discovered;
+
+    // initiator erase 先提交（COMPLETED 不阻断注销）
+    await eraseAccount(initiator.id);
+
+    releaseT1();
+    // sorted participant 锁取得后：checks-only initiator 复核 DENY
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    // 全部 dispute 副作用为零
+    const disputes = await rawClient!.rentalDispute.count({ where: { orderId: order.id } });
+    expect(disputes).toBe(0);
+    const holds = await rawClient!.dataHold.count({
+      where: { subjectType: "USER", subjectId: initiator.id },
+    });
+    expect(holds).toBe(0);
+    const finalOrder = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: order.id } });
+    expect(finalOrder.status).toBe("COMPLETED");
+    const statusLogs = await rawClient!.rentalOrderStatusLog.count({
+      where: { orderId: order.id },
+    });
+    expect(statusLogs).toBe(0);
+    const orderNotifications = await rawClient!.notification.count({
+      where: { orderId: order.id },
+    });
+    expect(orderNotifications).toBe(0);
+  }, 30_000);
+
+  it("EXPORT-RACE-01 erase wins：beforeLock 挂起 → erase 提交 → 拒绝，零 DATA_EXPORT PrivacyRequest，builder 未调用", async () => {
+    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const user = await createFixtureUser("RB03 导出竞态用户");
+    const builder = vi.fn().mockResolvedValue({ profile: {} });
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = executeSynchronousDataExport(user.id, builder, {
+      beforeLock: async () => {
+        signalEntered();
+        await t1Gate;
+      },
+    });
+    await entered;
+
+    await eraseAccount(user.id);
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    expect(builder).not.toHaveBeenCalled();
+    const exportRequests = await rawClient!.privacyRequest.count({
+      where: { userId: user.id, type: "DATA_EXPORT" },
+    });
+    expect(exportRequests).toBe(0);
+  }, 30_000);
+
+  it("DELETION-RACE-01 suspend wins：beforeLock 挂起 → suspend 提交 → 拒绝，零 ACCOUNT_DELETION request，零部分擦除", async () => {
+    const { createAccountDeletionRequest } = await import("@/lib/privacy/privacy-request-service");
+
+    const user = await createFixtureUser("RB03 删除竞态A");
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = createAccountDeletionRequest(user.id, {
+      beforeLock: async () => {
+        signalEntered();
+        await t1Gate;
+      },
+    });
+    await entered;
+
+    const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+    const suspendResult = await suspendAccount({
+      actorId: suspenderId,
+      targetUserId: user.id,
+      reasonCode: "MANUAL_REVIEW",
+      note: "RB-03 DELETION-RACE-01",
+    });
+    expect(suspendResult.status).toBe("SUSPENDED");
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    const deletionRequests = await rawClient!.privacyRequest.count({
+      where: { userId: user.id, type: "ACCOUNT_DELETION" },
+    });
+    expect(deletionRequests).toBe(0);
+    const finalUser = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(finalUser.status).toBe("SUSPENDED");
+    expect(finalUser.erasedAt).toBeNull();
+    expect(finalUser.name).toBe("RB03 删除竞态A");
+  }, 30_000);
+
+  it("DELETION-RACE-02 deletion wins：USER 锁内挂起 → suspend 排队（pg_locks 证明）→ 删除完成 → suspend 安全失败", async () => {
+    const { createAccountDeletionRequest } = await import("@/lib/privacy/privacy-request-service");
+    const { waitForAdvisoryLockWaiter } = await import("./helpers/lock-barrier");
+
+    console.log("[DR02] stage: fixture start");
+    const user = await createFixtureUser("RB03 删除竞态B");
+    console.log("[DR02] stage: fixture done");
+
+    let signalLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    console.log("[DR02] stage: t1 launching");
+    const t1 = createAccountDeletionRequest(user.id, {
+      afterCheck: async () => {
+        signalLocked();
+        await t1Gate;
+      },
+    });
+    await locked;
+    console.log("[DR02] stage: locked, t2 launching");
+
+    console.log("[DR02] t2 suspend starting");
+    const enforcement = await import("@/lib/enforcement/account-enforcement-service");
+    const t2 = enforcement.suspendAccount({
+      actorId: suspenderId,
+      targetUserId: user.id,
+      reasonCode: "MANUAL_REVIEW",
+      note: "RB-03 DELETION-RACE-02",
+    });
+    void t2.catch(() => undefined);
+    console.log("[DR02] t2 launched, waiting for lock waiter");
+    // pg_locks 证明 T2 真实等待 USER:<target> advisory lock
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${user.id}`]);
+    console.log("[DR02] stage: waiter detected");
+    console.log("[DR02] waiter detected");
+
+    releaseT1();
+    console.log("[DR02] t1 released");
+    const outcome = await t1;
+    if (outcome.status !== "COMPLETED") {
+      throw new Error("expected COMPLETED deletion outcome");
+    }
+    expect(outcome.status).toBe("COMPLETED");
+    expect(outcome.erasure.erasedAt).not.toBeNull();
+
+    // target 已 erased：suspend fails safely（不产生 SUSPENDED 终态覆盖）
+    console.log("[DR02] stage: awaiting t2");
+    const t2Outcome = await t2.then(
+      (v) => ({ settled: true, v }),
+      (e) => ({ settled: true as const, code: (e as { code?: string }).code }),
+    );
+    console.log("[DR02] t2 settled", JSON.stringify(t2Outcome));
+    expect((t2Outcome as { code?: string }).code).toBe("ENFORCEMENT_TARGET_NOT_FOUND");
+
+    const finalUser = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(finalUser.erasedAt).not.toBeNull();
+    expect(finalUser.lastLoginAt).toBeNull();
+    expect(finalUser.name).toBe("已注销用户");
+    expect(finalUser.status).not.toBe("SUSPENDED");
+    const request = await rawClient!.privacyRequest.findFirstOrThrow({
+      where: { userId: user.id, type: "ACCOUNT_DELETION" },
+    });
+    expect(request.status).toBe("COMPLETED");
+  }, 90_000);
+
+  it("PRIVACY-CANCEL-RACE-01 erase wins：legacy REQUESTED cancel 挂起 → erase 提交 → 拒绝，请求保持 REQUESTED", async () => {
+    const { cancelOwnPendingRequest } = await import("@/lib/privacy/privacy-request-service");
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    const user = await createFixtureUser("RB03 取消竞态用户");
+    const legacy = await rawClient!.privacyRequest.create({
+      data: { userId: user.id, type: "ACCOUNT_DELETION", status: "REQUESTED" },
+    });
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = cancelOwnPendingRequest(user.id, legacy.id, {
+      beforeLock: async () => {
+        signalEntered();
+        await t1Gate;
+      },
+    });
+    await entered;
+
+    await eraseAccount(user.id);
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    const finalRequest = await rawClient!.privacyRequest.findUniqueOrThrow({ where: { id: legacy.id } });
+    expect(finalRequest.status).toBe("REQUESTED");
+  }, 30_000);
 });

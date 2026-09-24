@@ -18,6 +18,7 @@ import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } f
 import {
   assertActiveAccountMutationAllowed,
   prepareActiveAccountMutation,
+  type ActiveAccountMutationSeams,
 } from "@/lib/governance/active-account-mutation";
 import { checkTimeConflict } from "@/repositories/rental-order-repository";
 import { withObligationGuard, type ObligationRacePoint } from "@/lib/governance/obligation-guard";
@@ -589,8 +590,9 @@ export async function cancelRentalOrderTx(
 export async function requestExtensionTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; newEndTime: Date },
+  activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId);
+  await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
 
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'PICKED_UP'] } },
@@ -834,6 +836,8 @@ export async function initiateDisputeTx(
     evidencePhotos: string[];
     /** 测试 seam：锁 + 复查之后、首个写入之前（D-RACE waiter 注入；生产不传） */
     racePoint?: (tx: Prisma.TransactionClient) => Promise<void>;
+    /** 测试 seam：sorted participant USER locks 取得之前（erase-wins 构造；生产不传） */
+    beforeSubjectLocks?: (tx: Prisma.TransactionClient) => Promise<void>;
   },
 ): Promise<RentalOrderTxError | { success: true }> {
   // ---- 步骤 1：candidate pre-read（无锁，仅用于发现锁键与 campus）----
@@ -850,6 +854,10 @@ export async function initiateDisputeTx(
   if (!candidate) return { error: "无效请求" };
 
   // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter（全局锁序）----
+  if (input.beforeSubjectLocks) {
+    await input.beforeSubjectLocks(tx);
+  }
+
   await acquireGovernanceSubjectLocks(tx, [
     { subjectType: "USER", subjectId: candidate.ownerId },
     { subjectType: "USER", subjectId: candidate.renterId },
@@ -959,8 +967,9 @@ export async function initiateDisputeTx(
 export async function submitRentalReviewTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; overallRating: number; content?: string },
+  activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId);
+  await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
 
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, status: 'COMPLETED', OR: [{ ownerId: input.userId }, { renterId: input.userId }] },
