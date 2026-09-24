@@ -427,6 +427,29 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
       },
       data: { accessories: null, currentCondition: null, knownIssues: null },
     });
+
+    // FINAL CLOSURE（BLOCKER A）：meetingLocation 是 buyer-authored——仅 buyer
+    // 注销清；seller 注销不动 buyer 数据
+    expect(txStub.order.updateMany).toHaveBeenCalledWith({
+      where: { buyerId: "user-1", meetingLocation: { not: null } },
+      data: { meetingLocation: null },
+    });
+
+    // FINAL CLOSURE（BLOCKER B）：pickup/return snapshot 是 owner-authored
+    // listing location 的 durable copy——owner 注销 REDACT；renter 注销不动
+    expect(txStub.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: {
+        ownerId: "user-1",
+        OR: [
+          { pickupLocationSnapshot: { not: ERASED_SUPPORT_TICKET_TEXT_MARKER } },
+          { returnLocationSnapshot: { not: ERASED_SUPPORT_TICKET_TEXT_MARKER } },
+        ],
+      },
+      data: {
+        pickupLocationSnapshot: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        returnLocationSnapshot: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+      },
+    });
   });
 
   it("deactivates all tradeable listings at completion (ACCOUNT_DELETION_DEACTIVATES_LISTINGS)", async () => {

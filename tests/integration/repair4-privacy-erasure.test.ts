@@ -922,6 +922,148 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     }
   });
 
+  it("FINAL CLOSURE A/B/C：meetingLocation buyer 归属 + snapshot owner REDACT + SECONDARY-04", async () => {
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { createRentalOrderTx } = await import("@/lib/rental-order-machine");
+    const { withTransaction } = await import("@/lib/prisma");
+
+    const buyer = await createFixtureUser("FC 买家");
+    const seller = await createFixtureUser("FC 卖家");
+    const owner = await createFixtureUser("FC 出租者");
+    const renter = await createFixtureUser("FC 租客");
+    const ownerB = await createFixtureUser("FC 出租者B");
+    for (const u of [buyer, seller, owner, renter, ownerB]) {
+      await createActiveMembership(u.id);
+    }
+
+    // ---- BLOCKER A fixture：buyer-authored meetingLocation ----
+    const product = await rawClient!.product.create({
+      data: {
+        title: RUN_TAG + " FC商品",
+        description: "FC描述",
+        price: "6.00",
+        locationText: "北门",
+        condition: "LIKE_NEW",
+        sellerId: seller.id,
+        campusId,
+        categoryId: productCategoryRef.id,
+      },
+    });
+    productIds.push(product.id);
+    const fcOrder = await rawClient!.order.create({
+      data: {
+        orderNo: `GOFC${RUN_TAG.slice(-6)}`,
+        type: "PRODUCT",
+        status: "COMPLETED",
+        paymentStatus: "OFFLINE_PENDING",
+        amount: "6.00",
+        meetingLocation: "宿舍A栋301-DO-NOT-SURVIVE",
+        note: null,
+        buyerId: buyer.id,
+        sellerId: seller.id,
+        productId: product.id,
+      },
+    });
+    orderIds.push(fcOrder.id);
+
+    // ---- BLOCKER B/C fixture：owner listing → createRentalOrderTx snapshot
+    //      + listing-title secondary-copy notification ----
+    const listingA = await createRentalListing(owner.id);
+    await rawClient!.rentalListing.update({
+      where: { id: listingA.id },
+      data: {
+        title: "PRIVATE-LISTING-TITLE-DO-NOT-COPY",
+        pickupLocation: "出租者宿舍B栋201",
+        returnLocation: "出租者宿舍B栋202",
+      },
+    });
+    const listingB = await createRentalListing(ownerB.id);
+
+    void renter;
+
+    // renter=renter 经生产路径下单（snapshot 形成 + owner 收到通知）
+    const orderA = await withTransaction((tx) =>
+      createRentalOrderTx(tx, {
+        rentalListingId: listingA.id,
+        startTime: new Date(Date.now() + 24 * 3600_000),
+        endTime: new Date(Date.now() + 30 * 3600_000),
+        quantity: 1,
+        userId: renter.id,
+      }),
+    );
+    expect("error" in orderA ? false : true).toBe(true);
+    const orderAId = (orderA as { orderId: string }).orderId;
+    rentalOrderIds.push(orderAId);
+
+    // renter=owner 经生产路径在 ownerB 的 listing 下单（owner 注销臂的对照：
+    // ownerA 仅是 renter，ownerB 的 snapshot 不得被清）
+    const orderB = await withTransaction((tx) =>
+      createRentalOrderTx(tx, {
+        rentalListingId: listingB.id,
+        startTime: new Date(Date.now() + 24 * 3600_000),
+        endTime: new Date(Date.now() + 30 * 3600_000),
+        quantity: 1,
+        userId: owner.id,
+      }),
+    );
+    const orderBId = (orderB as { orderId: string }).orderId;
+    rentalOrderIds.push(orderBId);
+
+    const snapshotsBefore = await rawClient!.rentalOrder.findUniqueOrThrow({
+      where: { id: orderAId },
+      select: {
+        pickupLocationSnapshot: true,
+        returnLocationSnapshot: true,
+        rentalAmount: true,
+        status: true,
+      },
+    });
+    expect(snapshotsBefore.pickupLocationSnapshot).toBe("出租者宿舍B栋201");
+    expect(snapshotsBefore.returnLocationSnapshot).toBe("出租者宿舍B栋202");
+
+    // SECONDARY-04：owner 收到的通知绝不携带 listing title 原文
+    const ownerNotifications = await rawClient!.notification.findMany({
+      where: { userId: owner.id, type: "RENTAL", title: "收到新的租赁申请" },
+    });
+    expect(ownerNotifications.length).toBeGreaterThanOrEqual(1);
+    for (const notification of ownerNotifications) {
+      expect(notification.content).not.toContain("PRIVATE-LISTING-TITLE-DO-NOT-COPY");
+      expect(notification.content).toBe("你的出租物品收到新的租赁申请，请前往出租订单中心处理。");
+    }
+
+    // ---- erase buyer：meetingLocation 清零（BLOCKER A 执行） ----
+    await eraseAccount(buyer.id);
+    const orderAfterBuyerErase = await rawClient!.order.findUniqueOrThrow({
+      where: { id: fcOrder.id },
+    });
+    expect(orderAfterBuyerErase.meetingLocation).toBeNull();
+    // 卖家注销才会清歧义 note/cancelReason；buyer 注销路径本轮仅断言
+    // meetingLocation 未被 seller 侧逻辑误清（结构对照）
+    expect(orderAfterBuyerErase.amount.toFixed(2)).toBe("6.00");
+
+    // 终局化两个订单（erase 前置：active rental order 会阻断注销）
+    await rawClient!.rentalOrder.updateMany({
+      where: { id: { in: [orderAId, orderBId] } },
+      data: { status: "COMPLETED", completedAt: new Date() },
+    });
+
+    // ---- erase owner：own snapshot REDACT；他人 listing snapshot 不动 ----
+    await eraseAccount(owner.id);
+
+    const orderAAfter = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: orderAId } });
+    expect(orderAAfter.pickupLocationSnapshot).toBe(ERASED_MARKER);
+    expect(orderAAfter.returnLocationSnapshot).toBe(ERASED_MARKER);
+    // 交易结构不变
+    expect(orderAAfter.rentalAmount.toFixed(2)).toBe(snapshotsBefore.rentalAmount.toFixed(2));
+    // 终局化后的结构状态保持（不被 erasure 改写）
+    expect(orderAAfter.status).toBe("COMPLETED");
+
+    // ownerA 在 orderB 只是 renter——ownerB 的 listing snapshot 不得被清
+    const orderBAfter = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: orderBId } });
+    expect(orderBAfter.pickupLocationSnapshot).toBe("北门");
+    expect(orderBAfter.returnLocationSnapshot).toBe("北门");
+  });
+
   it("ASSET-03：profile 头像替换的旧资源标记在同一事务内（回滚 = 零标记）", async () => {
     const { updateOwnProfileTx } = await import("@/lib/user/profile-service");
     const { withTransaction } = await import("@/lib/prisma");

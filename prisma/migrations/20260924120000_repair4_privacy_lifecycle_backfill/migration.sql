@@ -383,6 +383,16 @@ WHERE up."reason" IS NOT NULL
       )
   );
 
+-- D10a. Order.meetingLocation: buyer-authored (productOrderFormSchema /
+--       serviceOrderFormSchema → create*OrderTx); seller erasure never
+--       touches the buyer's data.
+UPDATE "Order" o2
+SET "meetingLocation" = NULL
+WHERE o2."meetingLocation" IS NOT NULL
+  AND o2."buyerId" IN (
+    SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+  );
+
 -- D10. RentalHandoverRecord: accessories / currentCondition / knownIssues
 --      are owner/renter dual-writable free text with no per-field author
 --      attribution → participant-erasure rule (same as General Order):
@@ -404,6 +414,22 @@ WHERE EXISTS (
     rh."accessories" IS NOT NULL
     OR rh."currentCondition" IS NOT NULL
     OR rh."knownIssues" IS NOT NULL
+  );
+
+-- D11. RentalOrder location snapshots: owner-authored listing location
+--      durable secondary copies (RentalListing.pickupLocation /
+--      returnLocation → createRentalOrderTx). Owner erasure → REDACT
+--      marker; renter erasure never touches owner data. Transaction
+--      structure (amounts / status / time window) retained.
+UPDATE "RentalOrder" ro2
+SET "pickupLocationSnapshot" = '（该内容已随账号注销删除）',
+    "returnLocationSnapshot" = '（该内容已随账号注销删除）'
+WHERE ro2."ownerId" IN (
+    SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+  )
+  AND (
+    ro2."pickupLocationSnapshot" <> '（该内容已随账号注销删除）'
+    OR ro2."returnLocationSnapshot" <> '（该内容已随账号注销删除）'
   );
 
 COMMIT;

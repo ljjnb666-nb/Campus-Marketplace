@@ -8,6 +8,7 @@ import {
   DECLARED_NON_PERSONAL_FIELDS,
   ERASURE_FIELD_COVERAGE,
   ERASURE_IMPLEMENTATION_MODELS,
+  SECONDARY_COPY_FIELD_EXPECTATIONS,
   ERASURE_MODES,
   FROZEN_PERSONAL_MODELS,
   GOVERNANCE_FIELD_POLICIES,
@@ -21,6 +22,7 @@ import {
   getFieldPrivacyPolicy,
   getModelPrivacyPolicy,
 } from "@/lib/privacy/privacy-data-registry";
+import { readFileSync as readValidatorFile } from "node:fs";
 
 /**
  * REGISTRY-01/02：隐私分类注册表 completeness + drift gate。
@@ -236,6 +238,131 @@ describe("REGISTRY-06/07/08：persisted user-input 字段全生命周期覆盖�
         policy === null || policy.classification !== "USER_AUTHORED_CONTENT",
         `${model}.${field} 是机器/结构字段，不得分类为 USER_AUTHORED_CONTENT`,
       ).toBe(true);
+    }
+  });
+});
+
+describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 validator）", () => {
+  const readValidator = (relPath: string): string =>
+    readValidatorFile(resolve(process.cwd(), "src", "validators", relPath), "utf8");
+
+  const orderValidator = readValidator("order.ts");
+  const trustValidator = readValidator("trust.ts");
+  const rentalValidator = readValidator("rental.ts");
+
+  it("关键 validator keys 真实存在（source 不是虚构 symbol）", () => {
+    // productOrderFormSchema / serviceOrderFormSchema（order.ts）
+    for (const key of ["meetingLocation", "note"]) {
+      expect(orderValidator.includes(key + ":"), `order.ts 缺少 ${key}`).toBe(true);
+    }
+    // reviewFormSchema（trust.ts）
+    for (const key of ["content:", "tags:"]) {
+      expect(trustValidator.includes(key), `trust.ts 缺少 ${key}`).toBe(true);
+    }
+    // rentalOrderCreateSchema / rentalCancelSchema（rental.ts）
+    for (const key of ["renterNote:", "cancellationNote:"]) {
+      expect(rentalValidator.includes(key), `rental.ts 缺少 ${key}`).toBe(true);
+    }
+    // rentalPickupConfirmSchema（rental.ts）
+    for (const key of ["currentCondition:", "knownIssues:"]) {
+      expect(rentalValidator.includes(key), `rental.ts 缺少 ${key}`).toBe(true);
+    }
+  });
+
+  it("accessories 不是当前 rentalPickupConfirmSchema 输入（HISTORICAL_ONLY）", () => {
+    // rental.ts 无 accessories 输入（唯一 accessoriesComplete 属 damageClaim
+    // 评分面，非 handover）
+    expect(
+      /rentalPickupConfirmSchema[\s\S]{0,400}accessories:/.test(rentalValidator) ||
+        /accessories:\s*z\./.test(rentalValidator),
+    ).toBe(false);
+    // 且不在当前生产输入清单中
+    expect(
+      USER_INPUT_FIELD_EXPECTATIONS.some(
+        (entry) => entry.model === "RentalHandoverRecord" && entry.field === "accessories",
+      ),
+    ).toBe(false);
+    // 但保护仍在：field policy + erasure coverage 双登记
+    expect(getFieldPrivacyPolicy("RentalHandoverRecord", "accessories")).not.toBeNull();
+    expect(ERASURE_FIELD_COVERAGE.has("RentalHandoverRecord.accessories")).toBe(true);
+  });
+
+  it("RentalExtensionRequest.ownerNote 无当前生产 writer（HISTORICAL_ONLY）", () => {
+    const machineSource = readValidatorFile(
+      resolve(process.cwd(), "src", "lib", "rental-order-machine.ts"),
+      "utf8",
+    );
+    // approve/reject extension 的 canonical input 只有 id+userId
+    expect(
+      /input:\s*\{\s*extensionRequestId:\s*string;\s*userId:\s*string\s*\}/.test(machineSource),
+    ).toBe(true);
+    // 不入当前生产输入清单，但保护保留
+    expect(
+      USER_INPUT_FIELD_EXPECTATIONS.some(
+        (entry) => entry.model === "RentalExtensionRequest" && entry.field === "ownerNote",
+      ),
+    ).toBe(false);
+    expect(getFieldPrivacyPolicy("RentalExtensionRequest", "ownerNote")).not.toBeNull();
+    expect(ERASURE_FIELD_COVERAGE.has("RentalExtensionRequest.ownerNote")).toBe(true);
+  });
+
+  it("SECONDARY_COPY_FIELD_EXPECTATIONS：映射合法且 target policy 与 registry 一致", () => {
+    expect(SECONDARY_COPY_FIELD_EXPECTATIONS.length).toBeGreaterThanOrEqual(3);
+
+    for (const mapping of SECONDARY_COPY_FIELD_EXPECTATIONS) {
+      // source 是已登记的 user-authored 面
+      const sourcePolicy = getFieldPrivacyPolicy(mapping.sourceModel, mapping.sourceField);
+      expect(
+        sourcePolicy,
+        `secondary-copy source ${mapping.sourceModel}.${mapping.sourceField} 未分类`,
+      ).not.toBeNull();
+      if (mapping.policy === "DURABLE_REDACT") {
+        // durable copy：target 字段分类 + REDACT
+        const targetPolicy = getFieldPrivacyPolicy(mapping.targetModel, mapping.targetField);
+        expect(targetPolicy).not.toBeNull();
+        expect(targetPolicy!.erasure).toBe("REDACT");
+      }
+      if (mapping.policy === "FORBIDDEN") {
+        // forbidden copy：source 必须 secondaryCopyAllowed=false
+        expect(sourcePolicy!.secondaryCopyAllowed).toBe(false);
+      }
+    }
+
+    // 冻结的三条映射精确存在
+    expect(SECONDARY_COPY_FIELD_EXPECTATIONS).toContainEqual({
+      sourceModel: "RentalListing",
+      sourceField: "pickupLocation",
+      targetModel: "RentalOrder",
+      targetField: "pickupLocationSnapshot",
+      policy: "DURABLE_REDACT",
+    });
+    expect(SECONDARY_COPY_FIELD_EXPECTATIONS).toContainEqual({
+      sourceModel: "RentalListing",
+      sourceField: "returnLocation",
+      targetModel: "RentalOrder",
+      targetField: "returnLocationSnapshot",
+      policy: "DURABLE_REDACT",
+    });
+    expect(SECONDARY_COPY_FIELD_EXPECTATIONS).toContainEqual({
+      sourceModel: "RentalListing",
+      sourceField: "title",
+      targetModel: "Notification",
+      targetField: "content",
+      policy: "FORBIDDEN",
+    });
+  });
+
+  it("snapshot / meetingLocation 的 registry 声明（BLOCKER A/B 合同锁）", () => {
+    const meetingLocation = getFieldPrivacyPolicy("Order", "meetingLocation")!;
+    expect(meetingLocation.classification).toBe("USER_AUTHORED_CONTENT");
+    expect(meetingLocation.erasure).toBe("CLEAR");
+
+    for (const field of ["pickupLocationSnapshot", "returnLocationSnapshot"]) {
+      const policy = getFieldPrivacyPolicy("RentalOrder", field)!;
+      expect(policy.classification).toBe("TRANSACTION_HISTORY");
+      expect(policy.erasure).toBe("REDACT");
+      expect(policy.secondaryCopyAllowed).toBe(false);
+      expect(policy.logSafe).toBe(false);
     }
   });
 });

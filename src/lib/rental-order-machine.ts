@@ -278,11 +278,15 @@ export async function createRentalOrderTx(
       note: '租客提交租赁申请',
     });
 
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER C）：listing.title 是
+    // USER_AUTHORED_CONTENT（secondaryCopyAllowed=NO）——通知只做事件信号，
+    // 绝不复制 listing 标题/描述/地点/renterNote（SECONDARY_COPY_FIELD_
+    // EXPECTATIONS: RentalListing.title → Notification.content = FORBIDDEN）。
     await createNotifications(tx, [{
       userId: listing.ownerId,
       type: 'RENTAL',
       title: '收到新的租赁申请',
-      content: `"${listing.title}" 收到新的租赁申请，请前往出租订单中心处理。`,
+      content: '你的出租物品收到新的租赁申请，请前往出租订单中心处理。',
     }]);
 
     return { orderId: order.id };

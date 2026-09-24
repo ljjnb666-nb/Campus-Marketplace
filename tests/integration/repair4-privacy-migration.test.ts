@@ -314,6 +314,61 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "REJECTED", operatorId: erased.id, note: "历史日志备注" },
       });
 
+      // FINAL CLOSURE BLOCKER B：erased owner 的 rentalOrder 携带原地点 snapshot
+      const erasedRentalListing = await db.rentalListing.create({
+        data: {
+          title: "私人租赁标题-DO-NOT-SURVIVE",
+          description: "private-rental-description",
+          condition: "LIKE_NEW",
+          price: "1.00",
+          pricingUnit: "PER_DAY",
+          depositAmount: "0",
+          minimumDuration: 1,
+          maximumDuration: 5,
+          ownerId: erased.id,
+          campusId: campus.id,
+          categoryId: rentalCategory.id,
+          pickupLocation: "私人取货地点",
+          returnLocation: "私人归还地点",
+          status: "OFFLINE",
+        },
+      });
+      const erasedOwnedOrder = await db.rentalOrder.create({
+        data: {
+          orderNumber: `ROMIG2${randomUUID().slice(0, 6)}`,
+          rentalListingId: erasedRentalListing.id,
+          ownerId: erased.id,
+          renterId: survivor.id,
+          startTime: new Date(),
+          endTime: new Date(),
+          unitPriceSnapshot: "1.00",
+          pricingUnitSnapshot: "PER_DAY",
+          rentalDuration: 1,
+          rentalAmount: "1.00",
+          depositAmount: "0",
+          finalAmount: "1.00",
+          paymentStatus: "OFFLINE_PENDING",
+          depositStatus: "NOT_REQUIRED",
+          status: "COMPLETED",
+          pickupLocationSnapshot: "私人取货地点-KEEP-ORIG-FOR-MIGRATION",
+          returnLocationSnapshot: "私人归还地点-KEEP-ORIG-FOR-MIGRATION",
+        },
+      });
+
+      // FINAL CLOSURE BLOCKER A：erased buyer 的 Order.meetingLocation 原值
+      await db.order.create({
+        data: {
+          orderNo: `GOMIG2${randomUUID().slice(0, 6)}`,
+          type: "PRODUCT",
+          status: "COMPLETED",
+          paymentStatus: "OFFLINE_PENDING",
+          amount: "1.00",
+          meetingLocation: "宿舍A栋301-DO-NOT-SURVIVE",
+          buyerId: erased.id,
+          sellerId: survivor.id,
+        },
+      });
+
       // RentalHandoverRecord participant-erasure（renter=erased）
       await db.rentalHandoverRecord.create({
         data: {
@@ -540,6 +595,27 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       const backfilledDispute = await db.rentalDispute.findFirstOrThrow({ where: { initiatorId: erased.id } });
       expect(backfilledDispute.reason).toBe(ERASED_MARKER);
       expect(backfilledDispute.evidencePhotos).toEqual([]);
+
+      // ---- FINAL CLOSURE：meetingLocation（buyer 归属）+ snapshots（owner 归属）----
+      const meetingOrderAfter = await db.order.findFirstOrThrow({
+        where: { orderNo: { startsWith: "GOMIG2" } },
+      });
+      expect(meetingOrderAfter.buyerId).toBe(erased.id);
+      expect(meetingOrderAfter.meetingLocation).toBeNull();
+
+      const erasedOwnedOrderAfter = await db.rentalOrder.findUniqueOrThrow({
+        where: { id: erasedOwnedOrder.id },
+      });
+      expect(erasedOwnedOrderAfter.pickupLocationSnapshot).toBe("（该内容已随账号注销删除）");
+      expect(erasedOwnedOrderAfter.returnLocationSnapshot).toBe("（该内容已随账号注销删除）");
+      expect(erasedOwnedOrderAfter.rentalAmount.toFixed(2)).toBe("1.00");
+      expect(erasedOwnedOrderAfter.status).toBe("COMPLETED");
+
+      // renter=erased 不清 owner（survivor）数据：原地点保留
+      const survivorOwnedOrderAfter = await db.rentalOrder.findUniqueOrThrow({
+        where: { id: rentalOrder.id },
+      });
+      expect(survivorOwnedOrderAfter.pickupLocationSnapshot).toBe("北门");
 
       // ---- 对照用户权威字段绝不被触碰（历史通知 redact 除外） ----
       const survivorAfter = await db.user.findUniqueOrThrow({ where: { id: survivor.id } });

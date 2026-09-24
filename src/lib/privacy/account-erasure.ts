@@ -293,6 +293,15 @@ export async function eraseAccount(
       data: { note: null, cancelReason: null },
     });
 
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER A）：meetingLocation 是
+    // buyer-authored（productOrderFormSchema/serviceOrderFormSchema →
+    // create*OrderTx），作者权威 = buyerId——仅 buyer 注销清；seller 注销
+    // 不动 buyer 的数据。
+    await client.order.updateMany({
+      where: { buyerId: userId, meetingLocation: { not: null } },
+      data: { meetingLocation: null },
+    });
+
     // Repair 4 / RB-29：租赁订单 free text 按精确作者归属清理；
     // cancellationReason 枚举是机器类别（非 raw free text），保留。
     await client.rentalOrder.updateMany({
@@ -438,6 +447,24 @@ export async function eraseAccount(
         ],
       },
       data: { accessories: null, currentCondition: null, knownIssues: null },
+    });
+
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER B）：pickup/returnLocationSnapshot
+    // 是 owner-authored listing location 的 durable secondary copy——owner
+    // 注销后原文以 REDACT 哨兵收敛；renter 注销不动 owner 数据。交易结构
+    // 字段（金额/状态/时间窗）保留。
+    await client.rentalOrder.updateMany({
+      where: {
+        ownerId: userId,
+        OR: [
+          { pickupLocationSnapshot: { not: ERASED_USER_CONTENT_MARKER } },
+          { returnLocationSnapshot: { not: ERASED_USER_CONTENT_MARKER } },
+        ],
+      },
+      data: {
+        pickupLocationSnapshot: ERASED_USER_CONTENT_MARKER,
+        returnLocationSnapshot: ERASED_USER_CONTENT_MARKER,
+      },
     });
 
     // RentalUnavailablePeriod：owner（经 listing FK）管理的不可租时段；

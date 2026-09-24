@@ -247,9 +247,19 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   // ---- Order ----
   field("Order", "note", USER_CONTENT_FIELD),
   field("Order", "cancelReason", USER_CONTENT_FIELD),
+  // meetingLocation 是 buyer-authored（productOrderFormSchema /
+  // serviceOrderFormSchema → createProductOrderTx/createServiceOrderTx）；
+  // selfExport 与当前 Order export 合同一致（SAFE_SUBSET）
+  field("Order", "meetingLocation", entry("USER_AUTHORED_CONTENT", "SAFE_SUBSET", "CLEAR", false, false)),
   // ---- RentalOrder ----
   field("RentalOrder", "renterNote", USER_CONTENT_FIELD),
   field("RentalOrder", "cancellationNote", USER_CONTENT_FIELD),
+  // pickup/returnLocationSnapshot 是 owner-authored listing location 的
+  // durable secondary copy（FINAL SECONDARY-COPY CLOSURE BLOCKER B）：
+  // row/transaction history 保留（REDACT 哨兵），owner 注销后原始地点
+  // 不得继续保存；renter 注销不清 owner 数据
+  field("RentalOrder", "pickupLocationSnapshot", entry("TRANSACTION_HISTORY", "SAFE_SUBSET", "REDACT", false, false)),
+  field("RentalOrder", "returnLocationSnapshot", entry("TRANSACTION_HISTORY", "SAFE_SUBSET", "REDACT", false, false)),
   // ---- RentalOrderStatusLog：只允许 system-generated description ----
   field("RentalOrderStatusLog", "note", entry("TRANSACTION_HISTORY", "EXCLUDE", "CLEAR", false, false)),
   // ---- RentalDispute ----
@@ -411,56 +421,112 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
 export type UserInputFieldExpectation = {
   model: string;
   field: string;
-  source: string;
+  /**
+   * 真实当前生产 writer（validator schema key / canonical service input）。
+   * 同一字段有多个 writer 时列出全部；每个 symbol 必须真实存在
+   * （REGISTRY-09 CURRENT_SOURCE_TRUTH 断言）。
+   */
+  sources: string[];
 };
 
 export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   // Product（productFormSchema / product actions）
-  { model: "Product", field: "title", source: "productFormSchema.title" },
-  { model: "Product", field: "description", source: "productFormSchema.description" },
-  { model: "Product", field: "locationText", source: "productFormSchema.locationText" },
+  { model: "Product", field: "title", sources: ["productFormSchema.title"] },
+  { model: "Product", field: "description", sources: ["productFormSchema.description"] },
+  { model: "Product", field: "locationText", sources: ["productFormSchema.locationText"] },
   // ErrandTask（errand form / errand actions）
-  { model: "ErrandTask", field: "title", source: "errandFormSchema.title" },
-  { model: "ErrandTask", field: "description", source: "errandFormSchema.description" },
-  { model: "ErrandTask", field: "pickupLocation", source: "errandFormSchema.pickupLocation" },
-  { model: "ErrandTask", field: "deliveryLocation", source: "errandFormSchema.deliveryLocation" },
-  { model: "ErrandTask", field: "contactNote", source: "errandFormSchema.contactNote" },
+  { model: "ErrandTask", field: "title", sources: ["errandFormSchema.title"] },
+  { model: "ErrandTask", field: "description", sources: ["errandFormSchema.description"] },
+  { model: "ErrandTask", field: "pickupLocation", sources: ["errandFormSchema.pickupLocation"] },
+  { model: "ErrandTask", field: "deliveryLocation", sources: ["errandFormSchema.deliveryLocation"] },
+  { model: "ErrandTask", field: "contactNote", sources: ["errandFormSchema.contactNote"] },
   // ServiceListing（service form / service actions）
-  { model: "ServiceListing", field: "title", source: "serviceFormSchema.title" },
-  { model: "ServiceListing", field: "description", source: "serviceFormSchema.description" },
-  { model: "ServiceListing", field: "locationText", source: "serviceFormSchema.locationText" },
-  { model: "ServiceListing", field: "availableSchedule", source: "serviceFormSchema.availableSchedule" },
-  { model: "ServiceListing", field: "coverImageUrl", source: "serviceFormSchema.coverImageUrl" },
+  { model: "ServiceListing", field: "title", sources: ["serviceFormSchema.title"] },
+  { model: "ServiceListing", field: "description", sources: ["serviceFormSchema.description"] },
+  { model: "ServiceListing", field: "locationText", sources: ["serviceFormSchema.locationText"] },
+  { model: "ServiceListing", field: "availableSchedule", sources: ["serviceFormSchema.availableSchedule"] },
+  { model: "ServiceListing", field: "coverImageUrl", sources: ["serviceFormSchema.coverImageUrl"] },
   // RentalListing（rental form / rental-listing actions）
-  { model: "RentalListing", field: "title", source: "rentalFormSchema.title" },
-  { model: "RentalListing", field: "description", source: "rentalFormSchema.description" },
-  { model: "RentalListing", field: "brand", source: "rentalFormSchema.brand" },
-  { model: "RentalListing", field: "model", source: "rentalFormSchema.model" },
-  { model: "RentalListing", field: "pickupLocation", source: "rentalFormSchema.pickupLocation" },
-  { model: "RentalListing", field: "returnLocation", source: "rentalFormSchema.returnLocation" },
-  { model: "RentalListing", field: "usageRules", source: "rentalFormSchema.usageRules" },
-  { model: "RentalListing", field: "damagePolicy", source: "rentalFormSchema.damagePolicy" },
-  { model: "RentalListing", field: "overduePolicy", source: "rentalFormSchema.overduePolicy" },
+  { model: "RentalListing", field: "title", sources: ["rentalFormSchema.title"] },
+  { model: "RentalListing", field: "description", sources: ["rentalFormSchema.description"] },
+  { model: "RentalListing", field: "brand", sources: ["rentalFormSchema.brand"] },
+  { model: "RentalListing", field: "model", sources: ["rentalFormSchema.model"] },
+  { model: "RentalListing", field: "pickupLocation", sources: ["rentalFormSchema.pickupLocation"] },
+  { model: "RentalListing", field: "returnLocation", sources: ["rentalFormSchema.returnLocation"] },
+  { model: "RentalListing", field: "usageRules", sources: ["rentalFormSchema.usageRules"] },
+  { model: "RentalListing", field: "damagePolicy", sources: ["rentalFormSchema.damagePolicy"] },
+  { model: "RentalListing", field: "overduePolicy", sources: ["rentalFormSchema.overduePolicy"] },
   // RentalHandoverRecord（rentalPickupConfirmSchema：owner/renter 双方可写，
-  // 无 per-field author attribution → participant-erasure 规则清空）
-  { model: "RentalHandoverRecord", field: "accessories", source: "rentalPickupConfirmSchema.accessories" },
-  { model: "RentalHandoverRecord", field: "currentCondition", source: "rentalPickupConfirmSchema.currentCondition" },
-  { model: "RentalHandoverRecord", field: "knownIssues", source: "rentalPickupConfirmSchema.knownIssues" },
-  // RentalDamageClaim / Extension / Return / Unavailable / Blocked / Dispute
-  { model: "RentalDamageClaim", field: "damageDescription", source: "rentalDamageClaimSchema.damageDescription" },
-  { model: "RentalDamageClaim", field: "renterNote", source: "rentalDamageRespondSchema.renterNote" },
-  { model: "RentalExtensionRequest", field: "ownerNote", source: "rentalExtensionRespondSchema.ownerNote" },
-  { model: "RentalReturnRecord", field: "inspectionNote", source: "rentalReturnConfirmSchema.inspectionNote" },
-  { model: "RentalUnavailablePeriod", field: "reason", source: "rentalUnavailablePeriodForm.reason" },
-  { model: "BlockedUser", field: "reason", source: "blockUserAction.reason" },
-  { model: "RentalDispute", field: "reason", source: "initiateDisputeSchema.reason" },
-  { model: "Report", field: "detail", source: "reportFormSchema.detail" },
-  { model: "Review", field: "content", source: "reviewFormSchema.content" },
-  { model: "RentalReview", field: "content", source: "rentalReviewFormSchema.content" },
-  { model: "Message", field: "content", source: "sendMessageAction.content" },
-  { model: "SupportTicket", field: "subject", source: "supportTicketFormSchema.subject" },
-  { model: "SupportTicket", field: "description", source: "supportTicketFormSchema.description" },
-  { model: "Appeal", field: "statement", source: "appealFormSchema.statement" },
+  // 无 per-field author attribution → participant-erasure 规则清空）。
+  // accessories 无当前生产 writer（schema 只有 currentCondition/knownIssues），
+  // 属 HISTORICAL_ONLY——保留 field policy 与 erasure coverage，不入本清单。
+  { model: "RentalHandoverRecord", field: "currentCondition", sources: ["rentalPickupConfirmSchema.currentCondition"] },
+  { model: "RentalHandoverRecord", field: "knownIssues", sources: ["rentalPickupConfirmSchema.knownIssues"] },
+  // RentalDamageClaim / Extension / Return / Unavailable
+  { model: "RentalDamageClaim", field: "damageDescription", sources: ["rentalDamageClaimSchema.damageDescription"] },
+  { model: "RentalDamageClaim", field: "renterNote", sources: ["rentalDamageRespondSchema.renterNote"] },
+  // ownerNote 无当前生产 writer（approveExtensionTx/rejectExtensionTx input
+  // 仅 id+userId）→ HISTORICAL_ONLY，保留 policy 与 erasure coverage。
+  { model: "RentalReturnRecord", field: "inspectionNote", sources: ["rentalReturnConfirmSchema.inspectionNote"] },
+  { model: "RentalUnavailablePeriod", field: "reason", sources: ["rentalUnavailablePeriodForm.reason"] },
+  // Order（productOrderFormSchema / serviceOrderFormSchema）
+  { model: "Order", field: "meetingLocation", sources: ["productOrderFormSchema.meetingLocation", "serviceOrderFormSchema.meetingLocation"] },
+  { model: "Order", field: "note", sources: ["productOrderFormSchema.note", "serviceOrderFormSchema.note"] },
+  { model: "Order", field: "cancelReason", sources: ["orderCancelAction.cancelReason"] },
+  // Review / RentalReview
+  { model: "Review", field: "content", sources: ["reviewFormSchema.content"] },
+  { model: "Review", field: "tags", sources: ["reviewFormSchema.tags"] },
+  { model: "RentalReview", field: "content", sources: ["rentalReviewFormSchema.content"] },
+  // RentalOrder free text
+  { model: "RentalOrder", field: "renterNote", sources: ["rentalOrderCreateSchema.renterNote"] },
+  { model: "RentalOrder", field: "cancellationNote", sources: ["rentalCancelSchema.cancellationNote"] },
+  // Message / Support / Appeal / Report / Dispute / Blocked
+  { model: "Message", field: "content", sources: ["sendMessageAction.content"] },
+  { model: "SupportTicket", field: "subject", sources: ["supportTicketFormSchema.subject"] },
+  { model: "SupportTicket", field: "description", sources: ["supportTicketFormSchema.description"] },
+  { model: "Appeal", field: "statement", sources: ["appealFormSchema.statement"] },
+  { model: "Report", field: "detail", sources: ["reportFormSchema.detail"] },
+  { model: "RentalDispute", field: "reason", sources: ["initiateDisputeSchema.reason"] },
+  { model: "BlockedUser", field: "reason", sources: ["blockUserAction.reason"] },
+];
+
+/**
+ * SECONDARY-COPY 面（FINAL SECONDARY-COPY CLOSURE）：user-authored source →
+ * durable derived copy 的映射登记。
+ * - DURABLE_REDACT：copy 行保留（transaction history），owner 注销后原文以
+ *   REDACT 哨兵收敛（当前 erasure + migration 双侧执行）
+ * - FORBIDDEN：绝不允许写入派生面（未来写路径必须 generic system copy）
+ */
+export type SecondaryCopyExpectation = {
+  sourceModel: string;
+  sourceField: string;
+  targetModel: string;
+  targetField: string;
+  policy: "DURABLE_REDACT" | "FORBIDDEN";
+};
+
+export const SECONDARY_COPY_FIELD_EXPECTATIONS: SecondaryCopyExpectation[] = [
+  {
+    sourceModel: "RentalListing",
+    sourceField: "pickupLocation",
+    targetModel: "RentalOrder",
+    targetField: "pickupLocationSnapshot",
+    policy: "DURABLE_REDACT",
+  },
+  {
+    sourceModel: "RentalListing",
+    sourceField: "returnLocation",
+    targetModel: "RentalOrder",
+    targetField: "returnLocationSnapshot",
+    policy: "DURABLE_REDACT",
+  },
+  {
+    sourceModel: "RentalListing",
+    sourceField: "title",
+    targetModel: "Notification",
+    targetField: "content",
+    policy: "FORBIDDEN",
+  },
 ];
 
 /**
@@ -496,7 +562,8 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "RentalListing.damagePolicy",
   "RentalListing.overduePolicy",
   "RentalListing.images",
-  // RentalHandoverRecord（participant erasure）
+  // RentalHandoverRecord（participant erasure；accessories 为 HISTORICAL_ONLY
+  // 但 erasure/migration 仍执行清空——保留执行登记）
   "RentalHandoverRecord.accessories",
   "RentalHandoverRecord.currentCondition",
   "RentalHandoverRecord.knownIssues",
@@ -524,8 +591,11 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "Appeal.statement",
   "Order.note",
   "Order.cancelReason",
+  "Order.meetingLocation",
   "RentalOrder.renterNote",
   "RentalOrder.cancellationNote",
+  "RentalOrder.pickupLocationSnapshot",
+  "RentalOrder.returnLocationSnapshot",
   "RentalOrderStatusLog.note",
 ]);
 
