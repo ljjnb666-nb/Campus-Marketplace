@@ -84,6 +84,9 @@ const txStub = {
   rentalReturnRecord: {
     updateMany: vi.fn(),
   },
+  rentalHandoverRecord: {
+    updateMany: vi.fn(),
+  },
   rentalUnavailablePeriod: {
     updateMany: vi.fn(),
   },
@@ -161,6 +164,7 @@ beforeEach(() => {
   txStub.rentalDamageClaim.updateMany.mockResolvedValue({ count: 1 });
   txStub.rentalExtensionRequest.updateMany.mockResolvedValue({ count: 1 });
   txStub.rentalReturnRecord.updateMany.mockResolvedValue({ count: 1 });
+  txStub.rentalHandoverRecord.updateMany.mockResolvedValue({ count: 1 });
   txStub.rentalUnavailablePeriod.updateMany.mockResolvedValue({ count: 1 });
   txStub.dataHold.findMany.mockResolvedValue([]);
 });
@@ -330,13 +334,23 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
     // ErrandTask：publisher 唯一作者；description 非空 → marker，contactNote → null
     expect(txStub.errandTask.updateMany).toHaveBeenCalledWith({
       where: { publisherId: "user-1" },
-      data: { description: ERASED_SUPPORT_TICKET_TEXT_MARKER, contactNote: null },
+      data: {
+        title: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        pickupLocation: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        deliveryLocation: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        contactNote: null,
+      },
     });
 
     // Product：description marker + ProductImage 内容行删除
     expect(txStub.product.updateMany).toHaveBeenCalledWith({
       where: { sellerId: "user-1" },
-      data: { description: ERASED_SUPPORT_TICKET_TEXT_MARKER },
+      data: {
+        title: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        locationText: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+      },
     });
     expect(txStub.productImage.deleteMany).toHaveBeenCalledWith({
       where: { product: { sellerId: "user-1" } },
@@ -345,13 +359,29 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
     // ServiceListing：description marker + coverImageUrl null
     expect(txStub.serviceListing.updateMany).toHaveBeenCalledWith({
       where: { providerId: "user-1" },
-      data: { description: ERASED_SUPPORT_TICKET_TEXT_MARKER, coverImageUrl: null },
+      data: {
+        title: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        locationText: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        availableSchedule: null,
+        coverImageUrl: null,
+      },
     });
 
     // RentalListing：description marker + RentalListingImage 内容行删除
     expect(txStub.rentalListing.updateMany).toHaveBeenCalledWith({
       where: { ownerId: "user-1" },
-      data: { description: ERASED_SUPPORT_TICKET_TEXT_MARKER },
+      data: {
+        title: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        description: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        pickupLocation: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        returnLocation: ERASED_SUPPORT_TICKET_TEXT_MARKER,
+        brand: null,
+        model: null,
+        usageRules: null,
+        damagePolicy: null,
+        overduePolicy: null,
+      },
     });
     expect(txStub.rentalListingImage.deleteMany).toHaveBeenCalledWith({
       where: { rentalListing: { ownerId: "user-1" } },
@@ -383,6 +413,19 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
     expect(txStub.rentalUnavailablePeriod.updateMany).toHaveBeenCalledWith({
       where: { rentalListing: { ownerId: "user-1" }, reason: { not: null } },
       data: { reason: null },
+    });
+
+    // RentalHandoverRecord：participant erasure（任一参与者注销即清无归属文本）
+    expect(txStub.rentalHandoverRecord.updateMany).toHaveBeenCalledWith({
+      where: {
+        order: { OR: [{ ownerId: "user-1" }, { renterId: "user-1" }] },
+        OR: [
+          { accessories: { not: null } },
+          { currentCondition: { not: null } },
+          { knownIssues: { not: null } },
+        ],
+      },
+      data: { accessories: null, currentCondition: null, knownIssues: null },
     });
   });
 

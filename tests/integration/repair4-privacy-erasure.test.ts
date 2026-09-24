@@ -642,7 +642,17 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     const rentalListing = await createRentalListing(owner.id);
     await rawClient!.rentalListing.update({
       where: { id: rentalListing.id },
-      data: { description: "private-rental-description" },
+      data: {
+        title: "私人租赁标题",
+        description: "private-rental-description",
+        brand: "private-brand",
+        model: "private-model",
+        pickupLocation: "私人取货地点",
+        returnLocation: "私人归还地点",
+        usageRules: "private-rules",
+        damagePolicy: "private-damage-policy",
+        overduePolicy: "private-overdue-policy",
+      },
     });
     await rawClient!.rentalListingImage.create({
       data: { rentalListingId: rentalListing.id, url: "canary-rental-image", sortOrder: 0 },
@@ -661,10 +671,10 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
 
     const product = await rawClient!.product.create({
       data: {
-        title: RUN_TAG + " 店主商品",
+        title: "私人商品标题-DO-NOT-SURVIVE",
         description: "private-product-description",
         price: "3.00",
-        locationText: "北门",
+        locationText: "宿舍A栋301-DO-NOT-SURVIVE",
         condition: "LIKE_NEW",
         sellerId: owner.id,
         campusId,
@@ -689,13 +699,14 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
 
     const serviceListing = await rawClient!.serviceListing.create({
       data: {
-        title: RUN_TAG + " 店主服务",
+        title: "私人服务标题",
         description: "private-service-description",
+        locationText: "私人服务地点",
+        availableSchedule: "每晚22点后微信联系",
         coverImageUrl: "canary-service-cover",
         categoryId: serviceCategoryRef.id,
         price: "8.00",
         pricingUnit: "PER_SESSION",
-        locationText: "北门",
         providerId: owner.id,
         campusId,
       },
@@ -715,12 +726,12 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
 
     const errandTask = await rawClient!.errandTask.create({
       data: {
-        title: RUN_TAG + " 店主跑腿",
+        title: "私人跑腿标题-DO-NOT-SURVIVE",
         description: "private-errand-description",
         categoryId: errandCategoryRef.id,
         reward: "2.00",
-        pickupLocation: "北门",
-        deliveryLocation: "南门",
+        pickupLocation: "宿舍B栋201",
+        deliveryLocation: "私人送达地点",
         contactNote: "微信 private-contact",
         deadline: new Date(Date.now() + 24 * 3600_000),
         publisherId: owner.id,
@@ -775,6 +786,17 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
       },
     });
 
+    // RentalHandoverRecord：owner 参与者注销臂（owner=owner）
+    await rawClient!.rentalHandoverRecord.create({
+      data: {
+        orderId: orderOwnerIsTarget.id,
+        photos: [],
+        accessories: "私人配件备注",
+        currentCondition: "私人现状说明",
+        knownIssues: "私人问题说明",
+      },
+    });
+
     // renter 侧文本：counterpart 拥有订单、owner 是租客 → renterNote 归属 owner
     const orderTargetIsRenter = await createRentalOrder({
       ownerId: counterpart.id,
@@ -783,7 +805,16 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
       renterNote: "private-renter-note",
       status: "COMPLETED",
     });
-    void orderTargetIsRenter;
+    // RentalHandoverRecord：renter 参与者注销臂（renter=owner）
+    await rawClient!.rentalHandoverRecord.create({
+      data: {
+        orderId: orderTargetIsRenter.id,
+        photos: [],
+        accessories: "租客侧配件备注",
+        currentCondition: "租客侧现状说明",
+        knownIssues: "租客侧问题说明",
+      },
+    });
 
     await eraseAccount(owner.id);
 
@@ -796,25 +827,43 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     const erasedRentalListing = await rawClient!.rentalListing.findUniqueOrThrow({
       where: { id: rentalListing.id },
     });
+    expect(erasedRentalListing.title).toBe(ERASED_MARKER);
     expect(erasedRentalListing.description).toBe(ERASED_MARKER);
+    expect(erasedRentalListing.pickupLocation).toBe(ERASED_MARKER);
+    expect(erasedRentalListing.returnLocation).toBe(ERASED_MARKER);
+    expect(erasedRentalListing.brand).toBeNull();
+    expect(erasedRentalListing.model).toBeNull();
+    expect(erasedRentalListing.usageRules).toBeNull();
+    expect(erasedRentalListing.damagePolicy).toBeNull();
+    expect(erasedRentalListing.overduePolicy).toBeNull();
     expect(erasedRentalListing.price.toFixed(2)).toBe("10.00");
     expect(erasedRentalListing.status).toBe("OFFLINE");
     expect(await rawClient!.rentalListingImage.count({ where: { rentalListingId: rentalListing.id } })).toBe(0);
 
     const erasedProduct = await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } });
+    expect(erasedProduct.title).toBe(ERASED_MARKER);
     expect(erasedProduct.description).toBe(ERASED_MARKER);
+    expect(erasedProduct.locationText).toBe(ERASED_MARKER);
+    expect(erasedProduct.price.toFixed(2)).toBe("3.00");
     expect(erasedProduct.status).toBe("OFFLINE");
     expect(await rawClient!.productImage.count({ where: { productId: product.id } })).toBe(0);
 
     const erasedService = await rawClient!.serviceListing.findUniqueOrThrow({
       where: { id: serviceListing.id },
     });
+    expect(erasedService.title).toBe(ERASED_MARKER);
     expect(erasedService.description).toBe(ERASED_MARKER);
+    expect(erasedService.locationText).toBe(ERASED_MARKER);
+    expect(erasedService.availableSchedule).toBeNull();
     expect(erasedService.coverImageUrl).toBeNull();
 
     const erasedErrand = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errandTask.id } });
+    expect(erasedErrand.title).toBe(ERASED_MARKER);
     expect(erasedErrand.description).toBe(ERASED_MARKER);
+    expect(erasedErrand.pickupLocation).toBe(ERASED_MARKER);
+    expect(erasedErrand.deliveryLocation).toBe(ERASED_MARKER);
     expect(erasedErrand.contactNote).toBeNull();
+    expect(erasedErrand.reward.toFixed(2)).toBe("2.00");
     expect(erasedErrand.status).toBe("CANCELLED");
 
     // BlockedUser：reason 清，relation 行保留
@@ -851,6 +900,20 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
       where: { id: orderTargetIsRenter.id },
     });
     expect(renterOrder.renterNote).toBeNull();
+
+    // §8/§18：handover free text 双臂（owner 注销 / renter 注销）均清空
+    const handoverOwnerArm = await rawClient!.rentalHandoverRecord.findUniqueOrThrow({
+      where: { orderId: orderOwnerIsTarget.id },
+    });
+    expect(handoverOwnerArm.accessories).toBeNull();
+    expect(handoverOwnerArm.currentCondition).toBeNull();
+    expect(handoverOwnerArm.knownIssues).toBeNull();
+    const handoverRenterArm = await rawClient!.rentalHandoverRecord.findUniqueOrThrow({
+      where: { orderId: orderTargetIsRenter.id },
+    });
+    expect(handoverRenterArm.accessories).toBeNull();
+    expect(handoverRenterArm.currentCondition).toBeNull();
+    expect(handoverRenterArm.knownIssues).toBeNull();
 
     // §10/§18：PRODUCT/SERVICE/RENTAL 资产（含 PUBLIC）→ PENDING_DELETE
     for (const assetId of [rentalImageAsset.id, productAsset.id, serviceAsset.id]) {

@@ -322,14 +322,41 @@ const REDACTED_USER_CONTENT = entry("USER_AUTHORED_CONTENT", "EXCLUDE", "REDACT"
 
 export const LISTING_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
   field("BlockedUser", "reason", CLEARED_USER_CONTENT),
+  // ---- ErrandTask（publisherId 唯一作者）----
+  field("ErrandTask", "title", REDACTED_USER_CONTENT),
   field("ErrandTask", "description", REDACTED_USER_CONTENT),
+  field("ErrandTask", "pickupLocation", REDACTED_USER_CONTENT),
+  field("ErrandTask", "deliveryLocation", REDACTED_USER_CONTENT),
   field("ErrandTask", "contactNote", CLEARED_USER_CONTENT),
+  // ---- Product（sellerId 唯一作者）----
+  field("Product", "title", REDACTED_USER_CONTENT),
   field("Product", "description", REDACTED_USER_CONTENT),
+  field("Product", "locationText", REDACTED_USER_CONTENT),
   field("Product", "images", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  // ---- ServiceListing（providerId 唯一作者）----
+  field("ServiceListing", "title", REDACTED_USER_CONTENT),
   field("ServiceListing", "description", REDACTED_USER_CONTENT),
+  field("ServiceListing", "locationText", REDACTED_USER_CONTENT),
+  field("ServiceListing", "availableSchedule", CLEARED_USER_CONTENT),
   field("ServiceListing", "coverImageUrl", CLEARED_USER_CONTENT),
+  // ---- RentalListing（ownerId 唯一作者）----
+  field("RentalListing", "title", REDACTED_USER_CONTENT),
   field("RentalListing", "description", REDACTED_USER_CONTENT),
+  field("RentalListing", "brand", CLEARED_USER_CONTENT),
+  field("RentalListing", "model", CLEARED_USER_CONTENT),
+  field("RentalListing", "pickupLocation", REDACTED_USER_CONTENT),
+  field("RentalListing", "returnLocation", REDACTED_USER_CONTENT),
+  field("RentalListing", "usageRules", CLEARED_USER_CONTENT),
+  field("RentalListing", "damagePolicy", CLEARED_USER_CONTENT),
+  field("RentalListing", "overduePolicy", CLEARED_USER_CONTENT),
   field("RentalListing", "images", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  // ---- RentalHandoverRecord（owner/renter 双方可写、无 per-field 归属 →
+  //      participant erasure 规则：任一参与者注销即清，与 General Order
+  //      participant-erasure 惯例一致）----
+  field("RentalHandoverRecord", "accessories", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "currentCondition", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "knownIssues", CLEARED_USER_CONTENT),
+  // ---- RentalDamageClaim / Extension / Return / Unavailable ----
   field("RentalDamageClaim", "damageDescription", REDACTED_USER_CONTENT),
   field("RentalDamageClaim", "renterNote", CLEARED_USER_CONTENT),
   field("RentalDamageClaim", "photos", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
@@ -373,6 +400,136 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
 ];
 
 // ============================================================
+// USER INPUT FIELD INVENTORY SSOT（REVIEW ROUND 2 / FIELD-COVERAGE GAP）
+// ------------------------------------------------------------------
+// 确认"由普通用户表单/domain action 自由填写并持久化"的字段清单。
+// completeness 的权威依据不是 SENSITIVE_FIELD_NAME_PATTERN（那只是
+// unknown-sensitive-name detector），而是本清单 + REGISTRY-06/07/08。
+// source = 该字段进入系统的表单 schema / action 入口。
+// ============================================================
+
+export type UserInputFieldExpectation = {
+  model: string;
+  field: string;
+  source: string;
+};
+
+export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
+  // Product（productFormSchema / product actions）
+  { model: "Product", field: "title", source: "productFormSchema.title" },
+  { model: "Product", field: "description", source: "productFormSchema.description" },
+  { model: "Product", field: "locationText", source: "productFormSchema.locationText" },
+  // ErrandTask（errand form / errand actions）
+  { model: "ErrandTask", field: "title", source: "errandFormSchema.title" },
+  { model: "ErrandTask", field: "description", source: "errandFormSchema.description" },
+  { model: "ErrandTask", field: "pickupLocation", source: "errandFormSchema.pickupLocation" },
+  { model: "ErrandTask", field: "deliveryLocation", source: "errandFormSchema.deliveryLocation" },
+  { model: "ErrandTask", field: "contactNote", source: "errandFormSchema.contactNote" },
+  // ServiceListing（service form / service actions）
+  { model: "ServiceListing", field: "title", source: "serviceFormSchema.title" },
+  { model: "ServiceListing", field: "description", source: "serviceFormSchema.description" },
+  { model: "ServiceListing", field: "locationText", source: "serviceFormSchema.locationText" },
+  { model: "ServiceListing", field: "availableSchedule", source: "serviceFormSchema.availableSchedule" },
+  { model: "ServiceListing", field: "coverImageUrl", source: "serviceFormSchema.coverImageUrl" },
+  // RentalListing（rental form / rental-listing actions）
+  { model: "RentalListing", field: "title", source: "rentalFormSchema.title" },
+  { model: "RentalListing", field: "description", source: "rentalFormSchema.description" },
+  { model: "RentalListing", field: "brand", source: "rentalFormSchema.brand" },
+  { model: "RentalListing", field: "model", source: "rentalFormSchema.model" },
+  { model: "RentalListing", field: "pickupLocation", source: "rentalFormSchema.pickupLocation" },
+  { model: "RentalListing", field: "returnLocation", source: "rentalFormSchema.returnLocation" },
+  { model: "RentalListing", field: "usageRules", source: "rentalFormSchema.usageRules" },
+  { model: "RentalListing", field: "damagePolicy", source: "rentalFormSchema.damagePolicy" },
+  { model: "RentalListing", field: "overduePolicy", source: "rentalFormSchema.overduePolicy" },
+  // RentalHandoverRecord（rentalPickupConfirmSchema：owner/renter 双方可写，
+  // 无 per-field author attribution → participant-erasure 规则清空）
+  { model: "RentalHandoverRecord", field: "accessories", source: "rentalPickupConfirmSchema.accessories" },
+  { model: "RentalHandoverRecord", field: "currentCondition", source: "rentalPickupConfirmSchema.currentCondition" },
+  { model: "RentalHandoverRecord", field: "knownIssues", source: "rentalPickupConfirmSchema.knownIssues" },
+  // RentalDamageClaim / Extension / Return / Unavailable / Blocked / Dispute
+  { model: "RentalDamageClaim", field: "damageDescription", source: "rentalDamageClaimSchema.damageDescription" },
+  { model: "RentalDamageClaim", field: "renterNote", source: "rentalDamageRespondSchema.renterNote" },
+  { model: "RentalExtensionRequest", field: "ownerNote", source: "rentalExtensionRespondSchema.ownerNote" },
+  { model: "RentalReturnRecord", field: "inspectionNote", source: "rentalReturnConfirmSchema.inspectionNote" },
+  { model: "RentalUnavailablePeriod", field: "reason", source: "rentalUnavailablePeriodForm.reason" },
+  { model: "BlockedUser", field: "reason", source: "blockUserAction.reason" },
+  { model: "RentalDispute", field: "reason", source: "initiateDisputeSchema.reason" },
+  { model: "Report", field: "detail", source: "reportFormSchema.detail" },
+  { model: "Review", field: "content", source: "reviewFormSchema.content" },
+  { model: "RentalReview", field: "content", source: "rentalReviewFormSchema.content" },
+  { model: "Message", field: "content", source: "sendMessageAction.content" },
+  { model: "SupportTicket", field: "subject", source: "supportTicketFormSchema.subject" },
+  { model: "SupportTicket", field: "description", source: "supportTicketFormSchema.description" },
+  { model: "Appeal", field: "statement", source: "appealFormSchema.statement" },
+];
+
+/**
+ * REGISTRY-08 的字段级 erasure 执行登记：每条 USER_INPUT_FIELD_EXPECTATIONS
+ * 必须出现在本集合（⊆ 关系），并另有集成/单元测试证明执行语义真实存在。
+ */
+export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
+  // Product
+  "Product.title",
+  "Product.description",
+  "Product.locationText",
+  "Product.images",
+  // ErrandTask
+  "ErrandTask.title",
+  "ErrandTask.description",
+  "ErrandTask.pickupLocation",
+  "ErrandTask.deliveryLocation",
+  "ErrandTask.contactNote",
+  // ServiceListing
+  "ServiceListing.title",
+  "ServiceListing.description",
+  "ServiceListing.locationText",
+  "ServiceListing.availableSchedule",
+  "ServiceListing.coverImageUrl",
+  // RentalListing
+  "RentalListing.title",
+  "RentalListing.description",
+  "RentalListing.brand",
+  "RentalListing.model",
+  "RentalListing.pickupLocation",
+  "RentalListing.returnLocation",
+  "RentalListing.usageRules",
+  "RentalListing.damagePolicy",
+  "RentalListing.overduePolicy",
+  "RentalListing.images",
+  // RentalHandoverRecord（participant erasure）
+  "RentalHandoverRecord.accessories",
+  "RentalHandoverRecord.currentCondition",
+  "RentalHandoverRecord.knownIssues",
+  // RentalDamageClaim / Extension / Return / Unavailable
+  "RentalDamageClaim.damageDescription",
+  "RentalDamageClaim.renterNote",
+  "RentalDamageClaim.photos",
+  "RentalExtensionRequest.ownerNote",
+  "RentalReturnRecord.inspectionNote",
+  "RentalUnavailablePeriod.reason",
+  // Blocked / Dispute / Report / Review / Message / Support / Appeal
+  "BlockedUser.reason",
+  "RentalDispute.reason",
+  "RentalDispute.evidencePhotos",
+  "Report.detail",
+  "Review.content",
+  "Review.tags",
+  "RentalReview.content",
+  "RentalReview.tags",
+  "Message.content",
+  "SupportTicket.subject",
+  "SupportTicket.description",
+  "SupportTicket.resolutionMessage",
+  "SupportTicket.internalNote",
+  "Appeal.statement",
+  "Order.note",
+  "Order.cancelReason",
+  "RentalOrder.renterNote",
+  "RentalOrder.cancellationNote",
+  "RentalOrderStatusLog.note",
+]);
+
+// ============================================================
 // 查询 helper
 // ============================================================
 
@@ -410,6 +567,7 @@ export const ERASURE_IMPLEMENTATION_MODELS: ReadonlySet<string> = new Set([
   "RentalExtensionRequest",
   "RentalUnavailablePeriod",
   "RentalReturnRecord",
+  "RentalHandoverRecord",
 ]);
 
 /** 经外部审计批准的保留例外（本轮 = 空；新增必须附审计证据） */
@@ -438,6 +596,11 @@ export function getModelPrivacyPolicy(model: string): ModelPrivacyPolicy | null 
   return (MODEL_PRIVACY_POLICIES as Record<string, ModelPrivacyPolicy>)[model] ?? null;
 }
 
-/** 敏感命名启发式（CI drift detector 用；不是运行时安全边界） */
+/**
+ * 敏感命名启发式（CI drift detector 用；不是运行时安全边界）。
+ * 定位（REVIEW ROUND 2 §20）：本 pattern 只是 UNKNOWN-SENSITIVE-NAME
+ * detector（新出现敏感命名字段必须人工分类）；user-input completeness
+ * 的权威是 USER_INPUT_FIELD_EXPECTATIONS + REGISTRY-06/07/08。
+ */
 export const SENSITIVE_FIELD_NAME_PATTERN =
   /(email|phone|name|note|content|description|reason|statement|image|filename|token|secret|password|avatar|bio|studentid|detail|photos)/i;

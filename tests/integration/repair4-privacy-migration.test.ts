@@ -156,10 +156,10 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
       const erasedProduct = await db.product.create({
         data: {
-          title: "历史注销商品",
+          title: "私人商品标题-DO-NOT-SURVIVE",
           description: "private-product-description",
+          locationText: "宿舍A栋301-DO-NOT-SURVIVE",
           price: "1.00",
-          locationText: "北门",
           condition: "LIKE_NEW",
           sellerId: erased.id,
           campusId: campus.id,
@@ -189,12 +189,12 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
       const erasedErrand = await db.errandTask.create({
         data: {
-          title: "历史注销跑腿",
+          title: "私人跑腿标题-DO-NOT-SURVIVE",
           description: "private-errand-description",
           categoryId: errandCategory.id,
           reward: "1.00",
-          pickupLocation: "北门",
-          deliveryLocation: "南门",
+          pickupLocation: "宿舍B栋201",
+          deliveryLocation: "私人送达地点",
           contactNote: "微信 private-contact",
           deadline: new Date(),
           publisherId: erased.id,
@@ -312,6 +312,17 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
       await db.rentalOrderStatusLog.create({
         data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "REJECTED", operatorId: erased.id, note: "历史日志备注" },
+      });
+
+      // RentalHandoverRecord participant-erasure（renter=erased）
+      await db.rentalHandoverRecord.create({
+        data: {
+          orderId: rentalOrder.id,
+          photos: [],
+          accessories: "私人配件备注",
+          currentCondition: "私人现状说明",
+          knownIssues: "私人问题说明",
+        },
       });
 
       // damage claim（挂在既有 rentalOrder：owner=survivor, renter=erased）
@@ -448,17 +459,28 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
 
       // ---- R4-03：listing/attachment 文本 + image 行 + owned listing 资产 ----
       const productAfter = await db.product.findUniqueOrThrow({ where: { id: erasedProduct.id } });
+      expect(productAfter.title).toBe("（该内容已随账号注销删除）");
       expect(productAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(productAfter.locationText).toBe("（该内容已随账号注销删除）");
       expect(productAfter.status).toBe("OFFLINE");
       expect(await db.productImage.count({ where: { productId: erasedProduct.id } })).toBe(0);
       const listingAssetAfter = await db.uploadedAsset.findUniqueOrThrow({ where: { id: erasedListingAsset.id } });
       expect(listingAssetAfter.status).toBe("PENDING_DELETE");
       expect(listingAssetAfter.originalFileName).toBeNull();
       const errandAfter = await db.errandTask.findUniqueOrThrow({ where: { id: erasedErrand.id } });
+      expect(errandAfter.title).toBe("（该内容已随账号注销删除）");
       expect(errandAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.pickupLocation).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.deliveryLocation).toBe("（该内容已随账号注销删除）");
       expect(errandAfter.contactNote).toBeNull();
       const blockedAfter = await db.blockedUser.findFirstOrThrow({ where: { blockerId: erased.id } });
       expect(blockedAfter.reason).toBeNull();
+      const handoverAfter = await db.rentalHandoverRecord.findFirstOrThrow({
+        where: { orderId: rentalOrder.id },
+      });
+      expect(handoverAfter.accessories).toBeNull();
+      expect(handoverAfter.currentCondition).toBeNull();
+      expect(handoverAfter.knownIssues).toBeNull();
       const claimsAfter = await db.rentalDamageClaim.findMany({ where: { orderId: rentalOrder.id } });
       expect(claimsAfter).toHaveLength(2);
       const keptClaim = claimsAfter.find((c) => c.damageDescription.includes('对照索赔描述'));
@@ -545,6 +567,14 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         where: { id: erasedListingAsset.id },
       });
       expect(listingAssetAfterReplay.status).toBe("PENDING_DELETE");
+      const errandAfterReplay = await db.errandTask.findUniqueOrThrow({ where: { id: erasedErrand.id } });
+      expect(errandAfterReplay.title).toBe("（该内容已随账号注销删除）");
+      expect(errandAfterReplay.contactNote).toBeNull();
+      const handoverAfterReplay = await db.rentalHandoverRecord.findFirstOrThrow({
+        where: { orderId: rentalOrder.id },
+      });
+      expect(handoverAfterReplay.accessories).toBeNull();
+      expect(handoverAfterReplay.knownIssues).toBeNull();
     } finally {
       await db.$disconnect().catch(() => undefined);
     }

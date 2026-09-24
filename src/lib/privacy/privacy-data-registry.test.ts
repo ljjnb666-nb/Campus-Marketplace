@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   APPROVED_RETENTION_EXCEPTIONS,
   DECLARED_NON_PERSONAL_FIELDS,
+  ERASURE_FIELD_COVERAGE,
   ERASURE_IMPLEMENTATION_MODELS,
   ERASURE_MODES,
   FROZEN_PERSONAL_MODELS,
@@ -16,6 +17,7 @@ import {
   SENSITIVE_FIELD_EXPECTATIONS,
   SENSITIVE_FIELD_NAME_PATTERN,
   SELF_EXPORT_MODES,
+  USER_INPUT_FIELD_EXPECTATIONS,
   getFieldPrivacyPolicy,
   getModelPrivacyPolicy,
 } from "@/lib/privacy/privacy-data-registry";
@@ -50,7 +52,11 @@ function parseSchemaModelFields(schemaText: string): SchemaField[] {
         continue;
       }
       const fieldName = line.split(/\s+/)[0];
-      if (!fieldName || fieldName === "model") {
+      if (!fieldName) {
+        continue;
+      }
+      // 跳过块声明行本身（"model X {"），但保留合法的字段名 `model`
+      if (fieldName === "model" && /^model\s+\w+\s+\{/.test(line)) {
         continue;
       }
       fields.push({ model: modelName, field: fieldName });
@@ -164,6 +170,72 @@ describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", 
       const key = `${policy.model}.${policy.field}`;
       expect(seen.has(key), `重复分类：${key}`).toBe(false);
       seen.add(key);
+    }
+  });
+});
+
+
+describe("REGISTRY-06/07/08：persisted user-input 字段全生命周期覆盖（FIELD-COVERAGE GAP 修复）", () => {
+  it("REGISTRY-06：每条 USER_INPUT_FIELD_EXPECTATIONS 都有 registry field policy", () => {
+    expect(USER_INPUT_FIELD_EXPECTATIONS.length).toBeGreaterThanOrEqual(30);
+
+    const unclassified = USER_INPUT_FIELD_EXPECTATIONS.filter(
+      (entry) => getFieldPrivacyPolicy(entry.model, entry.field) === null,
+    ).map((entry) => `${entry.model}.${entry.field}`);
+
+    expect(unclassified, "用户输入字段未分类（MODEL_PRESENT != FIELDS_CLASSIFIED）").toEqual([]);
+  });
+
+  it("REGISTRY-07（=REGISTRY-03 合同对 user-input 面）：user-input 字段 erasure ∈ {CLEAR, REDACT}", () => {
+    const violations = USER_INPUT_FIELD_EXPECTATIONS.map((entry) => ({
+      entry,
+      policy: getFieldPrivacyPolicy(entry.model, entry.field)!,
+    }))
+      .filter(
+        ({ policy }) =>
+          policy.classification === "USER_AUTHORED_CONTENT" &&
+          policy.erasure !== "CLEAR" &&
+          policy.erasure !== "REDACT",
+      )
+      .map(({ entry, policy }) => `${entry.model}.${entry.field}=${policy.erasure}`);
+
+    expect(violations, "user-input 字段不得 RETAIN_STRUCTURAL/RETAIN_GOVERNANCE").toEqual([]);
+  });
+
+  it("REGISTRY-08：USER_INPUT_FIELD_EXPECTATIONS ⊆ ERASURE_FIELD_COVERAGE（字段级执行登记）", () => {
+    const missing = USER_INPUT_FIELD_EXPECTATIONS.filter(
+      (entry) => !ERASURE_FIELD_COVERAGE.has(`${entry.model}.${entry.field}`),
+    ).map((entry) => `${entry.model}.${entry.field}`);
+
+    expect(missing, "用户输入字段缺少字段级 erasure 执行登记").toEqual([]);
+  });
+
+  it("ERASURE_FIELD_COVERAGE 无死键（每个登记键都是已分类字段）", () => {
+    for (const key of ERASURE_FIELD_COVERAGE) {
+      const [model, field] = key.split(".");
+      expect(
+        getFieldPrivacyPolicy(model, field),
+        `ERASURE_FIELD_COVERAGE 死键（registry 无此分类）：${key}`,
+      ).not.toBeNull();
+    }
+  });
+
+  it("机器字段不入 user-input 面（enum/money/count/timestamp 不得误分类）", () => {
+    const machineSamples: Array<[string, string]> = [
+      ["Product", "price"],
+      ["Product", "condition"],
+      ["RentalListing", "depositAmount"],
+      ["Order", "amount"],
+      ["ErrandTask", "reward"],
+      ["RentalOrder", "startTime"],
+      ["SupportTicket", "status"],
+    ];
+    for (const [model, field] of machineSamples) {
+      const policy = getFieldPrivacyPolicy(model, field);
+      expect(
+        policy === null || policy.classification !== "USER_AUTHORED_CONTENT",
+        `${model}.${field} 是机器/结构字段，不得分类为 USER_AUTHORED_CONTENT`,
+      ).toBe(true);
     }
   });
 });

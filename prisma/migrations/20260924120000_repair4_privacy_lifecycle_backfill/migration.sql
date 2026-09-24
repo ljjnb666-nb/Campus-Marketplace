@@ -220,27 +220,40 @@ WHERE bu."reason" IS NOT NULL
     SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
   );
 
--- D2. ErrandTask: publisher is the sole author. description is NON-NULLABLE
---     → REDACT; contactNote nullable → CLEAR.
+-- D2. ErrandTask: publisher is the sole author. title / description /
+--     pickupLocation / deliveryLocation are NON-NULLABLE → REDACT;
+--     contactNote nullable → CLEAR.
 UPDATE "ErrandTask" et
-SET "description" = '（该内容已随账号注销删除）',
+SET "title" = '（该内容已随账号注销删除）',
+    "description" = '（该内容已随账号注销删除）',
+    "pickupLocation" = '（该内容已随账号注销删除）',
+    "deliveryLocation" = '（该内容已随账号注销删除）',
     "contactNote" = NULL
 WHERE et."publisherId" IN (
   SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
 )
   AND (
-    et."description" <> '（该内容已随账号注销删除）'
+    et."title" <> '（该内容已随账号注销删除）'
+    OR et."description" <> '（该内容已随账号注销删除）'
+    OR et."pickupLocation" <> '（该内容已随账号注销删除）'
+    OR et."deliveryLocation" <> '（该内容已随账号注销删除）'
     OR et."contactNote" IS NOT NULL
   );
 
 -- D3. Product: seller is the sole author. description NON-NULLABLE → REDACT;
 --     ProductImage rows are attached content rows (row-level CLEAR).
 UPDATE "Product" p
-SET "description" = '（该内容已随账号注销删除）'
+SET "title" = '（该内容已随账号注销删除）',
+    "description" = '（该内容已随账号注销删除）',
+    "locationText" = '（该内容已随账号注销删除）'
 WHERE p."sellerId" IN (
   SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
 )
-  AND p."description" <> '（该内容已随账号注销删除）';
+  AND (
+    p."title" <> '（该内容已随账号注销删除）'
+    OR p."description" <> '（该内容已随账号注销删除）'
+    OR p."locationText" <> '（该内容已随账号注销删除）'
+  );
 
 DELETE FROM "ProductImage" pi
 WHERE pi."productId" IN (
@@ -253,24 +266,48 @@ WHERE pi."productId" IN (
 -- D4. ServiceListing: provider is the sole author. description NON-NULLABLE
 --     → REDACT; coverImageUrl nullable → CLEAR.
 UPDATE "ServiceListing" sv
-SET "description" = '（该内容已随账号注销删除）',
+SET "title" = '（该内容已随账号注销删除）',
+    "description" = '（该内容已随账号注销删除）',
+    "locationText" = '（该内容已随账号注销删除）',
+    "availableSchedule" = NULL,
     "coverImageUrl" = NULL
 WHERE sv."providerId" IN (
   SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
 )
   AND (
-    sv."description" <> '（该内容已随账号注销删除）'
+    sv."title" <> '（该内容已随账号注销删除）'
+    OR sv."description" <> '（该内容已随账号注销删除）'
+    OR sv."locationText" <> '（该内容已随账号注销删除）'
+    OR sv."availableSchedule" IS NOT NULL
     OR sv."coverImageUrl" IS NOT NULL
   );
 
 -- D5. RentalListing: owner is the sole author. description NON-NULLABLE →
 --     REDACT; RentalListingImage rows are attached content rows.
 UPDATE "RentalListing" rl
-SET "description" = '（该内容已随账号注销删除）'
+SET "title" = '（该内容已随账号注销删除）',
+    "description" = '（该内容已随账号注销删除）',
+    "pickupLocation" = '（该内容已随账号注销删除）',
+    "returnLocation" = '（该内容已随账号注销删除）',
+    "brand" = NULL,
+    "model" = NULL,
+    "usageRules" = NULL,
+    "damagePolicy" = NULL,
+    "overduePolicy" = NULL
 WHERE rl."ownerId" IN (
   SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
 )
-  AND rl."description" <> '（该内容已随账号注销删除）';
+  AND (
+    rl."title" <> '（该内容已随账号注销删除）'
+    OR rl."description" <> '（该内容已随账号注销删除）'
+    OR rl."pickupLocation" <> '（该内容已随账号注销删除）'
+    OR rl."returnLocation" <> '（该内容已随账号注销删除）'
+    OR rl."brand" IS NOT NULL
+    OR rl."model" IS NOT NULL
+    OR rl."usageRules" IS NOT NULL
+    OR rl."damagePolicy" IS NOT NULL
+    OR rl."overduePolicy" IS NOT NULL
+  );
 
 DELETE FROM "RentalListingImage" rli
 WHERE rli."rentalListingId" IN (
@@ -344,6 +381,29 @@ WHERE up."reason" IS NOT NULL
       AND rl."ownerId" IN (
         SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
       )
+  );
+
+-- D10. RentalHandoverRecord: accessories / currentCondition / knownIssues
+--      are owner/renter dual-writable free text with no per-field author
+--      attribution → participant-erasure rule (same as General Order):
+--      either rental participant erased → cleared. No author guessing.
+UPDATE "RentalHandoverRecord" rh
+SET "accessories" = NULL,
+    "currentCondition" = NULL,
+    "knownIssues" = NULL
+WHERE EXISTS (
+    SELECT 1 FROM "RentalOrder" ro
+    WHERE ro."id" = rh."orderId"
+      AND (ro."ownerId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      ) OR ro."renterId" IN (
+        SELECT u."id" FROM "User" u WHERE u."erasedAt" IS NOT NULL
+      ))
+  )
+  AND (
+    rh."accessories" IS NOT NULL
+    OR rh."currentCondition" IS NOT NULL
+    OR rh."knownIssues" IS NOT NULL
   );
 
 COMMIT;

@@ -338,7 +338,13 @@ export async function eraseAccount(
     // contactNote 可空 → CLEAR
     await client.errandTask.updateMany({
       where: { publisherId: userId },
-      data: { description: ERASED_USER_CONTENT_MARKER, contactNote: null },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        pickupLocation: ERASED_USER_CONTENT_MARKER,
+        deliveryLocation: ERASED_USER_CONTENT_MARKER,
+        contactNote: null,
+      },
     });
 
     // Product：seller 唯一作者。description 非空 → REDACT；图片为附属
@@ -346,7 +352,11 @@ export async function eraseAccount(
     // 行级 CLEAR = 删除内容行）；受控资产已由上方 PRODUCT 类 PENDING_DELETE
     await client.product.updateMany({
       where: { sellerId: userId },
-      data: { description: ERASED_USER_CONTENT_MARKER },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        locationText: ERASED_USER_CONTENT_MARKER,
+      },
     });
 
     await client.productImage.deleteMany({
@@ -357,14 +367,30 @@ export async function eraseAccount(
     // coverImageUrl 可空 → CLEAR
     await client.serviceListing.updateMany({
       where: { providerId: userId },
-      data: { description: ERASED_USER_CONTENT_MARKER, coverImageUrl: null },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        locationText: ERASED_USER_CONTENT_MARKER,
+        availableSchedule: null,
+        coverImageUrl: null,
+      },
     });
 
     // RentalListing：owner 唯一作者。description 非空 → REDACT；图片为
     // RentalListingImage 内容行（行级 CLEAR）
     await client.rentalListing.updateMany({
       where: { ownerId: userId },
-      data: { description: ERASED_USER_CONTENT_MARKER },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        pickupLocation: ERASED_USER_CONTENT_MARKER,
+        returnLocation: ERASED_USER_CONTENT_MARKER,
+        brand: null,
+        model: null,
+        usageRules: null,
+        damagePolicy: null,
+        overduePolicy: null,
+      },
     });
 
     await client.rentalListingImage.deleteMany({
@@ -396,6 +422,22 @@ export async function eraseAccount(
     await client.rentalReturnRecord.updateMany({
       where: { order: { ownerId: userId }, inspectionNote: { not: null } },
       data: { inspectionNote: null },
+    });
+
+    // RentalHandoverRecord：accessories/currentCondition/knownIssues 为
+    // owner/renter 双方可写且无 per-field 作者归属的 free text——按
+    // participant erasure 规则（与 General Order 同惯例）：任一参与者注销
+    // 即清空，不猜作者
+    await client.rentalHandoverRecord.updateMany({
+      where: {
+        order: { OR: [{ ownerId: userId }, { renterId: userId }] },
+        OR: [
+          { accessories: { not: null } },
+          { currentCondition: { not: null } },
+          { knownIssues: { not: null } },
+        ],
+      },
+      data: { accessories: null, currentCondition: null, knownIssues: null },
     });
 
     // RentalUnavailablePeriod：owner（经 listing FK）管理的不可租时段；
