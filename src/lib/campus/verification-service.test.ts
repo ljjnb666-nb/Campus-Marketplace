@@ -13,6 +13,7 @@ const {
   getCurrentVerificationPolicyMock,
   resolveImageTokens,
   applyVerificationAssetRetention,
+  markAssetsForValuesPendingDelete,
   recordAdminAudit,
   createNotification,
   loadAuthorizationContextMock,
@@ -29,6 +30,7 @@ const {
   getCurrentVerificationPolicyMock: vi.fn(),
   resolveImageTokens: vi.fn(),
   applyVerificationAssetRetention: vi.fn(),
+  markAssetsForValuesPendingDelete: vi.fn(),
   recordAdminAudit: vi.fn(),
   createNotification: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
@@ -42,6 +44,7 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/lib/upload", () => ({
   resolveImageTokens,
   applyVerificationAssetRetention,
+  markAssetsForValuesPendingDelete,
 }));
 
 vi.mock("@/lib/governance/governance-lock", () => ({
@@ -138,6 +141,7 @@ beforeEach(() => {
   getCurrentVerificationPolicyMock.mockReset().mockResolvedValue(PUBLISHED_POLICY);
   resolveImageTokens.mockReset().mockResolvedValue(["asset:asset-1"]);
   applyVerificationAssetRetention.mockReset().mockResolvedValue(1);
+  markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
   createNotification.mockReset().mockResolvedValue({});
   loadAuthorizationContextMock.mockReset();
@@ -533,6 +537,35 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
     expect(recordAdminAudit).toHaveBeenCalledWith(
       expect.objectContaining({ action: "REVOKE_VERIFICATION" }),
       txStub,
+    );
+  });
+
+  it("SECONDARY-01：REJECTED 通知为 generic copy——reviewNote 绝不进入 Notification.content", async () => {
+    txVerificationFindUnique.mockResolvedValue({ ...PENDING_VERIFICATION });
+    txVerificationUpdate.mockResolvedValue({ id: "verification-1", status: "REJECTED" });
+
+    await decideMembershipVerification({
+      actorId: "reviewer-1",
+      verificationId: "verification-1",
+      decision: "REJECTED",
+      reviewNote: "内部拒绝原因X",
+      reasonCode: "VERIFICATION_MATERIALS_INVALID",
+    });
+
+    // 权威列保存 reviewNote（认证页面按需展示）
+    expect(txVerificationUpdate).toHaveBeenCalledWith({
+      where: { id: "verification-1" },
+      data: expect.objectContaining({ reviewNote: "内部拒绝原因X" }),
+    });
+
+    // 通知只做事件信号：content 不携带 reviewNote 原文
+    expect(createNotification).toHaveBeenCalledWith(
+      txStub,
+      expect.objectContaining({
+        type: "SYSTEM",
+        title: "校园认证未通过",
+        content: expect.not.stringContaining("内部拒绝原因X"),
+      }),
     );
   });
 

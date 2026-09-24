@@ -32,12 +32,38 @@ const txStub = {
   },
   order: {
     count: vi.fn(),
+    updateMany: vi.fn(),
   },
   rentalOrder: {
     count: vi.fn(),
+    updateMany: vi.fn(),
   },
   supportTicket: {
     count: vi.fn(),
+    updateMany: vi.fn(),
+  },
+  notification: {
+    deleteMany: vi.fn(),
+  },
+  message: {
+    updateMany: vi.fn(),
+  },
+  review: {
+    updateMany: vi.fn(),
+  },
+  rentalReview: {
+    updateMany: vi.fn(),
+  },
+  report: {
+    updateMany: vi.fn(),
+  },
+  appeal: {
+    updateMany: vi.fn(),
+  },
+  rentalOrderStatusLog: {
+    updateMany: vi.fn(),
+  },
+  rentalDispute: {
     updateMany: vi.fn(),
   },
   dataHold: {
@@ -98,6 +124,16 @@ beforeEach(() => {
   txStub.rentalOrder.count.mockResolvedValue(0);
   txStub.supportTicket.count.mockResolvedValue(0);
   txStub.supportTicket.updateMany.mockResolvedValue({ count: 0 });
+  txStub.notification.deleteMany.mockResolvedValue({ count: 3 });
+  txStub.message.updateMany.mockResolvedValue({ count: 2 });
+  txStub.review.updateMany.mockResolvedValue({ count: 1 });
+  txStub.rentalReview.updateMany.mockResolvedValue({ count: 1 });
+  txStub.report.updateMany.mockResolvedValue({ count: 1 });
+  txStub.appeal.updateMany.mockResolvedValue({ count: 1 });
+  txStub.order.updateMany.mockResolvedValue({ count: 1 });
+  txStub.rentalOrder.updateMany.mockResolvedValue({ count: 1 });
+  txStub.rentalOrderStatusLog.updateMany.mockResolvedValue({ count: 1 });
+  txStub.rentalDispute.updateMany.mockResolvedValue({ count: 1 });
   txStub.dataHold.findMany.mockResolvedValue([]);
 });
 
@@ -121,7 +157,8 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
       }),
     });
 
-    // 认证材料清理 + 敏感资产到期（由既有 storage:cleanup 物理删除）
+    // 认证材料清理 + 敏感资产进入 durable deletion queue（PENDING_DELETE，
+    // 由既有 storage:cleanup 物理删除；头像已纳入，UPLOADING 保持 TTL 合同）
     expect(txStub.userVerification.updateMany).toHaveBeenCalled();
     // Phase 6A：成员关系闭环为 LEFT
     expect(txStub.campusMembership.updateMany).toHaveBeenCalledWith(
@@ -134,11 +171,100 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
       expect.objectContaining({
         where: expect.objectContaining({
           ownerId: "user-1",
-          category: { in: ["VERIFICATION", "HANDOVER", "RETURN", "REPORT"] },
+          category: { in: ["AVATAR", "VERIFICATION", "HANDOVER", "RETURN", "REPORT"] },
+          status: { in: ["UPLOADED", "ATTACHED"] },
         }),
-        data: { expiresAt: expect.any(Date) },
+        data: { status: "PENDING_DELETE" },
       }),
     );
+    // originalFileName 是潜在 PII：本人全部资产（任意状态）清空
+    expect(txStub.uploadedAsset.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { ownerId: "user-1", originalFileName: { not: null } },
+        data: { originalFileName: null },
+      }),
+    );
+  });
+
+  it("Repair 4：Notification 是 derived ephemeral inbox——注销时整表删除", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.notification.deleteMany).toHaveBeenCalledWith({ where: { userId: "user-1" } });
+  });
+
+  it("Repair 4：Message 保留行（关系历史），free text → 哨兵标记 + senderId 置空", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.message.updateMany).toHaveBeenCalledWith({
+      where: { senderId: "user-1" },
+      data: { content: ERASED_SUPPORT_TICKET_TEXT_MARKER, senderId: null },
+    });
+  });
+
+  it("Repair 4：Review / RentalReview 保留结构（rating/order/target），文本与标签清空", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.review.updateMany).toHaveBeenCalledWith({
+      where: { authorId: "user-1" },
+      data: { content: null, tags: [] },
+    });
+    expect(txStub.rentalReview.updateMany).toHaveBeenCalledWith({
+      where: { authorId: "user-1" },
+      data: { content: null, tags: [] },
+    });
+  });
+
+  it("Repair 4：Report detail 清空；handledNote（operator/governance）不清", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.report.updateMany).toHaveBeenCalledWith({
+      where: { reporterId: "user-1" },
+      data: { detail: null },
+    });
+  });
+
+  it("Repair 4：本人 appellant 的 Appeal statement → 哨兵标记（enforcement target 归属）", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.appeal.updateMany).toHaveBeenCalledWith({
+      where: { enforcementAction: { targetId: "user-1" } },
+      data: { statement: ERASED_SUPPORT_TICKET_TEXT_MARKER },
+    });
+  });
+
+  it("Repair 4：Order 参与者任一方注销即清歧义 free text（note/cancelReason）", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.order.updateMany).toHaveBeenCalledWith({
+      where: { OR: [{ buyerId: "user-1" }, { sellerId: "user-1" }] },
+      data: { note: null, cancelReason: null },
+    });
+  });
+
+  it("Repair 4：RentalOrder free text 按精确作者归属清理；cancellationReason 枚举保留", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { renterId: "user-1", renterNote: { not: null } },
+      data: { renterNote: null },
+    });
+    expect(txStub.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { cancelledById: "user-1", cancellationNote: { not: null } },
+      data: { cancellationNote: null },
+    });
+  });
+
+  it("Repair 4：本人 operator 的 status log note 清空；dispute reason/evidence 清理", async () => {
+    await eraseAccount("user-1");
+
+    expect(txStub.rentalOrderStatusLog.updateMany).toHaveBeenCalledWith({
+      where: { operatorId: "user-1", note: { not: null } },
+      data: { note: null },
+    });
+    expect(txStub.rentalDispute.updateMany).toHaveBeenCalledWith({
+      where: { initiatorId: "user-1" },
+      data: { reason: ERASED_SUPPORT_TICKET_TEXT_MARKER, evidencePhotos: [] },
+    });
   });
 
   it("deactivates all tradeable listings at completion (ACCOUNT_DELETION_DEACTIVATES_LISTINGS)", async () => {

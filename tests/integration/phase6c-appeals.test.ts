@@ -1094,7 +1094,8 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       // T25/T29：owner 导出包含 own appeal，格式精确 v2
       const payload = await buildUserExport(target.id);
-      expect(payload.format).toBe("campus-marketplace.user-export/v2");
+      // Repair 4：payload shape 扩段后升 v3（v1/v2 契约未被静默修改）
+      expect(payload.format).toBe("campus-marketplace.user-export/v3");
       expect(payload.appeals).toHaveLength(1);
       expect(payload.appeals[0]).toMatchObject({
         id: appeal.id,

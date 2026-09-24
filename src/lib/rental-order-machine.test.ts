@@ -39,6 +39,7 @@ import {
   isDisputableStatus,
   isRentalOrderRoleParticipant,
   recomputeRentalPositiveRate,
+  rejectRentalOrderTx,
   respondDamageClaimTx,
   writeStatusLog,
 } from "@/lib/rental-order-machine";
@@ -207,6 +208,53 @@ describe("rental-order-machine", () => {
       asTx(tx),
       [expect.objectContaining({ userId: "user-renter", title: "租赁申请已通过" })],
     );
+  });
+
+  it("SECONDARY-02/03：reject 原始原因保留在权威列，绝不进入 status log note / notification", async () => {
+    const tx = buildTx();
+    tx.rentalOrder.findFirst.mockResolvedValue({
+      id: "order-1",
+      status: "PENDING_APPROVAL",
+      ownerId: "user-owner",
+      renterId: "user-renter",
+    });
+    tx.rentalOrder.update.mockResolvedValue({});
+
+    const RAW_REASON = "物品已损坏不想出租原因X";
+    const result = await rejectRentalOrderTx(asTx(tx), {
+      orderId: "order-1",
+      userId: "user-owner",
+      rejectReason: RAW_REASON,
+    });
+
+    expect(result).toEqual({ success: true });
+
+    // 权威列保存原始原因（lifecycle/erasure 策略处理）
+    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: expect.objectContaining({
+        status: "REJECTED",
+        cancellationNote: RAW_REASON,
+      }),
+    });
+
+    // status log note = generic system copy（SECONDARY-03）
+    expect(tx.rentalOrderStatusLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        toStatus: "REJECTED",
+        note: "出租者拒绝了租赁申请",
+      }),
+    });
+    const logPayload = JSON.stringify(tx.rentalOrderStatusLog.create.mock.calls);
+    expect(logPayload).not.toContain(RAW_REASON);
+
+    // notification content = generic system copy（SECONDARY-02）
+    expect(createNotifications).toHaveBeenCalledWith(
+      asTx(tx),
+      [expect.objectContaining({ userId: "user-renter", title: "租赁申请被拒绝" })],
+    );
+    const notificationPayload = JSON.stringify(createNotifications.mock.calls);
+    expect(notificationPayload).not.toContain(RAW_REASON);
   });
 
   it("returns the domain error when the order is not approvable", async () => {
