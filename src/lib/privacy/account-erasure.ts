@@ -7,6 +7,7 @@ import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
 import { assertNoActiveHold } from "@/lib/privacy/data-hold-service";
+import { ERASED_USER_CONTENT_MARKER } from "@/lib/privacy/privacy-data-registry";
 
 /**
  * 账号注销 / 匿名化服务（fail closed）。
@@ -51,8 +52,8 @@ const ACTIVE_RENTAL_ORDER_STATUSES = [
 /** 仍在处理中的支持工单状态（存在即阻断注销；terminal 不阻断） */
 const ACTIVE_SUPPORT_TICKET_STATUSES = ["OPEN", "IN_PROGRESS"] as const;
 
-/** 支持工单自由文本的注销匿名化标记（ERASED_USER_DISPLAY_NAME 同一惯例） */
-export const ERASED_SUPPORT_TICKET_TEXT_MARKER = "（该内容已随账号注销删除）";
+/** 支持工单自由文本的注销匿名化标记（ERASED_USER_CONTENT_MARKER 同一惯例） */
+export const ERASED_SUPPORT_TICKET_TEXT_MARKER = ERASED_USER_CONTENT_MARKER;
 
 /** 匿名化后的展示名（RELATIONAL_HISTORY 约定） */
 export const ERASED_USER_DISPLAY_NAME = "已注销用户";
@@ -71,7 +72,7 @@ export type AccountErasureResult = {
     serviceListings: number;
     rentalListings: number;
   };
-  /** 敏感资产（认证/交接/举报材料）已标记到期，由既有 storage:cleanup 物理删除 */
+  /** 敏感资产（头像/认证/交接/归还/举报材料）已标记 PENDING_DELETE，由既有 storage:cleanup 物理删除 */
   sensitiveAssetsMarkedForDeletion: number;
 };
 
@@ -183,6 +184,9 @@ export async function eraseAccount(
         studentIdLast4: null,
         lastLoginAt: null,
         verificationStatus: "UNVERIFIED",
+        // R4-01：schoolName 非空列（registry=DIRECT_IDENTITY/REDACT）——
+        // 哨兵替换而非置 null
+        schoolName: ERASED_USER_DISPLAY_NAME,
       },
     });
 
@@ -207,14 +211,267 @@ export async function eraseAccount(
       data: { status: "LEFT" },
     });
 
-    // 敏感私有资产：立即到期 → 既有 storage:cleanup 物理删除对象（Phase 1 机制）
+    // Repair 4 / RB-40（REVIEW FIX R4-03 §10/§18 扩展）：全部 8 类业务镜像
+    // 资产（含 PUBLIC 的 PRODUCT/SERVICE/RENTAL listing 图）在 owner 注销时
+    // 一律进入 durable deletion queue——public/private 不改变 erasure
+    // lifecycle。UPLOADING 行绝不直接切 PENDING_DELETE——外部 S3 PUT 可能
+    // 尚在进行，cleanup 与 PUT 存在对象复活 race；UPLOADING 保持既有
+    // stale-upload TTL 恢复合同（RECOVERABLE_STAGING：最终无法 attach +
+    // cleanup 必然收敛删除）。
     const sensitiveAssets = await client.uploadedAsset.updateMany({
       where: {
         ownerId: userId,
-        category: { in: ["VERIFICATION", "HANDOVER", "RETURN", "REPORT"] },
+        category: {
+          in: [
+            "AVATAR",
+            "VERIFICATION",
+            "HANDOVER",
+            "RETURN",
+            "REPORT",
+            "PRODUCT",
+            "SERVICE",
+            "RENTAL",
+          ],
+        },
         status: { in: ["UPLOADED", "ATTACHED"] },
       },
-      data: { expiresAt: erasedAt },
+      data: { status: "PENDING_DELETE" },
+    });
+
+    // Repair 4 / RB-43：originalFileName 是潜在 PII——本人全部资产
+    // （任意 category / access / 状态）统一清空；bucket/objectKey 内部定位符
+    // 保留（physical cleanup 仍需要）。
+    await client.uploadedAsset.updateMany({
+      where: { ownerId: userId, originalFileName: { not: null } },
+      data: { originalFileName: null },
+    });
+
+    // Repair 4 / RB-23：Notification 是 derived ephemeral inbox——注销后无
+    // 保留必要，整表删除（在 erasure 事务内）。
+    await client.notification.deleteMany({ where: { userId } });
+
+    // Repair 4 / RB-24：本人发送的消息保留行（conversation/report 关系历史
+    // 不破坏），但 free text 置哨兵标记 + sender 置空（schema senderId 可空）。
+    await client.message.updateMany({
+      where: { senderId: userId },
+      data: { content: ERASED_USER_CONTENT_MARKER, senderId: null },
+    });
+
+    // Repair 4 / RB-25：本人 authored 评价保留结构（rating/order/target/
+    // 时间；authorId 继续 refer pseudonymous User row），文本与标签清空。
+    await client.review.updateMany({
+      where: { authorId: userId },
+      data: { content: null, tags: [] },
+    });
+
+    await client.rentalReview.updateMany({
+      where: { authorId: userId },
+      data: { content: null, tags: [] },
+    });
+
+    // Repair 4 / RB-26：本人 filed 举报的 detail（user free text）清空；
+    // reason 枚举 / status / scope provenance / decision history 保留。
+    // handledNote 属 operator/governance（RETAIN_GOVERNANCE，不清）。
+    await client.report.updateMany({
+      where: { reporterId: userId },
+      data: { detail: null },
+    });
+
+    // Repair 4 / RB-27：本人作为 appellant 的申诉——statement 是
+    // user-authored content（非空列 → 哨兵标记）；status/decision 机器记录
+    // 保留；decisionNote 属 OPERATOR_ONLY（不清，也永不 self-export）。
+    await client.appeal.updateMany({
+      where: { enforcementAction: { targetId: userId } },
+      data: { statement: ERASED_USER_CONTENT_MARKER },
+    });
+
+    // Repair 4 / RB-28：General Order 无可靠 cancelledBy attribution——参与者
+    // 任一方注销即清双方可见的歧义 free text（隐私侧优先）；amount/status/
+    // type/timestamps 等交易结构历史保留。
+    await client.order.updateMany({
+      where: { OR: [{ buyerId: userId }, { sellerId: userId }] },
+      data: { note: null, cancelReason: null },
+    });
+
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER A）：meetingLocation 是
+    // buyer-authored（productOrderFormSchema/serviceOrderFormSchema →
+    // create*OrderTx），作者权威 = buyerId——仅 buyer 注销清；seller 注销
+    // 不动 buyer 的数据。
+    await client.order.updateMany({
+      where: { buyerId: userId, meetingLocation: { not: null } },
+      data: { meetingLocation: null },
+    });
+
+    // Repair 4 / RB-29：租赁订单 free text 按精确作者归属清理；
+    // cancellationReason 枚举是机器类别（非 raw free text），保留。
+    await client.rentalOrder.updateMany({
+      where: { renterId: userId, renterNote: { not: null } },
+      data: { renterNote: null },
+    });
+
+    await client.rentalOrder.updateMany({
+      where: { cancelledById: userId, cancellationNote: { not: null } },
+      data: { cancellationNote: null },
+    });
+
+    // Repair 4 / RB-30：本人写入的状态流转日志 note 清空（未来写入侧已
+    // 冻结"只允许 system-generated description"）；fromStatus/toStatus/
+    // operator 伪名引用/时间保留。
+    await client.rentalOrderStatusLog.updateMany({
+      where: { operatorId: userId, note: { not: null } },
+      data: { note: null },
+    });
+
+    // Repair 4 / RB-31：本人发起的纠纷（active dispute 已被前置检查阻断，
+    // 此处只可能是 terminal）——reason/evidencePhotos 清理，evidence 资产
+    // 已由上方 REPORT category PENDING_DELETE 收敛；status/resolution
+    // 机器记录与 adminNote（OPERATOR_ONLY，governance）保留。
+    await client.rentalDispute.updateMany({
+      where: { initiatorId: userId },
+      data: { reason: ERASED_USER_CONTENT_MARKER, evidencePhotos: [] },
+    });
+
+    // ---- Repair 4 REVIEW FIX（R4-03）：listing / order 附属 user-authored
+    // 内容。STRUCTURAL ROW RETENTION != USER CONTENT RETENTION：行与结构
+    // 元数据保留（OFFLINE/CANCELLED 已由上方下架语句处理），自由文本与
+    // 资产引用按唯一 actor 归属清理。registry 分类与执行逐字段对应
+    // （LISTING_USER_CONTENT_FIELD_POLICIES / REGISTRY-05）。
+
+    // BlockedUser：blocker==注销人 → reason 置空；relation 行保持现有行为
+    await client.blockedUser.updateMany({
+      where: { blockerId: userId, reason: { not: null } },
+      data: { reason: null },
+    });
+
+    // ErrandTask：publisher 唯一作者。description 非空列 → REDACT marker；
+    // contactNote 可空 → CLEAR
+    await client.errandTask.updateMany({
+      where: { publisherId: userId },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        pickupLocation: ERASED_USER_CONTENT_MARKER,
+        deliveryLocation: ERASED_USER_CONTENT_MARKER,
+        contactNote: null,
+      },
+    });
+
+    // Product：seller 唯一作者。description 非空 → REDACT；图片为附属
+    // ProductImage 内容行（随 listing 行保留的 structural history 之外，
+    // 行级 CLEAR = 删除内容行）；受控资产已由上方 PRODUCT 类 PENDING_DELETE
+    await client.product.updateMany({
+      where: { sellerId: userId },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        locationText: ERASED_USER_CONTENT_MARKER,
+      },
+    });
+
+    await client.productImage.deleteMany({
+      where: { product: { sellerId: userId } },
+    });
+
+    // ServiceListing：provider 唯一作者。description 非空 → REDACT；
+    // coverImageUrl 可空 → CLEAR
+    await client.serviceListing.updateMany({
+      where: { providerId: userId },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        locationText: ERASED_USER_CONTENT_MARKER,
+        availableSchedule: null,
+        coverImageUrl: null,
+      },
+    });
+
+    // RentalListing：owner 唯一作者。description 非空 → REDACT；图片为
+    // RentalListingImage 内容行（行级 CLEAR）
+    await client.rentalListing.updateMany({
+      where: { ownerId: userId },
+      data: {
+        title: ERASED_USER_CONTENT_MARKER,
+        description: ERASED_USER_CONTENT_MARKER,
+        pickupLocation: ERASED_USER_CONTENT_MARKER,
+        returnLocation: ERASED_USER_CONTENT_MARKER,
+        brand: null,
+        model: null,
+        usageRules: null,
+        damagePolicy: null,
+        overduePolicy: null,
+      },
+    });
+
+    await client.rentalListingImage.deleteMany({
+      where: { rentalListing: { ownerId: userId } },
+    });
+
+    // RentalDamageClaim（active 义务已阻断注销，此处只可能 terminal）：
+    // damageDescription/photos 按 submittedById（owner-only 写入路径）
+    // 归属；renterNote 按 order.renterId 归属
+    await client.rentalDamageClaim.updateMany({
+      where: { submittedById: userId },
+      data: { damageDescription: ERASED_USER_CONTENT_MARKER, photos: [] },
+    });
+
+    await client.rentalDamageClaim.updateMany({
+      where: { order: { renterId: userId }, renterNote: { not: null } },
+      data: { renterNote: null },
+    });
+
+    // RentalExtensionRequest：ownerNote 由 owner（order.ownerId）批准时写入
+    await client.rentalExtensionRequest.updateMany({
+      where: { order: { ownerId: userId }, ownerNote: { not: null } },
+      data: { ownerNote: null },
+    });
+
+    // RentalReturnRecord：inspectionNote 由 owner（order.ownerId）验收时写入；
+    // photos 为双确认覆盖语义的混合归属资产引用（STORAGE_METADATA locator，
+    // 对象由 HANDOVER/RETURN 资产 lifecycle 物理删除）——不清数组
+    await client.rentalReturnRecord.updateMany({
+      where: { order: { ownerId: userId }, inspectionNote: { not: null } },
+      data: { inspectionNote: null },
+    });
+
+    // RentalHandoverRecord：accessories/currentCondition/knownIssues 为
+    // owner/renter 双方可写且无 per-field 作者归属的 free text——按
+    // participant erasure 规则（与 General Order 同惯例）：任一参与者注销
+    // 即清空，不猜作者
+    await client.rentalHandoverRecord.updateMany({
+      where: {
+        order: { OR: [{ ownerId: userId }, { renterId: userId }] },
+        OR: [
+          { accessories: { not: null } },
+          { currentCondition: { not: null } },
+          { knownIssues: { not: null } },
+        ],
+      },
+      data: { accessories: null, currentCondition: null, knownIssues: null },
+    });
+
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER B）：pickup/returnLocationSnapshot
+    // 是 owner-authored listing location 的 durable secondary copy——owner
+    // 注销后原文以 REDACT 哨兵收敛；renter 注销不动 owner 数据。交易结构
+    // 字段（金额/状态/时间窗）保留。
+    await client.rentalOrder.updateMany({
+      where: {
+        ownerId: userId,
+        OR: [
+          { pickupLocationSnapshot: { not: ERASED_USER_CONTENT_MARKER } },
+          { returnLocationSnapshot: { not: ERASED_USER_CONTENT_MARKER } },
+        ],
+      },
+      data: {
+        pickupLocationSnapshot: ERASED_USER_CONTENT_MARKER,
+        returnLocationSnapshot: ERASED_USER_CONTENT_MARKER,
+      },
+    });
+
+    // RentalUnavailablePeriod：owner（经 listing FK）管理的不可租时段；
+    // reason 置空，structural timing 保留
+    await client.rentalUnavailablePeriod.updateMany({
+      where: { rentalListing: { ownerId: userId }, reason: { not: null } },
+      data: { reason: null },
     });
 
     // ---- 交易下架：不留"已注销账号 + 可交易 listing" ----

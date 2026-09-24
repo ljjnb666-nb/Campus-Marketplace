@@ -278,11 +278,15 @@ export async function createRentalOrderTx(
       note: '租客提交租赁申请',
     });
 
+    // FINAL SECONDARY-COPY CLOSURE（BLOCKER C）：listing.title 是
+    // USER_AUTHORED_CONTENT（secondaryCopyAllowed=NO）——通知只做事件信号，
+    // 绝不复制 listing 标题/描述/地点/renterNote（SECONDARY_COPY_FIELD_
+    // EXPECTATIONS: RentalListing.title → Notification.content = FORBIDDEN）。
     await createNotifications(tx, [{
       userId: listing.ownerId,
       type: 'RENTAL',
       title: '收到新的租赁申请',
-      content: `"${listing.title}" 收到新的租赁申请，请前往出租订单中心处理。`,
+      content: '你的出租物品收到新的租赁申请，请前往出租订单中心处理。',
     }]);
 
     return { orderId: order.id };
@@ -344,19 +348,23 @@ export async function rejectRentalOrderTx(
     },
   });
 
+  // Repair 4 / RB-04 secondary-copy rule：rejectReason 是 user free text，
+  // 唯一权威保存在 RentalOrder.cancellationNote（由 lifecycle/erasure 策略
+  // 处理）；status log note 与 Notification.content 都只允许 generic system
+  // copy，绝不能复制原始原因。
   await writeStatusLog(tx, {
     orderId: input.orderId,
     fromStatus: 'PENDING_APPROVAL',
     toStatus: 'REJECTED',
     operatorId: input.userId,
-    note: `出租者拒绝租赁: ${input.rejectReason}`,
+    note: '出租者拒绝了租赁申请',
   });
 
   await createNotifications(tx, [{
     userId: order.renterId,
     type: 'RENTAL',
     title: '租赁申请被拒绝',
-    content: `你的租赁申请被拒绝。原因：${input.rejectReason}`,
+    content: '你的租赁申请未通过，请前往订单详情查看。',
   }]);
   return { success: true };
 }
@@ -947,12 +955,15 @@ export async function initiateDisputeTx(
     data: { status: "IN_DISPUTE" },
   });
 
+  // Repair 4 / RB-04：dispute reason 是 user free text（权威在
+  // RentalDispute.reason）——status log note 只允许 generic system copy，
+  // 绝不拼接原始纠纷原因。
   await writeStatusLog(tx, {
     orderId: input.orderId,
     fromStatus: order.status as RentalOrderStatus,
     toStatus: "IN_DISPUTE",
     operatorId: input.userId,
-    note: `发起纠纷: ${input.reason}`,
+    note: "订单进入纠纷流程",
   });
 
   await createNotifications(tx, [{

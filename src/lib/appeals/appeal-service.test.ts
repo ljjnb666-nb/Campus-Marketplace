@@ -266,6 +266,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "SUBMITTED",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: null });
@@ -285,7 +286,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
     });
   });
 
-  it("锁序硬合同：Appeal 行锁（FOR UPDATE）先于 USER governance lock", async () => {
+  it("锁序硬合同（Repair 4 修正）：USER governance lock 先于 Appeal 行锁（FOR UPDATE）", async () => {
     const order: string[] = [];
     txQueryRaw.mockImplementation(async () => {
       order.push("appeal-row-lock");
@@ -298,12 +299,15 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "SUBMITTED",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: null });
 
     await withdrawAppeal({ callerUserId: TARGET_ID, appealId: "ap-1" });
-    expect(order).toEqual(["appeal-row-lock", "user-target-lock"]);
+    // Repair 4：erasure 也是 Appeal 行写入者（advisory-first）——行锁在前
+    // 会与注销死锁（T35 P2010），全局统一 subject-lock-first。
+    expect(order).toEqual(["user-target-lock", "appeal-row-lock"]);
   });
 
   it("post-erasure withdraw → APPEAL_NOT_ALLOWED（零 user-originated mutation）", async () => {
@@ -311,6 +315,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "SUBMITTED",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: new Date() });
@@ -326,6 +331,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "SUBMITTED",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: null });
@@ -342,6 +348,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "SUBMITTED",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     const targetStates = [
@@ -366,6 +373,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "IN_REVIEW",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     txEnforcementActionFindUnique.mockResolvedValue({ targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: null });
@@ -378,6 +386,7 @@ describe("withdrawAppeal（行锁 → USER target 锁；post-erasure 禁止）",
       id: "ap-1",
       status: "UPHELD",
       enforcementActionId: EA_ID,
+      enforcementAction: { targetId: TARGET_ID },
     });
     await expect(withdrawAppeal({ callerUserId: TARGET_ID, appealId: "ap-1" })).rejects.toMatchObject({
       code: "APPEAL_INVALID_TRANSITION",

@@ -1,0 +1,658 @@
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PrismaClient } from "@prisma/client";
+import { afterAll, describe, expect, it, vi } from "vitest";
+
+/**
+ * MIGRATION-01/02：Repair 4 data-only migration 行为证明（真实 PostgreSQL）。
+ *
+ * 在临时库上重放全部 pre-migrations → 种子"迁移前"数据形态（历史通知
+ * raw free text / 已注销用户的未清理副本）→ 应用本 migration SQL →
+ * 逐字段断言确定性回填 → 重复应用同一 SQL 断言幂等（idempotent in effect）。
+ *
+ * 冻结合同：
+ * - 无启发式作者猜测（全部经 FK / ownership / explicit actor relation 归属）
+ * - 历史 Notification（DERIVED_EPHEMERAL）统一 redact，title/type/isRead 保留
+ * - 非注销用户的权威字段绝不被触碰（对照用户）
+ */
+
+vi.setConfig({ testTimeout: 240_000, hookTimeout: 300_000 });
+
+const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
+
+const NEW_MIGRATION = "20260924120000_repair4_privacy_lifecycle_backfill";
+const ERASED_MARKER = "（该内容已随账号注销删除）";
+const HISTORICAL_NOTIFICATION_MARKER = "历史通知详情已按隐私策略清理，请查看相关业务记录。";
+
+function swapDatabaseName(databaseUrl: string, name: string): string {
+  const parsed = new URL(databaseUrl);
+  parsed.pathname = `/${name}`;
+  parsed.search = "";
+  return parsed.toString();
+}
+
+function runPrismaCli(args: string[], databaseUrl: string, input?: string): string {
+  const result = spawnSync(
+    process.execPath,
+    [join("node_modules", "prisma", "build", "index.js"), ...args],
+    {
+      env: { ...process.env, DATABASE_URL: databaseUrl },
+      encoding: "utf8",
+      input,
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(`prisma cli failed (${result.status}): ${result.stderr}`);
+  }
+  return result.stdout;
+}
+
+function runPrismaDbExecute(sql: string, databaseUrl: string): void {
+  runPrismaCli(["db", "execute", "--schema", "prisma/schema.prisma", "--stdin"], databaseUrl, sql);
+}
+
+const TEMP_DB = `rb04mig_${randomUUID().slice(0, 8)}`;
+
+function createTempDatabase(): string {
+  const maintenanceUrl = swapDatabaseName(integrationDatabaseUrl!, "postgres");
+  runPrismaDbExecute(`DROP DATABASE IF EXISTS "${TEMP_DB}";`, maintenanceUrl);
+  runPrismaDbExecute(`CREATE DATABASE "${TEMP_DB}";`, maintenanceUrl);
+  return swapDatabaseName(integrationDatabaseUrl!, TEMP_DB);
+}
+
+function dropTempDatabase(): void {
+  const maintenanceUrl = swapDatabaseName(integrationDatabaseUrl!, "postgres");
+  try {
+    runPrismaDbExecute(`DROP DATABASE IF EXISTS "${TEMP_DB}" WITH (FORCE);`, maintenanceUrl);
+  } catch {
+    // 残留连接 FORCE 已尽力
+  }
+}
+
+function replayPreMigrations(tempUrl: string): void {
+  const migrationsDir = join(process.cwd(), "prisma", "migrations");
+  const preMigrations = readdirSync(migrationsDir)
+    .filter((name) => /^\d{14}_/.test(name) && name < NEW_MIGRATION)
+    .sort();
+  expect(preMigrations.length).toBeGreaterThan(0);
+  const sql = preMigrations
+    .map((name) => readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"))
+    .join("\n\n");
+  runPrismaDbExecute(sql, tempUrl);
+}
+
+function newMigrationSql(): string {
+  return readFileSync(
+    join(process.cwd(), "prisma", "migrations", NEW_MIGRATION, "migration.sql"),
+    "utf8",
+  );
+}
+
+describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (real PostgreSQL)", () => {
+  afterAll(async () => {
+    if (integrationDatabaseUrl) {
+      dropTempDatabase();
+    }
+  });
+
+  it("MIGRATION-01/02：历史通知 redact + already-erased 用户确定性回填 + 幂等重放", async () => {
+    const tempUrl = createTempDatabase();
+    replayPreMigrations(tempUrl);
+
+    // 临时库独立客户端（PrismaClient datasources 构造后不可变）
+    const db = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });
+    try {
+      // ---- 种子 pre-migration 数据形态 ----
+      const campus = await db.campus.create({
+        data: {
+          name: "RB04 迁移校区",
+          slug: `rb04mig-${randomUUID().slice(0, 8)}`,
+          schoolName: "集成测试大学",
+        },
+      });
+      const erased = await db.user.create({
+        data: {
+          name: "历史注销用户",
+          email: `erased-${randomUUID().slice(0, 8)}@it.local`,
+          passwordHash: "test-only",
+          schoolName: "示例大学",
+          campusId: campus.id,
+          erasedAt: new Date("2026-09-01T00:00:00Z"),
+        },
+      });
+      const survivor = await db.user.create({
+        data: {
+          name: "在册对照用户",
+          email: `survivor-${randomUUID().slice(0, 8)}@it.local`,
+          passwordHash: "test-only",
+          schoolName: "示例大学",
+          campusId: campus.id,
+        },
+      });
+      const erasedMembership = await db.campusMembership.create({
+        data: { userId: erased.id, campusId: campus.id, status: "LEFT" },
+      });
+
+      // 历史通知：无法定位作者（含 raw free text）——全部 redact
+      await db.notification.create({
+        data: { userId: erased.id, type: "SYSTEM", title: "历史标题A", content: "审核未通过：材料模糊" },
+      });
+      await db.notification.create({
+        data: { userId: survivor.id, type: "RENTAL", title: "历史标题B", content: "拒绝原因：不想租了" },
+      });
+
+      // R4-01 canary：erased 用户 schoolName 仍为原值（迁移后 → marker）
+      await db.user.update({
+        where: { id: erased.id },
+        data: { schoolName: "隐私学校-DO-NOT-SURVIVE" },
+      });
+
+      // R4-03 listing/attachment：erased 拥有的 product（含 ProductImage 行）
+      // + PRODUCT 资产；errandTask；blockedUser
+      const earlyProductCategory = await db.productCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const erasedProduct = await db.product.create({
+        data: {
+          title: "私人商品标题-DO-NOT-SURVIVE",
+          description: "private-product-description",
+          locationText: "宿舍A栋301-DO-NOT-SURVIVE",
+          price: "1.00",
+          condition: "LIKE_NEW",
+          sellerId: erased.id,
+          campusId: campus.id,
+          categoryId: earlyProductCategory.id,
+          status: "OFFLINE",
+        },
+      });
+      await db.productImage.create({
+        data: { productId: erasedProduct.id, url: "canary-product-image", sortOrder: 0 },
+      });
+      const erasedListingAsset = await db.uploadedAsset.create({
+        data: {
+          ownerId: erased.id,
+          category: "PRODUCT",
+          access: "PUBLIC",
+          bucket: "campus-public",
+          objectKey: `rb04mig/${randomUUID().slice(0, 8)}`,
+          mimeType: "image/webp",
+          sizeBytes: 10,
+          status: "ATTACHED",
+          productId: erasedProduct.id,
+          originalFileName: "历史商品图.png",
+        },
+      });
+      const errandCategory = await db.errandCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const erasedErrand = await db.errandTask.create({
+        data: {
+          title: "私人跑腿标题-DO-NOT-SURVIVE",
+          description: "private-errand-description",
+          categoryId: errandCategory.id,
+          reward: "1.00",
+          pickupLocation: "宿舍B栋201",
+          deliveryLocation: "私人送达地点",
+          contactNote: "微信 private-contact",
+          deadline: new Date(),
+          publisherId: erased.id,
+          campusId: campus.id,
+          status: "CANCELLED",
+        },
+      });
+      await db.blockedUser.create({
+        data: { blockerId: erased.id, blockedUserId: survivor.id, reason: "private-block-reason" },
+      });
+
+      // 已注销用户的未清理副本
+      const verification = await db.userVerification.create({
+        data: {
+          userId: erased.id,
+          membershipId: erasedMembership.id,
+          schoolName: "示例大学",
+          campusName: "主校区",
+          studentIdLast4: "1234",
+          studentCardImage: "erased",
+          status: "REJECTED",
+          reviewNote: "历史审核备注",
+          submittedAt: new Date(),
+          reviewDueAt: new Date(),
+        },
+      });
+      expect(verification.reviewNote).toBe("历史审核备注");
+
+      await db.supportTicket.create({
+        data: {
+          requesterId: erased.id,
+          scopeKey: "UNSCOPED",
+          category: "ACCOUNT",
+          status: "RESOLVED",
+          subject: "历史工单标题",
+          description: "历史工单描述",
+          resolutionCode: "ANSWERED",
+          resolutionMessage: "历史处理消息",
+          internalNote: "历史内部备注",
+          dueAt: new Date(),
+        },
+      });
+
+      const avatarAsset = await db.uploadedAsset.create({
+        data: {
+          ownerId: erased.id,
+          category: "AVATAR",
+          access: "PUBLIC",
+          bucket: "campus-public",
+          objectKey: `rb04mig/${randomUUID().slice(0, 8)}`,
+          mimeType: "image/webp",
+          sizeBytes: 10,
+          status: "UPLOADED",
+          originalFileName: "历史头像.png",
+        },
+      });
+      const productAsset = await db.uploadedAsset.create({
+        data: {
+          ownerId: erased.id,
+          category: "PRODUCT",
+          access: "PUBLIC",
+          bucket: "campus-public",
+          objectKey: `rb04mig/${randomUUID().slice(0, 8)}`,
+          mimeType: "image/webp",
+          sizeBytes: 10,
+          status: "ATTACHED",
+          originalFileName: "历史商品图.png",
+        },
+      });
+
+      // rental 链路：listing + order + status log
+      const rentalCategory = await db.rentalCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const listing = await db.rentalListing.create({
+        data: {
+          title: "迁移测试出租",
+          description: "迁移测试",
+          condition: "LIKE_NEW",
+          price: "1.00",
+          pricingUnit: "PER_DAY",
+          depositAmount: "0",
+          minimumDuration: 1,
+          maximumDuration: 5,
+          ownerId: survivor.id,
+          campusId: campus.id,
+          categoryId: rentalCategory.id,
+          pickupLocation: "北门",
+          returnLocation: "北门",
+        },
+      });
+      const rentalOrder = await db.rentalOrder.create({
+        data: {
+          orderNumber: `ROMIG${randomUUID().slice(0, 6)}`,
+          rentalListingId: listing.id,
+          ownerId: survivor.id,
+          renterId: erased.id,
+          startTime: new Date(),
+          endTime: new Date(),
+          unitPriceSnapshot: "1.00",
+          pricingUnitSnapshot: "PER_DAY",
+          rentalDuration: 1,
+          rentalAmount: "1.00",
+          depositAmount: "0",
+          finalAmount: "1.00",
+          paymentStatus: "OFFLINE_PENDING",
+          depositStatus: "NOT_REQUIRED",
+          status: "CANCELLED",
+          pickupLocationSnapshot: "北门",
+          returnLocationSnapshot: "北门",
+          renterNote: "历史租客备注",
+          cancellationNote: "历史取消备注",
+          cancelledById: erased.id,
+        },
+      });
+      await db.rentalOrderStatusLog.create({
+        data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "REJECTED", operatorId: erased.id, note: "历史日志备注" },
+      });
+
+      // FINAL CLOSURE BLOCKER B：erased owner 的 rentalOrder 携带原地点 snapshot
+      const erasedRentalListing = await db.rentalListing.create({
+        data: {
+          title: "私人租赁标题-DO-NOT-SURVIVE",
+          description: "private-rental-description",
+          condition: "LIKE_NEW",
+          price: "1.00",
+          pricingUnit: "PER_DAY",
+          depositAmount: "0",
+          minimumDuration: 1,
+          maximumDuration: 5,
+          ownerId: erased.id,
+          campusId: campus.id,
+          categoryId: rentalCategory.id,
+          pickupLocation: "私人取货地点",
+          returnLocation: "私人归还地点",
+          status: "OFFLINE",
+        },
+      });
+      const erasedOwnedOrder = await db.rentalOrder.create({
+        data: {
+          orderNumber: `ROMIG2${randomUUID().slice(0, 6)}`,
+          rentalListingId: erasedRentalListing.id,
+          ownerId: erased.id,
+          renterId: survivor.id,
+          startTime: new Date(),
+          endTime: new Date(),
+          unitPriceSnapshot: "1.00",
+          pricingUnitSnapshot: "PER_DAY",
+          rentalDuration: 1,
+          rentalAmount: "1.00",
+          depositAmount: "0",
+          finalAmount: "1.00",
+          paymentStatus: "OFFLINE_PENDING",
+          depositStatus: "NOT_REQUIRED",
+          status: "COMPLETED",
+          pickupLocationSnapshot: "私人取货地点-KEEP-ORIG-FOR-MIGRATION",
+          returnLocationSnapshot: "私人归还地点-KEEP-ORIG-FOR-MIGRATION",
+        },
+      });
+
+      // FINAL CLOSURE BLOCKER A：erased buyer 的 Order.meetingLocation 原值
+      await db.order.create({
+        data: {
+          orderNo: `GOMIG2${randomUUID().slice(0, 6)}`,
+          type: "PRODUCT",
+          status: "COMPLETED",
+          paymentStatus: "OFFLINE_PENDING",
+          amount: "1.00",
+          meetingLocation: "宿舍A栋301-DO-NOT-SURVIVE",
+          buyerId: erased.id,
+          sellerId: survivor.id,
+        },
+      });
+
+      // RentalHandoverRecord participant-erasure（renter=erased）
+      await db.rentalHandoverRecord.create({
+        data: {
+          orderId: rentalOrder.id,
+          photos: [],
+          accessories: "私人配件备注",
+          currentCondition: "私人现状说明",
+          knownIssues: "私人问题说明",
+        },
+      });
+
+      // damage claim（挂在既有 rentalOrder：owner=survivor, renter=erased）
+      await db.rentalDamageClaim.create({
+        data: {
+          orderId: rentalOrder.id,
+          submittedById: survivor.id,
+          damageDescription: "对照索赔描述（owner 未注销，保留）",
+          requestedDeduction: "0",
+          photos: [],
+        },
+      });
+      await db.rentalDamageClaim.create({
+        data: {
+          orderId: rentalOrder.id,
+          submittedById: survivor.id,
+          damageDescription: "对照索赔B",
+          requestedDeduction: "0",
+          photos: [],
+          renterNote: "private-renter-note（renter=erased，清）",
+          resolvedAt: new Date(),
+        },
+      });
+      await db.rentalOrderStatusLog.create({
+        data: { orderId: rentalOrder.id, fromStatus: "PENDING_APPROVAL", toStatus: "PENDING_PICKUP", operatorId: survivor.id, note: "对照日志备注" },
+      });
+
+      // message / review / report / dispute
+      const conversation = await db.conversation.create({
+        data: { participants: { create: [{ userId: erased.id }, { userId: survivor.id }] } },
+      });
+      await db.message.create({
+        data: { conversationId: conversation.id, senderId: erased.id, type: "DIRECT", content: "历史消息原文" },
+      });
+
+      const productCategory = await db.productCategory.create({
+        data: { name: `rb04mig-${randomUUID().slice(0, 8)}`, slug: `rb04mig-${randomUUID().slice(0, 8)}` },
+      });
+      const product = await db.product.create({
+        data: {
+          title: "迁移测试商品",
+          description: "迁移测试",
+          price: "1.00",
+          locationText: "北门",
+          condition: "LIKE_NEW",
+          sellerId: survivor.id,
+          campusId: campus.id,
+          categoryId: productCategory.id,
+        },
+      });
+      const order = await db.order.create({
+        data: {
+          orderNo: `GOMIG${randomUUID().slice(0, 6)}`,
+          type: "PRODUCT",
+          status: "COMPLETED",
+          paymentStatus: "OFFLINE_PENDING",
+          amount: "1.00",
+          note: "历史订单留言",
+          cancelReason: null,
+          buyerId: erased.id,
+          sellerId: survivor.id,
+          productId: product.id,
+        },
+      });
+      await db.review.create({
+        data: { orderId: order.id, authorId: erased.id, targetUserId: survivor.id, rating: 5, content: "历史评价原文", tags: ["历史"] },
+      });
+      await db.report.create({
+        data: {
+          targetType: "USER",
+          reason: "ADVERTISEMENT",
+          detail: "历史举报详情",
+          status: "RESOLVED",
+          reporterId: erased.id,
+          handledById: survivor.id,
+          handledNote: "历史 operator 备注",
+          scopeKey: "UNSCOPED",
+        },
+      });
+      const enforcement = await db.enforcementAction.create({
+        data: {
+          type: "ACCOUNT_SUSPEND",
+          actorId: survivor.id,
+          targetId: erased.id,
+          scopeKey: "GLOBAL",
+          reasonCode: "POLICY_VIOLATION",
+          resultState: "USER:SUSPENDED",
+        },
+      });
+      await db.appeal.create({
+        data: {
+          enforcementActionId: enforcement.id,
+          status: "UPHELD",
+          statement: "历史申诉原文",
+          reviewDueAt: new Date(),
+          decisionReasonCode: "MERIT_VIOLATION_CONFIRMED",
+        },
+      });
+      await db.rentalDispute.create({
+        data: {
+          orderId: rentalOrder.id,
+          initiatorId: erased.id,
+          reason: "历史纠纷原因",
+          evidencePhotos: ["asset:legacy"],
+          status: "CLOSED",
+          campusId: campus.id,
+          scopeKey: `CAMPUS:${campus.id}`,
+          dueAt: new Date(),
+          resolutionCode: "OTHER",
+          resolutionAction: "CLOSE_ORDER",
+        },
+      });
+
+      // ---- 应用新 migration SQL ----
+      runPrismaDbExecute(newMigrationSql(), tempUrl);
+
+      // ---- MIGRATION-NOTIFICATION-01：already-erased owner 的 Notification = DELETE ----
+      expect(await db.notification.count({ where: { userId: erased.id } })).toBe(0);
+
+      // ---- MIGRATION-NOTIFICATION-02：active owner 的历史行保留 + content redact ----
+      const notifications = await db.notification.findMany({ orderBy: { createdAt: "asc" } });
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]!.userId).toBe(survivor.id);
+      expect(notifications[0]!.content).toBe(HISTORICAL_NOTIFICATION_MARKER);
+      expect(notifications[0]!.title).toBe("历史标题B");
+      expect(notifications[0]!.type).toBe("RENTAL");
+
+      // ---- MIGRATION-SCHOOL-01：already-erased schoolName → marker；对照不变 ----
+      const schoolAfter = await db.user.findUniqueOrThrow({ where: { id: erased.id } });
+      expect(schoolAfter.schoolName).toBe("已注销用户");
+      expect(schoolAfter.schoolName).not.toContain("DO-NOT-SURVIVE");
+      const survivorAfterNotif = await db.user.findUniqueOrThrow({ where: { id: survivor.id } });
+      expect(survivorAfterNotif.schoolName).toBe("示例大学");
+
+      // ---- R4-03：listing/attachment 文本 + image 行 + owned listing 资产 ----
+      const productAfter = await db.product.findUniqueOrThrow({ where: { id: erasedProduct.id } });
+      expect(productAfter.title).toBe("（该内容已随账号注销删除）");
+      expect(productAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(productAfter.locationText).toBe("（该内容已随账号注销删除）");
+      expect(productAfter.status).toBe("OFFLINE");
+      expect(await db.productImage.count({ where: { productId: erasedProduct.id } })).toBe(0);
+      const listingAssetAfter = await db.uploadedAsset.findUniqueOrThrow({ where: { id: erasedListingAsset.id } });
+      expect(listingAssetAfter.status).toBe("PENDING_DELETE");
+      expect(listingAssetAfter.originalFileName).toBeNull();
+      const errandAfter = await db.errandTask.findUniqueOrThrow({ where: { id: erasedErrand.id } });
+      expect(errandAfter.title).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.description).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.pickupLocation).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.deliveryLocation).toBe("（该内容已随账号注销删除）");
+      expect(errandAfter.contactNote).toBeNull();
+      const blockedAfter = await db.blockedUser.findFirstOrThrow({ where: { blockerId: erased.id } });
+      expect(blockedAfter.reason).toBeNull();
+      const handoverAfter = await db.rentalHandoverRecord.findFirstOrThrow({
+        where: { orderId: rentalOrder.id },
+      });
+      expect(handoverAfter.accessories).toBeNull();
+      expect(handoverAfter.currentCondition).toBeNull();
+      expect(handoverAfter.knownIssues).toBeNull();
+      const claimsAfter = await db.rentalDamageClaim.findMany({ where: { orderId: rentalOrder.id } });
+      expect(claimsAfter).toHaveLength(2);
+      const keptClaim = claimsAfter.find((c) => c.damageDescription.includes('对照索赔描述'));
+      const renterNoteClaim = claimsAfter.find((c) => c.damageDescription.includes('对照索赔B'));
+      expect(keptClaim!.damageDescription).toContain('对照索赔描述');
+      expect(keptClaim!.renterNote).toBeNull();
+      expect(renterNoteClaim!.renterNote).toBeNull();
+
+      // ---- MIGRATION-02：already-erased 用户逐字段回填 ----
+      const backfilledVerification = await db.userVerification.findUniqueOrThrow({ where: { id: verification.id } });
+      expect(backfilledVerification.reviewNote).toBeNull();
+
+      const ticket = await db.supportTicket.findFirstOrThrow({ where: { requesterId: erased.id } });
+      expect(ticket.subject).toBe(ERASED_MARKER);
+      expect(ticket.description).toBe(ERASED_MARKER);
+      expect(ticket.resolutionMessage).toBeNull();
+      expect(ticket.internalNote).toBeNull();
+
+      const backfilledAvatar = await db.uploadedAsset.findUniqueOrThrow({ where: { id: avatarAsset.id } });
+      expect(backfilledAvatar.originalFileName).toBeNull();
+      expect(backfilledAvatar.status).toBe("PENDING_DELETE");
+      const backfilledProduct = await db.uploadedAsset.findUniqueOrThrow({ where: { id: productAsset.id } });
+      expect(backfilledProduct.originalFileName).toBeNull();
+      // R4-03 C5：listing 镜像资产同样进入 durable deletion queue
+      expect(backfilledProduct.status).toBe("PENDING_DELETE");
+
+      const logs = await db.rentalOrderStatusLog.findMany({ where: { orderId: rentalOrder.id } });
+      const erasedLog = logs.find((log) => log.operatorId === erased.id)!;
+      const survivorLog = logs.find((log) => log.operatorId === survivor.id)!;
+      expect(erasedLog.note).toBeNull();
+      expect(survivorLog.note).toBe("对照日志备注");
+
+      const backfilledOrder = await db.rentalOrder.findUniqueOrThrow({ where: { id: rentalOrder.id } });
+      expect(backfilledOrder.renterNote).toBeNull();
+      expect(backfilledOrder.cancellationNote).toBeNull();
+      expect(backfilledOrder.cancellationReason).toBeNull();
+
+      const backfilledMessage = await db.message.findFirstOrThrow({ where: { conversationId: conversation.id } });
+      expect(backfilledMessage.content).toBe(ERASED_MARKER);
+      expect(backfilledMessage.senderId).toBeNull();
+
+      const backfilledReview = await db.review.findFirstOrThrow({ where: { authorId: erased.id } });
+      expect(backfilledReview.content).toBeNull();
+      expect(backfilledReview.tags).toEqual([]);
+      expect(backfilledReview.rating).toBe(5);
+
+      const backfilledReport = await db.report.findFirstOrThrow({ where: { reporterId: erased.id } });
+      expect(backfilledReport.detail).toBeNull();
+      expect(backfilledReport.handledNote).toBe("历史 operator 备注");
+
+      const backfilledAppeal = await db.appeal.findUniqueOrThrow({ where: { enforcementActionId: enforcement.id } });
+      expect(backfilledAppeal.statement).toBe(ERASED_MARKER);
+
+      const backfilledGeneralOrder = await db.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(backfilledGeneralOrder.note).toBeNull();
+
+      const backfilledDispute = await db.rentalDispute.findFirstOrThrow({ where: { initiatorId: erased.id } });
+      expect(backfilledDispute.reason).toBe(ERASED_MARKER);
+      expect(backfilledDispute.evidencePhotos).toEqual([]);
+
+      // ---- FINAL CLOSURE：meetingLocation（buyer 归属）+ snapshots（owner 归属）----
+      const meetingOrderAfter = await db.order.findFirstOrThrow({
+        where: { orderNo: { startsWith: "GOMIG2" } },
+      });
+      expect(meetingOrderAfter.buyerId).toBe(erased.id);
+      expect(meetingOrderAfter.meetingLocation).toBeNull();
+
+      const erasedOwnedOrderAfter = await db.rentalOrder.findUniqueOrThrow({
+        where: { id: erasedOwnedOrder.id },
+      });
+      expect(erasedOwnedOrderAfter.pickupLocationSnapshot).toBe("（该内容已随账号注销删除）");
+      expect(erasedOwnedOrderAfter.returnLocationSnapshot).toBe("（该内容已随账号注销删除）");
+      expect(erasedOwnedOrderAfter.rentalAmount.toFixed(2)).toBe("1.00");
+      expect(erasedOwnedOrderAfter.status).toBe("COMPLETED");
+
+      // renter=erased 不清 owner（survivor）数据：原地点保留
+      const survivorOwnedOrderAfter = await db.rentalOrder.findUniqueOrThrow({
+        where: { id: rentalOrder.id },
+      });
+      expect(survivorOwnedOrderAfter.pickupLocationSnapshot).toBe("北门");
+
+      // ---- 对照用户权威字段绝不被触碰（历史通知 redact 除外） ----
+      const survivorAfter = await db.user.findUniqueOrThrow({ where: { id: survivor.id } });
+      expect(survivorAfter.name).toBe("在册对照用户");
+      expect(survivorAfter.email).toContain("survivor-");
+      expect(await db.userVerification.findUnique({ where: { userId: survivor.id } })).toBeNull();
+
+      // ---- 幂等：重复应用同一 SQL，终态不变 ----
+      runPrismaDbExecute(newMigrationSql(), tempUrl);
+      const notificationsAfterReplay = await db.notification.findMany();
+      expect(notificationsAfterReplay.map((entry) => entry.content)).toEqual([
+        HISTORICAL_NOTIFICATION_MARKER,
+      ]);
+      expect(notificationsAfterReplay[0]!.userId).toBe(survivor.id);
+      const avatarAfterReplay = await db.uploadedAsset.findUniqueOrThrow({ where: { id: avatarAsset.id } });
+      expect(avatarAfterReplay.status).toBe("PENDING_DELETE");
+      const reviewAfterReplay = await db.review.findFirstOrThrow({ where: { authorId: erased.id } });
+      expect(reviewAfterReplay.content).toBeNull();
+      expect(reviewAfterReplay.tags).toEqual([]);
+      // 幂等：listing/attachment 与 school 同样收敛到相同终态
+      expect(await db.notification.count({ where: { userId: erased.id } })).toBe(0);
+      const schoolAfterReplay = await db.user.findUniqueOrThrow({ where: { id: erased.id } });
+      expect(schoolAfterReplay.schoolName).toBe("已注销用户");
+      const listingAssetAfterReplay = await db.uploadedAsset.findUniqueOrThrow({
+        where: { id: erasedListingAsset.id },
+      });
+      expect(listingAssetAfterReplay.status).toBe("PENDING_DELETE");
+      const errandAfterReplay = await db.errandTask.findUniqueOrThrow({ where: { id: erasedErrand.id } });
+      expect(errandAfterReplay.title).toBe("（该内容已随账号注销删除）");
+      expect(errandAfterReplay.contactNote).toBeNull();
+      const handoverAfterReplay = await db.rentalHandoverRecord.findFirstOrThrow({
+        where: { orderId: rentalOrder.id },
+      });
+      expect(handoverAfterReplay.accessories).toBeNull();
+      expect(handoverAfterReplay.knownIssues).toBeNull();
+    } finally {
+      await db.$disconnect().catch(() => undefined);
+    }
+  });
+});

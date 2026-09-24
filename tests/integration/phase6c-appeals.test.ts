@@ -24,7 +24,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *  - migration 验证 D-1..D-6
  *
  * 并发全部确定性：advisory lock / row lock / racePoint / promise barrier；
- * 零 sleep、零随机重试。锁序统一：Appeal 行锁 → governance USER 锁。
+ * 零 sleep、零随机重试。锁序统一（Repair 4 REVIEW FIX §24 修正注释）：
+ * governance subject USER 锁 → Appeal 行锁（与 eraseAccount 的 advisory-first
+ * Appeal 行写入共存，行锁在前会构成死锁环——见 appeal-service 合同）。
  */
 
 const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
@@ -1094,7 +1096,8 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       // T25/T29：owner 导出包含 own appeal，格式精确 v2
       const payload = await buildUserExport(target.id);
-      expect(payload.format).toBe("campus-marketplace.user-export/v2");
+      // Repair 4：payload shape 扩段后升 v3（v1/v2 契约未被静默修改）
+      expect(payload.format).toBe("campus-marketplace.user-export/v3");
       expect(payload.appeals).toHaveLength(1);
       expect(payload.appeals[0]).toMatchObject({
         id: appeal.id,

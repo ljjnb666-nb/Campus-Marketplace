@@ -240,11 +240,7 @@ describe("user actions", () => {
     );
   });
 
-  it("marks replaced verification materials for deletion when resubmitting", async () => {
-    verificationFindUnique.mockResolvedValue({
-      studentCardImage: "asset:asset-old",
-    });
-
+  it("delegates replaced verification material cleanup to the lifecycle service（无事务外 best-effort 标记）", async () => {
     const formData = new FormData();
     formData.set("schoolName", "示例大学");
     formData.set("campusName", "主校区");
@@ -253,7 +249,10 @@ describe("user actions", () => {
 
     await submitVerification({ success: false, message: "" }, formData);
 
-    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", ["asset:asset-old"]);
+    // Repair 4：旧材料 PENDING_DELETE 标记已移入 submitMembershipVerification
+    // 的 canonical 事务；action 层不再做事务外 pre-read + best-effort 标记
+    expect(markAssetsForValuesPendingDelete).not.toHaveBeenCalled();
+    expect(verificationFindUnique).not.toHaveBeenCalled();
   });
 
   it("rejects verification submissions with invalid form data", async () => {
@@ -358,9 +357,13 @@ describe("user actions", () => {
       }),
       select: expect.anything(),
     });
-    // 旧头像被替换时标记待删除
-    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", [
-      "http://localhost:9100/campus-public/public/avatars/user-1/old.webp",
-    ]);
+    // Repair 4：旧头像被替换时在同一 USER 锁事务内标记待删除
+    //（第三参 = 事务客户端；不再有事务外 best-effort 调用）
+    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledTimes(1);
+    expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith(
+      "user-1",
+      ["http://localhost:9100/campus-public/public/avatars/user-1/old.webp"],
+      expect.anything(),
+    );
   });
 });

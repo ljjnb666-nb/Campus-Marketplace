@@ -121,12 +121,15 @@ export async function createReview(
         },
       });
 
+      // Repair 4 / RB-04 secondary-copy rule：评价者的展示名是
+      // DIRECT_IDENTITY（secondaryCopyAllowed=NO）——通知只做事件信号，
+      // 不携带评价者身份或评价内容原文，评价详情由评价读面按需展示。
       await createNotification(tx, {
         userId: parsed.data.targetUserId,
         orderId: order.id,
         type: "REVIEW",
         title: "收到新的订单评价",
-        content: `${user.name} 已为这笔订单提交评价，快去个人中心查看最新口碑表现。`,
+        content: "你收到一条新的订单评价，快去个人中心查看最新口碑表现。",
       });
     });
 
