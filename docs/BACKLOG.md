@@ -109,3 +109,20 @@
 - **candidate phase**：Phase 8（测试基建稳定化批）
 - **review_at**：Phase 8 planning
 - **blocker**：NON_BLOCKING（attempt=2 同 SHA 双绿；本地隔离全绿）
+
+---
+
+## CI_DEBT_MINIO_MIRROR_MUTABLE_TAG
+
+- **title**：CI 的 ghcr MinIO 镜像副本使用可变 `latest` tag
+- **motivation**：RB-04 FIELD-COVERAGE round（run 36033918738 起）CI 的
+  MinIO/mc 镜像源切换到 `ghcr.io/ljjnb666-nb/minio|mc:latest`（官方镜像
+  副本，解决 quay.io 匿名 401 与 Docker Hub runner-IP 限流）。`latest`
+  是可变 tag：副本与上游 MinIO 版本不会自动同步，镜像更新需维护者手动
+  重新 push；且无 digest pin，理论可变但持有者是唯一 pusher。
+- **priority**：LOW
+- **dependency**：ghcr packages（ljjnb666-nb/minio、/mc）
+- **candidate phase**：Repair 6 / deployment debt
+- **review_at**：Repair 6 planning
+- **blocker**：NON_BLOCKING（RB-04 CI 全绿；镜像内容 = MinIO 官方镜像）
+- **future work**：pin immutable version/digest + 镜像同步/可复现策略
