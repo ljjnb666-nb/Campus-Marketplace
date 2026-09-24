@@ -472,14 +472,17 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   // Order（productOrderFormSchema / serviceOrderFormSchema）
   { model: "Order", field: "meetingLocation", sources: ["productOrderFormSchema.meetingLocation", "serviceOrderFormSchema.meetingLocation"] },
   { model: "Order", field: "note", sources: ["productOrderFormSchema.note", "serviceOrderFormSchema.note"] },
-  { model: "Order", field: "cancelReason", sources: ["orderCancelAction.cancelReason"] },
+  // Order.cancelReason 不在当前生产输入清单：它由 updateOrderStatusTx 在
+  // CANCELLED 时系统生成（"用户主动取消"），不是用户输入。field policy、
+  // ERASURE_FIELD_COVERAGE 与 erasure/migration 保护全部保留（历史数据
+  // 可能含自由文本，清理属安全纵深防御）。
   // Review / RentalReview
   { model: "Review", field: "content", sources: ["reviewFormSchema.content"] },
   { model: "Review", field: "tags", sources: ["reviewFormSchema.tags"] },
   { model: "RentalReview", field: "content", sources: ["rentalReviewFormSchema.content"] },
   // RentalOrder free text
   { model: "RentalOrder", field: "renterNote", sources: ["rentalOrderCreateSchema.renterNote"] },
-  { model: "RentalOrder", field: "cancellationNote", sources: ["rentalCancelSchema.cancellationNote"] },
+  { model: "RentalOrder", field: "cancellationNote", sources: ["rentalCancelSchema.cancellationNote", "rentalRejectSchema.rejectReason"] },
   // Message / Support / Appeal / Report / Dispute / Blocked
   { model: "Message", field: "content", sources: ["sendMessageAction.content"] },
   { model: "SupportTicket", field: "subject", sources: ["supportTicketFormSchema.subject"] },

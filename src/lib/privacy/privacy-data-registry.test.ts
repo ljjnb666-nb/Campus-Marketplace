@@ -23,6 +23,7 @@ import {
   getModelPrivacyPolicy,
 } from "@/lib/privacy/privacy-data-registry";
 import { readFileSync as readValidatorFile } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 /**
  * REGISTRY-01/02：隐私分类注册表 completeness + drift gate。
@@ -267,6 +268,64 @@ describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 va
     for (const key of ["currentCondition:", "knownIssues:"]) {
       expect(rentalValidator.includes(key), `rental.ts 缺少 ${key}`).toBe(true);
     }
+  });
+
+  it("FINAL SSOT（A）：Order.cancelReason 不在当前生产输入清单（系统生成，非用户输入）", () => {
+    expect(
+      USER_INPUT_FIELD_EXPECTATIONS.some(
+        (entry) => entry.model === "Order" && entry.field === "cancelReason",
+      ),
+    ).toBe(false);
+    // 真实生产行为：updateOrderStatusTx 在 CANCELLED 时系统生成
+    const machineSource = readValidatorFile(
+      resolvePath(process.cwd(), "src", "lib", "order-status-service.ts"),
+      "utf8",
+    );
+    expect(machineSource.includes('cancelReason: requestedStatus === "CANCELLED"')).toBe(true);
+    // 但隐私保护全部保留（历史数据纵深防御）
+    expect(getFieldPrivacyPolicy("Order", "cancelReason")).not.toBeNull();
+    expect(ERASURE_FIELD_COVERAGE.has("Order.cancelReason")).toBe(true);
+  });
+
+  it("FINAL SSOT（B）：cancellationNote 双 writer 精确登记，无重复条目", () => {
+    const entries = USER_INPUT_FIELD_EXPECTATIONS.filter(
+      (entry) => entry.model === "RentalOrder" && entry.field === "cancellationNote",
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.sources).toEqual([
+      "rentalCancelSchema.cancellationNote",
+      "rentalRejectSchema.rejectReason",
+    ]);
+    // 两个 writer 的 schema symbol 真实存在
+    const rentalValidator = readValidator("rental.ts");
+    expect(rentalValidator.includes("cancellationNote:")).toBe(true);
+    expect(rentalValidator.includes("rejectReason:")).toBe(true);
+  });
+
+  it("FINAL SSOT（C）：RentalReview.tags = PROTECTED_BUT_NO_CURRENT_WRITER", () => {
+    // 不在当前生产输入清单
+    expect(
+      USER_INPUT_FIELD_EXPECTATIONS.some(
+        (entry) => entry.model === "RentalReview" && entry.field === "tags",
+      ),
+    ).toBe(false);
+    // 真实生产 writer（submitRentalReview）的 safeParse 不传 tags
+    const actionSource = readValidatorFile(
+      resolvePath(process.cwd(), "src", "actions", "rental-order.ts"),
+      "utf8",
+    );
+    const parseBlock = actionSource.slice(
+      actionSource.indexOf("rentalReviewSchema.safeParse"),
+      actionSource.indexOf("rentalReviewSchema.safeParse") + 400,
+    );
+    expect(parseBlock.includes("tags")).toBe(false);
+    // 保护保留：field policy + erasure coverage
+    expect(getFieldPrivacyPolicy("RentalReview", "tags")).not.toBeNull();
+    expect(ERASURE_FIELD_COVERAGE.has("RentalReview.tags")).toBe(true);
+  });
+
+  it("FINAL SSOT：当前生产输入清单计数锁定（42）", () => {
+    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(42);
   });
 
   it("accessories 不是当前 rentalPickupConfirmSchema 输入（HISTORICAL_ONLY）", () => {
