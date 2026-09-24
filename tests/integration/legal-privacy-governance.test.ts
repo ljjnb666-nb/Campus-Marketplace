@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, type Prisma } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
@@ -25,6 +25,19 @@ const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
 
 const prisma = integrationDatabaseUrl ? (await import("@/lib/prisma")).prisma : null;
 
+// RB-03 REVIEW FIX：recordSignupAcceptances 需要 tx —— 统一经 withTransaction 包装
+async function signupAcceptances(userId: string, documentIds: string[]) {
+  const { withTransaction } = await import("@/lib/prisma");
+  const { recordSignupAcceptances } = await import("@/lib/legal/policy-service");
+  return withTransaction((tx) => recordSignupAcceptances(tx, userId, documentIds));
+}
+
+async function reconsentAcceptances(userId: string, documentIds: string[], options?: { racePoint?: (tx: unknown) => Promise<void> }) {
+  const { recordReconsentAcceptances } = await import("@/lib/legal/policy-service");
+  return recordReconsentAcceptances({ userId, documentIds, racePoint: options?.racePoint as never });
+}
+
+
 const rawClient = integrationDatabaseUrl
   ? new PrismaClient({
       datasources: { db: { url: process.env.DATABASE_URL ?? integrationDatabaseUrl } },
@@ -35,6 +48,7 @@ const rawClient = integrationDatabaseUrl
 const RUN_TAG = `gov-it-${randomUUID().slice(0, 8)}`;
 
 const createdUserIds: string[] = [];
+const createdRoleIds: string[] = [];
 const createdDocumentIds: string[] = [];
 const createdOrderNos: string[] = [];
 const holdIds: string[] = [];
@@ -168,6 +182,15 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await rawClient!.policyAcceptance.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.userVerification.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await rawClient!.adminLog.deleteMany({
+      where: { OR: [{ adminId: { in: createdUserIds } }, { targetId: { in: createdUserIds } }] },
+    });
+    await rawClient!.enforcementAction.deleteMany({
+      where: { OR: [{ actorId: { in: createdUserIds } }, { targetId: { in: createdUserIds } }] },
+    });
+    await rawClient!.userRoleAssignment.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await rawClient!.rolePermission.deleteMany({ where: { roleId: { in: createdRoleIds } } });
+    await rawClient!.role.deleteMany({ where: { id: { in: createdRoleIds } } });
     await rawClient!.user.deleteMany({ where: { id: { in: createdUserIds } } });
     await rawClient!.legalDocument.deleteMany({ where: { id: { in: createdDocumentIds } } });
     await rawClient!.$disconnect();
@@ -217,7 +240,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument, computeContentHash } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, recordAcceptances } = await import("@/lib/legal/policy-service");
+    const { getRequiredPolicies } = await import("@/lib/legal/policy-service");
 
     const content = `# 隐私政策 ${RUN_TAG}`;
     const document = await publishLegalDocument(
@@ -236,11 +259,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     const required = await getRequiredPolicies();
     expect(required.some((entry) => entry.id === document.id)).toBe(true);
-    await recordAcceptances({
-      userId: user.id,
-      documentIds: required.map((entry) => entry.id),
-      source: "SIGNUP",
-    });
+    await signupAcceptances(user.id, required.map((entry) => entry.id));
 
     const evidence = await rawClient!.policyAcceptance.findUnique({
       where: { userId_documentId: { userId: user.id, documentId: document.id } },
@@ -256,7 +275,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+    const { getRequiredPolicies, getUserAcceptanceStatus } = await import(
       "@/lib/legal/policy-service"
     );
     const { GovernanceError } = await import("@/lib/governance/domain-errors");
@@ -276,11 +295,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     );
     createdDocumentIds.push(v1.id);
 
-    await recordAcceptances({
-      userId: user.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "SIGNUP",
-    });
+    await signupAcceptances(user.id, (await getRequiredPolicies()).map((entry) => entry.id));
     expect(
       (await getUserAcceptanceStatus(user.id)).pending.find((entry) => entry.id === v1.id),
     ).toBeUndefined();
@@ -308,15 +323,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     // stale 提交（旧版本文档 id）→ NOT_CURRENT
     await expect(
-      recordAcceptances({ userId: user.id, documentIds: [v1.id], source: "RECONSENT" }),
+      reconsentAcceptances(user.id, [v1.id]),
     ).rejects.toBeInstanceOf(GovernanceError);
 
     // 完整当前集合 → 恢复
-    await recordAcceptances({
-      userId: user.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "RECONSENT",
-    });
+    await reconsentAcceptances(user.id, (await getRequiredPolicies()).map((entry) => entry.id));
     expect((await getUserAcceptanceStatus(user.id)).compliant).toBe(true);
   });
 
@@ -324,7 +335,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, recordAcceptances } = await import("@/lib/legal/policy-service");
+    const { getRequiredPolicies } = await import("@/lib/legal/policy-service");
 
     const document = await publishLegalDocument(
       (
@@ -340,11 +351,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     const user = await createFixtureUser("并发用户");
     const submitFullSet = async () =>
-      recordAcceptances({
-        userId: user.id,
-        documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-        source: "SIGNUP",
-      });
+      signupAcceptances(user.id, (await getRequiredPolicies()).map((entry) => entry.id));
 
     // 双击并发：唯一约束兜底，不产生重复证据
     await Promise.allSettled([submitFullSet(), submitFullSet()]);
@@ -675,7 +682,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+    const { getRequiredPolicies, getUserAcceptanceStatus } = await import(
       "@/lib/legal/policy-service"
     );
 
@@ -726,12 +733,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     // 只提交唯一的 pending（TERMS v1 仍在 required、rules v1 是当前）——
     // 全集提交
     const submittedIds = (await getRequiredPolicies()).map((entry) => entry.id);
-    const result = await recordAcceptances({
-      userId: user.id,
-      documentIds: submittedIds,
-      source: "RECONSENT",
-      racePoint,
-    });
+    const result = await reconsentAcceptances(user.id, submittedIds, { racePoint });
 
     expect(acceptanceInRace).toBe(true);
     expect(result.created).toBeGreaterThan(0);
@@ -761,7 +763,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+    const { getRequiredPolicies, getUserAcceptanceStatus } = await import(
       "@/lib/legal/policy-service"
     );
     const { GovernanceError } = await import("@/lib/governance/domain-errors");
@@ -781,11 +783,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     );
     createdDocumentIds.push(v1.id);
 
-    await recordAcceptances({
-      userId: user.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "SIGNUP",
-    });
+    await signupAcceptances(user.id, (await getRequiredPolicies()).map((entry) => entry.id));
 
     // publish v2 先完成（线性化在 acceptance 之前）
     const v2 = await publishLegalDocument(
@@ -802,7 +800,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
 
     // stale 提交（v1）必须被拒
     await expect(
-      recordAcceptances({ userId: user.id, documentIds: [v1.id], source: "RECONSENT" }),
+      reconsentAcceptances(user.id, [v1.id]),
     ).rejects.toBeInstanceOf(GovernanceError);
 
     const status = await getUserAcceptanceStatus(user.id);
@@ -1584,7 +1582,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
   // ============================================================
 
   it("drill 1-2：missing acceptance 阻断 → 完整同意后恢复访问", async () => {
-    const { assertRequiredPoliciesAccepted, getRequiredPolicies, recordAcceptances } = await import(
+    const { assertRequiredPoliciesAccepted, getRequiredPolicies } = await import(
       "@/lib/legal/policy-service"
     );
     const { createLegalDocument, publishLegalDocument } = await import(
@@ -1611,11 +1609,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     });
 
     // 2. 明确同意当前集合 → 恢复
-    await recordAcceptances({
-      userId: userA.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "RECONSENT",
-    });
+    await reconsentAcceptances(userA.id, (await getRequiredPolicies()).map((entry) => entry.id));
     await expect(assertRequiredPoliciesAccepted(userA.id)).resolves.toBeUndefined();
   });
 
@@ -1623,18 +1617,14 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     const { createLegalDocument, publishLegalDocument } = await import(
       "@/lib/legal/legal-document-service"
     );
-    const { getRequiredPolicies, getUserAcceptanceStatus, recordAcceptances } = await import(
+    const { getRequiredPolicies, getUserAcceptanceStatus } = await import(
       "@/lib/legal/policy-service"
     );
 
     const userB = await createFixtureUser("演练用户B");
 
     // 先建立基线同意
-    await recordAcceptances({
-      userId: userB.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "SIGNUP",
-    });
+    await signupAcceptances(userB.id, (await getRequiredPolicies()).map((entry) => entry.id));
     expect((await getUserAcceptanceStatus(userB.id)).compliant).toBe(true);
 
     // 发布 TERMS 新版本 → 基线同意过期
@@ -1654,11 +1644,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(status.compliant).toBe(false);
     expect(status.pending.find((entry) => entry.id === upgraded.id)?.state).toBe("OUTDATED");
 
-    await recordAcceptances({
-      userId: userB.id,
-      documentIds: (await getRequiredPolicies()).map((entry) => entry.id),
-      source: "RECONSENT",
-    });
+    await reconsentAcceptances(userB.id, (await getRequiredPolicies()).map((entry) => entry.id));
     expect((await getUserAcceptanceStatus(userB.id)).compliant).toBe(true);
   });
 
@@ -1718,4 +1704,220 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(history!.buyerId).toBe(userC.id);
     expect(history!.sellerId).toBe(userD.id);
   });
+
+  // ============================================================
+  // RB-03 REVIEW FIX：RECONSENT × account lifecycle（USER → POLICY 锁序）
+  // ============================================================
+
+  async function rb03CreateSuspender() {
+    const suspender = await createFixtureUser("RB03 停用操作者");
+    const role = await rawClient!.role.create({
+      data: {
+        key: `${RUN_TAG}-rb03-suspender`,
+        name: `${RUN_TAG}-rb03-suspender`,
+        scope: "GLOBAL",
+        isSystem: false,
+        rolePermissions: {
+          create: [{ permission: { connect: { key: "user.suspend" } } }],
+        },
+      },
+    });
+    createdRoleIds.push(role.id);
+    await rawClient!.userRoleAssignment.create({
+      data: { userId: suspender.id, roleId: role.id, campusId: null, scopeKey: "GLOBAL" },
+    });
+    return suspender;
+  }
+
+  async function rb03EnsureRequiredDocuments() {
+    if ((await getRequiredPoliciesSafe()).length === 0) {
+      const { createLegalDocument, publishLegalDocument } = await import(
+        "@/lib/legal/legal-document-service"
+      );
+      const draft = await createLegalDocument({
+        type: "TERMS_OF_SERVICE",
+        version: await nextVersion("TERMS_OF_SERVICE"),
+        title: `RB03 演练协议 ${RUN_TAG}`,
+        content: `RB03 演练协议 ${RUN_TAG}`,
+      });
+      await publishLegalDocument(draft.id);
+      createdDocumentIds.push(draft.id);
+    }
+  }
+
+  async function getRequiredPoliciesSafe() {
+    const { getRequiredPolicies } = await import("@/lib/legal/policy-service");
+    return getRequiredPolicies();
+  }
+
+  async function reconsent(
+    userId: string,
+    documentIds: string[],
+    seams?: {
+      beforeLock?: (tx: Prisma.TransactionClient) => Promise<void>;
+      afterCheck?: (tx: Prisma.TransactionClient) => Promise<void>;
+    },
+    racePoint?: (tx: Prisma.TransactionClient) => Promise<void>,
+  ) {
+    const { recordReconsentAcceptances } = await import("@/lib/legal/policy-service");
+    return recordReconsentAcceptances({
+      userId,
+      documentIds,
+      activeAccountSeams: seams,
+      racePoint,
+    });
+  }
+
+  async function acceptanceCount(userId: string) {
+    return rawClient!.policyAcceptance.count({ where: { userId } });
+  }
+
+  it("LEGAL-01：ACTIVE 用户经权威 RECONSENT 入口提交同意 → PASS", async () => {
+    await rb03EnsureRequiredDocuments();
+    const user = await createFixtureUser("RB03 同意用户");
+    const documentIds = (await getRequiredPoliciesSafe()).map((entry) => entry.id);
+
+    const result = await reconsent(user.id, documentIds);
+
+    expect(result.created).toBeGreaterThan(0);
+    expect(await acceptanceCount(user.id)).toBe(documentIds.length);
+  }, 30_000);
+
+  it("LEGAL-02/03：SUSPENDED / ERASED → AUTH_ACCOUNT_INACTIVE，零 PolicyAcceptance", async () => {
+    await rb03EnsureRequiredDocuments();
+    const documentIds = (await getRequiredPoliciesSafe()).map((entry) => entry.id);
+
+    const suspended = await createFixtureUser("RB03 停态用户");
+    await rawClient!.user.update({
+      where: { id: suspended.id },
+      data: { status: "SUSPENDED" },
+    });
+    const erased = await createFixtureUser("RB03 注销态用户");
+    await rawClient!.user.update({
+      where: { id: erased.id },
+      data: { erasedAt: new Date(), name: "已注销用户" },
+    });
+
+    await expect(reconsent(suspended.id, documentIds)).rejects.toMatchObject({
+      code: "AUTH_ACCOUNT_INACTIVE",
+    });
+    await expect(reconsent(erased.id, documentIds)).rejects.toMatchObject({
+      code: "AUTH_ACCOUNT_INACTIVE",
+    });
+    expect(await acceptanceCount(suspended.id)).toBe(0);
+    expect(await acceptanceCount(erased.id)).toBe(0);
+  }, 30_000);
+
+  it("LEGAL-RACE-01 erase wins：entry 后 beforeLock 挂起 → erase 提交 → reconsent 被拒零写入", async () => {
+    await rb03EnsureRequiredDocuments();
+    const user = await createFixtureUser("RB03 竞态同意A");
+    const documentIds = (await getRequiredPoliciesSafe()).map((entry) => entry.id);
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = reconsent(user.id, documentIds, {
+      beforeLock: async () => {
+        signalEntered();
+        await t1Gate;
+      },
+    });
+    await entered;
+
+    await eraseAccountPublic(user.id);
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+    expect(await acceptanceCount(user.id)).toBe(0);
+  }, 30_000);
+
+  it("LEGAL-RACE-02 acceptance wins：持 USER+POLICY 锁挂起 → erase 排队 → 同意先提交、erasure 保持最终权威", async () => {
+    await rb03EnsureRequiredDocuments();
+    const user = await createFixtureUser("RB03 竞态同意B");
+    const documentIds = (await getRequiredPoliciesSafe()).map((entry) => entry.id);
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    const { waitForAdvisoryLockWaiter } = await import("./helpers/lock-barrier");
+
+    let signalLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      signalLocked = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = reconsent(
+      user.id,
+      documentIds,
+      {
+        afterCheck: async () => {
+          signalLocked();
+          await t1Gate;
+        },
+      },
+      async () => {
+        signalLocked();
+        await t1Gate;
+      },
+    );
+    await locked;
+
+    const t2 = eraseAccount(user.id);
+    await waitForAdvisoryLockWaiter(rawClient!, [`USER:${user.id}`]);
+
+    releaseT1();
+    const result = await t1;
+    expect(result.created).toBeGreaterThan(0);
+    await t2;
+
+    const finalUser = await rawClient!.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(finalUser.erasedAt).not.toBeNull();
+    expect(finalUser.lastLoginAt).toBeNull();
+    expect(await acceptanceCount(user.id)).toBe(documentIds.length);
+  }, 30_000);
+
+  it("LEGAL-RACE-03 suspend wins：suspendAccount 先提交 → stale reconsent 被拒零写入", async () => {
+    await rb03EnsureRequiredDocuments();
+    const suspender = await rb03CreateSuspender();
+    const user = await createFixtureUser("RB03 竞态同意C");
+    const documentIds = (await getRequiredPoliciesSafe()).map((entry) => entry.id);
+    const { suspendAccount } = await import("@/lib/enforcement/account-enforcement-service");
+
+    let signalEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      signalEntered = resolve;
+    });
+    let releaseT1!: () => void;
+    const t1Gate = new Promise<void>((resolve) => {
+      releaseT1 = resolve;
+    });
+
+    const t1 = reconsent(user.id, documentIds, {
+      beforeLock: async () => {
+        signalEntered();
+        await t1Gate;
+      },
+    });
+    await entered;
+
+    const suspendResult = await suspendAccount({
+      actorId: suspender.id,
+      targetUserId: user.id,
+      reasonCode: "MANUAL_REVIEW",
+      note: "RB-03 LEGAL-RACE-03 集成测试",
+    });
+    expect(suspendResult.status).toBe("SUSPENDED");
+
+    releaseT1();
+    await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+    expect(await acceptanceCount(user.id)).toBe(0);
+  }, 30_000);
 });

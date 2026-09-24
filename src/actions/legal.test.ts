@@ -1,17 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * ERASED_STALE_SESSION_LEGAL_ACTION_DENIED：
- * 注销/停用账号的残留旧 JWT 不能提交协议同意。
- *
- * 身份校验收敛在 getVerifiedSession（DB 复核 status/deletedAt/erasedAt）；
- * 本测试锁定 action 层的接线：resolver 拒绝 → action 返回安全拒绝
- * 且不触碰任何 downstream 写路径。
+ * ERASED_STALE_SESSION_LEGAL_ACTION_DENIED + RB-03 RECONSENT race-loss：
+ * - 注销/停用账号的残留旧 JWT 不能提交协议同意（entry resolver 拒绝）；
+ * - entry 时仍 ACTIVE 但 USER 锁内 fresh 复核前 erase/suspend 竞态先提交
+ *   （recordReconsentAcceptances 抛 AUTH_ACCOUNT_INACTIVE）→ 必须与入口
+ *   失效完全同形："请先登录"，不区分 erased/deleted/suspended/race-lost。
  */
 
-const { getVerifiedSession, recordAcceptances } = vi.hoisted(() => ({
+const { getVerifiedSession, recordReconsentAcceptances } = vi.hoisted(() => ({
   getVerifiedSession: vi.fn(),
-  recordAcceptances: vi.fn(),
+  recordReconsentAcceptances: vi.fn(),
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -24,7 +23,7 @@ vi.mock("@/lib/server-auth", () => ({
 }));
 
 vi.mock("@/lib/legal/policy-service", () => ({
-  recordAcceptances,
+  recordReconsentAcceptances,
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -47,11 +46,11 @@ function buildFormData(): FormData {
 
 beforeEach(() => {
   getVerifiedSession.mockReset();
-  recordAcceptances.mockReset();
-  recordAcceptances.mockResolvedValue({ created: 2, skipped: 0 });
+  recordReconsentAcceptances.mockReset();
+  recordReconsentAcceptances.mockResolvedValue({ created: 2, skipped: 0 });
 });
 
-describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED）", () => {
+describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED + RB-03 race-loss）", () => {
   it("denies an erased account's stale JWT without touching acceptance writes", async () => {
     getVerifiedSession.mockResolvedValue({ ok: false, reason: "ACCOUNT_INACTIVE" });
 
@@ -62,7 +61,7 @@ describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED）",
 
     expect(result).toMatchObject({ success: false });
     // 下游写路径零调用：被吊销的会话不能产生任何同意证据
-    expect(recordAcceptances).not.toHaveBeenCalled();
+    expect(recordReconsentAcceptances).not.toHaveBeenCalled();
   });
 
   it("denies unauthenticated submissions", async () => {
@@ -74,10 +73,10 @@ describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED）",
     );
 
     expect(result.success).toBe(false);
-    expect(recordAcceptances).not.toHaveBeenCalled();
+    expect(recordReconsentAcceptances).not.toHaveBeenCalled();
   });
 
-  it("proceeds to the policy service for an active account", async () => {
+  it("routes the authoritative write through recordReconsentAcceptances（RB-03）", async () => {
     getVerifiedSession.mockResolvedValue({
       ok: true,
       user: { id: "user-1", email: "user@x", name: "n", role: "STUDENT" },
@@ -89,9 +88,27 @@ describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED）",
     );
 
     expect(result).toMatchObject({ success: true, message: "已同意最新协议" });
-    expect(recordAcceptances).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "user-1", source: "RECONSENT" }),
+    expect(recordReconsentAcceptances).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-1" }),
     );
+  });
+
+  it("RB-03 race-loss：AUTH_ACCOUNT_INACTIVE → 与入口失效同形（请先登录）", async () => {
+    getVerifiedSession.mockResolvedValue({
+      ok: true,
+      user: { id: "user-1", email: "user@x", name: "n", role: "STUDENT" },
+    });
+    const { RbacError } = await import("@/lib/rbac/errors");
+    recordReconsentAcceptances.mockRejectedValue(
+      new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
+    );
+
+    const result = await acceptRequiredPolicies(
+      { success: false, message: "" },
+      buildFormData(),
+    );
+
+    expect(result).toEqual({ success: false, message: "请先登录" });
   });
 
   it("requires the explicit checkbox even for an active account", async () => {
@@ -106,6 +123,6 @@ describe("acceptRequiredPolicies（ERASED_STALE_SESSION_LEGAL_ACTION_DENIED）",
     const result = await acceptRequiredPolicies({ success: false, message: "" }, formData);
 
     expect(result).toMatchObject({ success: false, message: "请先勾选同意后再提交" });
-    expect(recordAcceptances).not.toHaveBeenCalled();
+    expect(recordReconsentAcceptances).not.toHaveBeenCalled();
   });
 });

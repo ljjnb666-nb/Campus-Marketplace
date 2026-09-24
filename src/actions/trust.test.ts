@@ -63,6 +63,10 @@ const {
   };
 });
 
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));
@@ -510,6 +514,13 @@ describe("trust actions", () => {
   });
 
   it("blocks another user with an optional reason", async () => {
+    transactionMock.mockImplementation((async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback({
+        blockedUser: { upsert: blockedUserUpsert, deleteMany: blockedUserDeleteMany },
+        // 保持后续 report 测试依赖的泄漏链兼容（tx.report / tx.moderationCase）
+        report: { findFirst: txReportFindFirst, create: txReportCreate },
+        moderationCase: { create: txCaseCreate },
+      } as never)) as never);
     blockedUserUpsert.mockResolvedValue({ id: "block-1" });
 
     const formData = new FormData();
@@ -542,6 +553,13 @@ describe("trust actions", () => {
   });
 
   it("unblocks a previously blocked user", async () => {
+    transactionMock.mockImplementation((async (callback: (tx: unknown) => Promise<unknown>) =>
+      callback({
+        blockedUser: { upsert: blockedUserUpsert, deleteMany: blockedUserDeleteMany },
+        // 保持后续 report 测试依赖的泄漏链兼容（tx.report / tx.moderationCase）
+        report: { findFirst: txReportFindFirst, create: txReportCreate },
+        moderationCase: { create: txCaseCreate },
+      } as never)) as never);
     blockedUserDeleteMany.mockResolvedValue({ count: 1 });
 
     const formData = new FormData();
@@ -561,6 +579,7 @@ describe("trust actions", () => {
     expect(result).toEqual({ success: false, message: "参数缺失" });
     expect(blockedUserDeleteMany).not.toHaveBeenCalled();
   });
+
 
   it("submits reports against errand tasks and service listings", async () => {
     errandTaskFindFirst.mockResolvedValue({ id: "errand-1", publisherId: "publisher-1", campusId: "campus-2" });
@@ -723,5 +742,37 @@ describe("trust actions", () => {
 
     expect(result.success).toBe(false);
     expect(result.message).toBeTruthy();
+  });
+
+  it("BLOCK-02：SUSPENDED actor → DENY，零 block 行（RB-03 guard）", async () => {
+    const { RbacError } = await import("@/lib/rbac/errors");
+    const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
+    (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
+    );
+
+    const formData = new FormData();
+    formData.set("targetUserId", "user-2");
+
+    const result = await blockUser({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(blockedUserUpsert).not.toHaveBeenCalled();
+  });
+
+  it("UNBLOCK-02：SUSPENDED actor → DENY，行保留（RB-03 guard）", async () => {
+    const { RbacError } = await import("@/lib/rbac/errors");
+    const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
+    (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
+    );
+
+    const formData = new FormData();
+    formData.set("targetUserId", "user-2");
+
+    const result = await unblockUser({ success: false, message: "" }, formData);
+
+    expect(result.success).toBe(false);
+    expect(blockedUserDeleteMany).not.toHaveBeenCalled();
   });
 });

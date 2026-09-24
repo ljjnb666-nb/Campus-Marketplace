@@ -3,6 +3,7 @@ import type { NextAuthOptions } from "next-auth";
 import { getServerSession } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { z } from "zod";
+import { finalizeCredentialLogin } from "@/lib/credential-login-service";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
@@ -96,26 +97,38 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
 
+        // 昂贵的 bcrypt 校验留在 USER 锁外（RB-03 REVIEW FIX：真正的
+        // lifecycle serialization 由 finalizeCredentialLogin 在锁内完成）
         const isValid = await compare(parsed.data.password, user.passwordHash);
 
         if (!isValid) {
           return null;
         }
 
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { lastLoginAt: new Date() },
+        // RB-03 CREDENTIAL_LOGIN_FINALIZATION_CONTRACT：USER 锁内 fresh
+        // lifecycle/hash/email 三重复核 + lastLoginAt 写入；identity 来自
+        // 锁内 fresh 行。erase 先提交 → 此处 DENY（null），绝不复活
+        // lastLoginAt 或返回 stale snapshot。
+        const identity = await finalizeCredentialLogin({
+          id: user.id,
+          passwordHash: user.passwordHash,
+          email: user.email,
         });
+
+        // bcrypt 通过但 finalization 失败 = 登录失败：不重置限流计数
+        if (!identity) {
+          return null;
+        }
 
         // 登录成功后重置该账号的失败计数
         await resetRateLimit(rateLimitKey);
 
         return {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          image: user.avatarUrl,
-          role: user.role,
+          id: identity.id,
+          email: identity.email,
+          name: identity.name,
+          image: identity.avatarUrl,
+          role: identity.role,
         };
       },
     }),

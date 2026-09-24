@@ -5,6 +5,8 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import { updateProductStatusTx } from "@/lib/listing-status-service";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
@@ -112,6 +114,10 @@ export async function createProduct(
     // Phase 6B/6C-3）→ 商品落库 → 图片 token 解析（attach 新上传资源）→ 图片行落库。
     // token 中的 asset: 引用被规范化为公开 URL 后才写入 ProductImage。
     const product = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（能力门之前，
+      // lifecycle 转换后不得新建可交易 listing）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(tx, user.id, seller.campusId);
 
       const created = await tx.product.create({
@@ -232,6 +238,10 @@ export async function updateProduct(
     }
 
     const imageUrls = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
+      // 修改公开 listing 内容）
+      await prepareActiveAccountMutation(tx, user.id);
+
       // Phase 6C-3：编辑自己 listing 的公开内容 = MODIFY_PUBLIC_LISTING_CONTENT
       // 能力（RESTRICTED 拒绝；campus 取既有 Product 权威行，客户端不可伪造）
       await enforceMarketplaceCapability(
@@ -298,6 +308,8 @@ export async function updateProduct(
 
 export async function updateProductStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：lifecycle 序列化与
+    // fresh row authority 在事务内（事务外不读 product）
     const user = await requireUser();
 
     const parsed = productStatusSchema.safeParse({
@@ -309,35 +321,12 @@ export async function updateProductStatus(formData: FormData) {
       return;
     }
 
-    const product = await prisma.product.findFirst({
-      where: {
-        id: parsed.data.productId,
-        sellerId: user.id,
-        deletedAt: null,
-      },
-      select: { id: true, campusId: true },
+    // ACTIVE = EXPOSURE_INCREASING（锁内追加 marketplace capability）；
+    // RESERVED/SOLD/OFFLINE = LIFECYCLE_SERIALIZED_WIND_DOWN（仅 lifecycle
+    // guard）；ownership/deletedAt/status 一律以锁内 fresh row 为准
+    await withTransaction(async (tx) => {
+      await updateProductStatusTx(tx, user.id, parsed.data.productId, parsed.data.status);
     });
-
-    if (!product) {
-      return;
-    }
-
-    if (parsed.data.status === "ACTIVE") {
-      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
-      // START_NEW_MARKETPLACE_ACTIVITY（下架/RESERVED/SOLD 等 wind-down 不 gate）
-      await withTransaction(async (tx) => {
-        await enforceMarketplaceCapability(tx, user.id, product.campusId);
-        await tx.product.update({
-          where: { id: parsed.data.productId },
-          data: { status: parsed.data.status },
-        });
-      });
-    } else {
-      await prisma.product.update({
-        where: { id: parsed.data.productId },
-        data: { status: parsed.data.status },
-      });
-    }
 
     revalidateProductViews(parsed.data.productId);
   } catch (error) {
@@ -419,6 +408,8 @@ export async function toggleFavorite(formData: FormData) {
     // 同一事务内的删除/新建 + 计数增减，并发下保持一致
     await withTransaction(async (tx) =>
       applyFavoriteToggle({
+        // RB-03：active-account 序列化（durable 用户所有态）
+        beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
         deleteFavorite: () =>
           tx.favorite.deleteMany({
             where: { userId: user.id, productId },

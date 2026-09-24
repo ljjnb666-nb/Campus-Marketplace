@@ -13,16 +13,19 @@ const {
   verificationFindUnique,
   transactionMock,
   txUserUpdate,
+  txUserFindUnique,
   txUserVerificationUpsert,
   txUserVerificationUpdate,
   submitMembershipVerification,
 } = vi.hoisted(() => {
   const txUserUpdate = vi.fn();
+  const txUserFindUnique = vi.fn();
   const txUserVerificationUpsert = vi.fn();
   const txUserVerificationUpdate = vi.fn();
   const transactionClient = {
     user: {
       update: txUserUpdate,
+      findUnique: txUserFindUnique,
     },
     userVerification: {
       upsert: txUserVerificationUpsert,
@@ -46,10 +49,15 @@ const {
       callback(transactionClient),
     ),
     txUserUpdate,
+    txUserFindUnique,
     txUserVerificationUpsert,
     txUserVerificationUpdate,
   };
 });
+
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("next/cache", () => ({
   revalidatePath,
@@ -105,7 +113,19 @@ describe("user actions", () => {
     verificationFindUnique.mockReset().mockResolvedValue(null);
     submitMembershipVerification.mockReset().mockResolvedValue({ id: "verification-1" });
     transactionMock.mockReset();
-    txUserUpdate.mockReset();
+    txUserUpdate
+      .mockReset()
+      .mockResolvedValue({
+        id: "user-1",
+        name: "李同学",
+        email: "user-1@example.com",
+        avatarUrl: null,
+        bio: null,
+        college: null,
+        grade: null,
+        phone: null,
+      });
+    txUserFindUnique.mockReset().mockResolvedValue({ avatarUrl: null });
     txUserVerificationUpsert.mockReset().mockResolvedValue({ id: "verification-1" });
     txUserVerificationUpdate.mockReset();
 
@@ -142,7 +162,8 @@ describe("user actions", () => {
 
     const result = await updateProfile({ success: false, message: "" }, formData);
 
-    expect(userUpdate).toHaveBeenCalledWith({
+    // RB-03：写入经 withTransaction 内的 tx 客户端（守卫之后）
+    expect(txUserUpdate).toHaveBeenCalledWith({
       where: { id: "user-1" },
       data: {
         name: "张同学",
@@ -163,7 +184,7 @@ describe("user actions", () => {
         phone: true,
       },
     });
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       success: true,
       message: "个人资料已更新",
       redirectTo: "/profile",
@@ -275,6 +296,7 @@ describe("user actions", () => {
 
     expect(result.success).toBe(false);
     expect(userUpdate).not.toHaveBeenCalled();
+    expect(txUserUpdate).not.toHaveBeenCalled();
   });
 
   it("returns a friendly message when the profile update fails", async () => {
@@ -285,7 +307,7 @@ describe("user actions", () => {
     formData.set("grade", "2023");
     formData.set("phone", "");
     formData.set("avatarUrl", "");
-    userUpdate.mockRejectedValue(new Error("db down"));
+    txUserUpdate.mockRejectedValue(new Error("db down"));
 
     const result = await updateProfile({ success: false, message: "" }, formData);
 
@@ -302,6 +324,9 @@ describe("user actions", () => {
       sizeBytes: 120,
     });
     userFindUnique.mockResolvedValue({
+      avatarUrl: "http://localhost:9100/campus-public/public/avatars/user-1/old.webp",
+    });
+    txUserFindUnique.mockResolvedValue({
       avatarUrl: "http://localhost:9100/campus-public/public/avatars/user-1/old.webp",
     });
 
@@ -324,7 +349,7 @@ describe("user actions", () => {
       category: "avatar",
       file: expect.any(File),
     });
-    expect(userUpdate).toHaveBeenCalledWith({
+    expect(txUserUpdate).toHaveBeenCalledWith({
       where: { id: "user-1" },
       data: expect.objectContaining({
         name: "李同学",

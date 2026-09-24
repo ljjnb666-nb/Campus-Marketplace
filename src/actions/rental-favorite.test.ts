@@ -24,6 +24,10 @@ const {
   transactionMock: vi.fn(),
 }));
 
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));

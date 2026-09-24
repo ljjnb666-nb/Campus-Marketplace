@@ -19,7 +19,9 @@ const {
   favoriteDeleteMany,
   favoriteCreate,
   transactionMock,
+  txProductUpdate,
 } = vi.hoisted(() => ({
+  txProductUpdate: vi.fn(),
   redirect: vi.fn((location: string) => {
     throw new Error(`REDIRECT:${location}`);
   }),
@@ -39,7 +41,13 @@ const {
   productImageCreateMany: vi.fn(),
   favoriteDeleteMany: vi.fn(),
   favoriteCreate: vi.fn(),
-  transactionMock: vi.fn(),
+  transactionMock: vi.fn(async (callback: (tx: { product: { findFirst: typeof productFindFirst; update: typeof txProductUpdate } }) => Promise<unknown>) =>
+    callback({ product: { findFirst: productFindFirst, update: txProductUpdate } }),
+  ),
+}));
+
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("next/cache", () => ({
@@ -133,6 +141,7 @@ describe("product actions", () => {
     productFindFirst.mockReset();
     productCreate.mockReset();
     productUpdate.mockReset();
+    txProductUpdate.mockReset();
     productImageFindMany.mockReset().mockResolvedValue([]);
     productImageDeleteMany.mockReset();
     productImageCreateMany.mockReset();
@@ -507,22 +516,41 @@ describe("product actions", () => {
       return formData;
     }
 
-    it("updates the status of an owned product", async () => {
-      productFindFirst.mockResolvedValue({ id: "product-1" });
+    it("updates the status of an owned product via in-tx fresh authority（RB-03）", async () => {
+      transactionMock.mockImplementation(async (callback: (tx: { product: { findFirst: typeof productFindFirst; update: typeof txProductUpdate } }) => Promise<unknown>) =>
+        callback({ product: { findFirst: productFindFirst, update: txProductUpdate } }),
+      );
+      productFindFirst.mockResolvedValue({ id: "product-1", campusId: "campus-1", status: "ACTIVE" });
+      txProductUpdate.mockResolvedValue({ id: "product-1" });
 
       await updateProductStatus(statusFormData("OFFLINE"));
 
-      expect(productUpdate).toHaveBeenCalledWith({
+      expect(txProductUpdate).toHaveBeenCalledWith({
         where: { id: "product-1" },
         data: { status: "OFFLINE" },
       });
       expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
     });
 
+    it("RB-03：SUSPENDED actor → AUTH_ACCOUNT_INACTIVE，零 status 写", async () => {
+      const { RbacError } = await import("@/lib/rbac/errors");
+      const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
+      (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
+      );
+      productFindFirst.mockResolvedValue({ id: "product-1" });
+
+      await updateProductStatus(statusFormData("RESERVED"));
+
+      expect(productUpdate).not.toHaveBeenCalled();
+      expect(txProductUpdate).not.toHaveBeenCalled();
+    });
+
     it("ignores invalid statuses", async () => {
       await updateProductStatus(statusFormData("BANNED"));
 
       expect(productFindFirst).not.toHaveBeenCalled();
+      expect(txProductUpdate).not.toHaveBeenCalled();
     });
 
     it("ignores products owned by others", async () => {
@@ -531,6 +559,7 @@ describe("product actions", () => {
       await updateProductStatus(statusFormData("OFFLINE"));
 
       expect(productUpdate).not.toHaveBeenCalled();
+      expect(txProductUpdate).not.toHaveBeenCalled();
     });
   });
 

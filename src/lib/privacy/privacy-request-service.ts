@@ -3,6 +3,10 @@ import type { Prisma, PrivacyRequest, PrivacyRequestStatus } from "@prisma/clien
 import { governanceError } from "@/lib/governance/domain-errors";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
+import {
+  prepareActiveAccountMutation,
+  type ActiveAccountMutationSeams,
+} from "@/lib/governance/active-account-mutation";
 import { eraseAccount, type AccountErasureResult } from "@/lib/privacy/account-erasure";
 
 /**
@@ -98,9 +102,17 @@ export type DeletionOutcome =
  * 幂等：部分唯一索引（userId WHERE type=ACCOUNT_DELETION AND status IN
  * active）兜底并发重复请求 → P2002 映射为 PRIVACY_REQUEST_ALREADY_ACTIVE。
  */
-export async function createAccountDeletionRequest(userId: string): Promise<DeletionOutcome> {
+export async function createAccountDeletionRequest(
+  userId: string,
+  activeAccountSeams?: ActiveAccountMutationSeams,
+): Promise<DeletionOutcome> {
   try {
     return await withTransaction(async (tx) => {
+      // RB-03 REVIEW FIX：guard 在 PrivacyRequest.create 之前（race-loss
+      // 零新 request）。eraseAccount 随后再次 acquire USER:<id> 为同事务
+      // advisory xact lock 安全重入。
+      await prepareActiveAccountMutation(tx, userId, activeAccountSeams);
+
       const request = await tx.privacyRequest.create({
         data: { userId, type: "ACCOUNT_DELETION", status: "REQUESTED" },
       });
@@ -184,18 +196,23 @@ export function describeBlockedReason(reasonCode: string | null): string {
   return "注销请求被阻止，请联系平台支持";
 }
 
-/** 取消本人尚未开始执行的注销请求。 */
+/** 取消本人尚未开始执行的注销请求（RB-03：lifecycle 序列化 + tx 内 fresh 读）。 */
 export async function cancelOwnPendingRequest(
   userId: string,
   requestId: string,
+  activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<PrivacyRequest> {
-  const request = await prisma.privacyRequest.findUnique({ where: { id: requestId } });
+  return withTransaction(async (tx) => {
+    await prepareActiveAccountMutation(tx, userId, activeAccountSeams);
 
-  if (!request || request.userId !== userId) {
-    throw governanceError("PRIVACY_REQUEST_NOT_FOUND");
-  }
+    const request = await tx.privacyRequest.findUnique({ where: { id: requestId } });
 
-  return transitionPrivacyRequest(requestId, "CANCELLED");
+    if (!request || request.userId !== userId) {
+      throw governanceError("PRIVACY_REQUEST_NOT_FOUND");
+    }
+
+    return transitionPrivacyRequest(requestId, "CANCELLED", undefined, tx);
+  });
 }
 
 /** 治理 seam（Phase 7 后台接入）：解除 BLOCKED → 重试。 */

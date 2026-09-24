@@ -1,6 +1,10 @@
 import { governanceError, isGovernanceError } from "@/lib/governance/domain-errors";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
+import {
+  prepareActiveAccountMutation,
+  type ActiveAccountMutationSeams,
+} from "@/lib/governance/active-account-mutation";
 import { ERASED_USER_DISPLAY_NAME } from "@/lib/privacy/account-erasure";
 import { transitionPrivacyRequest } from "@/lib/privacy/privacy-request-service";
 
@@ -610,8 +614,14 @@ export type ExportExecutionResult =
 export async function executeSynchronousDataExport(
   userId: string,
   builder: (userId: string) => Promise<UserExportPayload> = buildUserExport,
+  activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<SynchronousExportResult> {
   const result = await withTransaction(async (tx) => {
+    // RB-03 REVIEW FIX：guard 在 PrivacyRequest.create 之前——race-loss
+    // 时零新 PrivacyRequest。builder 普通 DB 读不是同一 DB snapshot；
+    // USER advisory lock 提供的是 account lifecycle linearization。
+    await prepareActiveAccountMutation(tx, userId, activeAccountSeams);
+
     const created = await tx.privacyRequest.create({
       data: { userId, type: "DATA_EXPORT", status: "REQUESTED" },
     });

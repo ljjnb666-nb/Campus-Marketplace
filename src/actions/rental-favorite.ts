@@ -2,6 +2,7 @@
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 
 import { revalidatePath } from "next/cache";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser, getVerifiedSession } from "@/lib/server-auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
@@ -21,6 +22,8 @@ export async function toggleRentalFavorite(formData: FormData) {
   // 同一事务内的删除/新建 + 计数增减，并发下保持一致
   await withTransaction((tx) =>
     applyFavoriteToggle({
+      // RB-03：active-account 序列化（durable 用户所有态）
+      beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
       deleteFavorite: () =>
         tx.rentalFavorite.deleteMany({
           where: { userId: user.id, rentalListingId },

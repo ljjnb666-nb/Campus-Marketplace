@@ -2,6 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import { blockUserTx, unblockUserTx } from "@/lib/trust/block-service";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -100,6 +102,9 @@ export async function createReview(
     }
 
     await withTransaction(async (tx) => {
+      // RB-03：已注销/停用账号不得再产生新的 durable 评价内容
+      await prepareActiveAccountMutation(tx, user.id);
+
       await tx.review.create({
         data: {
           orderId: order.id,
@@ -194,6 +199,9 @@ export async function createReport(
     // Phase 7E：target context 解析、scope 快照、Report 创建、1:1 case 创建、
     // RiskFlag 投影与通知收敛进同一个事务（创建原子合同）。
     const outcome = await withTransaction(async (tx) => {
+      // RB-03：已注销/停用账号不得再发起新举报（治理工作流不得被失效身份驱动）
+      await prepareActiveAccountMutation(tx, user.id);
+
       // Repair 2 Blocker E：owner/campus 解析唯一来源（resolveReportTargetContext）
       // ——本 action 不再维护任何 targetType → owner 的重复 switch。
       const targetContext = await resolveReportTargetContext(tx, targetRef);
@@ -299,22 +307,9 @@ export async function blockUser(
       return { success: false, message: "无效的拉黑目标" };
     }
 
-    await prisma.blockedUser.upsert({
-      where: {
-        blockerId_blockedUserId: {
-          blockerId: user.id,
-          blockedUserId: targetUserId,
-        },
-      },
-      create: {
-        blockerId: user.id,
-        blockedUserId: targetUserId,
-        reason,
-      },
-      update: {
-        reason,
-      },
-    });
+    // RB-03 REVIEW FIX：durable 关系写入经 active-account 序列化
+    // （仅 USER:<actor>；不锁 target）
+    await withTransaction((tx) => blockUserTx(tx, user.id, { targetUserId, reason }));
 
     revalidatePath("/messages");
     return { success: true, message: "已成功拉黑该用户" };
@@ -335,12 +330,8 @@ export async function unblockUser(
       return { success: false, message: "参数缺失" };
     }
 
-    await prisma.blockedUser.deleteMany({
-      where: {
-        blockerId: user.id,
-        blockedUserId: targetUserId,
-      },
-    });
+    // RB-03 REVIEW FIX：与 blockUser 对称的 lifecycle 序列化
+    await withTransaction((tx) => unblockUserTx(tx, user.id, targetUserId));
 
     revalidatePath("/messages");
     return { success: true, message: "已解除拉黑" };

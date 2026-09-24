@@ -3,6 +3,7 @@
 import { Prisma } from "@prisma/client";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
+import { updateOrderStatusTx } from "@/lib/order-status-service";
 import {
   createProductOrderTx,
   createServiceOrderTx,
@@ -218,6 +219,8 @@ export async function createServiceOrder(
 
 export async function updateOrderStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：Order fresh read、
+    // isBuyer/isSeller、canTransition 全部以 USER 锁内事务为最终 authority
     const user = await requireUser();
 
     const parsed = orderStatusSchema.safeParse({
@@ -229,137 +232,20 @@ export async function updateOrderStatus(formData: FormData) {
       return;
     }
 
-    const order = await prisma.order.findUnique({
-      where: { id: parsed.data.orderId },
-      select: {
-        id: true,
-        type: true,
-        status: true,
-        buyerId: true,
-        sellerId: true,
-        productId: true,
-        errandTaskId: true,
-        serviceListingId: true,
-      },
-    });
+    const outcome = await withTransaction(async (tx) =>
+      updateOrderStatusTx(tx, user.id, parsed.data.orderId, {
+        requestedStatus: parsed.data.status,
+      }),
+    );
 
-    if (!order) {
+    if (!outcome) {
       return;
     }
-
-    const isBuyer = order.buyerId === user.id;
-    const isSeller = order.sellerId === user.id;
-
-    const canTransition =
-      (parsed.data.status === "ACCEPTED" &&
-        isSeller &&
-        order.status === "PENDING" &&
-        (order.type === "PRODUCT" || order.type === "SERVICE")) ||
-      (parsed.data.status === "IN_PROGRESS" &&
-        isSeller &&
-        order.status === "ACCEPTED" &&
-        (order.type === "SERVICE" || order.type === "ERRAND")) ||
-      (parsed.data.status === "COMPLETED" &&
-        ((order.type === "PRODUCT" && isBuyer && order.status === "ACCEPTED") ||
-          (order.type === "SERVICE" &&
-            ((isBuyer && order.status === "IN_PROGRESS") ||
-              (isSeller && order.status === "IN_PROGRESS"))) ||
-          (order.type === "ERRAND" && isBuyer && order.status === "IN_PROGRESS"))) ||
-      (parsed.data.status === "CANCELLED" &&
-        ((order.type === "PRODUCT" && order.status === "PENDING" && (isBuyer || isSeller)) ||
-          (order.type === "SERVICE" && order.status === "PENDING" && (isBuyer || isSeller))));
-
-    if (!canTransition) {
-      return;
-    }
-
-    await withTransaction(async (tx) => {
-      // ERRAND 最终完成走唯一权威实现（completeErrandOrderTx）：
-      // 硬性要求 ErrandTask === PENDING_CONFIRMATION，exactly-once 副作用
-      // 与完成通知都在 canonical 事务内，此处不得再叠加任何完成副作用
-      if (order.type === "ERRAND" && order.errandTaskId && parsed.data.status === "COMPLETED") {
-        const completion = await completeErrandOrderTx(tx, {
-          orderId: order.id,
-          errandTaskId: order.errandTaskId,
-          buyerId: order.buyerId,
-          sellerId: order.sellerId,
-        });
-
-        if (!completion.completed) {
-          return;
-        }
-
-        revalidateOrderViews({ errandId: order.errandTaskId ?? undefined });
-        return;
-      }
-
-      // 条件更新充当乐观锁：仅当状态仍是读取时的状态才允许流转，
-      // 防止并发请求重复触发完成/取消的副作用（计数与通知被重复执行）
-      const transitionResult = await tx.order.updateMany({
-        where: { id: order.id, status: order.status },
-        data: {
-          status: parsed.data.status,
-          completedAt: parsed.data.status === "COMPLETED" ? new Date() : null,
-          cancelReason: parsed.data.status === "CANCELLED" ? "用户主动取消" : null,
-        },
-      });
-
-      if (transitionResult.count === 0) {
-        return;
-      }
-
-      if (order.type === "PRODUCT" && order.productId) {
-        if (parsed.data.status === "CANCELLED") {
-          await tx.product.update({
-            where: { id: order.productId },
-            data: { status: "ACTIVE" },
-          });
-        }
-
-        if (parsed.data.status === "COMPLETED") {
-          await tx.product.update({
-            where: { id: order.productId },
-            data: { status: "SOLD" },
-          });
-
-          await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
-        }
-      }
-
-      if (order.type === "SERVICE" && order.serviceListingId && parsed.data.status === "COMPLETED") {
-        await tx.serviceListing.update({
-          where: { id: order.serviceListingId },
-          data: { completedOrderCount: { increment: 1 } },
-        });
-
-        await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
-      }
-
-      const actorLabel = isBuyer ? "买家" : "卖家";
-      const statusLabel = getStatusLabel(parsed.data.status);
-
-      await createNotifications(tx, [
-        {
-          userId: order.buyerId,
-          orderId: order.id,
-          type: "ORDER",
-          title: `订单状态更新：${statusLabel}`,
-          content: `${actorLabel}已将订单状态更新为“${statusLabel}”，请前往订单中心查看。`,
-        },
-        {
-          userId: order.sellerId,
-          orderId: order.id,
-          type: "ORDER",
-          title: `订单状态更新：${statusLabel}`,
-          content: `${actorLabel}已将订单状态更新为“${statusLabel}”，请前往订单中心查看。`,
-        },
-      ]);
-    });
 
     revalidateOrderViews({
-      productId: order.productId ?? undefined,
-      serviceId: order.serviceListingId ?? undefined,
-      errandId: order.errandTaskId ?? undefined,
+      productId: outcome.productId ?? undefined,
+      serviceId: outcome.serviceListingId ?? undefined,
+      errandId: outcome.errandTaskId ?? undefined,
     });
   } catch (error) {
     actionErrorMessage(error, "updateOrderStatus");

@@ -4,6 +4,7 @@ import {
   VERIFIED_SESSION_HTTP_STATUS,
   getVerifiedSession,
 } from "@/lib/server-auth";
+import { isRbacError } from "@/lib/rbac/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { executeSynchronousDataExport } from "@/lib/privacy/data-export";
 import { actionErrorMessage } from "@/lib/error-handler";
@@ -65,6 +66,19 @@ async function getHandler() {
       },
     });
   } catch (error) {
+    // RB-03 race-loss：entry ACTIVE 但 USER 锁内 fresh 复核前 erase/suspend
+    // 先提交 → 与 entry 失效完全同形（401 ACCOUNT_INACTIVE），
+    // 不因 race timing 暴露不同 machine code/status
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return NextResponse.json(
+        { error: "未登录或账号不可用", code: "ACCOUNT_INACTIVE" },
+        {
+          status: VERIFIED_SESSION_HTTP_STATUS.ACCOUNT_INACTIVE,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
+
     if (isGovernanceError(error)) {
       return NextResponse.json(
         { error: error.message, code: error.code },

@@ -2,6 +2,7 @@
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 
 import { revalidatePath } from "next/cache";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { requireUser, getVerifiedSession } from "@/lib/server-auth";
@@ -15,6 +16,8 @@ export async function toggleServiceFavorite(serviceListingId: string) {
     // 同一事务内的删除/新建 + 计数增减，并发下保持一致
     const result = await withTransaction((tx) =>
       applyFavoriteToggle({
+        // RB-03：active-account 序列化（durable 用户所有态）
+        beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
         deleteFavorite: () =>
           tx.serviceFavorite.deleteMany({
             where: { userId: user.id, serviceListingId },

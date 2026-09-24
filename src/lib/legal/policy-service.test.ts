@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -46,7 +47,7 @@ vi.mock("@/lib/logger", () => ({
 import {
   getRequiredPolicies,
   getUserAcceptanceStatus,
-  recordAcceptances,
+  recordSignupAcceptances,
   assertRequiredPoliciesAccepted,
 } from "@/lib/legal/policy-service";
 import { GovernanceError } from "@/lib/governance/domain-errors";
@@ -88,13 +89,13 @@ beforeEach(() => {
   transactionMock.mockReset();
   loggerInfo.mockReset();
   loggerWarn.mockReset();
-  // recordAcceptances 内部会调用 getUserAcceptanceStatus → findMany：
+  // recordSignupAcceptances 内部会调用 getUserAcceptanceStatus → findMany：
   // 默认"无任何同意记录"（pending == required 全集）
   policyAcceptanceFindMany.mockResolvedValue([]);
 });
 
-/** recordAcceptances 全程在事务内（含锁查询/解析/校验/写入），统一 tx stub。 */
-function makeTxStub() {
+/** recordSignupAcceptances 全程在传入 tx 内（含锁查询/解析/校验/写入），统一 tx stub。 */
+function makeTxStub(): Prisma.TransactionClient {
   return {
     $executeRaw: vi.fn().mockResolvedValue(0),
     legalDocument: {
@@ -106,7 +107,7 @@ function makeTxStub() {
       findUnique: policyAcceptanceFindUnique,
       create: policyAcceptanceCreate,
     },
-  };
+  } as unknown as Prisma.TransactionClient;
 }
 
 describe("getRequiredPolicies（current policy resolution）", () => {
@@ -209,7 +210,7 @@ describe("assertRequiredPoliciesAccepted（consent gate）", () => {
   });
 });
 
-describe("recordAcceptances（acceptance evidence）", () => {
+describe("recordSignupAcceptances（acceptance evidence，policy core 语义）", () => {
   const terms = documentRow({ id: "doc-terms-2", type: "TERMS_OF_SERVICE", version: 2 });
   const privacy = documentRow({ id: "doc-privacy-1", type: "PRIVACY_POLICY", version: 1 });
 
@@ -236,12 +237,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       callback(makeTxStub()),
     );
 
-    const result = await recordAcceptances({
-      userId: "user-1",
-      documentIds: ["doc-terms-2", "doc-privacy-1"],
-      source: "RECONSENT",
-      now: NOW,
-    });
+    const result = await recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-2", "doc-privacy-1"], NOW);
 
     // 已存在同版本证据：跳过而非重复创建（(userId, documentId) 唯一）
     expect(result.created).toBe(0);
@@ -259,12 +255,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       callback(makeTxStub()),
     );
 
-    const result = await recordAcceptances({
-      userId: "user-1",
-      documentIds: ["doc-terms-2", "doc-privacy-1"],
-      source: "RECONSENT",
-      now: NOW,
-    });
+    const result = await recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-2", "doc-privacy-1"], NOW);
 
     // 并发双击：另一请求已创建同一证据 → 幂等成功，不产生重复证据
     expect(result.created).toBe(0);
@@ -285,34 +276,19 @@ describe("recordAcceptances（acceptance evidence）", () => {
 
     // 用户停留在旧版本集合上提交（v3 发布后 required 集合变化，提交其 id）
     await expect(
-      recordAcceptances({
-        userId: "user-1",
-        documentIds: ["doc-terms-3"],
-        source: "RECONSENT",
-        now: NOW,
-      }),
+      recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-3"], NOW),
     ).rejects.toMatchObject({ code: "LEGAL_DOCUMENT_NOT_CURRENT" });
 
     // 杜撰 id：直接 NOT_FOUND
     legalDocumentFindUnique.mockResolvedValue(null);
     await expect(
-      recordAcceptances({
-        userId: "user-1",
-        documentIds: ["ghost-id"],
-        source: "RECONSENT",
-        now: NOW,
-      }),
+      recordSignupAcceptances(makeTxStub(), "user-1", ["ghost-id"], NOW),
     ).rejects.toMatchObject({ code: "LEGAL_DOCUMENT_NOT_FOUND" });
 
     // 集合不完整同样拒绝
     legalDocumentFindUnique.mockReset();
     await expect(
-      recordAcceptances({
-        userId: "user-1",
-        documentIds: ["doc-terms-2"],
-        source: "RECONSENT",
-        now: NOW,
-      }),
+      recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-2"], NOW),
     ).rejects.toMatchObject({ code: "LEGAL_DOCUMENT_VERSION_CHANGED" });
   });
 
@@ -324,12 +300,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       callback(makeTxStub()),
     );
 
-    await recordAcceptances({
-      userId: "user-1",
-      documentIds: ["doc-terms-2", "doc-privacy-1"],
-      source: "SIGNUP",
-      now: NOW,
-    });
+    await recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-2", "doc-privacy-1"], NOW);
 
     // 证据固化三元组快照，可独立于文档表证明"接受了哪个版本"
     expect(policyAcceptanceCreate).toHaveBeenCalledWith({
@@ -355,12 +326,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
       callback(txStub),
     );
 
-    await recordAcceptances({
-      userId: "user-1",
-      documentIds: ["doc-terms-2", "doc-privacy-1"],
-      source: "RECONSENT",
-      now: NOW,
-    });
+    await recordSignupAcceptances(txStub, "user-1", ["doc-terms-2", "doc-privacy-1"], NOW);
 
     // policy 锁（advisory xact lock）在写之前于同一 tx 内取得
     expect(txStub.$executeRaw).toHaveBeenCalled();
@@ -388,18 +354,13 @@ describe("recordAcceptances（acceptance evidence）", () => {
       callback(makeTxStub()),
     );
 
-    const result = await recordAcceptances({
-      userId: "user-1",
-      documentIds: ["doc-terms-2"],
-      source: "RECONSENT",
-      now: NOW,
-    });
+    const result = await recordSignupAcceptances(makeTxStub(), "user-1", ["doc-terms-2"], NOW);
 
     // 只需补齐缺口：TERMS v2 新建证据；已接受的 PRIVACY 不被要求重交
     expect(result).toEqual({ created: 1, skipped: 0 });
     expect(policyAcceptanceCreate).toHaveBeenCalledTimes(1);
     expect(policyAcceptanceCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ documentId: "doc-terms-2", source: "RECONSENT" }),
+      data: expect.objectContaining({ documentId: "doc-terms-2", source: "SIGNUP" }),
     });
   });
 
@@ -410,12 +371,7 @@ describe("recordAcceptances（acceptance evidence）", () => {
     );
 
     await expect(
-      recordAcceptances({
-        userId: "user-1",
-        documentIds: ["ghost-id"],
-        source: "RECONSENT",
-        now: NOW,
-      }),
+      recordSignupAcceptances(makeTxStub() as never, "user-1", ["ghost-id"], NOW),
     ).rejects.toBeInstanceOf(GovernanceError);
   });
 });

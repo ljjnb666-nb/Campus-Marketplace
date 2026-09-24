@@ -10,12 +10,19 @@ const {
   credentialsProvider,
   userFindUnique,
   userUpdate,
+  finalizeCredentialLogin,
 } = vi.hoisted(() => ({
   compare: vi.fn(),
   getServerSession: vi.fn(),
   credentialsProvider: vi.fn((config: unknown) => config),
   userFindUnique: vi.fn(),
   userUpdate: vi.fn(),
+  finalizeCredentialLogin: vi.fn(),
+}));
+
+// RB-03 REVIEW FIX：post-bcrypt authoritative finalization 边界
+vi.mock("@/lib/credential-login-service", () => ({
+  finalizeCredentialLogin,
 }));
 
 vi.mock("bcryptjs", () => ({
@@ -78,6 +85,17 @@ describe("auth options", () => {
     credentialsProvider.mockClear();
     userFindUnique.mockReset();
     userUpdate.mockReset();
+    // 默认 finalizer：fresh identity（avatarUrl undefined 使旧 toEqual 兼容）
+    finalizeCredentialLogin.mockReset();
+    finalizeCredentialLogin.mockImplementation(
+      async (candidate: { id: string; email: string }) => ({
+        id: candidate.id,
+        email: candidate.email,
+        name: "测试同学",
+        avatarUrl: undefined,
+        role: "STUDENT" as const,
+      }),
+    );
   });
 
   it("rejects invalid credentials before querying the database", async () => {
@@ -196,15 +214,74 @@ describe("auth options", () => {
     });
 
     expect(compare).toHaveBeenCalledWith(TEST_PASSWORD, "hashed-password");
-    expect(userUpdate).toHaveBeenCalledWith({
-      where: { id: "user-1" },
-      data: { lastLoginAt: expect.any(Date) },
+    // RB-03：lastLoginAt 写入在 finalizer 内（USER 锁下），不再直写 prisma
+    expect(userUpdate).not.toHaveBeenCalled();
+    expect(finalizeCredentialLogin).toHaveBeenCalledWith({
+      id: "user-1",
+      passwordHash: "hashed-password",
+      email: "student1@campus.local",
     });
     expect(result).toEqual({
       id: "user-1",
       email: "student1@campus.local",
       name: "测试同学",
       role: "STUDENT",
+    });
+  });
+
+  it("LOGIN-08 wiring: bcrypt success routes through finalizeCredentialLogin", async () => {
+    const authorize = getCredentialsAuthorize();
+    mockValidCredentials();
+
+    await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    expect(finalizeCredentialLogin).toHaveBeenCalledTimes(1);
+    expect(finalizeCredentialLogin).toHaveBeenCalledWith({
+      id: "user-1",
+      passwordHash: "hashed-password",
+      email: "student1@campus.local",
+    });
+  });
+
+  it("LOGIN-09 wiring: finalizer null → authorize null（不视为成功登录）", async () => {
+    const authorize = getCredentialsAuthorize();
+    mockValidCredentials();
+    finalizeCredentialLogin.mockResolvedValue(null);
+
+    const result = await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("LOGIN-10 wiring: returned identity comes from the finalizer fresh result", async () => {
+    const authorize = getCredentialsAuthorize();
+    mockValidCredentials();
+    finalizeCredentialLogin.mockResolvedValue({
+      id: "user-1",
+      email: "fresh@example.com",
+      name: "锁内新名",
+      avatarUrl: "http://x/fresh.webp",
+      role: "ADMIN" as const,
+    });
+
+    const result = await authorize?.({
+      email: "student1@campus.local",
+      password: TEST_PASSWORD,
+    });
+
+    // 绝不返回 pre-bcrypt candidate snapshot
+    expect(result).toEqual({
+      id: "user-1",
+      email: "fresh@example.com",
+      name: "锁内新名",
+      image: "http://x/fresh.webp",
+      role: "ADMIN",
     });
   });
 

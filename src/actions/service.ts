@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import { updateServiceStatusTx } from "@/lib/listing-status-service";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
@@ -105,6 +107,9 @@ export async function createService(
 
     // Phase 6B/6C-3：subject 治理锁 + marketplace 能力门与服务创建同事务
     const service = await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（能力门之前）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(tx, user.id, provider.campusId);
 
       return tx.serviceListing.create({
@@ -221,6 +226,10 @@ export async function updateService(
     // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
     // ServiceListing 权威行，客户端不可伪造）
     await withTransaction(async (tx) => {
+      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
+      // 修改公开服务内容）
+      await prepareActiveAccountMutation(tx, user.id);
+
       await enforceMarketplaceCapability(
         tx,
         user.id,
@@ -263,6 +272,8 @@ export async function updateService(
 
 export async function updateServiceStatus(formData: FormData) {
   try {
+    // entry auth = 身份发现；RB-03 REVIEW FIX：lifecycle 序列化与
+    // fresh row authority 在事务内（事务外不读 serviceListing）
     const user = await requireUser();
 
     const parsed = serviceStatusSchema.safeParse({
@@ -274,35 +285,10 @@ export async function updateServiceStatus(formData: FormData) {
       return;
     }
 
-    const service = await prisma.serviceListing.findFirst({
-      where: {
-        id: parsed.data.serviceId,
-        providerId: user.id,
-        deletedAt: null,
-      },
-      select: { id: true, campusId: true },
+    // ACTIVE = EXPOSURE_INCREASING；PAUSED/OFFLINE = WIND_DOWN
+    await withTransaction(async (tx) => {
+      await updateServiceStatusTx(tx, user.id, parsed.data.serviceId, parsed.data.status);
     });
-
-    if (!service) {
-      return;
-    }
-
-    if (parsed.data.status === "ACTIVE") {
-      // Phase 6C-3：重新上架（→ACTIVE）= 重新产生市场暴露，属
-      // START_NEW_MARKETPLACE_ACTIVITY（PAUSED/OFFLINE wind-down 不 gate）
-      await withTransaction(async (tx) => {
-        await enforceMarketplaceCapability(tx, user.id, service.campusId);
-        await tx.serviceListing.update({
-          where: { id: parsed.data.serviceId },
-          data: { status: parsed.data.status },
-        });
-      });
-    } else {
-      await prisma.serviceListing.update({
-        where: { id: parsed.data.serviceId },
-        data: { status: parsed.data.status },
-      });
-    }
 
     revalidateServiceViews(parsed.data.serviceId);
   } catch (error) {

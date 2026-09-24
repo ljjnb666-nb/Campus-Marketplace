@@ -68,7 +68,7 @@ export async function createLegalDocument(input: {
  * 修改请求都会被拒绝（LEGAL_DOCUMENT_ALREADY_PUBLISHED）。
  *
  * Serialization：事务内先取该 type 的 policy advisory 锁（与
- * recordAcceptances 共享同一 serialization boundary）——"highestPublished
+ * recordSignup/ReconsentAcceptances 共享同一 serialization boundary）——"highestPublished
  * 检查 → PUBLISHED"窗口与并发 acceptance / 并发 publish 被互斥关闭，
  * 并发发布同 type 的 vN / vN+1 不会绕过版本顺序 invariant。
  */

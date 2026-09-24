@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { isRbacError } from "@/lib/rbac/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { logger } from "@/lib/logger";
 import { getVerifiedSession } from "@/lib/server-auth";
@@ -79,6 +80,12 @@ export async function requestAccountDeletion(
       message: describeBlockedReason(outcome.reasonCode),
     };
   } catch (error) {
+    // RB-03 race-loss：entry ACTIVE 但 USER 锁内 fresh 复核前 erase/suspend
+    // 先提交 → 与入口失效完全同形
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return { success: false, message: "请先登录" };
+    }
+
     if (isGovernanceError(error)) {
       return { success: false, message: error.message };
     }
@@ -114,6 +121,11 @@ export async function cancelPrivacyRequest(
 
     return { success: true, message: "已取消该请求" };
   } catch (error) {
+    // RB-03 race-loss：与入口失效同形
+    if (isRbacError(error) && error.code === "AUTH_ACCOUNT_INACTIVE") {
+      return { success: false, message: "请先登录" };
+    }
+
     if (isGovernanceError(error)) {
       return { success: false, message: error.message };
     }

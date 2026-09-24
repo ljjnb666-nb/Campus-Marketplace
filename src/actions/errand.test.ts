@@ -32,9 +32,12 @@ const {
   const txOrderUpdateMany = vi.fn();
   const txUserUpdate = vi.fn();
   const txErrandTaskCreate = vi.fn();
+  const errandTaskFindFirst = vi.fn();
   const transactionClient = {
     errandTask: {
       create: txErrandTaskCreate,
+      // RB-03 REVIEW FIX：updateErrandStatusTx 的 fresh read 在 tx 内
+      findFirst: errandTaskFindFirst,
       update: txErrandTaskUpdate,
       updateMany: txErrandTaskUpdateMany,
     },
@@ -83,7 +86,7 @@ const {
     userFindUnique: vi.fn(),
     errandCategoryFindUnique: vi.fn(),
     errandTaskCreate: txErrandTaskCreate,
-    errandTaskFindFirst: vi.fn(),
+    errandTaskFindFirst,
     errandTaskUpdate: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
@@ -99,6 +102,10 @@ const {
     txUserFindMany,
   };
 });
+
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
@@ -316,7 +323,8 @@ describe("errand actions", () => {
 
     await updateErrandStatus(buildErrandStatusFormData("OPEN"));
 
-    expect(transactionMock).not.toHaveBeenCalled();
+    // RB-03 REVIEW FIX：拒绝权威在事务内 fresh 复核（事务总是进入）
+    expect(transactionMock).toHaveBeenCalled();
     expect(txErrandTaskUpdate).not.toHaveBeenCalled();
     expect(txOrderUpdate).not.toHaveBeenCalled();
     expect(createNotifications).not.toHaveBeenCalled();
@@ -636,7 +644,7 @@ describe("errand actions", () => {
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
-    expect(transactionMock).not.toHaveBeenCalled();
+    expect(transactionMock).toHaveBeenCalled();
   });
 
   it("ignores invalid status payloads", async () => {

@@ -7,6 +7,7 @@ import {
   requireMarketplaceCapability,
   requireParticipantsMarketplaceEligible,
 } from "@/lib/enforcement/capability-gate";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { createNotification } from "@/repositories/notification-repository";
@@ -113,6 +114,12 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
   // 2. 数据库事务：完整参与方锁 → 锁后重读 → 锁内校验 → 创建
   try {
     const created = await withTransaction(async (tx) => {
+      // RB-03：发起者 active-account 序列化（USER 锁 + 锁内 fresh 复核）。
+      // MARKETPLACE_LISTING 分支随后对同一批 USER 键再取锁为同事务 advisory
+      // 重入（安全）；守卫先行保证发起者身份在 lifecycle 转换后不再产生
+      // 新会话 durable 态
+      await prepareActiveAccountMutation(tx, input.initialData.currentUserId);
+
       if (gate.kind === "MARKETPLACE_LISTING") {
         await acquireGovernanceSubjectLocks(
           tx,

@@ -30,6 +30,10 @@ const {
   serviceListingUpdate: vi.fn(),
 }));
 
+vi.mock("@/lib/governance/active-account-mutation", () => ({
+  prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("next/cache", () => ({
   revalidatePath,
 }));
@@ -76,6 +80,8 @@ vi.mock("@/lib/prisma", () => ({
     callback({
       serviceListing: {
         create: serviceListingCreate,
+        // RB-03 REVIEW FIX：updateServiceStatusTx 的 fresh read 在 tx 内
+        findFirst: serviceListingFindFirst,
         update: serviceListingUpdate,
       },
     }),
@@ -351,8 +357,9 @@ describe("service actions", () => {
   });
 
   describe("updateServiceStatus", () => {
-    it("updates the status of an owned service", async () => {
-      serviceListingFindFirst.mockResolvedValue({ id: "service-1" });
+    it("updates the status of an owned service via in-tx fresh authority（RB-03）", async () => {
+      serviceListingFindFirst.mockResolvedValue({ id: "service-1", campusId: "campus-1", status: "ACTIVE" });
+      serviceListingUpdate.mockResolvedValue({ id: "service-1" });
 
       const formData = new FormData();
       formData.set("serviceId", "service-1");
@@ -365,6 +372,23 @@ describe("service actions", () => {
         data: { status: "PAUSED" },
       });
       expect(revalidatePath).toHaveBeenCalledWith("/services/service-1");
+    });
+
+    it("RB-03：SUSPENDED actor → AUTH_ACCOUNT_INACTIVE，零 status 写", async () => {
+      const { RbacError } = await import("@/lib/rbac/errors");
+      const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
+      (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
+      );
+      serviceListingFindFirst.mockResolvedValue({ id: "service-1" });
+
+      const formData = new FormData();
+      formData.set("serviceId", "service-1");
+      formData.set("status", "PAUSED");
+
+      await updateServiceStatus(formData);
+
+      expect(serviceListingUpdate).not.toHaveBeenCalled();
     });
 
     it("ignores invalid status values", async () => {
