@@ -114,6 +114,11 @@
 
 ## CI_DEBT_MINIO_MIRROR_MUTABLE_TAG
 
+> **状态**：已关闭（2026-09-25，Repair 6 / RB-06）。CI 与生产 compose 的
+> MinIO/mc 镜像全部改为 immutable digest pin（`tests/ops/image-immutability.test.ts`
+> 静态 gate 防回退），镜像更新流程见 docs/PRODUCTION_DEPLOYMENT.md §3.2。
+> 以下为登记时的原始记录。
+
 - **title**：CI 的 ghcr MinIO 镜像副本使用可变 `latest` tag
 - **motivation**：RB-04 FIELD-COVERAGE round（run 36033918738 起）CI 的
   MinIO/mc 镜像源切换到 `ghcr.io/ljjnb666-nb/minio|mc:latest`（官方镜像
@@ -126,3 +131,21 @@
 - **review_at**：Repair 6 planning
 - **blocker**：NON_BLOCKING（RB-04 CI 全绿；镜像内容 = MinIO 官方镜像）
 - **future work**：pin immutable version/digest + 镜像同步/可复现策略
+
+---
+
+## OPS_DEBT_BASE_IMAGE_MUTABLE_TAGS
+
+- **title**：postgres/redis/node/caddy 等 base image 仍使用可变 version tag
+- **motivation**：Repair 6（RB-06）只冻结了已登记的 MinIO/mc mutable-image
+  debt（§43 边界：不得扩成完整供应链改造）。`postgres:16-alpine`、
+  `redis:7-alpine`、`node:24`（Dockerfile ARG NODE_VERSION）、
+  `caddy:2-alpine` 仍为 floating version tag，上游 push 同 tag 新 build
+  时 CI/生产拉取内容可能变化。这些是官方维护的发行线 tag，风险低于
+  `latest`，且 digest pin 会带来更频繁的维护成本。
+- **priority**：LOW
+- **dependency**：无
+- **candidate phase**：Phase 11 / supply-chain hardening batch
+- **review_at**：supply-chain hardening planning
+- **blocker**：NON_BLOCKING（RB-06 已关闭；MinIO/mc 之外不在 Repair 6 范围）
+- **future work**：逐镜像评估 digest pin vs 发行线 tag 的维护成本后统一决策

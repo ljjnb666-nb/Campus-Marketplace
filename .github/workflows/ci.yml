@@ -67,6 +67,12 @@ jobs:
       # 被限流（run 34668960928）；quay.io 匿名拉取全局 401（run
       # 36022272410 attempt=1..3）——两者均为平台侧问题，与代码无关。
       # GITHUB_TOKEN（packages:read）拉取本账号私有包。
+      # RB-06（2026-09-25）：MinIO/mc 一律 immutable digest pin（禁止 :latest
+      # floating tag，静态 gate 见 tests/ops/image-immutability.test.ts）。
+      # digest 来源：authenticated pull（GITHUB_TOKEN）+ docker inspect
+      # RepoDigests；镜像内容 = MinIO 官方镜像（与生产 pin 内容一致，
+      # 见 compose.production.yml）。更新流程见 docs/PRODUCTION_DEPLOYMENT.md
+      # （禁止自动跟 latest）。
       - name: Log in to ghcr.io
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
@@ -76,7 +82,7 @@ jobs:
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            ghcr.io/ljjnb666-nb/minio:latest server /data --console-address ":9001"
+            ghcr.io/ljjnb666-nb/minio@sha256:a1a8bd4ac40ad7881a245bab97323e18f971e4d4cba2c2007ec1bedd21cbaba2 server /data --console-address ":9001"
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
               echo "MinIO ready after ${i} probe(s)"
@@ -92,7 +98,7 @@ jobs:
         # 幂等创建 public/private bucket 并设置匿名策略：
         # public = 允许匿名读（禁止写）；private = 完全禁止匿名访问
         run: |
-          docker run --rm --network host --entrypoint /bin/sh ghcr.io/ljjnb666-nb/mc:latest -c "
+          docker run --rm --network host --entrypoint /bin/sh ghcr.io/ljjnb666-nb/mc@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780 -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
             mc mb --ignore-existing local/campus-private &&
@@ -208,7 +214,7 @@ jobs:
             -p 9100:9000 -p 9101:9001 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            ghcr.io/ljjnb666-nb/minio:latest server /data --console-address ":9001"
+            ghcr.io/ljjnb666-nb/minio@sha256:a1a8bd4ac40ad7881a245bab97323e18f971e4d4cba2c2007ec1bedd21cbaba2 server /data --console-address ":9001"
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9100/minio/health/ready > /dev/null; then
               echo "MinIO ready after ${i} probe(s)"
@@ -222,7 +228,7 @@ jobs:
 
       - name: Bootstrap MinIO buckets
         run: |
-          docker run --rm --network host --entrypoint /bin/sh ghcr.io/ljjnb666-nb/mc:latest -c "
+          docker run --rm --network host --entrypoint /bin/sh ghcr.io/ljjnb666-nb/mc@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780 -c "
             mc alias set local http://localhost:9100 minioadmin minioadmin &&
             mc mb --ignore-existing local/campus-public &&
             mc mb --ignore-existing local/campus-private &&
