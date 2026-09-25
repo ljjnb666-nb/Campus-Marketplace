@@ -32,7 +32,18 @@ import {
 
 const actor = "user-1";
 
-function makeTx(fresh: unknown) {
+const lockedProductRow = {
+  id: "product-1",
+  campusId: "campus-1",
+  sellerId: actor,
+  status: "PAUSED",
+  deletedAt: null,
+};
+
+function makeTx(
+  fresh: unknown,
+  options: { productRow?: unknown; activeOrder?: { id: string } | null } = {},
+) {
   return {
     product: {
       findFirst: vi.fn().mockResolvedValue(fresh),
@@ -46,10 +57,24 @@ function makeTx(fresh: unknown) {
       findFirst: vi.fn().mockResolvedValue(fresh),
       update: vi.fn().mockResolvedValue({}),
     },
+    order: {
+      // AUDIT2-RB01：ACTIVE 目标的 active PRODUCT order 防御读取
+      findFirst: vi.fn().mockResolvedValue(options.activeOrder ?? null),
+    },
+    // AUDIT2-RB01：Product fresh 读 = 行级 FOR UPDATE
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      if (sql.includes('FROM "Product"')) {
+        return [options.productRow === undefined ? lockedProductRow : options.productRow];
+      }
+      return [];
+    }),
   } as unknown as Prisma.TransactionClient & {
     product: { findFirst: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
     serviceListing: { findFirst: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
     rentalListing: { findFirst: ReturnType<typeof vi.fn>; update: ReturnType<typeof vi.fn> };
+    order: { findFirst: ReturnType<typeof vi.fn> };
+    $queryRaw: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -103,11 +128,47 @@ describe("updateProductStatusTx（PSTATUS）", () => {
     expect(requireMarketplaceCapability).not.toHaveBeenCalled();
   });
 
-  it("PSTATUS-05：fresh missing / wrong owner / deleted → NO-OP 零写", async () => {
-    const tx = makeTx(null);
+  it("PSTATUS-05：行缺失 / 非本人 / 已删除 → NO-OP 零写", async () => {
+    for (const productRow of [
+      null,
+      { ...lockedProductRow, sellerId: "someone-else" },
+      { ...lockedProductRow, deletedAt: new Date("2026-01-01T00:00:00Z") },
+    ]) {
+      const tx = makeTx(null, { productRow });
 
-    expect(await updateProductStatusTx(tx, actor, "product-1", "RESERVED")).toBe(false);
+      expect(await updateProductStatusTx(tx, actor, "product-1", "RESERVED")).toBe(false);
+      expect(tx.product.update).not.toHaveBeenCalled();
+    }
+  });
+
+  it("PSTATUS-07（AUDIT2-RB01）：RESERVED + active PRODUCT order → ACTIVE 被阻止（安全 NO-OP）", async () => {
+    const tx = makeTx(null, {
+      productRow: { ...lockedProductRow, status: "RESERVED" },
+      activeOrder: { id: "order-1" },
+    });
+
+    expect(await updateProductStatusTx(tx, actor, "product-1", "ACTIVE")).toBe(false);
+    expect(tx.order.findFirst).toHaveBeenCalledWith({
+      where: {
+        productId: "product-1",
+        type: "PRODUCT",
+        status: { in: ["PENDING", "ACCEPTED"] },
+      },
+      select: { id: true },
+    });
     expect(tx.product.update).not.toHaveBeenCalled();
+  });
+
+  it("PSTATUS-08（AUDIT2-RB01）：无 active order → ACTIVE 放行", async () => {
+    const tx = makeTx(null, {
+      productRow: { ...lockedProductRow, status: "OFFLINE" },
+    });
+
+    expect(await updateProductStatusTx(tx, actor, "product-1", "ACTIVE")).toBe(true);
+    expect(tx.product.update).toHaveBeenCalledWith({
+      where: { id: "product-1" },
+      data: { status: "ACTIVE" },
+    });
   });
 
   it("PSTATUS-06：AUTH_ACCOUNT_INACTIVE → 零 product 写", async () => {

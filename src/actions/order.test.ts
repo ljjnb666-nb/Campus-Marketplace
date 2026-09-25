@@ -18,17 +18,34 @@ const {
   txUserUpdate,
   txExecuteRaw,
   txUserFindMany,
+  txOrderFindFirst,
+  setProductLockRow,
 } = vi.hoisted(() => {
   const txExecuteRaw = vi.fn();
   const txUserFindMany = vi.fn();
   const txOrderCreate = vi.fn();
   const txOrderUpdate = vi.fn();
   const txOrderUpdateMany = vi.fn();
+  const txOrderFindFirst = vi.fn();
   const txProductUpdate = vi.fn();
   const txProductUpdateMany = vi.fn();
   const txServiceListingUpdate = vi.fn();
   const txUserUpdate = vi.fn();
   const orderFindUnique = vi.fn();
+  // Product 行锁返回行（默认 = 创建路径的 ACTIVE 行；取消路径测试
+  // 通过 setProductLockRow 切换为 RESERVED 投影行）
+  const defaultProductLockRow = {
+    id: "product-1",
+    campusId: "campus-1",
+    status: "ACTIVE",
+    price: "100",
+    sellerId: "seller-1",
+    deletedAt: null,
+  };
+  let productLockRow: Record<string, unknown> = defaultProductLockRow;
+  const setProductLockRow = (row: Record<string, unknown>) => {
+    productLockRow = row;
+  };
   const transactionClient = {
     order: {
       create: txOrderCreate,
@@ -36,6 +53,8 @@ const {
       findUnique: orderFindUnique,
       update: txOrderUpdate,
       updateMany: txOrderUpdateMany,
+      // AUDIT2-RB01：cancellation 投影的 other-active-order 防御读取
+      findFirst: txOrderFindFirst,
     },
     product: {
       update: txProductUpdate,
@@ -54,10 +73,25 @@ const {
       ),
     },
     $executeRaw: txExecuteRaw,
-    // Phase 7C：listing 行锁（FOR UPDATE）+ 活跃 moderation 复查
+    // Phase 7C：listing 行锁（FOR UPDATE）；AUDIT2-RB01：Order/Product
+    // 行锁——按锁内 SELECT 的目标表分流返回行
     $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
-      // 按锁内 SELECT 的目标表分流返回行（PRODUCT/SERVICE 各自形状）
       const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      if (sql.includes('FROM "Order"')) {
+        return [
+          {
+            id: "order-1",
+            type: "PRODUCT",
+            status: "PENDING",
+            buyerId: "user-1",
+            sellerId: "seller-1",
+            productId: "product-1",
+          },
+        ];
+      }
+      if (sql.includes('FROM "Product"')) {
+        return [productLockRow];
+      }
       if (sql.includes("ServiceListing")) {
         return [
           {
@@ -100,12 +134,14 @@ const {
     txOrderCreate,
     txOrderUpdate,
     txOrderUpdateMany,
+    txOrderFindFirst,
     txProductUpdate,
     txProductUpdateMany,
     txServiceListingUpdate,
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
+    setProductLockRow,
   };
 });
 
@@ -138,6 +174,8 @@ vi.mock("@/lib/enforcement/capability-gate", () => ({
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireParticipantsMarketplaceEligible: vi.fn().mockResolvedValue(undefined),
   marketplaceObligationValidator: vi.fn(() => async () => undefined),
+  // AUDIT2-RB01：cancellation 投影的 checks-only 能力判定（默认放行）
+  evaluateMarketplaceCapability: vi.fn().mockResolvedValue({ allowed: true }),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -181,7 +219,16 @@ describe("order actions", () => {
     txOrderCreate.mockReset();
     txOrderUpdate.mockReset();
     txOrderUpdateMany.mockReset();
+    txOrderFindFirst.mockReset().mockResolvedValue(null);
     txProductUpdate.mockReset();
+    setProductLockRow({
+      id: "product-1",
+      campusId: "campus-1",
+      status: "ACTIVE",
+      price: "100",
+      sellerId: "seller-1",
+      deletedAt: null,
+    });
     txProductUpdateMany.mockReset();
     txServiceListingUpdate.mockReset();
     txUserUpdate.mockReset();
@@ -287,6 +334,14 @@ describe("order actions", () => {
       errandTaskId: null,
       serviceListingId: null,
     });
+    // AUDIT2-RB01：cancellation 投影读到的锁内 Product 行 = RESERVED
+    setProductLockRow({
+      id: "product-1",
+      campusId: "campus-1",
+      status: "RESERVED",
+      sellerId: "seller-1",
+      deletedAt: null,
+    });
 
     const formData = new FormData();
     formData.set("orderId", "order-1");
@@ -307,6 +362,8 @@ describe("order actions", () => {
       data: { status: "ACTIVE" },
     });
     expect(createNotifications).toHaveBeenCalled();
+    // canonical 参与方锁路径：buyer + seller 两把 sorted advisory 锁
+    expect(txExecuteRaw).toHaveBeenCalledTimes(2);
     expect(revalidatePath).toHaveBeenCalledWith("/my/orders");
     expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
   });

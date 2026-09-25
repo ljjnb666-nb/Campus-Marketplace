@@ -670,6 +670,23 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       expect(allowed).not.toBeNull();
       trackedOrderIds.push((allowed as { id: string }).id);
+
+      // AUDIT2-RB01 fixture hygiene：restore 用例断言完成后终止该订单，
+      // 恢复 productA「无 active order + ACTIVE」干净基线——带 active order
+      // 的 RESERVED 商品不再允许手动重新曝光（CAP-13/17/23 依赖该基线）。
+      // 走 production 取消路径（eligible seller + 无其它 active order →
+      // productA 回到 ACTIVE）。
+      const { updateOrderStatusTx } = await import("@/lib/order-status-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateOrderStatusTx(tx, buyerA.id, (allowed as { id: string }).id, {
+          requestedStatus: "CANCELLED",
+        }),
+      );
+      const productABaseline = await rawClient!.product.findUniqueOrThrow({
+        where: { id: productA.id },
+      });
+      expect(productABaseline.status).toBe("ACTIVE");
     });
 
     // ==================================================================
@@ -721,6 +738,30 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(afterWinddown.status).toBe("RESERVED");
 
       await restore(sellerA.id);
+
+      // AUDIT2-RB01：CAP-06 遗留的 PENDING order 仍占用 reservation——
+      // active order 存在时手动重上架被同根关闭（安全 NO-OP）。先经
+      // production 取消路径释放 reservation，再验证 restore 后重上架恢复。
+      const { updateOrderStatusTx } = await import("@/lib/order-status-service");
+      const { withTransaction: withTxForRelease } = await import("@/lib/prisma");
+      const activeOrders = await rawClient!.order.findMany({
+        where: { productId: productA.id, status: { in: ["PENDING", "ACCEPTED"] } },
+        select: { id: true, buyerId: true },
+      });
+      for (const activeOrder of activeOrders) {
+        const cancelled = await withTxForRelease((tx: Prisma.TransactionClient) =>
+          updateOrderStatusTx(tx, activeOrder.buyerId, activeOrder.id, {
+            requestedStatus: "CANCELLED",
+          }),
+        );
+        expect(cancelled).not.toBeNull();
+      }
+      // 取消投影（capability 已 restore）→ ACTIVE；置回 OFFLINE 后再验证
+      // 显式 OFFLINE → ACTIVE 重上架路径
+      await rawClient!.product.update({
+        where: { id: productA.id },
+        data: { status: "OFFLINE" },
+      });
 
       // restore 后：编辑与重上架恢复
       const editAfterRestore = await updateProduct({ success: false, message: "" }, editForm);
