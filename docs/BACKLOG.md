@@ -167,3 +167,22 @@
 - **blocker**：NON_BLOCKING（restore 是人工确认路径，gate 仍在其后 fail closed）
 - **future work**：与 OPS_RELEASE_VERIFIER 同模式收敛（测试改走真实 restore
   脚本 + PATH stub），或改为可注入的 TypeScript 函数参数
+
+---
+
+## OPS_DEBT_E2E_7E02_RETRY_FLAKE
+
+- **title**：PR #34 CI e2e job 中 7E-E2E02（report moderation reopen/dueAt）
+  单测首跑失败、重试通过（Playwright 计 1 flaky）
+- **motivation**：run 36109381086（head e37c7b0）e2e job 整体 success /
+  attempt=1，但 phase7e-report-moderation.spec.ts:151（7E-E2E02 reopen
+  RESOLVED → IN_REVIEW → dueAt 重置 → case ACTIVE）首 attempt 失败后
+  retry 通过（72 passed + 1 flaky）。与本文件 P7-DEBT-E2E-LOAD-01 记录的
+  散布 timeout 类症状同类；本轮不做 rerun，按"如实报告"纪律登记。
+- **priority**：LOW
+- **dependency**：E2E infrastructure
+- **candidate phase**：Final Hardening
+- **review_at**：Final Hardening planning
+- **blocker**：NON_BLOCKING（job 绿；重试通过；与 release identity 变更无关）
+- **future work**：隔离复跑定位（timing/goto 超时类）后修复或纳入
+  deterministic bootstrap 改造
