@@ -2,12 +2,17 @@
 
 import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { prisma } from "@/lib/prisma";
 import { resetModerationKeywordCache } from "@/lib/moderation";
 import { requireAdmin } from "@/lib/server-auth";
 import { decideMembershipVerification } from "@/lib/campus/verification-service";
 import { suspendAccount, reinstateAccount } from "@/lib/enforcement/account-enforcement-service";
 import { reviewReportInGovernance } from "@/lib/reports/report-review-service";
+import {
+  toggleCategoryStatusInGovernance,
+  toggleModerationKeywordStatusInGovernance,
+  upsertCategoryInGovernance,
+  upsertModerationKeywordInGovernance,
+} from "@/lib/governance/admin-configuration-service";
 import {
   categoryFormSchema,
   categoryStatusSchema,
@@ -29,28 +34,6 @@ function invalidFormState(): AdminActionState {
 
 type CategoryKind = "PRODUCT" | "ERRAND" | "SERVICE";
 
-type CategoryPayload = {
-  name: string;
-  slug: string;
-  description: string | null;
-  sortOrder: number;
-  isActive: boolean;
-};
-
-type CategoryTable = {
-  create(args: { data: CategoryPayload }): Promise<unknown>;
-  update(args: {
-    where: { id: string };
-    data: CategoryPayload | { isActive: boolean };
-  }): Promise<unknown>;
-};
-
-const categoryTables: Record<CategoryKind, CategoryTable> = {
-  PRODUCT: prisma.productCategory,
-  ERRAND: prisma.errandCategory,
-  SERVICE: prisma.serviceCategory,
-};
-
 const categoryListingPaths: Record<CategoryKind, string> = {
   PRODUCT: "/products",
   ERRAND: "/errands",
@@ -68,6 +51,11 @@ function readCategoryForm(formData: FormData) {
   };
 }
 
+// RB-05：Category / ModerationKeyword 的 mutation authority 已收敛到
+// canonical governance service（USER actor 锁 → 锁内 fresh permission 复核
+// → 域写 + same-tx AdminLog 审计 → COMMIT）。本文件的 8 个 legacy action
+// 只保留 requireAdmin 粗粒度入口门 + 身份发现 + FormData 校验 + post-commit
+// 缓存/路由失效 + 错误映射——entry auth 可过期，canonical mutation 不可。
 async function upsertCategory(
   kind: CategoryKind,
   formData: FormData,
@@ -81,28 +69,16 @@ async function upsertCategory(
     }
 
     const { categoryId, name, slug, description, sortOrder, isActive } = parsed.data;
-    const payload: CategoryPayload = {
+
+    await upsertCategoryInGovernance({
+      actorId: admin.id,
+      kind,
+      categoryId,
       name,
       slug,
       description: description || null,
       sortOrder,
       isActive,
-    };
-
-    if (categoryId) {
-      await categoryTables[kind].update({ where: { id: categoryId }, data: payload });
-    } else {
-      await categoryTables[kind].create({ data: payload });
-    }
-
-    await prisma.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: categoryId ? `UPDATE_${kind}_CATEGORY` : `CREATE_${kind}_CATEGORY`,
-        targetType: `${kind}_CATEGORY`,
-        targetId: categoryId ?? slug,
-        detail: name,
-      },
     });
 
     revalidatePath("/admin/categories");
@@ -127,18 +103,11 @@ async function toggleCategoryStatus(
       return invalidFormState();
     }
 
-    await categoryTables[kind].update({
-      where: { id: parsed.data.categoryId },
-      data: { isActive: parsed.data.isActive },
-    });
-
-    await prisma.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: parsed.data.isActive ? `ENABLE_${kind}_CATEGORY` : `DISABLE_${kind}_CATEGORY`,
-        targetType: `${kind}_CATEGORY`,
-        targetId: parsed.data.categoryId,
-      },
+    await toggleCategoryStatusInGovernance({
+      actorId: admin.id,
+      kind,
+      categoryId: parsed.data.categoryId,
+      isActive: parsed.data.isActive,
     });
 
     revalidatePath("/admin/categories");
@@ -325,36 +294,16 @@ export async function upsertModerationKeyword(
       return invalidFormState();
     }
 
-    if (parsed.data.keywordId) {
-      await prisma.moderationKeyword.update({
-        where: { id: parsed.data.keywordId },
-        data: {
-          keyword: parsed.data.keyword,
-          targetType: parsed.data.targetType,
-          isEnabled: parsed.data.isEnabled,
-        },
-      });
-    } else {
-      await prisma.moderationKeyword.create({
-        data: {
-          keyword: parsed.data.keyword,
-          targetType: parsed.data.targetType,
-          isEnabled: parsed.data.isEnabled,
-          createdById: admin.id,
-        },
-      });
-    }
-
-    await prisma.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: parsed.data.keywordId ? "UPDATE_MODERATION_KEYWORD" : "CREATE_MODERATION_KEYWORD",
-        targetType: "MODERATION_KEYWORD",
-        targetId: parsed.data.keywordId ?? parsed.data.keyword,
-        detail: parsed.data.targetType,
-      },
+    await upsertModerationKeywordInGovernance({
+      actorId: admin.id,
+      keywordId: parsed.data.keywordId,
+      keyword: parsed.data.keyword,
+      targetType: parsed.data.targetType,
+      isEnabled: parsed.data.isEnabled,
     });
 
+    // 缓存失效只在 service COMMIT 成功后发生；authority deny / 回滚
+    // （含审计失败）不会到达此处。
     resetModerationKeywordCache();
     revalidatePath("/admin/keywords");
   } catch (error) {
@@ -376,18 +325,10 @@ export async function toggleModerationKeywordStatus(
       return invalidFormState();
     }
 
-    await prisma.moderationKeyword.update({
-      where: { id: parsed.data.keywordId },
-      data: { isEnabled: parsed.data.isEnabled },
-    });
-
-    await prisma.adminLog.create({
-      data: {
-        adminId: admin.id,
-        action: parsed.data.isEnabled ? "ENABLE_MODERATION_KEYWORD" : "DISABLE_MODERATION_KEYWORD",
-        targetType: "MODERATION_KEYWORD",
-        targetId: parsed.data.keywordId,
-      },
+    await toggleModerationKeywordStatusInGovernance({
+      actorId: admin.id,
+      keywordId: parsed.data.keywordId,
+      isEnabled: parsed.data.isEnabled,
     });
 
     resetModerationKeywordCache();
