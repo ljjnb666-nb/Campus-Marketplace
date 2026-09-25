@@ -144,6 +144,39 @@ EXPECTED_SHA 必须是 40 位 hex Git commit SHA（`unknown`/`dev`/短 SHA/分�
 失败输出只含 reason code、HTTP 状态与 release 标识，绝不输出 secrets、
 dependency 异常细节或 bucket 名称。
 
+**Source artifact identity（deploy STEP 0，RB-06 FINAL）**：release SHA 不是
+operator label。deploy.sh 在任何生产副作用（env preflight / build / backup /
+migration / app switch / gate）之前 hard verify：
+
+- 入参（若显式给出）本身已是 40-hex——禁止截断任意输入后再接受
+  （`INVALID_EXPECTED_SHA`）；
+- 当前 checkout HEAD 可解析为 40-hex（`RELEASE_SOURCE_HEAD_UNRESOLVED`）；
+- 显式入参（normalize 小写）必须等于 HEAD，否则 `RELEASE_SOURCE_SHA_MISMATCH`
+  ——远端 endpoint 自报的 release 不能覆盖本地 artifact identity mismatch；
+- `git rev-parse --verify <SHA>^{commit}` 成功（`RELEASE_SOURCE_COMMIT_NOT_FOUND`）；
+- `git status --porcelain` 为空（tracked/staged 修改或 untracked
+  build-context 文件都会被 `COPY .` 带入镜像 → `RELEASE_SOURCE_TREE_DIRTY`；
+  `.env.production`/`.releases.log` 等由 `.gitignore` 管理，不进 porcelain，
+  不做手工 allowlist）。
+
+完整 release identity chain（§30），任何一环不同即 DEPLOY FAIL：
+
+```
+git committed tree == clean checkout HEAD == GIT_SHA build arg
+  == image tag == runtime RELEASE_SHA == health.release == ready.release
+```
+
+`deploy.sh <sha>` 因此只起 "assert expected checkout" 作用。运维步骤
+`git checkout <release_sha>` 只是操作说明；deploy.sh 自身仍会 hard verify。
+rollback 不重新构建 source，不要求 PREVIOUS_SHA == HEAD，但同样在任何 side
+effect 之前校验 40-hex 并禁止截断。
+
+生产 deploy/rollback 脚本不存在任何 verifier env override（`OPS_RELEASE_VERIFIER`
+类 test seam 已移除，静态 gate 见 `tests/ops/ops-scripts.test.ts`）：
+deploy 与 rollback 的 SUCCESS 判定只能出自
+`scripts/ops/release-readiness-check.ts`。`OPS_HEALTH_TIMEOUT` 仅允许在脚本内
+把等待预算调整为正整数（非法值回默认），不能把失败变成功。
+
 门禁失败时 deploy.sh 不写 release log，打印 rollback 命令参考后 exit 1；
 **不自动回滚**（自动回滚存在 schema compatibility 风险，由操作员执行
 `scripts/ops/rollback.sh <previous_git_sha>`）。
@@ -200,12 +233,14 @@ docs/PRODUCTION_SECURITY.md 第 6 节。
 ## 7. 升级 / 日常部署
 
 ```bash
-git fetch && git checkout <release_sha>   # 在服务器上的代码副本
-./scripts/ops/deploy.sh                   # 全流程（含备份/迁移/发布门禁）
+git fetch && git checkout <release_sha>   # 在服务器上的代码副本（clean worktree）
+./scripts/ops/deploy.sh [<release_sha>]   # 全流程（含备份/迁移/发布门禁）；
+                                          # 显式 SHA 只起 assert expected checkout 作用
 cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/READINESS=ready）
 ```
 
-升级/回滚 SUCCESS 均以 RELEASE READINESS GATE（§3.1）为准；回滚见
+升级/回滚 SUCCESS 均以 RELEASE READINESS GATE（§3.1）为准；worktree 必须 clean
+（deploy STEP 0 hard verify，dirty → `RELEASE_SOURCE_TREE_DIRTY`）；回滚见
 [ROLLBACK.md](./ROLLBACK.md)。
 
 ## 8. 磁盘空间

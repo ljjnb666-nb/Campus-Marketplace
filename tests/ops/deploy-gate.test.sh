@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy release-readiness gate shell-level regression tests（RB-06 §57）
+# deploy source-identity + release-gate shell-level regression（RB-06 FINAL）
 #
-# 在沙箱中执行真实 deploy.sh（docker/npx 走 stub，不构建不部署生产），覆盖：
-#   1. stub verifier PASS → deploy exit 0，.releases.log 写入且含 READINESS=ready
-#   2. stub verifier FAIL → deploy exit 1，绝不写 SUCCESS release log
-#   3. REAL verifier（scripts/ops/release-readiness-check.ts）× 本地 fake app：
-#      health ok + ready 全绿 → exit 0
-#   4. REAL verifier：ready HTTP 200 + degraded → exit 1，不写 release log
-#      （RB-06 核心：HTTP 200 ≠ DEPLOY SUCCESS）
-#   5. REAL verifier：invalid expected SHA → exit 1（网络验证之前 fail closed）
+# 在沙箱（最小 git 仓库 + docker/npx PATH stub + 本地 fake HTTP app）中执行
+# 真实 deploy.sh，不构建、不部署生产：
+#   SOURCE-01  clean tree + 无参数 → GIT_SHA=HEAD，走完全流程（真实 verifier）
+#   SOURCE-02  clean tree + 显式 HEAD（大写）→ 正常化后放行
+#   SOURCE-03  有效 40-hex ≠ HEAD（远端自报该 SHA）→ RELEASE_SOURCE_SHA_MISMATCH
+#              且在任何网络/部署动作之前失败（§27 关键证明）
+#   SOURCE-04  短 SHA → INVALID_EXPECTED_SHA，零生产副作用
+#   SOURCE-05  41 字符 hex → INVALID_EXPECTED_SHA，零生产副作用
+#   SOURCE-06  tracked 文件修改 → RELEASE_SOURCE_TREE_DIRTY，零副作用
+#   SOURCE-07  staged 变更 → RELEASE_SOURCE_TREE_DIRTY，零副作用
+#   SOURCE-08  untracked source 文件 → RELEASE_SOURCE_TREE_DIRTY，零副作用
+#   GATE-OK    真实 verifier × fake app 全绿 → exit 0 + release log
+#   GATE-DEGRADED  ready HTTP 200 + degraded → exit 1 + 不写 release log
+#   GATE-NOTREADY  ready 503 not_ready → exit 1 + 不写 release log
+# verifier 一律为真实 scripts/ops/release-readiness-check.ts（RB-06 FINAL-02：
+# 生产脚本与测试均无 OPS_RELEASE_VERIFIER 类 env override）。
 # 由 tests/ops/ops-scripts.test.ts（vitest）调用并断言整体退出码。
 # =============================================================================
 set -uo pipefail
@@ -34,9 +42,19 @@ assert_exit() {
 assert_file_absent() {
   if [[ -e "$1" ]]; then fail_test "$2: 文件不应存在: $1"; else pass_test; fi
 }
+# 零生产副作用：calls.log 不存在（或无任何 side_effect 标记）+ 无 release log
+assert_zero_side_effects() {
+  if [[ -f "${SANDBOX}/calls.log" ]] && grep -q "side_effect:" "${SANDBOX}/calls.log" 2>/dev/null; then
+    fail_test "$1: 出现生产副作用: $(grep 'side_effect:' "${SANDBOX}/calls.log" | tr '\n' ';')"
+  else
+    pass_test
+  fi
+  assert_file_absent "${SANDBOX}/.releases.log" "$1: 不写 release log"
+}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEPLOY_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+# 40-hex；与沙箱 HEAD 不同，用于 mismatch/自报场景
+OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
@@ -64,21 +82,44 @@ DEFAULT_CAMPUS_SLUG=main-campus
 BACKUP_OFFSITE_TARGET=
 BACKUP_RETENTION_DAYS=14
 ENV
-  sed -i "s|BACKUP_DIR_PLACEHOLDER|${SANDBOX}/backups|" "${SANDBOX}/.env.production"
   printf 'BACKUP_DIR=%s\n' "${SANDBOX}/backups" >> "${SANDBOX}/.env.production"
 
-  # ---- docker stub：build/up/migrate（返回 No pending migrations）----
+  # ---- 沙箱 = 最小 git 仓库：HEAD 是 source identity gate 的被测对象 ----
+  # runtime/ignored 文件不进 porcelain（与真实仓库的 .gitignore 语义一致，
+  # 不做手工 allowlist）。
+  git init -q "${SANDBOX}"
+  git -C "${SANDBOX}" config user.email deploy-gate@test.local
+  git -C "${SANDBOX}" config user.name deploy-gate
+  cat > "${SANDBOX}/.gitignore" <<'GITIGNORE'
+bin/
+backups/
+calls.log
+fake-app.out
+.env.production
+.releases.log
+GITIGNORE
+  echo "committed source marker" > "${SANDBOX}/app-source-marker.txt"
+  git -C "${SANDBOX}" add .gitignore app-source-marker.txt
+  git -C "${SANDBOX}" commit -q -m "sandbox init"
+
+  # ---- docker stub：记录 side_effect 并模拟 compose 行为 ----
   cat > "${SANDBOX}/bin/docker" <<STUB
 #!/usr/bin/env bash
 ARGS="\$*"
+echo "docker_called:\${ARGS}" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
-  *"run --rm migrate"*)
+  *"compose"*"build"*)
+    echo "side_effect:build GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    exit 0 ;;
+  *"compose"*"run --rm migrate"*)
+    echo "side_effect:migrate" >> "${SANDBOX}/calls.log"
     echo "No pending migrations"
     exit 0 ;;
-  *"up -d"*)
-    echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS"
+  *"compose"*"up -d"*)
+    echo "side_effect:app_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>}"
     exit 0 ;;
-  *"config --images"*)
+  *"compose"*"config --images"*)
     if [[ -n "\${GIT_SHA:-}" ]]; then
       echo "campus-marketplace-app:\${GIT_SHA}"
     else
@@ -86,6 +127,7 @@ case "\$ARGS" in
     fi
     exit 0 ;;
   *"exec -T postgres pg_dump"*)
+    echo "side_effect:pg_dump" >> "${SANDBOX}/calls.log"
     echo "DUMMYDUMP"
     exit 0 ;;
   *"exec -T postgres psql"*)
@@ -96,8 +138,7 @@ esac
 STUB
   chmod +x "${SANDBOX}/bin/docker"
 
-  # ---- npx stub：透传到真实 tsx（production-env-check / release verifier）----
-  # Windows（Git Bash）下 node 不能解析 POSIX 路径，需要 cygpath -m 转换
+  # ---- npx stub：透传真实 tsx（env-check / release-readiness-check.ts）----
   if command -v cygpath >/dev/null 2>&1; then
     REAL_TSX="$(cygpath -m "${REPO_ROOT}/node_modules/tsx/dist/cli.mjs")"
   else
@@ -117,17 +158,6 @@ done
 exec node "\${REAL_TSX}" "\${args[@]}"
 STUB
   chmod +x "${SANDBOX}/bin/npx"
-
-  # ---- stub verifier（仅测试 seam；生产路径走真实 release-readiness-check.ts）----
-  cat > "${SANDBOX}/bin/release-verifier-stub" <<STUB
-#!/usr/bin/env bash
-echo "verifier_called:\$1" >> "${SANDBOX}/calls.log"
-case "\${VERIFIER_STUB_MODE:-success}" in
-  success) exit 0 ;;
-  failure) exit 1 ;;
-esac
-STUB
-  chmod +x "${SANDBOX}/bin/release-verifier-stub"
 }
 
 cleanup() {
@@ -191,81 +221,152 @@ UNSET_ENV_ARGS=(
   -u BACKUP_RETENTION_DAYS -u METRICS_BEARER_TOKEN -u RELEASE_SHA
 )
 
-run_deploy() {  # $1=输出文件；APP_URL 等经 EXTRA_ENV 注入
-  rm -f "${SANDBOX}/.releases.log"
-  # OPS_RELEASE_VERIFIER：未设置 → 默认 stub verifier；显式空串 → 真实 verifier
-  #（${VAR-default} 语义：空串是显式选择，不得被 :- 折叠成默认）
-  env "${UNSET_ENV_ARGS[@]}" "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
-    VERIFIER_STUB_MODE="${VERIFIER_STUB_MODE:-success}" \
-    OPS_PROJECT_DIR="${SANDBOX}" \
-    OPS_RELEASE_VERIFIER="${OPS_RELEASE_VERIFIER-${SANDBOX}/bin/release-verifier-stub}" \
-    OPS_HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT-120}" \
-    bash "${REPO_ROOT}/scripts/ops/deploy.sh" "${DEPLOY_SHA}" > "$1" 2>&1
+run_deploy() {  # $1=输出文件；$2=可选显式 SHA；APP_URL 等经 EXTRA_ENV 注入
+  rm -f "${SANDBOX}/.releases.log" "${SANDBOX}/calls.log"
+  if [[ $# -ge 2 && -n "${2:-}" ]]; then
+    env "${UNSET_ENV_ARGS[@]}" "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
+      OPS_PROJECT_DIR="${SANDBOX}" \
+      OPS_HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT-120}" \
+      bash "${REPO_ROOT}/scripts/ops/deploy.sh" "$2" > "$1" 2>&1
+  else
+    env "${UNSET_ENV_ARGS[@]}" "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
+      OPS_PROJECT_DIR="${SANDBOX}" \
+      OPS_HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT-120}" \
+      bash "${REPO_ROOT}/scripts/ops/deploy.sh" > "$1" 2>&1
+  fi
   return $?
+}
+
+SANDBOX_HEAD=""
+refresh_head() {
+  SANDBOX_HEAD="$(git -C "${SANDBOX}" rev-parse HEAD)"
 }
 
 EXTRA_ENV=()
 
-echo "== 1. stub verifier PASS → exit 0 + release log（含 READINESS=ready）=="
+echo "== SOURCE-01：clean tree + 无参数 → GIT_SHA=HEAD，真实 verifier 全绿放行 =="
 make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=15 run_deploy "${OUT}"; rc=$?
+assert_exit 0 "$rc" "SOURCE-01 deploy"
+assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 以 HEAD 为 release 更新 app"
+assert_contains "RELEASE_SHA=${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 HEAD"
+assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "SOURCE-01 release log readiness"
+rm -f "${OUT}"
+
+echo "== SOURCE-02：clean tree + 显式 HEAD（大写）→ 正常化后放行 =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
+OUT="$(mktemp)"
+UPPER_HEAD="$(printf '%s' "${SANDBOX_HEAD}" | tr 'a-f' 'A-F')"
+OPS_HEALTH_TIMEOUT=15 run_deploy "${OUT}" "${UPPER_HEAD}"; rc=$?
+assert_exit 0 "$rc" "SOURCE-02 deploy with uppercase HEAD"
+assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-02 release identity = HEAD"
+rm -f "${OUT}"
+
+echo "== SOURCE-03（§27）：有效 40-hex ≠ HEAD，且远端自报该 SHA → 任何网络/部署动作之前 RELEASE_SOURCE_SHA_MISMATCH =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+# fake app 全链路自报 OTHER_SHA：若 deploy 误把调用者标签当 release 传给 verifier，
+# verifier 会照它 PASS——因此本测试要求 deploy 在 STEP 0 就失败、根本不触网。
+start_fake_app ready "${OTHER_SHA}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
+OUT="$(mktemp)"
+run_deploy "${OUT}" "${OTHER_SHA}"; rc=$?
+assert_exit 1 "$rc" "SOURCE-03 mismatch deploy"
+assert_contains "RELEASE_SOURCE_SHA_MISMATCH" "${OUT}" "SOURCE-03 失败原因"
+assert_not_contains "release readiness gate" "${OUT}" "SOURCE-03 未进入 release gate（verifier 未被调用、未触网）"
+assert_not_contains "生产 env 校验" "${OUT}" "SOURCE-03 在 STEP 1 preflight 之前失败"
+assert_zero_side_effects "SOURCE-03"
+rm -f "${OUT}"
+
+echo "== SOURCE-04：短 SHA → INVALID_EXPECTED_SHA，零副作用 =="
+make_sandbox
+refresh_head
+OUT="$(mktemp)"
+run_deploy "${OUT}" "abc123"; rc=$?
+assert_exit 1 "$rc" "SOURCE-04 deploy"
+assert_contains "INVALID_EXPECTED_SHA" "${OUT}" "SOURCE-04 失败原因"
+assert_zero_side_effects "SOURCE-04"
+rm -f "${OUT}"
+
+echo "== SOURCE-05：41 字符 hex → INVALID_EXPECTED_SHA，零副作用 =="
+make_sandbox
+refresh_head
+OUT="$(mktemp)"
+run_deploy "${OUT}" "${OTHER_SHA}0"; rc=$?
+assert_exit 1 "$rc" "SOURCE-05 deploy"
+assert_contains "INVALID_EXPECTED_SHA" "${OUT}" "SOURCE-05 失败原因"
+assert_zero_side_effects "SOURCE-05"
+rm -f "${OUT}"
+
+echo "== SOURCE-06：tracked 文件修改 → RELEASE_SOURCE_TREE_DIRTY，build 之前失败 =="
+make_sandbox
+refresh_head
+echo "dirty change" >> "${SANDBOX}/app-source-marker.txt"
 OUT="$(mktemp)"
 run_deploy "${OUT}"; rc=$?
-assert_exit 0 "$rc" "deploy with verifier pass"
-assert_contains "verifier_called:${DEPLOY_SHA}" "${SANDBOX}/calls.log" "verifier 收到 expected SHA"
-assert_contains "RELEASE_SHA=${DEPLOY_SHA}" "${SANDBOX}/.releases.log" "release log 记录 SHA"
-assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "release log 记录 readiness"
-assert_contains "app_up_called" "${OUT}" "app 滚动更新已执行"
+assert_exit 1 "$rc" "SOURCE-06 deploy"
+assert_contains "RELEASE_SOURCE_TREE_DIRTY" "${OUT}" "SOURCE-06 失败原因"
+assert_zero_side_effects "SOURCE-06"
 rm -f "${OUT}"
 
-echo "== 2. stub verifier FAIL → exit 1 + 绝不写 SUCCESS release log =="
+echo "== SOURCE-07：staged 变更 → RELEASE_SOURCE_TREE_DIRTY，零副作用 =="
 make_sandbox
+refresh_head
+echo "staged change" >> "${SANDBOX}/app-source-marker.txt"
+git -C "${SANDBOX}" add app-source-marker.txt
 OUT="$(mktemp)"
-VERIFIER_STUB_MODE=failure run_deploy "${OUT}"; rc=$?
-assert_exit 1 "$rc" "deploy with verifier failure"
-assert_contains "deployment verification failed" "${OUT}" "失败输出明确指向回滚参考"
-assert_file_absent "${SANDBOX}/.releases.log" "失败后不写 release log"
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "SOURCE-07 deploy"
+assert_contains "RELEASE_SOURCE_TREE_DIRTY" "${OUT}" "SOURCE-07 失败原因"
+assert_zero_side_effects "SOURCE-07"
 rm -f "${OUT}"
 
-echo "== 3. REAL verifier × fake app 全绿 → exit 0 + release log =="
+echo "== SOURCE-08：untracked source 文件 → RELEASE_SOURCE_TREE_DIRTY，零副作用 =="
 make_sandbox
+refresh_head
+echo "untracked build-context source" > "${SANDBOX}/new-source-file.ts"
+OUT="$(mktemp)"
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "SOURCE-08 deploy"
+assert_contains "RELEASE_SOURCE_TREE_DIRTY" "${OUT}" "SOURCE-08 失败原因"
+assert_zero_side_effects "SOURCE-08"
+rm -f "${OUT}"
+
+echo "== GATE-DEGRADED：ready HTTP 200 + degraded → verifier FAIL，不写 release log（RB-06 核心）=="
+make_sandbox
+refresh_head
 PORTFILE="${SANDBOX}/fake-app.out"
-start_fake_app ready "${DEPLOY_SHA}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+start_fake_app degraded "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
 OUT="$(mktemp)"
-OPS_RELEASE_VERIFIER="" OPS_HEALTH_TIMEOUT=15 run_deploy "${OUT}"; rc=$?
-if [[ "${DEPLOY_GATE_DEBUG:-}" == "1" ]]; then echo "---- test3 deploy output ----"; cat "${OUT}"; fi
-assert_exit 0 "$rc" "real verifier all-green deploy"
-assert_contains "RELEASE_SHA=${DEPLOY_SHA}" "${SANDBOX}/.releases.log" "real verifier 通过后写 release log"
-assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "real verifier 通过后记录 readiness"
-
-echo "== 4. REAL verifier：ready HTTP 200 + degraded → exit 1 + 不写 release log（RB-06 核心）=="
-make_sandbox
-PORTFILE="${SANDBOX}/fake-app.out"
-start_fake_app degraded "${DEPLOY_SHA}" "${PORTFILE}" || { fail_test "fake app 启动"; }
-OUT="$(mktemp)"
-EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
-OPS_RELEASE_VERIFIER="" OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
-assert_exit 1 "$rc" "real verifier degraded must fail deploy"
-assert_contains "deployment verification failed" "${OUT}" "degraded 失败输出"
-assert_file_absent "${SANDBOX}/.releases.log" "degraded 不写 release log"
+OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "GATE-DEGRADED deploy"
+assert_contains "deployment verification failed" "${OUT}" "GATE-DEGRADED 失败输出"
+assert_contains "READY_DEGRADED" "${OUT}" "GATE-DEGRADED verifier reason"
+assert_file_absent "${SANDBOX}/.releases.log" "GATE-DEGRADED 不写 release log"
 rm -f "${OUT}"
 
-echo "== 5. REAL verifier：invalid expected SHA → 网络验证之前 fail（不写 release log）=="
+echo "== GATE-NOTREADY：ready 503 not_ready → verifier FAIL，不写 release log =="
 make_sandbox
-OUT="$(mktemp)"
+refresh_head
 PORTFILE="${SANDBOX}/fake-app.out"
-start_fake_app ready "${DEPLOY_SHA}" "${PORTFILE}" || { fail_test "fake app 启动"; }
-# deploy 传入短 SHA：verifier 必须 INVALID_EXPECTED_SHA 快速失败
-env "${UNSET_ENV_ARGS[@]}" \
-  APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" \
-  OPS_PROJECT_DIR="${SANDBOX}" \
-  OPS_HEALTH_TIMEOUT=5 \
-  PATH="${SANDBOX}/bin:${PATH}" \
-  bash "${REPO_ROOT}/scripts/ops/deploy.sh" "shortsha" > "${OUT}" 2>&1
-rc=$?
-assert_exit 1 "$rc" "deploy with invalid sha"
-assert_contains "INVALID_EXPECTED_SHA" "${OUT}" "invalid sha 快速失败原因"
-assert_file_absent "${SANDBOX}/.releases.log" "invalid sha 不写 release log"
+start_fake_app notready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "GATE-NOTREADY deploy"
+assert_contains "READY_NOT_READY" "${OUT}" "GATE-NOTREADY verifier reason"
+assert_file_absent "${SANDBOX}/.releases.log" "GATE-NOTREADY 不写 release log"
 rm -f "${OUT}"
 
 echo "=============================="

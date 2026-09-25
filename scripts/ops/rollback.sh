@@ -17,7 +17,10 @@
 # 恢复失败 → 立即非 0 退出，应用切换绝不执行（app 保持停止，人工介入）。
 # 绝不自动执行 destructive down migration。
 #
-# OPS_RELEASE_VERIFIER 仅供自动化测试注入 stub verifier（生产路径不受影响）。
+# PREVIOUS_SHA 必须是 40 位 hex Git commit SHA，且在任何 side effect
+# （镜像检查/hard restore/app switch/gate）之前校验；禁止截断任意输入。
+# rollback 不重新构建 source，因此不要求 PREVIOUS_SHA == 当前 HEAD，
+# 只要求它真实标识一个既有不可变镜像 tag。
 # =============================================================================
 set -euo pipefail
 
@@ -30,7 +33,11 @@ load_production_env
 RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT:-${SCRIPT_DIR}/restore-production-postgres.sh}"
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
-PREVIOUS_SHA="${PREVIOUS_SHA:0:40}"
+if [[ ! "${PREVIOUS_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+  echo "[rollback][FAIL] INVALID_EXPECTED_SHA：PREVIOUS_SHA 必须是 40 位 hex Git commit SHA（禁止短 SHA/分支名/unknown/dev/截断）" >&2
+  exit 1
+fi
+PREVIOUS_SHA="${PREVIOUS_SHA,,}"
 MODE="${2:-}"
 
 if [[ "${MODE}" != "" && "${MODE}" != "--hard" ]]; then
@@ -48,18 +55,19 @@ if ! docker image inspect "campus-marketplace-app:${PREVIOUS_SHA}" >/dev/null 2>
 fi
 
 APP_URL="${APP_URL:-$(app_url_from_env)}"
-# OPS_HEALTH_TIMEOUT 仅供自动化测试压短门禁轮询预算（生产路径默认 120s）
+# OPS_HEALTH_TIMEOUT 仅调整门禁等待预算（不能把失败变成功）：
+# 必须是正整数，否则回默认；正则白名单保证无注入面。
 HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT:-120}"
+if [[ ! "${HEALTH_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  HEALTH_TIMEOUT=120
+fi
 
-# OPS_RELEASE_VERIFIER 仅供自动化测试注入 stub verifier（参数：expected_sha）。
-# 生产路径必须走 scripts/ops/release-readiness-check.ts（deploy 与 rollback
-# 共用的唯一 release gate 权威，禁止在本脚本内另写 grep/sed JSON 解析）。
+# 统一 release gate 调用：唯一权威 = scripts/ops/release-readiness-check.ts。
+# 不提供任何 environment-selected verifier override（RB-06 FINAL-02：测试期
+# verifier 可执行文件注入 seam 已从生产脚本移除，测试直接使用真实 verifier，
+# 静态 gate 见 tests/ops/ops-scripts.test.ts）。
 run_release_gate() {
   local expected_sha="$1"
-  if [[ -n "${OPS_RELEASE_VERIFIER:-}" ]]; then
-    bash "${OPS_RELEASE_VERIFIER}" "${expected_sha}"
-    return
-  fi
   npx --prefix "${PROJECT_DIR}" tsx "${SCRIPT_DIR}/release-readiness-check.ts" \
     --base-url "${APP_URL}" \
     --expected-sha "${expected_sha}" \

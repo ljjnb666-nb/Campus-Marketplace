@@ -188,4 +188,74 @@ describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
     // route 只指向 minio，private 桶名不得出现在资产 route 附近
     expect(content).not.toMatch(/campus-private/);
   });
+
+  // ---- RB-06 FINAL-02：release gate 权威不可被 env override 替换 ----
+
+  it("RELEASE_VERIFIER_BYPASS_ABSENT：deploy/rollback 不得包含 OPS_RELEASE_VERIFIER", () => {
+    for (const file of ["scripts/ops/deploy.sh", "scripts/ops/rollback.sh"]) {
+      const content = readFileSync(path.join(repoRoot, file), "utf8");
+      expect(content, `${file} 不得包含 OPS_RELEASE_VERIFIER`).not.toContain(
+        "OPS_RELEASE_VERIFIER",
+      );
+      // 唯一权威 verifier 必须被直接调用
+      expect(content, `${file} 必须调用 release-readiness-check.ts`).toContain(
+        "release-readiness-check.ts",
+      );
+    }
+  });
+
+  it("OPS_HEALTH_TIMEOUT_SEAM_SAFE：等待预算 seam 只接受正整数，无注入面", () => {
+    for (const file of ["scripts/ops/deploy.sh", "scripts/ops/rollback.sh"]) {
+      const content = readFileSync(path.join(repoRoot, file), "utf8");
+      expect(content, `${file} 必须校验 OPS_HEALTH_TIMEOUT 为正整数`).toMatch(
+        /\^\[1-9\]\[0-9\]\*\$/,
+      );
+    }
+  });
+
+  // ---- RB-06 FINAL-01：source artifact identity 静态合同 ----
+
+  it("SOURCE_IDENTITY_GATE_ORDER：deploy.sh 的 source identity gate 必须先于 build/backup/migrate/app-up", () => {
+    const content = readFileSync(path.join(repoRoot, "scripts/ops/deploy.sh"), "utf8");
+    const identity = content.indexOf("SOURCE ARTIFACT IDENTITY");
+    // 各生产副作用的首次出现位置
+    const envCheck = content.indexOf("production-env-check");
+    const build = content.indexOf('compose_run build');
+    const backup = content.indexOf("backup-postgres.sh");
+    const migrate = content.indexOf("run --rm migrate");
+    const up = content.indexOf("up -d --no-deps --wait app");
+    const gate = content.indexOf("release readiness gate");
+    for (const [name, idx] of [
+      ["production-env-check", envCheck],
+      ["compose build", build],
+      ["backup-postgres", backup],
+      ["migrate", migrate],
+      ["app up", up],
+      ["release readiness gate", gate],
+    ] as const) {
+      expect(idx, `${name} 必须存在`).toBeGreaterThan(-1);
+      expect(
+        identity,
+        `source identity gate 必须先于 ${name}`,
+      ).toBeLessThan(idx);
+    }
+  });
+
+  it("SOURCE_IDENTITY_CONTRACT_STATIC：40-hex 校验/HEAD 相等/commit 存在/clean tree 缺一不可，且禁止 SHA 截断", () => {
+    const deploy = readFileSync(path.join(repoRoot, "scripts/ops/deploy.sh"), "utf8");
+    // 40-hex 正则 + HEAD 解析 + 相等断言 + commit 存在 + porcelain clean
+    expect(deploy).toMatch(/\^\[a-fA-F0-9\]\{40\}\$/);
+    expect(deploy).toContain('rev-parse HEAD');
+    expect(deploy).toContain("RELEASE_SOURCE_SHA_MISMATCH");
+    expect(deploy).toContain('rev-parse --verify');
+    expect(deploy).toContain("RELEASE_SOURCE_COMMIT_NOT_FOUND");
+    expect(deploy).toContain("status --porcelain");
+    expect(deploy).toContain("RELEASE_SOURCE_TREE_DIRTY");
+    // 禁止截断任意输入后接受（GIT_SHA=...:0:40 / PREVIOUS_SHA:0:40）
+    expect(deploy, "deploy.sh 不得截断 SHA").not.toMatch(/:0:40/);
+    const rollback = readFileSync(path.join(repoRoot, "scripts/ops/rollback.sh"), "utf8");
+    expect(rollback).toMatch(/\^\[a-fA-F0-9\]\{40\}\$/);
+    expect(rollback, "rollback.sh 不得截断 SHA").not.toMatch(/:0:40/);
+    expect(rollback).toMatch(/INVALID_EXPECTED_SHA/);
+  });
 });

@@ -149,3 +149,21 @@
 - **review_at**：supply-chain hardening planning
 - **blocker**：NON_BLOCKING（RB-06 已关闭；MinIO/mc 之外不在 Repair 6 范围）
 - **future work**：逐镜像评估 digest pin vs 发行线 tag 的维护成本后统一决策
+
+---
+
+## OPS_DEBT_TEST_SEAM_OPS_RESTORE_SCRIPT
+
+- **title**：rollback.sh 仍保留 OPS_RESTORE_SCRIPT 环境注入 seam（restore 脚本
+  executable path 可被 env 覆盖）
+- **motivation**：RB-06 FINAL-02 移除了 OPS_RELEASE_VERIFIER（release gate
+  权威不可被 env 替换）。OPS_RESTORE_SCRIPT 是更早（--hard 恢复路径）的既有
+  测试 seam，影响面为 restore 脚本选择，不属于 release-verifier blocker；
+  本轮按冻结边界不顺手重构 hard restore。
+- **priority**：LOW
+- **dependency**：无
+- **candidate phase**：Final Hardening
+- **review_at**：Final Hardening planning
+- **blocker**：NON_BLOCKING（restore 是人工确认路径，gate 仍在其后 fail closed）
+- **future work**：与 OPS_RELEASE_VERIFIER 同模式收敛（测试改走真实 restore
+  脚本 + PATH stub），或改为可注入的 TypeScript 函数参数
