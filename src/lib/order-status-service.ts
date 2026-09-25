@@ -5,6 +5,7 @@ import {
   type ActiveAccountMutationSeams,
 } from "@/lib/governance/active-account-mutation";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
+import { cancelProductOrderTx } from "@/lib/product-order-lifecycle";
 import { createNotifications } from "@/repositories/notification-repository";
 
 /**
@@ -18,6 +19,11 @@ import { createNotifications } from "@/repositories/notification-repository";
  * 不加 marketplace capability：Order progression 属既有义务
  * wind-down/completion——ACTIVE but risk-restricted 用户仍可处理既有义务
  * （Phase 6C-3 合同），只要求 account ACTIVE lifecycle。
+ *
+ * AUDIT2-RB01：PRODUCT + CANCELLED 不再走本函数的 actor-only general 路径
+ * （旧实现曾无条件 Product → ACTIVE，使订单取消错误拥有 listing 重曝光
+ * 权威），改为委派唯一权威实现 cancelProductOrderTx（sorted participant
+ * 锁 → Order 行锁 → Product 行锁 → 条件投影）。
  *
  * seams 仅测试注入。
  */
@@ -66,6 +72,42 @@ export async function updateOrderStatusTx(
   input: UpdateOrderStatusInput,
   seams?: ActiveAccountMutationSeams,
 ): Promise<UpdateOrderStatusResult | null> {
+  // AUDIT2-RB01：PRODUCT CANCELLED 委派 canonical 参与方锁路径。candidate
+  // pre-read 只用于锁键发现（buyerId/sellerId/productId/type 分流），
+  // 不是 participant/status 权威——锁后由 cancelProductOrderTx 重读复核。
+  if (input.requestedStatus === "CANCELLED") {
+    const candidate = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { type: true, buyerId: true, sellerId: true, productId: true },
+    });
+
+    if (candidate?.type === "PRODUCT") {
+      const cancellation = await cancelProductOrderTx(
+        tx,
+        actorUserId,
+        orderId,
+        {
+          buyerId: candidate.buyerId,
+          sellerId: candidate.sellerId,
+          productId: candidate.productId,
+        },
+        seams,
+      );
+
+      if (!cancellation) {
+        return null;
+      }
+
+      return {
+        productId: candidate.productId,
+        serviceListingId: null,
+        errandTaskId: null,
+        isBuyer: cancellation.isBuyer,
+      };
+    }
+    // SERVICE CANCELLED / 订单缺失 → 既有 general actor-only 路径
+  }
+
   await prepareActiveAccountMutation(tx, actorUserId, seams);
 
   const order = await tx.order.findUnique({
@@ -105,9 +147,12 @@ export async function updateOrderStatusTx(
           ((isBuyer && order.status === "IN_PROGRESS") ||
             (isSeller && order.status === "IN_PROGRESS"))) ||
         (order.type === "ERRAND" && isBuyer && order.status === "IN_PROGRESS"))) ||
+    // AUDIT2-RB01：PRODUCT CANCELLED 的唯一权威是入口处委派的
+    // cancelProductOrderTx（type 不可变，正常不可达；防御性 fail closed）
     (requestedStatus === "CANCELLED" &&
-      ((order.type === "PRODUCT" && order.status === "PENDING" && (isBuyer || isSeller)) ||
-        (order.type === "SERVICE" && order.status === "PENDING" && (isBuyer || isSeller))));
+      order.type === "SERVICE" &&
+      order.status === "PENDING" &&
+      (isBuyer || isSeller));
 
   if (!canTransition) {
     return null;
@@ -148,14 +193,9 @@ export async function updateOrderStatusTx(
     return null;
   }
 
+  // AUDIT2-RB01：PRODUCT CANCELLED 已在函数入口委派 cancelProductOrderTx
+  // （条件化 Product 投影）；本 general 路径只保留 COMPLETED 投影。
   if (order.type === "PRODUCT" && order.productId) {
-    if (requestedStatus === "CANCELLED") {
-      await tx.product.update({
-        where: { id: order.productId },
-        data: { status: "ACTIVE" },
-      });
-    }
-
     if (requestedStatus === "COMPLETED") {
       await tx.product.update({
         where: { id: order.productId },
