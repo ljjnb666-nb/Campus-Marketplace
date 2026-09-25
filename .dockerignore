@@ -2,6 +2,7 @@
 node_modules
 .next
 out
+build
 
 # 版本控制与 CI
 .git
@@ -27,3 +28,47 @@ docs
 .DS_Store
 .mimosa
 tsconfig.tsbuildinfo
+
+# =============================================================================
+# RB-06 FINAL-03：Docker build context 必须是 committed git tree 的确定性投影。
+# 以下与 .gitignore 的本地/运行时产物对齐 —— git ignored 的文件不会出现在
+# `git status --porcelain`（deploy STEP 0 的 clean tree 检查看不到它们），
+# 但 COPY . 会把 build context 内的一切带入镜像；必须在 context 层排除。
+# 静态 gate：tests/ops/docker-context-provenance.test.ts
+# 动态 canary probe：tests/ops/docker-context-probe.Dockerfile
+# =============================================================================
+
+# 本地测试/工具运行时产物
+.playwright-mcp
+.tmp-test-uploads
+tests/e2e/.auth
+tests/e2e/.artifacts
+tests/e2e/.report
+tests/e2e/.run-state.json
+
+# Vercel / 日志 / 证书 / 系统文件
+.vercel
+*.log
+*.pem
+*.stackdump
+
+# Next.js / TS 本地产物（builder 阶段内由 next build 重新生成）
+next-env.d.ts
+*.tsbuildinfo
+
+# 本地开发数据库
+prisma/dev.db
+prisma/dev.db-journal
+
+# 仓库根的本地截图
+/*.png
+
+# 本地工具状态文件（未跟踪的本地 tool config）
+.zcodeignore
+
+# 运行时用户上传（legacy / local-only）：绝不进 immutable production image
+# （部署主机遗留上传文件的 inventory/quarantine 属既有 operational debt）。
+# tracked placeholder 资产通过 negation 保留进入 context：
+public/uploads/*
+!public/uploads/placeholders/
+!public/uploads/placeholders/**

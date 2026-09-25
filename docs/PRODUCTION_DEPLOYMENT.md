@@ -166,6 +166,28 @@ git committed tree == clean checkout HEAD == GIT_SHA build arg
   == image tag == runtime RELEASE_SHA == health.release == ready.release
 ```
 
+**Docker build context provenance（RB-06 FINAL-03）**：clean worktree 本身
+不足以保证 artifact identity —— git ignored 文件不出现在 `git status
+--porcelain`，但会被 `COPY . .` 从 build context 带入镜像。因此
+`.dockerignore` 与 `.gitignore` 的本地/运行时产物对齐（`public/uploads/*`
+运行时上传、`next-env.d.ts`、`*.log`、`prisma/dev.db`、`/*.png`、`*.pem`、
+`.vercel`、`.playwright-mcp`、`.tmp-test-uploads` 等；tracked placeholder
+资产经 negation 保留），使 **Docker build input 是 committed git tree 的
+确定性投影**：
+
+```
+committed git tree + clean worktree + dockerignore 全量本地/运行时排除
+  == deterministic docker context
+```
+
+静态 gate：`tests/ops/docker-context-provenance.test.ts`（冻结关键
+pattern + placeholder negation）；真实 canary probe（`tests/ops/
+docker-context-probe.Dockerfile`，FROM scratch + COPY，`docker export`
+列举 context）验证 ignored 本地文件（含 `public/uploads` 运行时内容）不进
+context、tracked placeholder 不缺席。部署主机遗留上传文件的
+inventory/quarantine 属既有 operational debt（BACKLOG
+AUDIT_DEBT_LEGACY_UPLOADS_PUBLIC_DIR），本机制仅保证它们不进镜像。
+
 `deploy.sh <sha>` 因此只起 "assert expected checkout" 作用。运维步骤
 `git checkout <release_sha>` 只是操作说明；deploy.sh 自身仍会 hard verify。
 rollback 不重新构建 source，不要求 PREVIOUS_SHA == HEAD，但同样在任何 side

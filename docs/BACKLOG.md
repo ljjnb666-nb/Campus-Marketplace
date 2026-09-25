@@ -89,6 +89,11 @@
 - **review_at**：Phase 8 planning（与 RB-04 privacy lifecycle 同批）
 - **blocker**：NON_BLOCKING（无证据表明其下存在学生证类材料；本地实测
   仅头像/占位文件）
+- **RB-06 FINAL-03 补充（2026-09-25）**：`.dockerignore` 已排除
+  `public/uploads/*`（negation 保留 tracked placeholder 资产），本地/遗留
+  上传文件不再进入 production Docker build context（动态 canary probe 见
+  `tests/ops/docker-context-provenance.test.ts`）；主机侧存量文件的
+  inventory/quarantine 仍属本条既有 debt。
 
 ---
 
