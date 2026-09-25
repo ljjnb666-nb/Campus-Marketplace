@@ -458,4 +458,198 @@ describe("ops-check（npm run ops:check）", () => {
       cleanup();
     }
   }, 150_000);
+
+  // ---- RB-06：release identity 必须是 40 位 hex Git SHA（§48）----
+  // 注意：不能走 --skip-connectivity（该路径 production 直接拒绝并跳过
+  // identity 检查）；必须带连通性跑，让 release_identity 真正参与评估。
+
+  it("RELEASE_IDENTITY_INVALID_SHA_REJECTED：production + RELEASE_SHA=dev → exit 1 且 failed 含 release_identity", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    const { dir: backupDir, cleanup: cleanupBackup } = tmpBackupDir();
+    try {
+      const failure = await execFileAsync(
+        process.execPath,
+        [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), script, "--mode", "production"],
+        {
+          cwd,
+          timeout: 120_000,
+          env: { ...syntheticProductionEnv(backupDir), RELEASE_SHA: "dev" },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      const stdout = (failure as { stdout?: string }).stdout ?? "";
+      expect((failure as { code?: number }).code).not.toBe(0);
+      const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
+      expect(summary.result).toBe("FAIL");
+      // 合成 env 的 fake host 连通性必然失败，但 release_identity 必须在列
+      expect(summary.failed).toContain("release_identity");
+    } finally {
+      cleanup();
+      cleanupBackup();
+    }
+  }, 150_000);
+
+  it("RELEASE_IDENTITY_SHORT_SHA_REJECTED：production + 短 SHA → failed 含 release_identity；40 位 hex 对照不含", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    const { dir: backupDir, cleanup: cleanupBackup } = tmpBackupDir();
+    try {
+      const shortFailure = await execFileAsync(
+        process.execPath,
+        [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), script, "--mode", "production"],
+        {
+          cwd,
+          timeout: 120_000,
+          env: { ...syntheticProductionEnv(backupDir), RELEASE_SHA: "abc123" },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      const shortStdout = (shortFailure as { stdout?: string }).stdout ?? "";
+      expect((shortFailure as { code?: number }).code).not.toBe(0);
+      const shortSummary = JSON.parse(shortStdout.trim().split("\n").at(-1)!);
+      expect(shortSummary.failed).toContain("release_identity");
+
+      // 对照：合法 40 位 hex（syntheticProductionEnv 默认）即使连通性失败，
+      // 也不得因 release identity 失败
+      const validFailure = await execFileAsync(
+        process.execPath,
+        [path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"), script, "--mode", "production"],
+        {
+          cwd,
+          timeout: 120_000,
+          env: syntheticProductionEnv(backupDir),
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ).catch((error: { stdout?: string; code?: number }) => error);
+
+      const validStdout = (validFailure as { stdout?: string }).stdout ?? "";
+      expect((validFailure as { code?: number }).code).not.toBe(0);
+      const validSummary = JSON.parse(validStdout.trim().split("\n").at(-1)!);
+      expect(validSummary.failed).not.toContain("release_identity");
+    } finally {
+      cleanup();
+      cleanupBackup();
+    }
+  }, 150_000);
+
+  // ---- RB-06：storage readiness 必须 public+private 两 bucket（§22 parity）----
+
+  it("STORAGE_PRIVATE_BUCKET_REQUIRED：S3 配置缺 S3_BUCKET_PRIVATE → storage_connectivity skipped（不再视为配置完整）", async () => {
+    const { cwd, cleanup } = tmpCwd();
+    try {
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        [
+          path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+          script,
+          "--mode",
+          "development",
+        ],
+        {
+          cwd,
+          timeout: 120_000,
+          env: {
+            ...process.env,
+            DATABASE_URL: "",
+            REDIS_URL: "",
+            S3_ENDPOINT: "http://minio:9000",
+            S3_ACCESS_KEY_ID: "CAMPUSSYNTHKEY01",
+            S3_SECRET_ACCESS_KEY: SYNTH.s3Secret,
+            S3_BUCKET_PUBLIC: "campus-public",
+            S3_BUCKET_PRIVATE: "",
+            BACKUP_DIR: "",
+            RELEASE_SHA: "",
+          },
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+
+      const storageLine = JSON.parse(
+        stdout.trim().split("\n").filter((l) => l.includes("storage_connectivity")).at(-1)!,
+      );
+      expect(storageLine.status).toBe("skipped");
+      expect(storageLine.detail).toContain("S3_* 未配置完整");
+    } finally {
+      cleanup();
+    }
+  }, 150_000);
+
+  // ---- 真实 MinIO parity（CI：INTEGRATION_S3_ENDPOINT 指向服务容器）----
+
+  const itRealS3 = process.env.INTEGRATION_S3_ENDPOINT ? it : it.skip;
+
+  itRealS3(
+    "OPS_CHECK_REAL_MINIO_PARITY：public+private 均可达 → storage_connectivity=pass；private 指向缺失 fixture → fail",
+    async () => {
+      const { cwd, cleanup } = tmpCwd();
+      try {
+        const s3Env = {
+          S3_ENDPOINT: process.env.INTEGRATION_S3_ENDPOINT,
+          S3_REGION: "us-east-1",
+          S3_ACCESS_KEY_ID: process.env.INTEGRATION_S3_ACCESS_KEY_ID ?? "minioadmin",
+          S3_SECRET_ACCESS_KEY: process.env.INTEGRATION_S3_SECRET_ACCESS_KEY ?? "minioadmin",
+          S3_BUCKET_PUBLIC: process.env.INTEGRATION_S3_BUCKET_PUBLIC ?? "campus-public",
+          S3_BUCKET_PRIVATE: process.env.INTEGRATION_S3_BUCKET_PRIVATE ?? "campus-private",
+          S3_FORCE_PATH_STYLE: "true",
+        };
+        const { stdout } = await execFileAsync(
+          process.execPath,
+          [
+            path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+            script,
+            "--mode",
+            "development",
+          ],
+          {
+            cwd,
+            timeout: 120_000,
+            env: { ...process.env, DATABASE_URL: "", REDIS_URL: "", BACKUP_DIR: "", RELEASE_SHA: "", ...s3Env },
+            maxBuffer: 10 * 1024 * 1024,
+          },
+        );
+        const passLine = JSON.parse(
+          stdout.trim().split("\n").find((l) => l.includes('"name":"storage_connectivity"'))!,
+        );
+        expect(passLine.status).toBe("pass");
+
+        // private bucket 缺失（隔离 fixture 名，绝不创建/删除共享 bucket）→ fail
+        const failure = await execFileAsync(
+          process.execPath,
+          [
+            path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+            script,
+            "--mode",
+            "development",
+          ],
+          {
+            cwd,
+            timeout: 120_000,
+            env: {
+              ...process.env,
+              DATABASE_URL: "",
+              REDIS_URL: "",
+              BACKUP_DIR: "",
+              RELEASE_SHA: "",
+              ...s3Env,
+              S3_BUCKET_PRIVATE: `campus-private-fixture-missing-${Date.now()}`,
+            },
+            maxBuffer: 10 * 1024 * 1024,
+          },
+        ).catch((error: { stdout?: string; code?: number }) => error);
+
+        const failStdout = (failure as { stdout?: string }).stdout ?? "";
+        expect((failure as { code?: number }).code).not.toBe(0);
+        const failLine = JSON.parse(
+          failStdout.trim().split("\n").find((l) => l.includes('"name":"storage_connectivity"'))!,
+        );
+        expect(failLine.status).toBe("fail");
+        // 绝不泄露 bucket 名称
+        expect(failLine.detail).not.toContain("campus-private-fixture-missing");
+      } finally {
+        cleanup();
+      }
+    },
+    150_000,
+  );
 });
