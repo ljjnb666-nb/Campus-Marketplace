@@ -21,6 +21,8 @@ const {
   txUserUpdate,
   txExecuteRaw,
   txUserFindMany,
+  errandRowHolder,
+  activeOrderRowsHolder,
 } = vi.hoisted(() => {
   const txExecuteRaw = vi.fn();
   const txUserFindMany = vi.fn();
@@ -33,6 +35,23 @@ const {
   const txUserUpdate = vi.fn();
   const txErrandTaskCreate = vi.fn();
   const errandTaskFindFirst = vi.fn();
+
+  // AUDIT2-RB02：状态/编辑/删除走 canonical lifecycle 的 $queryRaw 行权威——
+  // ErrandTask candidate discovery + FOR UPDATE 与 active Order FOR UPDATE
+  // 按表分发；行内容由测试用例通过 holder 配置
+  const errandRowHolder = {
+    row: {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "OPEN",
+      reward: "10",
+      publisherId: "publisher-1",
+      accepterId: null,
+      deletedAt: null,
+    } as Record<string, unknown> | null,
+  };
+  const activeOrderRowsHolder = { rows: [] as Record<string, unknown>[] };
+
   const transactionClient = {
     errandTask: {
       create: txErrandTaskCreate,
@@ -57,18 +76,22 @@ const {
       update: txUserUpdate,
       findMany: txUserFindMany,
     },
-    // Phase 7C：ErrandTask 行锁（FOR UPDATE）+ 活跃 moderation 复查
-    $queryRaw: vi.fn(async () => [
-      {
-        id: "errand-1",
-        campusId: "campus-1",
-        status: "OPEN",
-        reward: "10",
-        publisherId: "publisher-1",
-        accepterId: null,
-        deletedAt: null,
-      },
-    ]),
+    // Phase 7C：ErrandTask 行锁（FOR UPDATE）+ 活跃 moderation 复查；
+    // AUDIT2-RB02：canonical lifecycle 行权威按表分发
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join(" ") : String(strings);
+      if (sql.includes('FROM "ErrandTask"')) {
+        const row = errandRowHolder.row;
+        if (sql.includes("FOR UPDATE")) {
+          return row ? [row] : [];
+        }
+        return row && row.deletedAt == null ? [row] : [];
+      }
+      if (sql.includes('FROM "Order"')) {
+        return activeOrderRowsHolder.rows;
+      }
+      return [];
+    }),
     listingModeration: {
       findFirst: vi.fn(async () => null),
     },
@@ -100,11 +123,15 @@ const {
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
+    errandRowHolder,
+    activeOrderRowsHolder,
   };
 });
 
 vi.mock("@/lib/governance/active-account-mutation", () => ({
   prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+  // AUDIT2-RB02：canonical lifecycle 使用 checks-only 变体（锁由路径自持）
+  assertActiveAccountMutationAllowed: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
@@ -215,6 +242,18 @@ describe("errand actions", () => {
     txErrandTaskUpdateMany.mockResolvedValue({ count: 1 });
     txOrderUpdateMany.mockResolvedValue({ count: 1 });
 
+    // canonical lifecycle 行权威默认行（claim 路径契约不变）
+    errandRowHolder.row = {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "OPEN",
+      reward: "10",
+      publisherId: "publisher-1",
+      accepterId: null,
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [];
+
     // participant governance guard 默认全绿（锁查询 + 全员 ACTIVE）
     txExecuteRaw.mockReset().mockResolvedValue(0);
     txUserFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
@@ -314,46 +353,49 @@ describe("errand actions", () => {
   });
 
   it("does not reopen an errand after it has entered progress", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "IN_PROGRESS",
       publisherId: "user-1",
       accepterId: "runner-1",
-      status: "IN_PROGRESS",
-    });
+      deletedAt: null,
+    };
 
     await updateErrandStatus(buildErrandStatusFormData("OPEN"));
 
     // RB-03 REVIEW FIX：拒绝权威在事务内 fresh 复核（事务总是进入）
     expect(transactionMock).toHaveBeenCalled();
-    expect(txErrandTaskUpdate).not.toHaveBeenCalled();
-    expect(txOrderUpdate).not.toHaveBeenCalled();
+    expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
+    expect(txOrderUpdateMany).not.toHaveBeenCalled();
     expect(createNotifications).not.toHaveBeenCalled();
   });
 
-  it("allows the publisher to reopen a newly claimed errand and cancel the latest order", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+  it("allows the publisher to reopen a newly claimed errand and cancel the accepted order", async () => {
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "CLAIMED",
       publisherId: "user-1",
       accepterId: "runner-1",
-      status: "CLAIMED",
-    });
-    txOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      buyerId: "user-1",
-      sellerId: "runner-1",
-    });
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [
+      { id: "order-1", status: "ACCEPTED", buyerId: "user-1", sellerId: "runner-1" },
+    ];
 
     await updateErrandStatus(buildErrandStatusFormData("OPEN"));
 
-    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-1" },
+    // AUDIT2-RB02：canonical pair 写入（Task 先行 + Order ACCEPTED → CANCELLED）
+    expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+      where: { id: "errand-1", status: "CLAIMED" },
       data: {
         status: "OPEN",
         accepterId: null,
       },
     });
-    expect(txOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", status: "ACCEPTED" },
       data: {
         status: "CANCELLED",
         cancelReason: "发布者撤销接单",
@@ -365,17 +407,22 @@ describe("errand actions", () => {
   });
 
   it("soft deletes an open errand for its publisher and redirects back to my errands", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
       status: "OPEN",
-    });
+      publisherId: "user-1",
+      accepterId: null,
+      deletedAt: null,
+    };
 
     const formData = new FormData();
     formData.set("errandId", "errand-1");
 
     await expect(deleteErrand(formData)).rejects.toThrow("REDIRECT:/my/errands");
 
-    expect(errandTaskUpdate).toHaveBeenCalledWith({
+    // AUDIT2-RB02：删除走事务级 domain helper（锁内 fresh 权威）
+    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
       where: { id: "errand-1" },
       data: {
         deletedAt: expect.any(Date),
@@ -387,18 +434,34 @@ describe("errand actions", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/my/errands");
   });
 
-  it("does not delete errands that are already in progress or owned by others", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+  it("does not delete errands that are in progress, completed, or owned by others", async () => {
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
       status: "IN_PROGRESS",
-    });
+      publisherId: "user-1",
+      accepterId: "runner-1",
+      deletedAt: null,
+    };
 
     const formData = new FormData();
     formData.set("errandId", "errand-1");
 
     await expect(deleteErrand(formData)).rejects.toThrow("REDIRECT:/my/errands");
 
-    expect(errandTaskUpdate).not.toHaveBeenCalled();
+    expect(txErrandTaskUpdate).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+
+    errandRowHolder.row = {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "OPEN",
+      publisherId: "someone-else",
+      accepterId: null,
+      deletedAt: null,
+    };
+    await expect(deleteErrand(formData)).rejects.toThrow("REDIRECT:/my/errands");
+    expect(txErrandTaskUpdate).not.toHaveBeenCalled();
   });
 
   it("creates an errand with campus scope and notifications", async () => {
@@ -505,61 +568,65 @@ describe("errand actions", () => {
   });
 
   it("lets the accepter start a claimed errand", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "CLAIMED",
       publisherId: "publisher-1",
       accepterId: "user-1",
-      status: "CLAIMED",
-    });
-    txOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      buyerId: "publisher-1",
-      sellerId: "user-1",
-    });
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [
+      { id: "order-1", status: "ACCEPTED", buyerId: "publisher-1", sellerId: "user-1" },
+    ];
 
     await updateErrandStatus(buildErrandStatusFormData("IN_PROGRESS"));
 
-    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-1" },
+    expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+      where: { id: "errand-1", status: "CLAIMED" },
       data: { status: "IN_PROGRESS" },
     });
-    expect(txOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", status: "ACCEPTED" },
       data: { status: "IN_PROGRESS" },
     });
   });
 
   it("lets the accepter submit the errand for confirmation", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "IN_PROGRESS",
       publisherId: "publisher-1",
       accepterId: "user-1",
-      status: "IN_PROGRESS",
-    });
-    txOrderFindFirst.mockResolvedValue(null);
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [
+      { id: "order-1", status: "IN_PROGRESS", buyerId: "publisher-1", sellerId: "user-1" },
+    ];
 
     await updateErrandStatus(buildErrandStatusFormData("PENDING_CONFIRMATION"));
 
-    expect(txErrandTaskUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-1" },
+    expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+      where: { id: "errand-1", status: "IN_PROGRESS" },
       data: { status: "PENDING_CONFIRMATION" },
     });
-    // 没有关联订单时仅更新任务并通知
-    expect(txOrderUpdate).not.toHaveBeenCalled();
+    // canonical pair：Order 保持 IN_PROGRESS 不变
+    expect(txOrderUpdateMany).not.toHaveBeenCalled();
   });
 
   it("completes the errand via the canonical exactly-once transaction", async () => {
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "PENDING_CONFIRMATION",
       publisherId: "user-1",
       accepterId: "runner-1",
-      status: "PENDING_CONFIRMATION",
-    });
-    txOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      buyerId: "user-1",
-      sellerId: "runner-1",
-    });
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [
+      { id: "order-1", status: "IN_PROGRESS", buyerId: "user-1", sellerId: "runner-1" },
+    ];
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
@@ -594,23 +661,23 @@ describe("errand actions", () => {
 
   it("rejects premature completion when ErrandTask is still IN_PROGRESS (forged request)", async () => {
     // 伪造请求场景：Order 已 IN_PROGRESS 但接单者尚未提交完成
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "IN_PROGRESS",
       publisherId: "user-1",
       accepterId: "runner-1",
-      status: "PENDING_CONFIRMATION",
-    });
-    txOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      buyerId: "user-1",
-      sellerId: "runner-1",
-    });
-    // canonical 闸门：ErrandTask 非_PENDING_CONFIRMATION → count=0
-    txErrandTaskUpdateMany.mockResolvedValue({ count: 0 });
+      deletedAt: null,
+    };
+    activeOrderRowsHolder.rows = [
+      { id: "order-1", status: "IN_PROGRESS", buyerId: "user-1", sellerId: "runner-1" },
+    ];
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
+    // canonical pair 谓词拒绝（Task IN_PROGRESS ≠ COMPLETED 前置）：
     // Order / 计数 / 通知全部不得变更
+    expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
     expect(txOrderUpdateMany).not.toHaveBeenCalled();
     expect(txUserUpdate).not.toHaveBeenCalled();
     expect(createNotifications).not.toHaveBeenCalled();
@@ -618,12 +685,14 @@ describe("errand actions", () => {
 
   it("is idempotent: re-submitting COMPLETED produces no duplicate side effects", async () => {
     // 已完成的任务再次提交完成：动作前置校验直接拒绝（no-op）
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "COMPLETED",
       publisherId: "user-1",
       accepterId: "runner-1",
-      status: "COMPLETED",
-    });
+      deletedAt: null,
+    };
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
@@ -635,12 +704,14 @@ describe("errand actions", () => {
 
   it("ignores status changes that violate the state machine", async () => {
     // 接单者不能直接完成任务
-    errandTaskFindFirst.mockResolvedValue({
+    errandRowHolder.row = {
       id: "errand-1",
+      campusId: "campus-1",
+      status: "IN_PROGRESS",
       publisherId: "publisher-1",
       accepterId: "user-1",
-      status: "IN_PROGRESS",
-    });
+      deletedAt: null,
+    };
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
 
@@ -700,6 +771,14 @@ describe("errand actions", () => {
 
   it("updates an open errand for its publisher", async () => {
     errandTaskFindFirst.mockResolvedValue({ id: "errand-1", status: "OPEN" });
+    errandRowHolder.row = {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "OPEN",
+      publisherId: "user-1",
+      accepterId: null,
+      deletedAt: null,
+    };
     errandCategoryFindUnique.mockResolvedValue({
       id: "errand-category-1",
       isActive: true,
@@ -716,11 +795,39 @@ describe("errand actions", () => {
       message: "任务已更新",
       redirectTo: "/errands/errand-1",
     });
-    // Phase 6C-3：编辑已最小事务化，update 走事务客户端
+    // AUDIT2-RB02：编辑写权威 = updateErrandContentTx（锁内 fresh OPEN 谓词）
     expect(txErrandTaskUpdate).toHaveBeenCalledWith({
       where: { id: "errand-1" },
       data: expect.objectContaining({ title: "帮我取顺丰快递" }),
     });
+  });
+
+  it("rejects edits when the task was claimed after the stale OPEN snapshot", async () => {
+    // 事务外 pre-read 看到 OPEN；锁内 fresh 已是 CLAIMED → 稳定业务错误，零写
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", status: "OPEN" });
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+    errandRowHolder.row = {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "CLAIMED",
+      publisherId: "user-1",
+      accepterId: "runner-1",
+      deletedAt: null,
+    };
+
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-1");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({
+      success: false,
+      message: "只有待接单任务允许编辑",
+    });
+    expect(txErrandTaskUpdate).not.toHaveBeenCalled();
   });
 
   it("rejects updates without an errand id", async () => {
