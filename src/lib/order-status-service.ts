@@ -1,10 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
-import {
-  prepareActiveAccountMutation,
-  type ActiveAccountMutationSeams,
-} from "@/lib/governance/active-account-mutation";
-import { completeErrandOrderTx } from "@/lib/errand-completion";
+import { transitionErrandOrderTx, type ErrandLifecycleSeams } from "@/lib/errand-lifecycle";
+import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { cancelProductOrderTx } from "@/lib/product-order-lifecycle";
 import { createNotifications } from "@/repositories/notification-repository";
 
@@ -13,8 +10,7 @@ import { createNotifications } from "@/repositories/notification-repository";
  *
  * USER_STATUS_MUTATION_CONTRACT：事务外 Order read 只是 discovery / early
  * UI optimization；最终 owner/participant/status/transition authority 全部
- * 以 USER:<actorId> 治理锁内 fresh row 为准。既有 transition matrix 与
- * 角色关系保持不变；ERRAND COMPLETED 继续委派唯一 completeErrandOrderTx。
+ * 以治理锁内 fresh row 为准。既有 transition matrix 与角色关系保持不变。
  *
  * 不加 marketplace capability：Order progression 属既有义务
  * wind-down/completion——ACTIVE but risk-restricted 用户仍可处理既有义务
@@ -24,6 +20,12 @@ import { createNotifications } from "@/repositories/notification-repository";
  * （旧实现曾无条件 Product → ACTIVE，使订单取消错误拥有 listing 重曝光
  * 权威），改为委派唯一权威实现 cancelProductOrderTx（sorted participant
  * 锁 → Order 行锁 → Product 行锁 → 条件投影）。
+ *
+ * AUDIT2-RB02：ERRAND + IN_PROGRESS / COMPLETED 不再走 general Order-only
+ * transition（两个入口各自可写同一业务状态 = cross-entity 竞态），改为在
+ * 入口处发现 candidate 后委派唯一 canonical errand lifecycle authority
+ * （participant locks → ErrandTask 行锁 → Order 行锁 → pair 谓词 → 写入）。
+ * general canTransition 从此不拥有任何 ERRAND 业务 transition。
  *
  * seams 仅测试注入。
  */
@@ -70,8 +72,48 @@ export async function updateOrderStatusTx(
   actorUserId: string,
   orderId: string,
   input: UpdateOrderStatusInput,
-  seams?: ActiveAccountMutationSeams,
+  seams?: ErrandLifecycleSeams,
 ): Promise<UpdateOrderStatusResult | null> {
+  // AUDIT2-RB02：ERRAND IN_PROGRESS / COMPLETED 入口处委派 canonical errand
+  // lifecycle authority。candidate pre-read 只用于分流与锁键发现（type /
+  // errandTaskId / buyerId / sellerId），不是 status / participant 权威——
+  // 锁后由 transitionErrandOrderTx 重读复核。必须在任何 USER 锁之前委派，
+  // 避免先取 actor 锁再追加参与者锁破坏全局 sorted lock discipline。
+  if (input.requestedStatus === "IN_PROGRESS" || input.requestedStatus === "COMPLETED") {
+    const candidate = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { type: true, errandTaskId: true, buyerId: true, sellerId: true },
+    });
+
+    if (candidate?.type === "ERRAND" && candidate.errandTaskId) {
+      const outcome = await transitionErrandOrderTx(
+        tx,
+        actorUserId,
+        orderId,
+        {
+          errandTaskId: candidate.errandTaskId,
+          buyerId: candidate.buyerId,
+          sellerId: candidate.sellerId,
+        },
+        input.requestedStatus,
+        seams,
+      );
+
+      if (!outcome) {
+        return null;
+      }
+
+      // RESULT COMPATIBILITY（action/UI 契约不变）
+      return {
+        productId: null,
+        serviceListingId: null,
+        errandTaskId: candidate.errandTaskId,
+        isBuyer: outcome.isBuyer,
+      };
+    }
+    // 非 ERRAND（或缺失 errandTaskId 的异常行）→ 既有 general 路径（fail closed）
+  }
+
   // AUDIT2-RB01：PRODUCT CANCELLED 委派 canonical 参与方锁路径。candidate
   // pre-read 只用于锁键发现（buyerId/sellerId/productId/type 分流），
   // 不是 participant/status 权威——锁后由 cancelProductOrderTx 重读复核。
@@ -137,16 +179,17 @@ export async function updateOrderStatusTx(
       isSeller &&
       order.status === "PENDING" &&
       (order.type === "PRODUCT" || order.type === "SERVICE")) ||
+    // AUDIT2-RB02：ERRAND IN_PROGRESS / COMPLETED 已在入口委派 canonical
+    // errand lifecycle；general 路径不再拥有任何 ERRAND 业务 transition
     (requestedStatus === "IN_PROGRESS" &&
       isSeller &&
       order.status === "ACCEPTED" &&
-      (order.type === "SERVICE" || order.type === "ERRAND")) ||
+      order.type === "SERVICE") ||
     (requestedStatus === "COMPLETED" &&
       ((order.type === "PRODUCT" && isBuyer && order.status === "ACCEPTED") ||
         (order.type === "SERVICE" &&
           ((isBuyer && order.status === "IN_PROGRESS") ||
-            (isSeller && order.status === "IN_PROGRESS"))) ||
-        (order.type === "ERRAND" && isBuyer && order.status === "IN_PROGRESS"))) ||
+            (isSeller && order.status === "IN_PROGRESS"))))) ||
     // AUDIT2-RB01：PRODUCT CANCELLED 的唯一权威是入口处委派的
     // cancelProductOrderTx（type 不可变，正常不可达；防御性 fail closed）
     (requestedStatus === "CANCELLED" &&
@@ -156,27 +199,6 @@ export async function updateOrderStatusTx(
 
   if (!canTransition) {
     return null;
-  }
-
-  // ERRAND 最终完成走唯一权威实现（completeErrandOrderTx）
-  if (order.type === "ERRAND" && order.errandTaskId && requestedStatus === "COMPLETED") {
-    const completion = await completeErrandOrderTx(tx, {
-      orderId: order.id,
-      errandTaskId: order.errandTaskId,
-      buyerId: order.buyerId,
-      sellerId: order.sellerId,
-    });
-
-    if (!completion.completed) {
-      return null;
-    }
-
-    return {
-      productId: null,
-      serviceListingId: null,
-      errandTaskId: order.errandTaskId,
-      isBuyer,
-    };
   }
 
   // 条件更新充当乐观锁：仅当状态仍是 fresh 读取时的状态才允许流转

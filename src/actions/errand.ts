@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
-import { updateErrandStatusTx } from "@/lib/errand-status-service";
+import { deleteErrandTx, transitionErrandTx, updateErrandContentTx } from "@/lib/errand-lifecycle";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
@@ -179,6 +179,8 @@ export async function updateErrand(
       select: { id: true, status: true, campusId: true },
     });
 
+    // 事务外 pre-read 只能 discovery（提前 UX 反馈）；最终写权威在
+    // updateErrandContentTx 的锁内 fresh 复核（AUDIT2-RB02 §32/§34）
     if (!errand) {
       return { ...initialState, message: "无权修改该任务" };
     }
@@ -207,40 +209,34 @@ export async function updateErrand(
       };
     }
 
-    // Phase 6C-3：编辑自己任务内容 = MODIFY_PUBLIC_LISTING_CONTENT 能力；
-    // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
-    // ErrandTask 权威行，客户端不可伪造）
-    await withTransaction(async (tx) => {
-      // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
-      // 修改公开跑腿任务内容）
-      await prepareActiveAccountMutation(tx, user.id);
+    // AUDIT2-RB02：编辑写权威 = USER:publisher 锁 → ErrandTask FOR UPDATE →
+    // fresh OPEN 谓词（publisher/deletedAt/status/accepterId）→ capability →
+    // 内容写入。事务外 OPEN snapshot 不再能授权写入。
+    const outcome = await withTransaction(async (tx) =>
+      updateErrandContentTx(tx, user.id, errandId, {
+        title: parsed.data.title,
+        description: parsed.data.description,
+        categoryId: parsed.data.categoryId,
+        reward: decimalValue(parsed.data.reward),
+        pickupLocation: parsed.data.pickupLocation,
+        deliveryLocation: parsed.data.deliveryLocation,
+        deadline,
+        contactNote: parsed.data.contactNote || null,
+        needsAdvancePay: parsed.data.needsAdvancePay === "true",
+        advanceAmount:
+          parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
+            ? decimalValue(parsed.data.advanceAmount)
+            : null,
+      }),
+    );
 
-      await enforceMarketplaceCapability(
-        tx,
-        user.id,
-        errand.campusId,
-        "MODIFY_PUBLIC_LISTING_CONTENT",
-      );
+    if (outcome === "MISSING") {
+      return { ...initialState, message: "无权修改该任务" };
+    }
 
-      await tx.errandTask.update({
-        where: { id: errandId },
-        data: {
-          title: parsed.data.title,
-          description: parsed.data.description,
-          categoryId: parsed.data.categoryId,
-          reward: decimalValue(parsed.data.reward),
-          pickupLocation: parsed.data.pickupLocation,
-          deliveryLocation: parsed.data.deliveryLocation,
-          deadline,
-          contactNote: parsed.data.contactNote || null,
-          needsAdvancePay: parsed.data.needsAdvancePay === "true",
-          advanceAmount:
-            parsed.data.advanceAmount && parsed.data.advanceAmount !== ""
-              ? decimalValue(parsed.data.advanceAmount)
-              : null,
-        },
-      });
-    });
+    if (outcome === "NOT_OPEN") {
+      return { ...initialState, message: "只有待接单任务允许编辑" };
+    }
 
     revalidateErrandViews(errandId);
 
@@ -323,7 +319,7 @@ export async function updateErrandStatus(formData: FormData) {
     }
 
     await withTransaction(async (tx) => {
-      await updateErrandStatusTx(tx, user.id, parsed.data.errandId, parsed.data.status);
+      await transitionErrandTx(tx, user.id, parsed.data.errandId, parsed.data.status);
     });
 
     revalidateErrandViews(parsed.data.errandId);
@@ -340,33 +336,18 @@ export async function deleteErrand(formData: FormData) {
     redirect("/my/errands");
   }
 
-  const errand = await prisma.errandTask.findFirst({
-    where: {
-      id: errandId,
-      publisherId: user.id,
-      deletedAt: null,
-    },
-    select: {
-      id: true,
-      status: true,
-    },
-  });
-
-  if (!errand || (errand.status !== "OPEN" && errand.status !== "CANCELLED")) {
-    redirect("/my/errands");
-  }
-
+  // AUDIT2-RB02：删除写权威 = USER 锁 → ErrandTask FOR UPDATE → fresh
+  // ownership/deletedAt/status → active-order invariant → 软删除。事务外
+  // pre-read 与裸 update 的旧竞态窗口关闭；MISSING / NOT_DELETABLE /
+  // ANOMALOUS_ACTIVE_ORDER 与既有"静默回列表"安全语义同形。
   try {
-    await prisma.errandTask.update({
-      where: { id: errandId },
-      data: {
-        deletedAt: new Date(),
-        status: "CANCELLED",
-        accepterId: null,
-      },
-    });
+    const outcome = await withTransaction(async (tx) =>
+      deleteErrandTx(tx, user.id, errandId),
+    );
 
-    revalidateErrandViews(errandId);
+    if (outcome === "DELETED") {
+      revalidateErrandViews(errandId);
+    }
   } catch (error) {
     actionErrorMessage(error, "deleteErrand");
   }
