@@ -41,7 +41,9 @@ const {
   productImageCreateMany: vi.fn(),
   favoriteDeleteMany: vi.fn(),
   favoriteCreate: vi.fn(),
-  transactionMock: vi.fn(async (callback: (tx: { product: { findFirst: typeof productFindFirst; update: typeof txProductUpdate } }) => Promise<unknown>) =>
+  // AUDIT2-RB01：tx mock 形状放宽为 unknown（updateProductStatus 需要
+  // $queryRaw 行锁 / order.findFirst，其余用例只需 product 子集）
+  transactionMock: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
     callback({ product: { findFirst: productFindFirst, update: txProductUpdate } }),
   ),
 }));
@@ -516,11 +518,17 @@ describe("product actions", () => {
       return formData;
     }
 
-    it("updates the status of an owned product via in-tx fresh authority（RB-03）", async () => {
-      transactionMock.mockImplementation(async (callback: (tx: { product: { findFirst: typeof productFindFirst; update: typeof txProductUpdate } }) => Promise<unknown>) =>
-        callback({ product: { findFirst: productFindFirst, update: txProductUpdate } }),
+    it("updates the status of an owned product via in-tx fresh authority（RB-03 + AUDIT2-RB01 行锁权威）", async () => {
+      transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          product: { findFirst: productFindFirst, update: txProductUpdate },
+          order: { findFirst: vi.fn().mockResolvedValue(null) },
+          // AUDIT2-RB01：fresh 读 = Product 行级 FOR UPDATE（锁内权威）
+          $queryRaw: vi.fn(async () => [
+            { id: "product-1", campusId: "campus-1", sellerId: "user-1", status: "ACTIVE", deletedAt: null },
+          ]),
+        }),
       );
-      productFindFirst.mockResolvedValue({ id: "product-1", campusId: "campus-1", status: "ACTIVE" });
       txProductUpdate.mockResolvedValue({ id: "product-1" });
 
       await updateProductStatus(statusFormData("OFFLINE"));
@@ -530,6 +538,22 @@ describe("product actions", () => {
         data: { status: "OFFLINE" },
       });
       expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
+    });
+
+    it("AUDIT2-RB01：RESERVED + active PRODUCT order → ACTIVE 安全 NO-OP（action 零写）", async () => {
+      transactionMock.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          product: { findFirst: productFindFirst, update: txProductUpdate },
+          order: { findFirst: vi.fn().mockResolvedValue({ id: "order-1" }) },
+          $queryRaw: vi.fn(async () => [
+            { id: "product-1", campusId: "campus-1", sellerId: "user-1", status: "RESERVED", deletedAt: null },
+          ]),
+        }),
+      );
+
+      await updateProductStatus(statusFormData("ACTIVE"));
+
+      expect(txProductUpdate).not.toHaveBeenCalled();
     });
 
     it("RB-03：SUSPENDED actor → AUTH_ACCOUNT_INACTIVE，零 status 写", async () => {

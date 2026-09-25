@@ -192,6 +192,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await rawClient!.rolePermission.deleteMany({ where: { roleId: { in: createdRoleIds } } });
     await rawClient!.role.deleteMany({ where: { id: { in: createdRoleIds } } });
     await rawClient!.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    // FK 兜底：acceptance 行可能由 fixture 清单外的 userId 持有（CI fresh
+    // 环境时序暴露的 teardown 缺口），按 documentId 先行清理再删文档
+    await rawClient!.policyAcceptance.deleteMany({
+      where: { documentId: { in: createdDocumentIds } },
+    });
     await rawClient!.legalDocument.deleteMany({ where: { id: { in: createdDocumentIds } } });
     await rawClient!.$disconnect();
     await prisma?.$disconnect();

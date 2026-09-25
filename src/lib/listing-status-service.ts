@@ -5,6 +5,7 @@ import {
   type ActiveAccountMutationSeams,
 } from "@/lib/governance/active-account-mutation";
 import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import { ACTIVE_PRODUCT_ORDER_STATUSES } from "@/lib/product-order-lifecycle";
 
 /**
  * RB-03 REVIEW FIX（LISTING_STATUS_LIFECYCLE_SERIALIZATION）：
@@ -29,6 +30,11 @@ import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate"
  * 时 NO-OP——该判断必须在锁内以 fresh row 重新执行，不信任事务外
  * snapshot。
  *
+ * AUDIT2-RB01：Product fresh 读升级为行级 FOR UPDATE；ACTIVE 目标额外
+ * 要求"无 active PRODUCT order"（PENDING/ACCEPTED 占用 reservation 时
+ * 手动重新曝光 → 安全 NO-OP），与订单取消侧的投影权威共用同一
+ * ACTIVE_PRODUCT_ORDER_STATUSES 定义。
+ *
  * seams 仅测试注入（beforeLock：discovery 后、锁前；afterCheck：复核
  * 通过后、写前）。生产调用不传。
  */
@@ -46,19 +52,41 @@ export async function updateProductStatusTx(
 ): Promise<boolean> {
   await prepareActiveAccountMutation(tx, actorUserId, seams);
 
-  const fresh = await tx.product.findFirst({
-    where: { id: productId, sellerId: actorUserId, deletedAt: null },
-    select: { id: true, campusId: true, status: true },
-  });
+  // AUDIT2-RB01：fresh 读升级为真实 Product 行锁（USER 锁 → Product 行锁，
+  // 与 cancellation / creation 的 domain 锁序一致，禁止反序）
+  const lockedRows = await tx.$queryRaw<Array<{
+    id: string; campusId: string; sellerId: string; status: string; deletedAt: Date | null;
+  }>>`
+    SELECT id, "campusId", "sellerId", status, "deletedAt"
+    FROM "Product"
+    WHERE id = ${productId}
+    FOR UPDATE
+  `;
+  const fresh = lockedRows[0];
 
   // fresh missing / 非本人 / 已删除 → 保持原 action 安全语义：NO-OP
-  if (!fresh) {
+  if (!fresh || fresh.sellerId !== actorUserId || fresh.deletedAt !== null) {
     return false;
   }
 
   if (targetStatus === "ACTIVE") {
     // EXPOSURE_INCREASING：重新上架属 START_NEW_MARKETPLACE_ACTIVITY
     await requireMarketplaceCapability(tx, actorUserId, fresh.campusId);
+
+    // AUDIT2-RB01：存在 active PRODUCT order 的 reservation 不得被手动
+    // 重新曝光 → 安全 NO-OP（不抛 500，保持 action 现有 no-op 语义）
+    const activeOrder = await tx.order.findFirst({
+      where: {
+        productId,
+        type: "PRODUCT",
+        status: { in: [...ACTIVE_PRODUCT_ORDER_STATUSES] },
+      },
+      select: { id: true },
+    });
+
+    if (activeOrder) {
+      return false;
+    }
   }
 
   await tx.product.update({
