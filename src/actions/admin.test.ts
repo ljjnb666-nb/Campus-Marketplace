@@ -28,6 +28,11 @@ const {
   applyReportReviewTx,
   reviewReportInGovernance,
   reportQueryRaw,
+  upsertCategoryInGovernance,
+  toggleCategoryStatusInGovernance,
+  upsertModerationKeywordInGovernance,
+  toggleModerationKeywordStatusInGovernance,
+  resetModerationKeywordCache,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
   requireAdmin: vi.fn(),
@@ -56,6 +61,11 @@ const {
   applyReportReviewTx: vi.fn(),
   reviewReportInGovernance: vi.fn(),
   reportQueryRaw: vi.fn(),
+  upsertCategoryInGovernance: vi.fn(),
+  toggleCategoryStatusInGovernance: vi.fn(),
+  upsertModerationKeywordInGovernance: vi.fn(),
+  toggleModerationKeywordStatusInGovernance: vi.fn(),
+  resetModerationKeywordCache: vi.fn(),
 }));
 
 vi.mock("next/cache", () => ({
@@ -80,6 +90,20 @@ vi.mock("@/lib/enforcement/report-projection", () => ({
 // lock，stub 事务无法承载，域行为由 report-review-service/集成测试覆盖）。
 vi.mock("@/lib/reports/report-review-service", () => ({
   reviewReportInGovernance,
+}));
+
+// RB-05：Category/Keyword 的 mutation authority 归 canonical governance
+// service——本文件只测 action adapter 合同（会话/参数透传/缓存时序/错误面），
+// 域行为由 admin-configuration-service 单测与集成竞态覆盖。
+vi.mock("@/lib/governance/admin-configuration-service", () => ({
+  upsertCategoryInGovernance,
+  toggleCategoryStatusInGovernance,
+  upsertModerationKeywordInGovernance,
+  toggleModerationKeywordStatusInGovernance,
+}));
+
+vi.mock("@/lib/moderation", () => ({
+  resetModerationKeywordCache,
 }));
 
 vi.mock("@/lib/server-auth", () => ({
@@ -191,6 +215,11 @@ describe("admin actions", () => {
       reopened: false,
       dueAt: new Date("2026-09-18T00:00:00.000Z"),
     });
+    upsertCategoryInGovernance.mockReset().mockResolvedValue({ categoryId: "category-new", created: true });
+    toggleCategoryStatusInGovernance.mockReset().mockResolvedValue({ categoryId: "category-1", isActive: false });
+    upsertModerationKeywordInGovernance.mockReset().mockResolvedValue({ keywordId: "keyword-new", created: true });
+    toggleModerationKeywordStatusInGovernance.mockReset().mockResolvedValue({ keywordId: "keyword-1", isEnabled: true });
+    resetModerationKeywordCache.mockReset();
     transactionMock.mockReset();
     transactionMock.mockImplementation(async (callback) =>
       callback({
@@ -249,7 +278,7 @@ describe("admin actions", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  it("creates an errand category and writes an admin log", async () => {
+  it("delegates errand category creation to the canonical governance service（RB-05 薄 adapter）", async () => {
     const formData = new FormData();
     formData.set("name", "代取快递");
     formData.set("slug", "pickup");
@@ -259,29 +288,22 @@ describe("admin actions", () => {
 
     await upsertErrandCategory(formData);
 
-    expect(errandCategoryCreate).toHaveBeenCalledWith({
-      data: {
-        name: "代取快递",
-        slug: "pickup",
-        description: "快递代取类任务",
-        sortOrder: 2,
-        isActive: true,
-      },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "CREATE_ERRAND_CATEGORY",
-        targetType: "ERRAND_CATEGORY",
-        targetId: "pickup",
-        detail: "代取快递",
-      },
+    // actorId 只能来自 requireAdmin 的 session/DB 校验，FormData 不参与身份
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "ERRAND",
+      categoryId: undefined,
+      name: "代取快递",
+      slug: "pickup",
+      description: "快递代取类任务",
+      sortOrder: 2,
+      isActive: true,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/admin/categories");
     expect(revalidatePath).toHaveBeenCalledWith("/errands");
   });
 
-  it("updates an existing errand category and records the update action", async () => {
+  it("delegates errand category updates with the categoryId passthrough", async () => {
     const formData = new FormData();
     formData.set("categoryId", "errand-category-1");
     formData.set("name", "代取快递");
@@ -292,29 +314,19 @@ describe("admin actions", () => {
 
     await upsertErrandCategory(formData);
 
-    expect(errandCategoryUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-category-1" },
-      data: {
-        name: "代取快递",
-        slug: "pickup",
-        description: null,
-        sortOrder: 2,
-        isActive: true,
-      },
-    });
-    expect(errandCategoryCreate).not.toHaveBeenCalled();
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "UPDATE_ERRAND_CATEGORY",
-        targetType: "ERRAND_CATEGORY",
-        targetId: "errand-category-1",
-        detail: "代取快递",
-      },
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "ERRAND",
+      categoryId: "errand-category-1",
+      name: "代取快递",
+      slug: "pickup",
+      description: null,
+      sortOrder: 2,
+      isActive: true,
     });
   });
 
-  it("creates a product category through the shared upsert helper", async () => {
+  it("delegates product category creation through the shared adapter", async () => {
     const formData = new FormData();
     formData.set("name", "教材资料");
     formData.set("slug", "books");
@@ -324,23 +336,15 @@ describe("admin actions", () => {
 
     await upsertProductCategory(formData);
 
-    expect(productCategoryCreate).toHaveBeenCalledWith({
-      data: {
-        name: "教材资料",
-        slug: "books",
-        description: "教材与笔记",
-        sortOrder: 1,
-        isActive: true,
-      },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "CREATE_PRODUCT_CATEGORY",
-        targetType: "PRODUCT_CATEGORY",
-        targetId: "books",
-        detail: "教材资料",
-      },
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "PRODUCT",
+      categoryId: undefined,
+      name: "教材资料",
+      slug: "books",
+      description: "教材与笔记",
+      sortOrder: 1,
+      isActive: true,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/admin/categories");
     expect(revalidatePath).toHaveBeenCalledWith("/products");
@@ -356,34 +360,26 @@ describe("admin actions", () => {
     const result = await upsertErrandCategory(formData);
 
     expect(result).toEqual({ success: false, error: "参数无效" });
-    expect(errandCategoryCreate).not.toHaveBeenCalled();
-    expect(errandCategoryUpdate).not.toHaveBeenCalled();
-    expect(adminLogCreate).not.toHaveBeenCalled();
+    expect(upsertCategoryInGovernance).not.toHaveBeenCalled();
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
-  it("toggles errand category status and records the correct action", async () => {
+  it("delegates errand category status toggles to the canonical service", async () => {
     const formData = new FormData();
     formData.set("categoryId", "errand-category-2");
     formData.set("isActive", "false");
 
     await toggleErrandCategoryStatus(formData);
 
-    expect(errandCategoryUpdate).toHaveBeenCalledWith({
-      where: { id: "errand-category-2" },
-      data: { isActive: false },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "DISABLE_ERRAND_CATEGORY",
-        targetType: "ERRAND_CATEGORY",
-        targetId: "errand-category-2",
-      },
+    expect(toggleCategoryStatusInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "ERRAND",
+      categoryId: "errand-category-2",
+      isActive: false,
     });
   });
 
-  it("creates a service category and revalidates the service plaza", async () => {
+  it("delegates service category creation and revalidates the service plaza", async () => {
     const formData = new FormData();
     formData.set("name", "编程辅导");
     formData.set("slug", "coding");
@@ -393,45 +389,31 @@ describe("admin actions", () => {
 
     await upsertServiceCategory(formData);
 
-    expect(serviceCategoryCreate).toHaveBeenCalledWith({
-      data: {
-        name: "编程辅导",
-        slug: "coding",
-        description: "代码答疑与项目辅导",
-        sortOrder: 3,
-        isActive: true,
-      },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "CREATE_SERVICE_CATEGORY",
-        targetType: "SERVICE_CATEGORY",
-        targetId: "coding",
-        detail: "编程辅导",
-      },
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "SERVICE",
+      categoryId: undefined,
+      name: "编程辅导",
+      slug: "coding",
+      description: "代码答疑与项目辅导",
+      sortOrder: 3,
+      isActive: true,
     });
     expect(revalidatePath).toHaveBeenCalledWith("/services");
   });
 
-  it("toggles service category status and records the correct action", async () => {
+  it("delegates service category status toggles to the canonical service", async () => {
     const formData = new FormData();
     formData.set("categoryId", "service-category-2");
     formData.set("isActive", "false");
 
     await toggleServiceCategoryStatus(formData);
 
-    expect(serviceCategoryUpdate).toHaveBeenCalledWith({
-      where: { id: "service-category-2" },
-      data: { isActive: false },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "DISABLE_SERVICE_CATEGORY",
-        targetType: "SERVICE_CATEGORY",
-        targetId: "service-category-2",
-      },
+    expect(toggleCategoryStatusInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "SERVICE",
+      categoryId: "service-category-2",
+      isActive: false,
     });
   });
 
@@ -443,11 +425,10 @@ describe("admin actions", () => {
     const result = await toggleServiceCategoryStatus(formData);
 
     expect(result).toEqual({ success: false, error: "参数无效" });
-    expect(serviceCategoryUpdate).not.toHaveBeenCalled();
-    expect(adminLogCreate).not.toHaveBeenCalled();
+    expect(toggleCategoryStatusInGovernance).not.toHaveBeenCalled();
   });
 
-  it("creates a moderation keyword with the admin as creator", async () => {
+  it("delegates moderation keyword creation with the session admin as creator", async () => {
     const formData = new FormData();
     formData.set("keyword", "代考");
     formData.set("targetType", "GLOBAL");
@@ -455,23 +436,15 @@ describe("admin actions", () => {
 
     await upsertModerationKeyword(formData);
 
-    expect(moderationKeywordCreate).toHaveBeenCalledWith({
-      data: {
-        keyword: "代考",
-        targetType: "GLOBAL",
-        isEnabled: true,
-        createdById: "admin-1",
-      },
+    expect(upsertModerationKeywordInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      keywordId: undefined,
+      keyword: "代考",
+      targetType: "GLOBAL",
+      isEnabled: true,
     });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "CREATE_MODERATION_KEYWORD",
-        targetType: "MODERATION_KEYWORD",
-        targetId: "代考",
-        detail: "GLOBAL",
-      },
-    });
+    // 缓存失效只在 service COMMIT 成功后发生（RB-05 §24 时序）
+    expect(resetModerationKeywordCache).toHaveBeenCalledTimes(1);
     expect(revalidatePath).toHaveBeenCalledWith("/admin/keywords");
   });
 
@@ -484,29 +457,42 @@ describe("admin actions", () => {
     const result = await upsertModerationKeyword(formData);
 
     expect(result).toEqual({ success: false, error: "参数无效" });
-    expect(moderationKeywordCreate).not.toHaveBeenCalled();
-    expect(adminLogCreate).not.toHaveBeenCalled();
+    expect(upsertModerationKeywordInGovernance).not.toHaveBeenCalled();
+    expect(resetModerationKeywordCache).not.toHaveBeenCalled();
   });
 
-  it("toggles a moderation keyword and records the enable action", async () => {
+  it("delegates moderation keyword status toggles and resets cache only after success", async () => {
     const formData = new FormData();
     formData.set("keywordId", "keyword-1");
     formData.set("isEnabled", "true");
 
     await toggleModerationKeywordStatus(formData);
 
-    expect(moderationKeywordUpdate).toHaveBeenCalledWith({
-      where: { id: "keyword-1" },
-      data: { isEnabled: true },
+    expect(toggleModerationKeywordStatusInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      keywordId: "keyword-1",
+      isEnabled: true,
     });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: {
-        adminId: "admin-1",
-        action: "ENABLE_MODERATION_KEYWORD",
-        targetType: "MODERATION_KEYWORD",
-        targetId: "keyword-1",
-      },
-    });
+    expect(resetModerationKeywordCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reset the keyword cache when the canonical authority denies（RB-05）", async () => {
+    const { rbacError } = await import("@/lib/rbac/errors");
+    upsertModerationKeywordInGovernance.mockRejectedValue(
+      rbacError("AUTH_PERMISSION_DENIED"),
+    );
+
+    const formData = new FormData();
+    formData.set("keyword", "代考");
+    formData.set("targetType", "GLOBAL");
+    formData.set("isEnabled", "true");
+
+    const result = await upsertModerationKeyword(formData);
+
+    // authorization race-loss 映射为安全后台错误，不泄露 permission 结构
+    expect(result).toEqual({ success: false, error: "无权执行该操作" });
+    expect(resetModerationKeywordCache).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it("approves a verification via the central lifecycle service（Phase 6A）", async () => {
@@ -745,7 +731,7 @@ describe("admin actions", () => {
     expect(result).not.toEqual({ success: false, error: "不能对该账号执行此管理操作" });
   });
 
-  it("creates product and service categories with typed admin logs", async () => {
+  it("routes product and service category creation through the canonical service", async () => {
     const formData = new FormData();
     formData.set("name", "数码设备");
     formData.set("slug", "digital");
@@ -755,44 +741,35 @@ describe("admin actions", () => {
 
     await upsertProductCategory(formData);
 
-    expect(productCategoryCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ name: "数码设备", slug: "digital" }),
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        action: "CREATE_PRODUCT_CATEGORY",
-        targetType: "PRODUCT_CATEGORY",
-      }),
-    });
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith(
+      expect.objectContaining({ actorId: "admin-1", kind: "PRODUCT", slug: "digital" }),
+    );
 
     formData.set("name", "编程辅导");
     formData.set("slug", "coding");
     await upsertServiceCategory(formData);
 
-    expect(serviceCategoryCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ slug: "coding" }),
-    });
+    expect(upsertCategoryInGovernance).toHaveBeenCalledWith(
+      expect.objectContaining({ actorId: "admin-1", kind: "SERVICE", slug: "coding" }),
+    );
   });
 
-  it("toggles product category status and records the disable action", async () => {
+  it("delegates product category status toggles to the canonical service", async () => {
     const formData = new FormData();
     formData.set("categoryId", "category-1");
     formData.set("isActive", "false");
 
     await toggleProductCategoryStatus(formData);
 
-    expect(productCategoryUpdate).toHaveBeenCalledWith({
-      where: { id: "category-1" },
-      data: { isActive: false },
-    });
-    expect(adminLogCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        action: expect.stringContaining("PRODUCT_CATEGORY"),
-      }),
+    expect(toggleCategoryStatusInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      kind: "PRODUCT",
+      categoryId: "category-1",
+      isActive: false,
     });
   });
 
-  it("updates an existing moderation keyword", async () => {
+  it("delegates moderation keyword updates to the canonical service", async () => {
     const formData = new FormData();
     formData.set("keywordId", "keyword-1");
     formData.set("keyword", "更新后的关键词");
@@ -801,10 +778,32 @@ describe("admin actions", () => {
 
     await upsertModerationKeyword(formData);
 
-    expect(moderationKeywordUpdate).toHaveBeenCalledWith({
-      where: { id: "keyword-1" },
-      data: expect.objectContaining({ keyword: "更新后的关键词" }),
+    expect(upsertModerationKeywordInGovernance).toHaveBeenCalledWith({
+      actorId: "admin-1",
+      keywordId: "keyword-1",
+      keyword: "更新后的关键词",
+      targetType: "GLOBAL",
+      isEnabled: true,
     });
-    expect(moderationKeywordCreate).not.toHaveBeenCalled();
+  });
+
+  it("contains no raw governance prisma writes（RB-05 static raw-write gate）", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+
+    const source = await readFile(
+      resolve(process.cwd(), "src/actions/admin.ts"),
+      "utf8",
+    );
+
+    // legacy 裸写普查为零：Category/Keyword/AdminLog 的唯一 mutation 权威是
+    // canonical governance service（域写 + same-tx 审计）
+    expect(source).not.toMatch(/prisma\.productCategory/);
+    expect(source).not.toMatch(/prisma\.errandCategory/);
+    expect(source).not.toMatch(/prisma\.serviceCategory/);
+    expect(source).not.toMatch(/prisma\.moderationKeyword/);
+    expect(source).not.toMatch(/prisma\.adminLog\.create/);
+    // 同理禁止经 delegate 别名/表映射绕过（tx/adminLog 亦不得出现）
+    expect(source).not.toMatch(/adminLog/);
   });
 });
