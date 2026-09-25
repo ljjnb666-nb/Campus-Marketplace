@@ -43,6 +43,28 @@ describe("rollback / restore shell-level regression（tests/ops/rollback-restore
   );
 });
 
+describe("deploy release gate shell-level regression（tests/ops/deploy-gate.test.sh）", () => {
+  it.skipIf(!hasBash())(
+    "verifier PASS 才写 release log；FAIL/degraded/invalid SHA 一律 fail closed（不真实部署）",
+    async () => {
+      try {
+        const { stdout } = await execFileAsync("bash", ["tests/ops/deploy-gate.test.sh"], {
+          cwd: repoRoot,
+          timeout: 180_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        expect(stdout).toMatch(/FAIL=0/);
+      } catch (error) {
+        const e = error as { stdout?: string; stderr?: string };
+        console.error("deploy-gate stdout:\n", e.stdout);
+        console.error("deploy-gate stderr:\n", e.stderr);
+        throw error;
+      }
+    },
+    200_000,
+  );
+});
+
 describe("backup status artifact shell-level regression（tests/ops/backup-status.test.sh）", () => {
   it.skipIf(!hasBash())(
     "成功/空 dump/offsite 失败三场景均产出正确 backup-status.json 且退出码语义正确",

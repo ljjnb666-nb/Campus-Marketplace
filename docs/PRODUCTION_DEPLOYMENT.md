@@ -110,7 +110,60 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
    release 必须等于部署 SHA。
 
 日常部署直接用封装脚本：`./scripts/ops/deploy.sh`（= preflight → 备份 → 迁移 →
-滚动更新 → health/release 验证 → 写 release 日志）。
+滚动更新 → RELEASE READINESS GATE → 写 release 日志）。deploy.sh 与 rollback.sh
+的 SUCCESS 都必须通过统一发布门禁
+`scripts/ops/release-readiness-check.ts`（见 §3.1），仅 verifier PASS 才写
+`.releases.log`（记录 `READINESS=ready`，不含 dependency URLs/credentials/bucket names）。
+
+### 3.1 健康语义与发布门禁（RB-06）
+
+三个概念严格区分，不得混用：
+
+| 概念 | 载体 | 语义 |
+| --- | --- | --- |
+| `GET /api/health` | liveness | 只证明 Next.js 进程存活 + release identity。**不访问** PostgreSQL/Redis/S3；依赖 outage 时不影响容器健康判定 |
+| `GET /api/ready` | runtime readiness | 当前实例的依赖状态：DB/storage 失败 → `not_ready`（503）；Redis 失败 → `degraded`（**仍 200**，运行时 availability policy：限流有本地降级，可继续接流量） |
+| RELEASE READINESS GATE | deploy/rollback SUCCESS | `scripts/ops/release-readiness-check.ts`（deploy 与 rollback 共用的唯一权威 verifier） |
+
+**Docker HEALTHCHECK 故意仍指向 `/api/health`（liveness）**：若 DB/Redis/S3 暂时
+故障就把正常运行的 app 容器标成 unhealthy，会制造 restart storm。
+`CONTAINER_HEALTH = LIVENESS`、`RELEASE_SUCCESS = READINESS`，两者不是同一概念。
+
+**发布门禁契约（fail closed）**——deploy/rollback 只有全部满足才 SUCCESS：
+
+1. `/api/health`：HTTP 2xx、`status=ok`、`release == EXPECTED_SHA`；
+2. `/api/ready`：响应可解析（JSON.parse + 结构校验，禁止 grep/sed）、
+   `release == EXPECTED_SHA`、`status === "ready"`、
+   `dependencies.database/redis/storage` 全部 `"ok"`。
+
+关键区分：`/api/ready` 返回 **HTTP 200 + `degraded` 仍然 FAIL release gate**
+（运行中服务可继续接流量 ≠ 新 release 可被认证为健康）。
+EXPECTED_SHA 必须是 40 位 hex Git commit SHA（`unknown`/`dev`/短 SHA/分支名
+在进入任何网络验证前即被拒绝）。verifier 有 bounded polling（默认 3s 间隔 /
+120s deadline）；连接拒绝等瞬时错误重试到 deadline，超时 exit 1。
+失败输出只含 reason code、HTTP 状态与 release 标识，绝不输出 secrets、
+dependency 异常细节或 bucket 名称。
+
+门禁失败时 deploy.sh 不写 release log，打印 rollback 命令参考后 exit 1；
+**不自动回滚**（自动回滚存在 schema compatibility 风险，由操作员执行
+`scripts/ops/rollback.sh <previous_git_sha>`）。
+
+### 3.2 MinIO/mc 镜像不可变 pin 与更新流程
+
+`compose.production.yml`（官方 upstream `minio/minio`、`minio/mc`）与
+`.github/workflows/ci.yml`（GHCR mirror `ghcr.io/ljjnb666-nb/*`）中的镜像一律
+`@sha256:<digest>` immutable pin，**禁止 `:latest` / floating tag**
+（静态 gate：`tests/ops/image-immutability.test.ts`）。不新增自动同步 latest
+的 workflow。镜像更新必须走显式流程：
+
+1. 选择明确的上游版本（官方 release）；
+2. 验证官方来源（minio/minio、minio/mc 官方仓库）；
+3. authenticated pull 该版本镜像；
+4. `docker inspect --format '{{index .RepoDigests 0}}'` 取得真实 digest
+   （**禁止猜 digest**；无法从真实 registry 获得时停止并报告）；
+5. 更新 CI mirror / production compose 的 digest（CI 与生产 pin 同一官方构建）；
+6. 跑 full CI（含 MinIO 启动、mc bootstrap、真实 S3 集成测试）；
+7. PR review 后合并。
 
 ## 4. TLS / 证书
 
@@ -148,9 +201,12 @@ docs/PRODUCTION_SECURITY.md 第 6 节。
 
 ```bash
 git fetch && git checkout <release_sha>   # 在服务器上的代码副本
-./scripts/ops/deploy.sh                   # 全流程（含备份/迁移/验证）
-cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/时间）
+./scripts/ops/deploy.sh                   # 全流程（含备份/迁移/发布门禁）
+cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/READINESS=ready）
 ```
+
+升级/回滚 SUCCESS 均以 RELEASE READINESS GATE（§3.1）为准；回滚见
+[ROLLBACK.md](./ROLLBACK.md)。
 
 ## 8. 磁盘空间
 

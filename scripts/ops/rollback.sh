@@ -13,9 +13,11 @@
 #   1. 先执行 restore-production-postgres.sh（强确认、停写、SHA256、
 #      完整性检查；脚本任一步失败立即非 0 退出）
 #   2. 恢复成功才允许把应用切回旧镜像
-#   3. 最后 health / release 验证
+#   3. 最后 RELEASE READINESS GATE 验证
 # 恢复失败 → 立即非 0 退出，应用切换绝不执行（app 保持停止，人工介入）。
 # 绝不自动执行 destructive down migration。
+#
+# OPS_RELEASE_VERIFIER 仅供自动化测试注入 stub verifier（生产路径不受影响）。
 # =============================================================================
 set -euo pipefail
 
@@ -45,7 +47,24 @@ if ! docker image inspect "campus-marketplace-app:${PREVIOUS_SHA}" >/dev/null 2>
   exit 1
 fi
 
-APP_URL="$(app_url_from_env)"
+APP_URL="${APP_URL:-$(app_url_from_env)}"
+# OPS_HEALTH_TIMEOUT 仅供自动化测试压短门禁轮询预算（生产路径默认 120s）
+HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT:-120}"
+
+# OPS_RELEASE_VERIFIER 仅供自动化测试注入 stub verifier（参数：expected_sha）。
+# 生产路径必须走 scripts/ops/release-readiness-check.ts（deploy 与 rollback
+# 共用的唯一 release gate 权威，禁止在本脚本内另写 grep/sed JSON 解析）。
+run_release_gate() {
+  local expected_sha="$1"
+  if [[ -n "${OPS_RELEASE_VERIFIER:-}" ]]; then
+    bash "${OPS_RELEASE_VERIFIER}" "${expected_sha}"
+    return
+  fi
+  npx --prefix "${PROJECT_DIR}" tsx "${SCRIPT_DIR}/release-readiness-check.ts" \
+    --base-url "${APP_URL}" \
+    --expected-sha "${expected_sha}" \
+    --timeout-seconds "${HEALTH_TIMEOUT}"
+}
 
 # -----------------------------------------------------------------------------
 # 应用切换的唯一路径（safe 与 --hard 共用）：显式以目标 SHA 选择镜像。
@@ -111,20 +130,15 @@ fi
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
 switch_app_to "${PREVIOUS_SHA}"
 
-# health / release 验证
-echo "[rollback] 验证 ${APP_URL}/api/health"
-body="$(curl -fsS "${APP_URL}/api/health")"
-echo "${body}"
-echo "${body}" | grep -q '"status":"ok"' || {
-  echo "[rollback] 健康检查失败" >&2
-  exit 1
-}
-
-release="$(echo "${body}" | sed -n 's/.*"release":"\([^"]*\)".*/\1/p')"
-if [[ "${release}" != "${PREVIOUS_SHA}" ]]; then
-  echo "[rollback] release 不一致: health=${release} 期望=${PREVIOUS_SHA}" >&2
+# RELEASE READINESS GATE（RB-06）：回滚成功同样必须通过严格发布门禁——
+# health(ok + PREVIOUS_SHA) 且 ready(ready + PREVIOUS_SHA + DB/Redis/双 bucket 全 ok)。
+# /api/health 200 不再等于 ROLLBACK SUCCESS。
+echo "[rollback] release readiness gate（${APP_URL}）"
+if ! run_release_gate "${PREVIOUS_SHA}"; then
+  echo "[rollback][FAIL] rollback verification failed —— 不写 release log；" >&2
+  echo "[rollback][FAIL] app 已切回 ${PREVIOUS_SHA} 但依赖未就绪，人工检查后重试或回切" >&2
   exit 1
 fi
 
-echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} MODE=${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
+echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} MODE=${MODE:-safe} READINESS=ready" >> "${PROJECT_DIR}/.releases.log"
 echo "[rollback] SUCCESS → ${PREVIOUS_SHA}"
