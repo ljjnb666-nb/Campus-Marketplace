@@ -145,8 +145,13 @@ services:
       - backend
 
   # ---- 自建 MinIO（可选；使用外部 S3 提供商时不要启动本组）----
+  # RB-06（2026-09-25）：官方 upstream（docker.io/minio/*）immutable digest pin，
+  # 禁止 :latest floating tag（静态 gate 见 tests/ops/image-immutability.test.ts）。
+  # digest 来源：docker inspect RepoDigests（真实 pull 记录，quay.io 同 manifest
+  # digest 交叉印证），与 CI mirror（ghcr.io/ljjnb666-nb/*）内容为同一官方构建
+  # （镜像创建时间一致）。更新流程见 docs/PRODUCTION_DEPLOYMENT.md。
   minio:
-    image: minio/minio:latest
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     <<: *service-defaults
     profiles: ["selfhosted-minio"]
     env_file: .env.production
@@ -162,7 +167,7 @@ services:
       - backend
 
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     profiles: ["selfhosted-minio"]
     env_file: .env.production
     depends_on:

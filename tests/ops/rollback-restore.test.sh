@@ -31,6 +31,9 @@ assert_log_contains() {
 assert_log_not_contains() {
   if printf '%s' "$CALL_LOG" | grep -qF "$1"; then fail_test "log 不应包含: $1"; else pass_test; fi
 }
+assert_contains_file() {
+  if grep -qF "$1" "$2" 2>/dev/null; then pass_test; else fail_test "$3: 文件缺少 $1"; fi
+}
 assert_exit() {
   if [[ "$1" == "$2" ]]; then pass_test; else fail_test "$3: 期望 exit=$1 实际=$2"; fi
 }
@@ -69,7 +72,7 @@ ARGS="\$*"
 echo "docker called:\$ARGS" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
   *"image inspect"*)
-    [[ "\$ARGS" == *"EXPECTED_PREV_SHA"* ]] && exit 0 || exit 1 ;;
+    [[ "\$ARGS" == *"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]] && exit 0 || exit 1 ;;
   *"config --images"*)
     if [[ -n "\${CONFIG_STUB_MODE:-}" && "\${CONFIG_STUB_MODE}" == "broken" ]]; then
       echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
@@ -101,7 +104,7 @@ STUB
   # ---- curl stub（health 返回的 release 可配置）----
   cat > "${SANDBOX}/bin/curl" <<'STUB'
 #!/usr/bin/env bash
-echo "{\"status\":\"ok\",\"release\":\"${CURL_STUB_RELEASE:-EXPECTED_PREV_SHA}\",\"timestamp\":\"2026-01-01T00:00:00Z\"}"
+echo "{\"status\":\"ok\",\"release\":\"${CURL_STUB_RELEASE:-0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c}\",\"timestamp\":\"2026-01-01T00:00:00Z\"}"
 exit 0
 STUB
   chmod +x "${SANDBOX}/bin/curl"
@@ -116,6 +119,29 @@ case "\${RESTORE_STUB_MODE:-success}" in
 esac
 STUB
   chmod +x "${SANDBOX}/bin/restore-stub"
+
+  # ---- npx stub：透传真实 tsx（release gate 一律走真实 release-readiness-check.ts；
+  #      RB-06 FINAL-02：不再存在 OPS_RELEASE_VERIFIER 类 stub verifier seam）----
+  # Windows（Git Bash）下 node 不能解析 POSIX 路径，需要 cygpath -m 转换
+  if command -v cygpath >/dev/null 2>&1; then
+    REAL_TSX="$(cygpath -m "${REPO_ROOT}/node_modules/tsx/dist/cli.mjs")"
+  else
+    REAL_TSX="${REPO_ROOT}/node_modules/tsx/dist/cli.mjs"
+  fi
+  cat > "${SANDBOX}/bin/npx" <<STUB
+#!/usr/bin/env bash
+REAL_TSX="${REAL_TSX}"
+args=()
+skip_next=0
+for a in "\$@"; do
+  if [[ "\$skip_next" == "1" ]]; then skip_next=0; continue; fi
+  if [[ "\$a" == "--prefix" ]]; then skip_next=1; continue; fi
+  if [[ "\$a" == "tsx" ]]; then continue; fi
+  args+=("\$a")
+done
+exec node "\${REAL_TSX}" "\${args[@]}"
+STUB
+  chmod +x "${SANDBOX}/bin/npx"
 }
 
 run_rollback() {
@@ -129,33 +155,80 @@ run_rollback() {
     shift
   fi
   CALL_LOG=""
-  rm -f "${SANDBOX}/calls.log"
+  rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
   # 一律经 env 命令注入环境：展开形式的 VAR=v 不能作为 assignment 前缀
   env "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
     RESTORE_STUB_MODE="${RESTORE_STUB_MODE:-success}" \
     OPS_PROJECT_DIR="${SANDBOX}" \
     OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
     OPS_SLEEP_SECONDS=0 \
+    OPS_HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT-120}" \
+    APP_URL="${TEST_APP_URL:-}" \
     bash "${REPO_ROOT}/scripts/ops/rollback.sh" "${sha}" "${mode}" > /tmp/rb-out.$$ 2>&1
   local rc=$?
   [[ -f "${SANDBOX}/calls.log" ]] && CALL_LOG="$(cat "${SANDBOX}/calls.log")"
   return "${rc}"
 }
 
+# 启动 fake app（node one-liner；端口经 stdout 写入 bash 管理的文件，避免 MSYS 路径转换问题）
+# $1=release $2=ready 模式 $3=输出文件（内容 PORT=<port>）
+start_fake_app() {
+  node -e '
+    const http = require("node:http");
+    const [sha, mode] = process.argv.slice(1);
+    const server = http.createServer((req, res) => {
+      if (!req.url || !req.url.endsWith("/api/ready")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", release: sha, timestamp: "2026-01-01T00:00:00Z" }));
+        return;
+      }
+      if (mode === "ready") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ready", release: sha, dependencies: { database: "ok", redis: "ok", storage: "ok" } }));
+      } else if (mode === "degraded") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "degraded", release: sha, dependencies: { database: "ok", redis: "degraded", storage: "ok" } }));
+      } else {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ status: "ready", release: sha, dependencies: { database: "ok", redis: "ok", storage: "ok" } }));
+      }
+    });
+    server.listen(0, "127.0.0.1", () => console.log("PORT=" + server.address().port));
+  ' "$1" "$2" > "$3" 2>&1 &
+  FAKE_APP_PID=$!
+  for _ in $(seq 1 50); do
+    grep -q "^PORT=" "$3" 2>/dev/null && return 0
+    sleep 0.1
+  done
+  echo "fake app 未在预期时间内启动" >&2
+  return 1
+}
+
+fake_port() {
+  grep "^PORT=" "$1" | head -1 | cut -d= -f2
+}
+
 # docker stub 的 image inspect 只接受该 tag；rollback 的 authoritative SHA 即它
-PREV_SHA="EXPECTED_PREV_SHA"
+PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+# 与 PREV_SHA 不同的合法 40-hex（release mismatch 用例的 fake app 自报值）
+OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
 
-echo "== 1. safe rollback 不碰 DB =="
+echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=="
 RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 0 "$rc" "safe rollback"
 assert_log_contains "app_up_called"
 assert_log_not_contains "restore_called"
 assert_log_not_contains "app_stop_called"
 
 echo "== 1b. safe rollback 最终选择 EXACT PREVIOUS_SHA（先 resolve 断言再 up）=="
-assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 assert_log_contains "config --images"
 config_line="$(printf '%s' "$CALL_LOG" | grep -n "config --images" | head -1 | cut -d: -f1)"
 up_line="$(printf '%s' "$CALL_LOG" | grep -n "app_up_called" | head -1 | cut -d: -f1)"
@@ -167,11 +240,16 @@ fi
 
 echo "== 1c. shell 中残留错误 GIT_SHA 时，rollback 参数必须 authoritative =="
 RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
 EXTRA_ENV=(GIT_SHA=WRONG_SHA_IN_SHELL)
 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
 EXTRA_ENV=()
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 0 "$rc" "safe rollback with poisoned GIT_SHA"
-assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 assert_log_not_contains "GIT_SHA=WRONG_SHA_IN_SHELL"
 
 echo "== 2. hard restore 失败 → app 回滚不执行 =="
@@ -181,17 +259,22 @@ CALL_LOG=""; rm -f "${SANDBOX}/calls.log"
 RESTORE_STUB_MODE=failure \
 OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" OPS_SLEEP_SECONDS=0 \
 PATH="${SANDBOX}/bin:${PATH}" \
-bash "${REPO_ROOT}/scripts/ops/rollback.sh" EXPECTED_PREV_SHA --hard >/tmp/rb-hard-fail.$$ 2>&1; rc=$?
+bash "${REPO_ROOT}/scripts/ops/rollback.sh" 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c --hard >/tmp/rb-hard-fail.$$ 2>&1; rc=$?
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "hard rollback with restore failure"
 assert_log_contains "restore_called"
 assert_log_not_contains "app_up_called"
 
-echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA =="
+echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA（真实 gate 全绿）=="
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
 run_rollback "${PREV_SHA}" --hard; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 0 "$rc" "hard rollback with restore success"
 assert_log_contains "restore_called"
-assert_log_contains "app_up_called GIT_SHA=EXPECTED_PREV_SHA"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 assert_log_contains "config --images"
 
 echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
@@ -242,13 +325,77 @@ assert_exit 1 "$rc" "resolved image mismatch must abort rollback"
 assert_log_contains "config --images"
 assert_log_not_contains "app_up_called"
 
-echo "== 9. health release != PREVIOUS_SHA → fail（release 必须等于回滚目标）=="
+echo "== 9. PREVIOUS_SHA 非法（短 SHA）→ INVALID_EXPECTED_SHA，零 side effect =="
 RESTORE_STUB_MODE=success make_sandbox
-EXTRA_ENV=(CURL_STUB_RELEASE=WRONG_RELEASE_SHA)
-run_rollback "${PREV_SHA}"; rc=$?
-EXTRA_ENV=()
-assert_exit 1 "$rc" "health release mismatch must fail rollback"
+CALL_LOG=""; rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
+  OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/rollback.sh" "abc123" >/tmp/rb-invalid.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "invalid PREVIOUS_SHA must fail rollback"
+if grep -q "INVALID_EXPECTED_SHA" /tmp/rb-invalid.$$; then pass_test; else fail_test "缺少 INVALID_EXPECTED_SHA 原因"; fi
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "invalid SHA 不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9b. release gate（真实 verifier × fake app 全绿，大写 SHA 正常化）→ 成功日志含 READINESS=ready =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UPPER_PREV_SHA="$(printf '%s' "${PREV_SHA}" | tr 'a-f' 'A-F')"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${UPPER_PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier pass rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 成功日志"
+assert_contains_file "READINESS=ready" "${SANDBOX}/.releases.log" "rollback 成功日志 readiness"
+
+echo "== 9c. release gate（真实 verifier）：ready.release != PREVIOUS_SHA → fail =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${OTHER_SHA}" wrong-release "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=2 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier release mismatch must fail rollback"
 assert_log_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "release mismatch 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9d. release gate（真实 verifier）：health+ready 全绿（exact PREVIOUS_SHA）→ SUCCESS =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier all-green rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "real verifier 通过后写成功日志"
+
+echo "== 9e. release gate（真实 verifier）：ready degraded（HTTP 200）→ fail（HTTP 200 ≠ ROLLBACK SUCCESS）=="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" degraded "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=2 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier degraded must fail rollback"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "degraded 后不得写 .releases.log"
+else
+  pass_test
+fi
 
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
@@ -272,7 +419,7 @@ if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
   [[ \"\$v\" == \"14\" ]]"; then pass_test; else fail_test "retention: 未配置应默认 14"; fi
 
 # 清理沙箱
-rm -rf "${SANDBOX}" /tmp/rb-out.$$ /tmp/rb-hard-fail.$$ /tmp/rp-sha.$$ /tmp/rp-noflag.$$ /tmp/rp-mismatch.$$ 2>/dev/null
+rm -rf "${SANDBOX}" /tmp/rb-out.$$ /tmp/rb-hard-fail.$$ /tmp/rb-invalid.$$ /tmp/rp-sha.$$ /tmp/rp-noflag.$$ /tmp/rp-mismatch.$$ 2>/dev/null
 
 echo "=============================="
 echo "PASS=${PASS} FAIL=${FAIL}"

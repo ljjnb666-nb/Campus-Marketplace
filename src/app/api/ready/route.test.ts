@@ -108,4 +108,21 @@ describe("GET /api/ready", () => {
 
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
+
+  it("ROUTE_RELEASE_FIELD：health.release 与 ready.release 来自同一 RELEASE_SHA（§27 冻结）", async () => {
+    const previous = process.env.RELEASE_SHA;
+    try {
+      process.env.RELEASE_SHA = "test-sha";
+      runReadinessChecksMock.mockResolvedValue(readyReport());
+
+      const body = await (await GET(dummyRequest())).json();
+
+      expect(body.release).toBe("test-sha");
+      // 与 /api/health 的 release 语义同源：deploy gate 要求两端一致
+      expect(body.release).toBe(process.env.RELEASE_SHA);
+    } finally {
+      if (previous === undefined) delete process.env.RELEASE_SHA;
+      else process.env.RELEASE_SHA = previous;
+    }
+  });
 });

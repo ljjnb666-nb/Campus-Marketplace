@@ -13,9 +13,14 @@
 #   1. 先执行 restore-production-postgres.sh（强确认、停写、SHA256、
 #      完整性检查；脚本任一步失败立即非 0 退出）
 #   2. 恢复成功才允许把应用切回旧镜像
-#   3. 最后 health / release 验证
+#   3. 最后 RELEASE READINESS GATE 验证
 # 恢复失败 → 立即非 0 退出，应用切换绝不执行（app 保持停止，人工介入）。
 # 绝不自动执行 destructive down migration。
+#
+# PREVIOUS_SHA 必须是 40 位 hex Git commit SHA，且在任何 side effect
+# （镜像检查/hard restore/app switch/gate）之前校验；禁止截断任意输入。
+# rollback 不重新构建 source，因此不要求 PREVIOUS_SHA == 当前 HEAD，
+# 只要求它真实标识一个既有不可变镜像 tag。
 # =============================================================================
 set -euo pipefail
 
@@ -28,7 +33,11 @@ load_production_env
 RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT:-${SCRIPT_DIR}/restore-production-postgres.sh}"
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
-PREVIOUS_SHA="${PREVIOUS_SHA:0:40}"
+if [[ ! "${PREVIOUS_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
+  echo "[rollback][FAIL] INVALID_EXPECTED_SHA：PREVIOUS_SHA 必须是 40 位 hex Git commit SHA（禁止短 SHA/分支名/unknown/dev/截断）" >&2
+  exit 1
+fi
+PREVIOUS_SHA="${PREVIOUS_SHA,,}"
 MODE="${2:-}"
 
 if [[ "${MODE}" != "" && "${MODE}" != "--hard" ]]; then
@@ -45,7 +54,25 @@ if ! docker image inspect "campus-marketplace-app:${PREVIOUS_SHA}" >/dev/null 2>
   exit 1
 fi
 
-APP_URL="$(app_url_from_env)"
+APP_URL="${APP_URL:-$(app_url_from_env)}"
+# OPS_HEALTH_TIMEOUT 仅调整门禁等待预算（不能把失败变成功）：
+# 必须是正整数，否则回默认；正则白名单保证无注入面。
+HEALTH_TIMEOUT="${OPS_HEALTH_TIMEOUT:-120}"
+if [[ ! "${HEALTH_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  HEALTH_TIMEOUT=120
+fi
+
+# 统一 release gate 调用：唯一权威 = scripts/ops/release-readiness-check.ts。
+# 不提供任何 environment-selected verifier override（RB-06 FINAL-02：测试期
+# verifier 可执行文件注入 seam 已从生产脚本移除，测试直接使用真实 verifier，
+# 静态 gate 见 tests/ops/ops-scripts.test.ts）。
+run_release_gate() {
+  local expected_sha="$1"
+  npx --prefix "${PROJECT_DIR}" tsx "${SCRIPT_DIR}/release-readiness-check.ts" \
+    --base-url "${APP_URL}" \
+    --expected-sha "${expected_sha}" \
+    --timeout-seconds "${HEALTH_TIMEOUT}"
+}
 
 # -----------------------------------------------------------------------------
 # 应用切换的唯一路径（safe 与 --hard 共用）：显式以目标 SHA 选择镜像。
@@ -111,20 +138,15 @@ fi
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
 switch_app_to "${PREVIOUS_SHA}"
 
-# health / release 验证
-echo "[rollback] 验证 ${APP_URL}/api/health"
-body="$(curl -fsS "${APP_URL}/api/health")"
-echo "${body}"
-echo "${body}" | grep -q '"status":"ok"' || {
-  echo "[rollback] 健康检查失败" >&2
-  exit 1
-}
-
-release="$(echo "${body}" | sed -n 's/.*"release":"\([^"]*\)".*/\1/p')"
-if [[ "${release}" != "${PREVIOUS_SHA}" ]]; then
-  echo "[rollback] release 不一致: health=${release} 期望=${PREVIOUS_SHA}" >&2
+# RELEASE READINESS GATE（RB-06）：回滚成功同样必须通过严格发布门禁——
+# health(ok + PREVIOUS_SHA) 且 ready(ready + PREVIOUS_SHA + DB/Redis/双 bucket 全 ok)。
+# /api/health 200 不再等于 ROLLBACK SUCCESS。
+echo "[rollback] release readiness gate（${APP_URL}）"
+if ! run_release_gate "${PREVIOUS_SHA}"; then
+  echo "[rollback][FAIL] rollback verification failed —— 不写 release log；" >&2
+  echo "[rollback][FAIL] app 已切回 ${PREVIOUS_SHA} 但依赖未就绪，人工检查后重试或回切" >&2
   exit 1
 fi
 
-echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} MODE=${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
+echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} MODE=${MODE:-safe} READINESS=ready" >> "${PROJECT_DIR}/.releases.log"
 echo "[rollback] SUCCESS → ${PREVIOUS_SHA}"

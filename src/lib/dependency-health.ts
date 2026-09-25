@@ -131,12 +131,21 @@ export async function checkRedis(
   });
 }
 
+/**
+ * storage readiness：PUBLIC + PRIVATE 两个业务 bucket 都必须可达（RB-06）。
+ * private bucket 承载 verification / report-dispute evidence / private assets，
+ * 只探 public 是不完整的。任一失败 → storage=failed → not_ready（503）。
+ * 对外绝不泄露失败的是哪个 bucket 名称（连内部日志也不输出 bucket 配置）。
+ */
 export async function checkStorage(
   timeoutMs = DEFAULT_CHECK_TIMEOUT_MS,
 ): Promise<DependencyCheckResult> {
   return checkDependency("storage", false, timeoutMs, async () => {
-    const reachable = await getStorage().headBucket(env.S3_BUCKET_PUBLIC);
-    if (!reachable) {
+    const [publicOk, privateOk] = await Promise.all([
+      getStorage().headBucket(env.S3_BUCKET_PUBLIC),
+      getStorage().headBucket(env.S3_BUCKET_PRIVATE),
+    ]);
+    if (!publicOk || !privateOk) {
       throw new Error("storage bucket not reachable");
     }
   });

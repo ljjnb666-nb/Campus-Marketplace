@@ -142,9 +142,11 @@ async function checkRedis(): Promise<OpsCheckResult> {
 }
 
 async function checkStorage(): Promise<OpsCheckResult> {
-  const { S3_ENDPOINT, S3_BUCKET_PUBLIC, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_REGION, S3_FORCE_PATH_STYLE } =
+  // 与 canonical runReadinessChecks 的 storage 语义一致（§23 单一事实）：
+  // 生产资产存储可用 = PUBLIC + PRIVATE 两 bucket 均可达。
+  const { S3_ENDPOINT, S3_BUCKET_PUBLIC, S3_BUCKET_PRIVATE, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_REGION, S3_FORCE_PATH_STYLE } =
     process.env;
-  if (!S3_ENDPOINT || !S3_BUCKET_PUBLIC || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
+  if (!S3_ENDPOINT || !S3_BUCKET_PUBLIC || !S3_BUCKET_PRIVATE || !S3_ACCESS_KEY_ID || !S3_SECRET_ACCESS_KEY) {
     return {
       name: "storage_connectivity",
       status: "skipped",
@@ -158,15 +160,20 @@ async function checkStorage(): Promise<OpsCheckResult> {
     forcePathStyle: S3_FORCE_PATH_STYLE !== "false",
     credentials: { accessKeyId: S3_ACCESS_KEY_ID, secretAccessKey: S3_SECRET_ACCESS_KEY },
   });
+  // 绝不输出 bucket 名称/凭据：对外仍只有 storage_connectivity 的 pass/fail
+  const headReachable = async (bucket: string): Promise<boolean> => {
+    try {
+      await client.send(new HeadBucketCommand({ Bucket: bucket }));
+      return true;
+    } catch {
+      return false;
+    }
+  };
   try {
-    const reachable = await withTimeout("storage", async () => {
-      try {
-        await client.send(new HeadBucketCommand({ Bucket: S3_BUCKET_PUBLIC }));
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    const [publicOk, privateOk] = await withTimeout("storage", async () =>
+      Promise.all([headReachable(S3_BUCKET_PUBLIC), headReachable(S3_BUCKET_PRIVATE)]),
+    );
+    const reachable = publicOk && privateOk;
     return reachable
       ? { name: "storage_connectivity", status: "pass", required: true }
       : { name: "storage_connectivity", status: "fail", required: true, detail: "bucket 不可达" };
@@ -184,11 +191,18 @@ async function checkStorage(): Promise<OpsCheckResult> {
 
 function checkReleaseIdentity(mode: string): OpsCheckResult {
   const releaseSha = process.env.RELEASE_SHA ?? "";
-  if (releaseSha) {
+  // RB-06 部署身份契约：production 的 RELEASE_SHA 必须是 40 位 hex Git SHA；
+  // dev/unknown/短 SHA/分支名在 production 一律 fail（与 release-readiness-check
+  // 的 EXPECTED_SHA 校验一致）。非 production mode 维持原语义（非空即可）。
+  const isValidSha = /^[a-fA-F0-9]{40}$/.test(releaseSha);
+  if (releaseSha && (mode !== "production" || isValidSha)) {
     return { name: "release_identity", status: "pass", required: mode === "production" };
   }
   if (mode === "production") {
-    return { name: "release_identity", status: "fail", required: true, detail: "RELEASE_SHA 未设置（生产必须可回答当前运行版本）" };
+    const detail = releaseSha
+      ? "RELEASE_SHA 不是 40 位 hex Git commit SHA（禁止 dev/unknown/短 SHA/分支名）"
+      : "RELEASE_SHA 未设置（生产必须可回答当前运行版本）";
+    return { name: "release_identity", status: "fail", required: true, detail };
   }
   return { name: "release_identity", status: "skipped", required: false, detail: "非 production mode，RELEASE_SHA 可选" };
 }

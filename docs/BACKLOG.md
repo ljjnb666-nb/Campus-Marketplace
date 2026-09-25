@@ -89,6 +89,11 @@
 - **review_at**：Phase 8 planning（与 RB-04 privacy lifecycle 同批）
 - **blocker**：NON_BLOCKING（无证据表明其下存在学生证类材料；本地实测
   仅头像/占位文件）
+- **RB-06 FINAL-03 补充（2026-09-25）**：`.dockerignore` 已排除
+  `public/uploads/*`（negation 保留 tracked placeholder 资产），本地/遗留
+  上传文件不再进入 production Docker build context（动态 canary probe 见
+  `tests/ops/docker-context-provenance.test.ts`）；主机侧存量文件的
+  inventory/quarantine 仍属本条既有 debt。
 
 ---
 
@@ -114,6 +119,11 @@
 
 ## CI_DEBT_MINIO_MIRROR_MUTABLE_TAG
 
+> **状态**：已关闭（2026-09-25，Repair 6 / RB-06）。CI 与生产 compose 的
+> MinIO/mc 镜像全部改为 immutable digest pin（`tests/ops/image-immutability.test.ts`
+> 静态 gate 防回退），镜像更新流程见 docs/PRODUCTION_DEPLOYMENT.md §3.2。
+> 以下为登记时的原始记录。
+
 - **title**：CI 的 ghcr MinIO 镜像副本使用可变 `latest` tag
 - **motivation**：RB-04 FIELD-COVERAGE round（run 36033918738 起）CI 的
   MinIO/mc 镜像源切换到 `ghcr.io/ljjnb666-nb/minio|mc:latest`（官方镜像
@@ -126,3 +136,58 @@
 - **review_at**：Repair 6 planning
 - **blocker**：NON_BLOCKING（RB-04 CI 全绿；镜像内容 = MinIO 官方镜像）
 - **future work**：pin immutable version/digest + 镜像同步/可复现策略
+
+---
+
+## OPS_DEBT_BASE_IMAGE_MUTABLE_TAGS
+
+- **title**：postgres/redis/node/caddy 等 base image 仍使用可变 version tag
+- **motivation**：Repair 6（RB-06）只冻结了已登记的 MinIO/mc mutable-image
+  debt（§43 边界：不得扩成完整供应链改造）。`postgres:16-alpine`、
+  `redis:7-alpine`、`node:24`（Dockerfile ARG NODE_VERSION）、
+  `caddy:2-alpine` 仍为 floating version tag，上游 push 同 tag 新 build
+  时 CI/生产拉取内容可能变化。这些是官方维护的发行线 tag，风险低于
+  `latest`，且 digest pin 会带来更频繁的维护成本。
+- **priority**：LOW
+- **dependency**：无
+- **candidate phase**：Phase 11 / supply-chain hardening batch
+- **review_at**：supply-chain hardening planning
+- **blocker**：NON_BLOCKING（RB-06 已关闭；MinIO/mc 之外不在 Repair 6 范围）
+- **future work**：逐镜像评估 digest pin vs 发行线 tag 的维护成本后统一决策
+
+---
+
+## OPS_DEBT_TEST_SEAM_OPS_RESTORE_SCRIPT
+
+- **title**：rollback.sh 仍保留 OPS_RESTORE_SCRIPT 环境注入 seam（restore 脚本
+  executable path 可被 env 覆盖）
+- **motivation**：RB-06 FINAL-02 移除了 OPS_RELEASE_VERIFIER（release gate
+  权威不可被 env 替换）。OPS_RESTORE_SCRIPT 是更早（--hard 恢复路径）的既有
+  测试 seam，影响面为 restore 脚本选择，不属于 release-verifier blocker；
+  本轮按冻结边界不顺手重构 hard restore。
+- **priority**：LOW
+- **dependency**：无
+- **candidate phase**：Final Hardening
+- **review_at**：Final Hardening planning
+- **blocker**：NON_BLOCKING（restore 是人工确认路径，gate 仍在其后 fail closed）
+- **future work**：与 OPS_RELEASE_VERIFIER 同模式收敛（测试改走真实 restore
+  脚本 + PATH stub），或改为可注入的 TypeScript 函数参数
+
+---
+
+## OPS_DEBT_E2E_7E02_RETRY_FLAKE
+
+- **title**：PR #34 CI e2e job 中 7E-E2E02（report moderation reopen/dueAt）
+  单测首跑失败、重试通过（Playwright 计 1 flaky）
+- **motivation**：run 36109381086（head e37c7b0）e2e job 整体 success /
+  attempt=1，但 phase7e-report-moderation.spec.ts:151（7E-E2E02 reopen
+  RESOLVED → IN_REVIEW → dueAt 重置 → case ACTIVE）首 attempt 失败后
+  retry 通过（72 passed + 1 flaky）。与本文件 P7-DEBT-E2E-LOAD-01 记录的
+  散布 timeout 类症状同类；本轮不做 rerun，按"如实报告"纪律登记。
+- **priority**：LOW
+- **dependency**：E2E infrastructure
+- **candidate phase**：Final Hardening
+- **review_at**：Final Hardening planning
+- **blocker**：NON_BLOCKING（job 绿；重试通过；与 release identity 变更无关）
+- **future work**：隔离复跑定位（timing/goto 超时类）后修复或纳入
+  deterministic bootstrap 改造

@@ -39,6 +39,7 @@ import {
   checkDatabase,
   runReadinessChecks,
 } from "@/lib/dependency-health";
+import { env } from "@/lib/env";
 
 function redisStub(pong: string | Promise<string> = "PONG") {
   return { ping: vi.fn().mockResolvedValue(pong), status: "ready" };
@@ -147,5 +148,41 @@ describe("dependency-health（/api/ready 探针）", () => {
 
     const line = JSON.stringify(errorSpy.mock.calls[0]);
     expect(line).not.toContain("hunter2222");
+  });
+
+  // ---- RB-06：storage readiness 必须验证 PUBLIC + PRIVATE 两个 bucket ----
+
+  it("STORAGE-BOTH-OK：public+private 均可达 → storage ok，且 headBucket 覆盖两个配置 bucket", async () => {
+    const report = await runReadinessChecks();
+
+    expect(report.dependencies.storage).toBe("ok");
+    expect(report.status).toBe("ready");
+    // 单一事实（§23）：canonical readiness 必须探测两个 bucket
+    expect(headBucketMock).toHaveBeenCalledWith(env.S3_BUCKET_PUBLIC);
+    expect(headBucketMock).toHaveBeenCalledWith(env.S3_BUCKET_PRIVATE);
+  });
+
+  it("STORAGE-PUBLIC-FAIL：public 不可达（private ok）→ storage failed → not_ready，且不泄露 bucket 名称", async () => {
+    headBucketMock.mockImplementation(async (bucket: string) => bucket !== env.S3_BUCKET_PUBLIC);
+
+    const report = await runReadinessChecks();
+
+    expect(report.dependencies.storage).toBe("failed");
+    expect(report.status).toBe("not_ready");
+    const logged = JSON.stringify([errorSpy.mock.calls, warnSpy.mock.calls]);
+    expect(logged).not.toContain(env.S3_BUCKET_PUBLIC);
+    expect(logged).not.toContain(env.S3_BUCKET_PRIVATE);
+  });
+
+  it("STORAGE-PRIVATE-FAIL：private 不可达（public ok）→ storage failed → not_ready（private 承载 evidence/private assets）", async () => {
+    headBucketMock.mockImplementation(async (bucket: string) => bucket !== env.S3_BUCKET_PRIVATE);
+
+    const report = await runReadinessChecks();
+
+    expect(report.dependencies.storage).toBe("failed");
+    expect(report.status).toBe("not_ready");
+    const logged = JSON.stringify([errorSpy.mock.calls, warnSpy.mock.calls]);
+    expect(logged).not.toContain(env.S3_BUCKET_PUBLIC);
+    expect(logged).not.toContain(env.S3_BUCKET_PRIVATE);
   });
 });
