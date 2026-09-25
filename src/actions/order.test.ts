@@ -19,7 +19,10 @@ const {
   txExecuteRaw,
   txUserFindMany,
   txOrderFindFirst,
+  txErrandTaskUpdateMany,
   setProductLockRow,
+  errandLockRowHolder,
+  orderLockRowHolder,
 } = vi.hoisted(() => {
   const txExecuteRaw = vi.fn();
   const txUserFindMany = vi.fn();
@@ -31,6 +34,7 @@ const {
   const txProductUpdateMany = vi.fn();
   const txServiceListingUpdate = vi.fn();
   const txUserUpdate = vi.fn();
+  const txErrandTaskUpdateMany = vi.fn();
   const orderFindUnique = vi.fn();
   // Product 行锁返回行（默认 = 创建路径的 ACTIVE 行；取消路径测试
   // 通过 setProductLockRow 切换为 RESERVED 投影行）
@@ -46,7 +50,24 @@ const {
   const setProductLockRow = (row: Record<string, unknown>) => {
     productLockRow = row;
   };
+  // AUDIT2-RB02：ERRAND 订单中心委派的行权威（ErrandTask FOR UPDATE /
+  // active Order FOR UPDATE），由用例按需覆写
+  const errandLockRowHolder = { row: null as Record<string, unknown> | null };
+  const orderLockRowHolder = {
+    row: {
+      id: "order-1",
+      type: "PRODUCT",
+      status: "PENDING",
+      buyerId: "user-1",
+      sellerId: "seller-1",
+      productId: "product-1",
+    } as Record<string, unknown> | Record<string, unknown>[],
+  };
   const transactionClient = {
+    // AUDIT2-RB02：ERRAND 委派路径的 Task 写（applyErrandStartWrites）
+    errandTask: {
+      updateMany: txErrandTaskUpdateMany,
+    },
     order: {
       create: txOrderCreate,
       // RB-03 REVIEW FIX：updateOrderStatusTx 的 fresh read 在 tx 内
@@ -77,17 +98,13 @@ const {
     // 行锁——按锁内 SELECT 的目标表分流返回行
     $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
       const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
+      if (sql.includes('FROM "ErrandTask"')) {
+        return errandLockRowHolder.row ? [errandLockRowHolder.row] : [];
+      }
       if (sql.includes('FROM "Order"')) {
-        return [
-          {
-            id: "order-1",
-            type: "PRODUCT",
-            status: "PENDING",
-            buyerId: "user-1",
-            sellerId: "seller-1",
-            productId: "product-1",
-          },
-        ];
+        return Array.isArray(orderLockRowHolder.row)
+          ? orderLockRowHolder.row
+          : [orderLockRowHolder.row];
       }
       if (sql.includes('FROM "Product"')) {
         return [productLockRow];
@@ -141,7 +158,10 @@ const {
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
+    txErrandTaskUpdateMany,
     setProductLockRow,
+    errandLockRowHolder,
+    orderLockRowHolder,
   };
 });
 
@@ -229,9 +249,19 @@ describe("order actions", () => {
       sellerId: "seller-1",
       deletedAt: null,
     });
+    errandLockRowHolder.row = null;
+    orderLockRowHolder.row = {
+      id: "order-1",
+      type: "PRODUCT",
+      status: "PENDING",
+      buyerId: "user-1",
+      sellerId: "seller-1",
+      productId: "product-1",
+    };
     txProductUpdateMany.mockReset();
     txServiceListingUpdate.mockReset();
     txUserUpdate.mockReset();
+    txErrandTaskUpdateMany.mockReset().mockResolvedValue({ count: 1 });
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     txProductUpdateMany.mockResolvedValue({ count: 1 });
@@ -535,10 +565,11 @@ describe("order actions", () => {
       expect(createNotifications).toHaveBeenCalled();
     });
 
-    it("routes ERRAND completion through completeErrandOrderTx（FR-05 branch 补全）", async () => {
+    it("routes ERRAND completion through the canonical errand lifecycle delegation", async () => {
       completeErrandOrderTxMock.mockResolvedValue({ completed: true });
       const completeMock = completeErrandOrderTxMock;
-      // 状态机：ERRAND COMPLETED 须 isBuyer（session user-1 = buyer）∧ IN_PROGRESS
+      // 状态机：ERRAND COMPLETED 须 isBuyer（session user-1 = buyer）∧
+      // Task PENDING_CONFIRMATION ∧ 恰 1 个 IN_PROGRESS active order
       orderFindUnique.mockResolvedValue(
         orderFixture({
           type: "ERRAND",
@@ -549,6 +580,20 @@ describe("order actions", () => {
           errandTaskId: "errand-1",
         }),
       );
+      errandLockRowHolder.row = {
+        id: "errand-1",
+        campusId: "campus-1",
+        status: "PENDING_CONFIRMATION",
+        publisherId: "user-1",
+        accepterId: "runner-1",
+        deletedAt: null,
+      };
+      orderLockRowHolder.row = {
+        id: "order-1",
+        status: "IN_PROGRESS",
+        buyerId: "user-1",
+        sellerId: "runner-1",
+      };
 
       await updateOrderStatus(statusFormData("COMPLETED"));
 
@@ -572,16 +617,74 @@ describe("order actions", () => {
           type: "ERRAND",
           status: "IN_PROGRESS",
           buyerId: "user-1",
+          sellerId: "runner-1",
           productId: null,
           errandTaskId: "errand-1",
         }),
       );
+      errandLockRowHolder.row = {
+        id: "errand-1",
+        campusId: "campus-1",
+        status: "PENDING_CONFIRMATION",
+        publisherId: "user-1",
+        accepterId: "runner-1",
+        deletedAt: null,
+      };
+      orderLockRowHolder.row = {
+        id: "order-1",
+        status: "IN_PROGRESS",
+        buyerId: "user-1",
+        sellerId: "runner-1",
+      };
 
       await updateOrderStatus(statusFormData("COMPLETED"));
 
       expect(completeMock).toHaveBeenCalled();
       // completed=false → 无 revalidate、无后续乐观锁流转
       expect(txOrderUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it("routes ERRAND start through the canonical errand lifecycle delegation", async () => {
+      // 状态机：ERRAND IN_PROGRESS 须 isSeller（accepter）∧ Task CLAIMED ∧
+      // 恰 1 个 ACCEPTED active order；Task + Order 同事务流转
+      orderFindUnique.mockResolvedValue(
+        orderFixture({
+          type: "ERRAND",
+          status: "ACCEPTED",
+          buyerId: "buyer-1",
+          sellerId: "user-1",
+          productId: null,
+          errandTaskId: "errand-1",
+        }),
+      );
+      errandLockRowHolder.row = {
+        id: "errand-1",
+        campusId: "campus-1",
+        status: "CLAIMED",
+        publisherId: "buyer-1",
+        accepterId: "user-1",
+        deletedAt: null,
+      };
+      orderLockRowHolder.row = {
+        id: "order-1",
+        status: "ACCEPTED",
+        buyerId: "buyer-1",
+        sellerId: "user-1",
+      };
+
+      await updateOrderStatus(statusFormData("IN_PROGRESS"));
+
+      expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
+        where: { id: "errand-1", status: "CLAIMED" },
+        data: { status: "IN_PROGRESS" },
+      });
+      expect(txOrderUpdateMany).toHaveBeenCalledWith({
+        where: { id: "order-1", status: "ACCEPTED" },
+        data: { status: "IN_PROGRESS" },
+      });
+      // canonical 通知（与详情页同集合，禁止入口路径依赖）
+      expect(createNotifications).toHaveBeenCalledTimes(1);
+      expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
     });
 
     it("marks the product as sold and bumps counters on completion", async () => {

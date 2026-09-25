@@ -845,6 +845,23 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       await restrict(publisherA.id);
 
+      // AUDIT2-RB02 canonical pair：CLAIMED 必须恰好 1 个 active ACCEPTED
+      // order（0 个 = 数据异常 fail closed）——capability 语义不变，fixture
+      // 需带配套订单
+      const reopenOrder = await rawClient!.order.create({
+        data: {
+          orderNo: `it-${randomUUID()}`,
+          type: "ERRAND",
+          status: "ACCEPTED",
+          amount: new Prisma.Decimal(8),
+          paymentStatus: "OFFLINE_PENDING",
+          buyerId: publisherA.id,
+          sellerId: buyerA.id,
+          errandTaskId: errandA.id,
+        },
+      });
+      trackedOrderIds.push(reopenOrder.id);
+
       const reopenForm = new FormData();
       reopenForm.set("errandId", errandA.id);
       reopenForm.set("status", "OPEN");
@@ -858,6 +875,16 @@ describe.skipIf(!integrationDatabaseUrl)(
       const reopened = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errandA.id } });
       expect(reopened.status).toBe("OPEN");
       expect(reopened.accepterId).toBeNull();
+      // canonical pair：reopen 对应 active Order ACCEPTED → CANCELLED
+      expect(
+        (await rawClient!.order.findUniqueOrThrow({ where: { id: reopenOrder.id } })).status,
+      ).toBe("CANCELLED");
+      // 复位：fixture order 删除 + 任务回 OPEN 无 accepter 基线（后续用例依赖）
+      await rawClient!.order.delete({ where: { id: reopenOrder.id } });
+      await rawClient!.errandTask.update({
+        where: { id: errandA.id },
+        data: { status: "OPEN", accepterId: null, deletedAt: null },
+      });
     });
 
     it("CAP-23/41 既有义务沟通：ORDER 会话发起 + sendMessage 在 restriction 下放行", async () => {
