@@ -953,4 +953,86 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
     // 通知只有 winner 一条
     expect(createNotifications).toHaveBeenCalledTimes(1);
   });
+
+  // ---- AUDIT2-RB03 EXTERNAL REVIEW FIX：maximumDuration 总租期合同 ----
+  // maximumDuration 约束整个订单 startTime → proposed endTime 的最大总租期
+  // （不是单次增量）；request 与 approve 都以 locked listing 现势值为 authority。
+
+  it("EXT-MAX-UNIT-01 request total duration > maximumDuration → blocked，零创建零通知", async () => {
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1", maximumDuration: 3 }], // proposed total = 4 天
+      pendingCount: 0,
+    });
+
+    const result = await requestExtensionTx(asExtensionTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      newEndTime: NEW_END,
+    });
+
+    expect(result).toEqual({ error: "最长租期为 3 个计价单位" });
+    expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("EXT-MAX-UNIT-02 approve total duration > maximumDuration → blocked，extension 保持 PENDING 零订单写", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1", maximumDuration: 3 }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "最长租期为 3 个计价单位" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("EXT-MAX-UNIT-03 duration == maximumDuration → request 与 approve 均允许（> 而非 >=）", async () => {
+    // proposed total = 8/8 → 8/12 = 4 天，maximumDuration = 4：恰好等于上限
+    const requestTx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1", maximumDuration: 4 }],
+      pendingCount: 0,
+      conflictAvailable: true,
+    });
+    checkTimeConflict.mockResolvedValue({ available: true });
+
+    expect(
+      await requestExtensionTx(asExtensionTx(requestTx), {
+        orderId: "order-1",
+        userId: "user-renter",
+        newEndTime: NEW_END,
+      }),
+    ).toEqual({ success: true });
+    expect(requestTx.rentalExtensionRequest.create).toHaveBeenCalledTimes(1);
+
+    const approveTx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1", maximumDuration: 4 }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+      gateCount: 1,
+    });
+
+    expect(
+      await approveExtensionTx(asExtensionTx(approveTx), {
+        extensionRequestId: "ext-1",
+        userId: "user-owner",
+      }),
+    ).toEqual({ success: true });
+    expect(approveTx.rentalExtensionRequest.updateMany).toHaveBeenCalledTimes(1);
+    expect(approveTx.rentalOrder.update).toHaveBeenCalledTimes(1);
+  });
 });

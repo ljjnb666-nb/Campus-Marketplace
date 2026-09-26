@@ -644,6 +644,8 @@ export type ExtensionRacePoint = (tx: Prisma.TransactionClient) => Promise<void>
  *   5. RentalListing FOR UPDATE（capacity authority 与 createRentalOrderTx 同 mutex）
  *   6. single-PENDING invariant：已有 PENDING → 稳定业务错误，绝不创建第二个
  *   7. fresh newEndTime > fresh order.endTime
+ *   7b. maximumDuration 总租期合同：calculateRentalDuration(startTime → newEnd)
+ *       ≤ locked listing.maximumDuration（续租不得绕过创建时同域规则）
  *   8. unavailable period 增量区间 [order.endTime, newEndTime) 命中即拒绝
  *   9. capacity check（request 阶段仅即时反馈，不是 approval authority）
  *   10. additionalFee 基于 fresh locked 订单 price snapshot 计价（listing 现价不是 authority）
@@ -702,13 +704,17 @@ export async function requestExtensionTx(
   const order = asExtensionOrder(rawOrder);
 
   // ---- 步骤 4：RentalListing FOR UPDATE（capacity mutex；物理缺失 fail closed）----
-  const listingRows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT id
+  // AUDIT2-RB03 review fix：maximumDuration 是 extension 的 policy authority
+  // （RentalOrder 无该字段的 snapshot，本轮以 locked listing 现势行为准，
+  // SCHEMA_CHANGE=NO）。
+  const listingRows = await tx.$queryRaw<Array<{ id: string; maximumDuration: number }>>`
+    SELECT id, "maximumDuration"
     FROM "RentalListing"
     WHERE id = ${order.rentalListingId}
     FOR UPDATE
   `;
-  if (!listingRows[0]) return { error: "出租物品不存在或已下架" };
+  const lockedListing = listingRows[0];
+  if (!lockedListing) return { error: "出租物品不存在或已下架" };
 
   // ---- 步骤 5：single-PENDING invariant（§16，participant + order locks 内）----
   const pendingCount = await tx.rentalExtensionRequest.count({
@@ -718,6 +724,14 @@ export async function requestExtensionTx(
 
   // ---- 步骤 6：fresh newEndTime（§19，锁内而非 UI）----
   if (input.newEndTime <= order.endTime) return { error: "新结束时间必须晚于当前结束时间" };
+
+  // ---- 步骤 6b：maximumDuration 总租期合同（review fix §2/§4）----
+  // maximumDuration 约束整个订单 startTime → proposed endTime 的最大总租期，
+  // 不是单次 extension 增量；语义与 createRentalOrderTx 相同，续租不得绕过。
+  const proposedDuration = calculateRentalDuration(order.pricingUnitSnapshot, order.startTime, input.newEndTime);
+  if (proposedDuration > lockedListing.maximumDuration) {
+    return { error: `最长租期为 ${lockedListing.maximumDuration} 个计价单位` };
+  }
 
   // ---- 步骤 7：unavailable period 增量区间（§22，与 createRentalOrderTx 同谓词）----
   const unavailable = await tx.rentalUnavailablePeriod.findFirst({
@@ -763,7 +777,9 @@ export async function requestExtensionTx(
  * RentalListing FOR UPDATE（capacity mutex，§26）→
  * RentalExtensionRequest FOR UPDATE + fresh 验证（§28）→
  * exact single-PENDING cardinality（§29，历史脏数据 fail closed）→
- * fresh endTime（§30 不得缩短订单）→ fee 重算比对（§31 基线漂移 fail
+ * fresh endTime（§30 不得缩短订单）→ maximumDuration approval-time 复查
+ * （review fix：locked listing 现势值，request-time PASS 不是 authority）→
+ * fee 重算比对（§31 基线漂移 fail
  * closed，不静默改价）→ unavailable period（§33）→ capacity（§33）→
  * racePoint（测试 seam）→ conditional winner gate（§34 updateMany
  * PENDING→APPROVED count=1）→ 订单 endTime/rentalDuration/rentalAmount/
@@ -822,13 +838,16 @@ export async function approveExtensionTx(
   const order = asExtensionOrder(rawOrder);
 
   // ---- 步骤 4：RentalListing FOR UPDATE（§26 capacity mutex；物理缺失 fail closed）----
-  const listingRows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT id
+  // review fix：approval-time maximumDuration 以 locked listing 现势行为准，
+  // 绝不信任 request-time 旧值（owner 可能已在 request 之后收紧最长租期）。
+  const listingRows = await tx.$queryRaw<Array<{ id: string; maximumDuration: number }>>`
+    SELECT id, "maximumDuration"
     FROM "RentalListing"
     WHERE id = ${order.rentalListingId}
     FOR UPDATE
   `;
-  if (!listingRows[0]) return { error: "出租物品不存在或已下架" };
+  const lockedListing = listingRows[0];
+  if (!lockedListing) return { error: "出租物品不存在或已下架" };
 
   // ---- 步骤 5：RentalExtensionRequest FOR UPDATE + fresh 验证（§28）----
   const extRows = await tx.$queryRaw<
@@ -868,6 +887,15 @@ export async function approveExtensionTx(
 
   // ---- 步骤 7：fresh base-end 保护（§30，绝不缩短订单）----
   if (ext.newEndTime <= order.endTime) return { error: "续租请求已过期，请重新提交续租" };
+
+  // ---- 步骤 7b：maximumDuration approval-time 复查（review fix §2/§5/§6）----
+  // request-time PASS 不是 approval authority：fresh locked listing.maximumDuration
+  // 才是 policy authority。违反时返回同一稳定业务错误，extension 保持 PENDING、
+  // 订单零变更、零 approval notification。
+  const proposedDuration = calculateRentalDuration(order.pricingUnitSnapshot, order.startTime, ext.newEndTime);
+  if (proposedDuration > lockedListing.maximumDuration) {
+    return { error: `最长租期为 ${lockedListing.maximumDuration} 个计价单位` };
+  }
 
   // ---- 步骤 8：fee 重算比对（§31/§32，基线漂移 fail closed 不改价）----
   const expectedAdditionalFee = calculateRentalAmount(

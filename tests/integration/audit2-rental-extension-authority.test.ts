@@ -84,7 +84,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       return user;
     }
 
-    async function createFixtureListing(totalQuantity: number) {
+    async function createFixtureListing(totalQuantity: number, maximumDuration = 30) {
       const listing = await rawClient!.rentalListing.create({
         data: {
           title: `RB03 续租 ${randomUUID().slice(0, 6)}`,
@@ -94,7 +94,7 @@ describe.skipIf(!integrationDatabaseUrl)(
           pricingUnit: "PER_DAY",
           depositAmount: "50.00",
           minimumDuration: 1,
-          maximumDuration: 30,
+          maximumDuration,
           totalQuantity,
           availableQuantity: totalQuantity,
           pickupLocation: "南门",
@@ -889,6 +889,87 @@ describe.skipIf(!integrationDatabaseUrl)(
       const orders = await rawClient!.rentalOrder.findMany({ where: { rentalListingId: listing.id } });
       expect(orders).toHaveLength(2);
       expect(orders.reduce((sum, o) => sum + o.quantity, 0)).toBe(2); // 时间不重叠：T0-T1 与 T1+1h-T2-1h
+    });
+
+    // ============================================================
+    // AUDIT2-RB03 EXTERNAL REVIEW FIX：maximumDuration 总租期合同
+    // （maximumDuration 约束 startTime → proposed endTime 的最大总租期，
+    // request 与 approve 都以 locked listing 现势值为 authority）
+    // ============================================================
+
+    it("EXT-17 maximumDuration=3：request 总租期 4 > 3 → 拒绝，零 PENDING 零通知", async () => {
+      const listing = await createFixtureListing(1, 3);
+      const order = await createFixtureOrder({ listingId: listing.id, renterId: renterA.id, status: "IN_RENTAL" });
+
+      // proposed total = T0 → T2 = 4 个计价单位 > 3
+      expect(await requestViaProduction(renterA.id, order.id, T2)).toEqual({
+        error: "最长租期为 3 个计价单位",
+      });
+
+      expect(
+        await rawClient!.rentalExtensionRequest.count({ where: { orderId: order.id } }),
+      ).toBe(0);
+      expect(await notificationCount({ userId: owner.id, title: "收到续租请求" })).toBe(0);
+      // 订单零变更
+      const finalOrder = await readOrder(order.id);
+      expect(finalOrder.endTime.getTime()).toBe(T1.getTime());
+      expect(finalOrder.rentalAmount.toString()).toBe("40");
+      expect(finalOrder.finalAmount.toString()).toBe("90");
+    });
+
+    it("EXT-18 policy drift：request 时 max=10 通过 → owner 收紧为 5 → approve 基于 fresh listing 拒绝，extension 保持 PENDING 零变更", async () => {
+      const listing = await createFixtureListing(1, 10);
+      const order = await createFixtureOrder({ listingId: listing.id, renterId: renterA.id, status: "IN_RENTAL" });
+
+      // Day0 → Day8：proposed total = 8 ≤ 10，request 合法
+      const day8 = new Date(T0.getTime() + 8 * DAY);
+      expect(await requestViaProduction(renterA.id, order.id, day8)).toEqual({ success: true });
+      const ext = await rawClient!.rentalExtensionRequest.findFirstOrThrow({
+        where: { orderId: order.id },
+      });
+      expect(ext.status).toBe("PENDING");
+
+      // 真实 DB 政策漂移：owner 在 request 之后把最长租期收紧为 5
+      await rawClient!.rentalListing.update({
+        where: { id: listing.id },
+        data: { maximumDuration: 5 },
+      });
+
+      // approval 必须基于 fresh locked listing.maximumDuration = 5 拒绝（8 > 5），
+      // 绝不信任 request-time 旧值 10
+      expect(await approveViaProduction(owner.id, ext.id)).toEqual({
+        error: "最长租期为 5 个计价单位",
+      });
+
+      const finalOrder = await readOrder(order.id);
+      expect(finalOrder.endTime.getTime()).toBe(T1.getTime());
+      expect(finalOrder.rentalDuration).toBe(2);
+      expect(finalOrder.rentalAmount.toString()).toBe("40");
+      expect(finalOrder.finalAmount.toString()).toBe("90");
+      expect((await readExtension(ext.id)).status).toBe("PENDING");
+      expect(await notificationCount({ userId: renterA.id, title: "续租请求已通过" })).toBe(0);
+    });
+
+    it("EXT-19 boundary：maximumDuration=4，proposed total = 4 → request + approve 全 PASS（> 而非 >=）", async () => {
+      const listing = await createFixtureListing(1, 4);
+      const order = await createFixtureOrder({ listingId: listing.id, renterId: renterA.id, status: "IN_RENTAL" });
+
+      // proposed total = T0 → T2 = 4，恰好等于上限
+      expect(await requestViaProduction(renterA.id, order.id, T2)).toEqual({ success: true });
+      const ext = await rawClient!.rentalExtensionRequest.findFirstOrThrow({
+        where: { orderId: order.id },
+      });
+      expect(ext.additionalFee.toString()).toBe("40");
+
+      expect(await approveViaProduction(owner.id, ext.id)).toEqual({ success: true });
+
+      const finalOrder = await readOrder(order.id);
+      expect(finalOrder.endTime.getTime()).toBe(T2.getTime());
+      expect(finalOrder.rentalDuration).toBe(4);
+      expect(finalOrder.rentalAmount.toString()).toBe("80");
+      expect(finalOrder.finalAmount.toString()).toBe("130");
+      expect((await readExtension(ext.id)).status).toBe("APPROVED");
+      expect(await notificationCount({ userId: renterA.id, title: "续租请求已通过" })).toBe(1);
     });
   },
 );
