@@ -283,19 +283,57 @@ describe("uploadImageAsset（可恢复状态机）", () => {
     expect(putObject).not.toHaveBeenCalled();
   });
 
-  it("S3 PUT 失败：补偿删除 UPLOADING 行并释放配额（CASE A）", async () => {
-    putObject.mockRejectedValue(new Error("connection reset"));
+  it("S3 PUT 失败（ambiguous outcome）：行转 PENDING_DELETE 保留，配额不提前释放，purge 成功后 exactly-once 释放（LR-071）", async () => {
+    putObject.mockRejectedValue(new Error("connection reset after remote commit"));
 
     await expect(
       uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
-    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 500 });
+    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
 
-    // 补偿事务：删除 UPLOADING 行 + 释放配额（同一事务）
-    expect(assetDeleteMany).toHaveBeenCalledWith({
+    // 安全失败状态：UPLOADING → PENDING_DELETE（authoritative recovery row 保留）
+    expect(assetUpdateMany).toHaveBeenCalledWith({
       where: { id: "asset-1", status: "UPLOADING" },
+      data: { status: "PENDING_DELETE" },
     });
-    expect(executeRaw).toHaveBeenCalledTimes(2); // 预留 + 释放
-    expect(assetUpdateMany).not.toHaveBeenCalled(); // 未进入 UPLOADED
+    // 禁止删行（旧即时补偿已废除：PUT throw ≠ 远端对象不存在）
+    expect(assetDeleteMany).not.toHaveBeenCalled();
+    // purge 成功路径：DeleteObject → T2（条件转移 DELETED + 同事务释放配额）
+    expect(deleteObject).toHaveBeenCalledWith({
+      bucket: "campus-public",
+      objectKey: expect.any(String),
+    });
+    // executeRaw 调用 = 预留（T1）+ 释放（T2 purge 内）——无提前/重复释放
+    expect(executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("S3 PUT 失败且远端删除仍不可用：停留 PENDING_DELETE，配额保持占用，由 cleanup 重试", async () => {
+    putObject.mockRejectedValue(new Error("connection reset"));
+    deleteObject.mockRejectedValue(new Error("storage still down"));
+
+    await expect(
+      uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
+    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
+
+    // PENDING_DELETE 标记成功，但删除失败 → 不释放配额（executeRaw 仅 T1 预留一次）
+    expect(assetUpdateMany).toHaveBeenCalledWith({
+      where: { id: "asset-1", status: "UPLOADING" },
+      data: { status: "PENDING_DELETE" },
+    });
+    expect(executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("S3 PUT 失败且标记 PENDING_DELETE 本身失败：行保持 UPLOADING 走 stale 恢复，不释放配额", async () => {
+    putObject.mockRejectedValue(new Error("connection reset"));
+    // 第一次 updateMany = PUT 后的 PENDING_DELETE 标记：DB 故障
+    assetUpdateMany.mockRejectedValueOnce(new Error("db down"));
+
+    await expect(
+      uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
+    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
+
+    // 标记失败 → 不 purge、不释放配额；行停留 UPLOADING（cleanup stale 恢复）
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(executeRaw).toHaveBeenCalledTimes(1);
   });
 
   it("S3 成功但状态转移失败：报错且资源停留 UPLOADING 等待 cleanup", async () => {
