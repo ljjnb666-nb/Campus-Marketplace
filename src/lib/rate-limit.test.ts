@@ -302,6 +302,57 @@ describe("rate limiter", () => {
     expect(evalFn).not.toHaveBeenCalled();
   });
 
+  it("dedupes client-level reconnect error storms into one degraded event per outage episode", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    const loggerModule = await import("@/lib/logger");
+    const warnSpy = vi.spyOn(loggerModule.logger, "warn").mockImplementation(() => undefined);
+    const infoSpy = vi.spyOn(loggerModule.logger, "info").mockImplementation(() => undefined);
+
+    // 创建 client（mock 底层）：触发 on("error") 注册
+    mockClient.status = "ready";
+    evalFn.mockResolvedValue(1);
+    await isRateLimited({ key: "storm", limit: 10, windowMs: 60_000 });
+
+    const errorRegistrations = mockClient.on.mock.calls.filter(
+      ([event]) => event === "error",
+    );
+    expect(errorRegistrations.length).toBeGreaterThan(0);
+    const errorHandler = errorRegistrations[
+      errorRegistrations.length - 1
+    ][1] as (error: Error) => void;
+
+    // 同一持续 outage：12 连发 client error 事件 → degraded WARN 恰好 1 条
+    for (let i = 0; i < 12; i += 1) {
+      errorHandler(new Error(`connect ECONNREFUSED 10.1.2.3:6379 attempt ${i}`));
+    }
+    let degraded = warnSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_degraded"),
+    );
+    expect(degraded).toHaveLength(1);
+    // 日志安全：不落 raw error message（可能含端点）、不落 rate-limit key
+    expect(JSON.stringify(degraded[0])).not.toContain("ECONNREFUSED");
+    expect(JSON.stringify(degraded[0])).not.toContain("storm");
+
+    // 恢复：client ready → 下一次调用清除冷却 → recovered INFO 恰好 1 条
+    await isRateLimited({ key: "storm", limit: 10, windowMs: 60_000 });
+    const recovered = infoSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_recovered"),
+    );
+    expect(recovered).toHaveLength(1);
+
+    // 再次 outage：degraded WARN 恰好 +1
+    for (let i = 0; i < 5; i += 1) {
+      errorHandler(new Error("connect ECONNREFUSED again"));
+    }
+    degraded = warnSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_degraded"),
+    );
+    expect(degraded).toHaveLength(2);
+
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
   it("does not log the rate-limit key in cooldown transition events", async () => {
     vi.stubEnv("REDIS_URL", "redis://localhost:6379");
     const loggerModule = await import("@/lib/logger");

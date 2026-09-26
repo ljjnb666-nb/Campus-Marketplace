@@ -86,11 +86,17 @@ export function getRedisClient(): Redis | null {
       connectTimeout: 2000,
       commandTimeout: 1500,
     });
-    // 显式消费连接错误事件，避免 ioredis 未处理 error 事件的噪音
+    // 显式消费连接错误事件（避免 ioredis 未处理 error 事件崩溃）。
+    // 日志合同（LR-070 审计修复）：持续 outage 重连期间 ioredis 每次重试
+    // 都会发 error 事件（约每 1-2s 一条）——事件路由进失败冷却状态做
+    // 跳变去重，同一冷却窗口内只产生一次 degraded WARN，不形成 client 级
+    // WARN 风暴。只记录 errorName：error.message 可能包含连接串/端点信息，
+    // 不落日志。
     client.on("error", (error) => {
-      logger.warn("Redis 连接异常，限流回退本地计数", "rate-limit", {
-        error: error.message,
-      });
+      enterRedisFailureCooldown(
+        "connection_error",
+        error instanceof Error ? error.name : "Error",
+      );
     });
     global.rateLimitRedis = client;
     global.rateLimitRedisReady = undefined;

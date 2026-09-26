@@ -143,31 +143,35 @@ describe.skipIf(!integrationRedisUrl)("LR-070 Redis 故障冷却（真实连接�
     expect(elapsed).toBeLessThan(3000);
   });
 
-  it("冷却到期后允许重新 probe（重试语义，固定有界）", async () => {
+  it("持续 outage：probe 永不连续、延迟永不叠加（任意调用后下一次必立即回退）", async () => {
     const outagePort = await findFreePort();
     const rateLimit = await freshModule(`redis://localhost:${outagePort}`);
-    // 缩短冷却窗口：验证"到期后允许下一次 probe"而不必等 30s
+    // 缩短冷却窗口并跨越多个窗口边界：真实 ioredis 的后台连接错误会持续
+    // 再武装冷却（生产窗口 30s >> 错误事件间隔，业务恒为立即回退）；
+    // 本测试验证与错误事件节奏无关的确定性不变量——
+    // "任意一次调用后冷却必然已武装"，因此 probe 至多每窗口一次且永不连续
     rateLimit.setRedisFailureCooldownForTests(300);
     const key = freshKey("cooldown-expiry");
 
-    // 第一次失败 → 冷却 300ms
-    await rateLimit.isRateLimited({ key, limit: 100, windowMs: 60_000 });
-    // 冷却内：立即回退
-    const fastStart = Date.now();
-    await rateLimit.isRateLimited({ key, limit: 100, windowMs: 60_000 });
-    expect(Date.now() - fastStart).toBeLessThan(200);
+    for (let round = 0; round < 3; round += 1) {
+      // 跨越窗口边界
+      await new Promise((resolve) => setTimeout(resolve, 350));
 
-    // 冷却到期：重新 probe（仍失败但被重新执行，预算有界）
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    const retryStart = Date.now();
-    const retry = await rateLimit.isRateLimited({ key, limit: 100, windowMs: 60_000 });
-    const retryElapsed = Date.now() - retryStart;
-    expect(retry.limited).toBe(false);
-    expect(retryElapsed).toBeGreaterThanOrEqual(300);
-    expect(retryElapsed).toBeLessThan(3000);
+      // 本轮第一次调用：要么冷却仍被后台错误武装（立即），要么支付一次有界 probe
+      const firstStart = Date.now();
+      const first = await rateLimit.isRateLimited({ key, limit: 100, windowMs: 60_000 });
+      expect(first.limited).toBe(false);
+      expect(Date.now() - firstStart).toBeLessThan(3000);
+
+      // 第二次调用：上一次调用必然已武装冷却 → 必须立即回退（< 200ms）
+      const secondStart = Date.now();
+      const second = await rateLimit.isRateLimited({ key, limit: 100, windowMs: 60_000 });
+      expect(second.limited).toBe(false);
+      expect(Date.now() - secondStart).toBeLessThan(200);
+    }
 
     rateLimit.setRedisFailureCooldownForTests(undefined);
-  });
+  }, 20_000);
 
   it("resetRateLimit 在 outage 下安全返回且清除本地桶", async () => {
     const outagePort = await findFreePort();
