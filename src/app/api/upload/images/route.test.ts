@@ -83,9 +83,13 @@ function buildUploadRequest(
   formData.set("category", category);
 
   // 路由只依赖 request.formData()，直接提供桩对象避免跨环境 multipart 序列化
-  // （multipart 解析层的真实证据由 production-build HTTP harness 覆盖）
+  // （multipart 解析层的真实证据由 production-build HTTP harness 覆盖）；
+  // 默认携带合法 multipart Content-Type（CT 预检有独立用例覆盖）
   return {
-    headers: new Headers(headers),
+    headers: new Headers({
+      "content-type": "multipart/form-data; boundary=----vitestboundary",
+      ...headers,
+    }),
     formData: async () => formData,
   } as unknown as NextRequest;
 }
@@ -239,9 +243,12 @@ describe("POST /api/upload/images", () => {
     expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("maps multipart parser failures to 400 INVALID_MULTIPART instead of generic 500", async () => {
+  it("maps known malformed multipart parser failures to 400 INVALID_MULTIPART", async () => {
     const request = {
-      headers: new Headers({ "content-length": "1000" }),
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+        "content-length": "1000",
+      }),
       formData: async () => {
         throw new TypeError("Failed to parse body as FormData.");
       },
@@ -254,6 +261,62 @@ describe("POST /api/upload/images", () => {
       error: "上传数据格式不正确，请重新选择文件",
       code: "INVALID_MULTIPART",
     });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing / non-multipart / boundary-less Content-Type before calling formData", async () => {
+    for (const contentType of [undefined, "application/json", "multipart/form-data"]) {
+      const formDataFn = vi.fn(async () => new FormData());
+      const request = {
+        headers: new Headers(
+          contentType ? { "content-type": contentType } : {},
+        ),
+        formData: formDataFn,
+      } as unknown as NextRequest;
+
+      const response = await POST(request);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "上传数据格式不正确，请重新选择文件",
+        code: "INVALID_MULTIPART",
+      });
+      expect(formDataFn).not.toHaveBeenCalled();
+      expect(uploadImageAsset).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rethrows unknown formData failures as generic 500 (unknown ≠ client fault)", async () => {
+    // 未知 Error（内部故障）：必须 500，不得伪装为 4xx
+    const unknownErrorRequest = {
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+      }),
+      formData: async () => {
+        throw new Error("unexpected internal parser failure");
+      },
+    } as unknown as NextRequest;
+    const errorResponse = await POST(unknownErrorRequest);
+    expect(errorResponse.status).toBe(500);
+    expect(await errorResponse.json()).toEqual({
+      error: "服务器内部错误，请稍后重试",
+    });
+
+    // 未知 TypeError（框架内部故障）：同样必须 500，不做宽泛 instanceof 归类
+    const unknownTypeErrorRequest = {
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+      }),
+      formData: async () => {
+        throw new TypeError("unexpected internal framework failure");
+      },
+    } as unknown as NextRequest;
+    const typeErrorResponse = await POST(unknownTypeErrorRequest);
+    expect(typeErrorResponse.status).toBe(500);
+    expect(await typeErrorResponse.json()).toEqual({
+      error: "服务器内部错误，请稍后重试",
+    });
+
     expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
