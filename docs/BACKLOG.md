@@ -191,3 +191,47 @@
 - **blocker**：NON_BLOCKING（job 绿；重试通过；与 release identity 变更无关）
 - **future work**：隔离复跑定位（timing/goto 超时类）后修复或纳入
   deterministic bootstrap 改造
+
+---
+
+## REPAIR-A-DEBT-PERF-01
+
+- **title**：公开搜索未采用 pg_trgm GIN 索引（评估后不交付；以 query-shape
+  复合索引 + createdAt 游走承担检索性能）
+- **motivation**：FINAL REPAIR A 评估了 pg_trgm GIN 方案并决定不交付：
+  （a）实测陷阱——pg_trgm 对 <3 字符模式无法提取 trigram，GIN 扫描退化为
+  全索引条目 + 全表 recheck（2 字词 数码 在 ErrandTask 上 Bitmap Index Scan
+  actual rows=60000、Rows Removed by Index Recheck=60000，单查询 50–110ms，
+  劣于基线 Seq Scan 的 20–40ms），而 2 字词是中文搜索最常见长度；
+  （b）drift 不变量——GIN/partial 索引无法在 Prisma datamodel 表达，交付
+  即破坏 D-5/T38-D "migrate diff = empty" 硬门禁。最终交付方案为
+  query-shape 复合索引（migration 20260926100802）：检索子查询经
+  createdAt 索引游走 + LIMIT 提前终止（EXPLAIN 实证 34–44ms Seq Scan →
+  0.1–0.6ms Index Scan），不依赖 GIN。已知边界：零/极低匹配词（如 typo）
+  的检索游走无法提前终止，成本与基线 Seq Scan 相当（~40ms 量级）。
+  若上线后查询长度分布证明 3+ 字词占比高，可评估"有意识放宽 drift 门禁 +
+  全表 GIN"（3 字词 自行车 全表 GIN 时 /search c=25 88.3 rps vs 复合索引
+  41.5 rps vs 基线 30.1 rps）或引入中文分词（tsvector/zhparser）/外部
+  搜索引擎。
+- **priority**：LOW
+- **dependency**：真实搜索词长度分布遥测（未建）
+- **candidate phase**：FINAL REPAIR B / Phase 8
+- **review_at**：Launch Readiness 复审
+- **blocker**：NON_BLOCKING——/search 代表性场景全部优于 LR-012 基线
+---
+
+## REPAIR-A-DEBT-PERF-02
+
+- **title**：/products（及各列表页）count 查询为每次请求的已知 Seq Scan 成本
+- **motivation**：`getProductList` 的 `COUNT(*)`（WHERE deletedAt IS NULL +
+  NOT EXISTS moderation）在 120k Product 上每次请求 ~20–30ms（campus_perf
+  实测）。计数无排序键可依、无法用窄索引显著优化；filters 组合高基数，
+  不允许结果缓存。FINAL REPAIR A 通过索引将同请求的 findMany 降至 ~1–2ms，
+  count 成为列表页 DB 成本主体。若 launch 后需要进一步优化，方向为
+  count 缓存（按精确 filter 组合、短 TTL）或 keyset 分页替代 offset+count。
+- **priority**：LOW
+- **dependency**：无
+- **candidate phase**：Phase 8
+- **review_at**：Launch Readiness 复审
+- **blocker**：NON_BLOCKING——列表页 p99 已控制在 ~2s @c=100（基线同场景
+  无法在 collapse 后测得）

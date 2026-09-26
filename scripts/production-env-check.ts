@@ -92,6 +92,23 @@ export function collectEnvChecks(vars: Record<string, string | undefined>): EnvC
       db.password.length >= 16 && containsUnsafeDefault(db.password) === undefined,
       "数据库密码缺失/过短/含危险默认值",
     );
+    // FINAL REPAIR A（LR-014）：连接池必须显式配置（launch checklist gate）。
+    // 容量公式与保留位说明见 docs/DATABASE.md「连接池容量规划」：
+    //   web 实例数 × connection_limit ≤ max_connections − 保留位
+    const connectionLimit = db.searchParams.get("connection_limit");
+    check(
+      results,
+      "DATABASE_URL.connection_limit",
+      connectionLimit !== null && Number.isInteger(Number(connectionLimit)) && Number(connectionLimit) > 0,
+      "生产连接串必须显式配置 connection_limit（按 docs/DATABASE.md 容量公式计算，禁止沿用隐式默认）",
+    );
+    const poolTimeout = db.searchParams.get("pool_timeout");
+    check(
+      results,
+      "DATABASE_URL.pool_timeout",
+      poolTimeout !== null && Number.isInteger(Number(poolTimeout)) && Number(poolTimeout) > 0,
+      "生产连接串必须显式配置 pool_timeout（池饱和时 fail-fast 与长尾延迟的取舍见 docs/DATABASE.md）",
+    );
   } catch {
     check(results, "DATABASE_URL", false, "不是合法 URL");
   }

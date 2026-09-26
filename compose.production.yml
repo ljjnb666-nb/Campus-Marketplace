@@ -113,8 +113,10 @@ services:
       - postgres
       - -c
       - timezone=Asia/Shanghai
+      # FINAL REPAIR A（LR-014）：max_connections 是连接池容量公式的输入，
+      # 允许按部署规模覆盖（默认 100；公式见 docs/DATABASE.md「连接池容量规划」）。
       - -c
-      - max_connections=100
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
     volumes:
       - pgdata:/var/lib/postgresql/data
     shm_size: 128mb
