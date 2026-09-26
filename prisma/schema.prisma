@@ -433,9 +433,18 @@ model Product {
   // Phase 7C：治理 overlay（活跃行 = 隐藏中；业务 status 零变更）
   moderations ListingModeration[] @relation("ModerationTargetProduct")
 
+  // FINAL REPAIR A（LR-013/LR-012）：高频排序/检索 query-shape 索引。
+  // 逐条形状与 EXPLAIN 证据见 migration 20260926120100；软删谓词不作
+  // partial 条件（查询侧恒为字面量，~2% recheck 换取 datamodel 可表达，
+  // 保持 drift=NONE 不变量）。
   @@index([campusId, status, createdAt])
   @@index([sellerId, status])
   @@index([categoryId, status])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([favoriteCount(sort: Desc), viewCount(sort: Desc), createdAt(sort: Desc)])
+  @@index([price, favoriteCount(sort: Desc), createdAt(sort: Desc)], map: "Product_budget_idx")
+  @@index([price(sort: Desc), favoriteCount(sort: Desc), createdAt(sort: Desc)], map: "Product_price_desc_idx")
 }
 
 model ProductImage {
@@ -526,9 +535,13 @@ model ErrandTask {
   // Phase 7C：治理 overlay（活跃行 = 隐藏中；workflow 状态零变更）
   moderations ListingModeration[] @relation("ModerationTargetErrand")
 
+  // FINAL REPAIR A：homepage 跑腿两榜（deadline/reward 交叉序）+ 默认序检索游走
   @@index([campusId, status, deadline])
   @@index([publisherId, status])
   @@index([categoryId, status])
+  @@index([status, deadline, reward(sort: Desc)])
+  @@index([status, reward(sort: Desc), deadline])
+  @@index([createdAt(sort: Desc)])
 }
 
 model ServiceListing {
@@ -562,9 +575,12 @@ model ServiceListing {
   // Phase 7C：治理 overlay（活跃行 = 隐藏中；业务 status 零变更）
   moderations ListingModeration[] @relation("ModerationTargetService")
 
+  // FINAL REPAIR A：homepage 服务两榜 + orders_desc 页排序 + 默认序检索游走
   @@index([campusId, status, createdAt])
   @@index([providerId, status])
   @@index([categoryId, status])
+  @@index([completedOrderCount(sort: Desc), createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
 }
 
 model Order {
@@ -1083,10 +1099,13 @@ model RentalListing {
   // PENDING_REVIEW / BANNED 为既有死枚举，Phase 7C 禁止启用）
   moderations ListingModeration[] @relation("ModerationTargetRental")
 
+  // FINAL REPAIR A：/rentals 默认序 + popular 排序
   @@index([campusId, status, createdAt])
   @@index([ownerId, status])
   @@index([categoryId, status])
   @@index([pricingUnit, status])
+  @@index([createdAt(sort: Desc)])
+  @@index([favoriteCount(sort: Desc), createdAt(sort: Desc)])
 }
 
 model RentalListingImage {
