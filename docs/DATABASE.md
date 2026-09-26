@@ -101,6 +101,15 @@ web 实例数 × connection_limit + worker 实例数 × worker_connection_limit
   提前终止）。pg_trgm GIN 经实测评估后不交付：2 字关键词（中文最常见长度）
   触发全索引扫描回退且无法在 datamodel 表达（drift=NONE 不变量），
   详见 BACKLOG REPAIR-A-DEBT-PERF-01。
+
+  LR-012 正式分类 = MITIGATED_WITH_DOCUMENTED_BOUNDARY
+  （PRODUCTION_BLOCKER = NO，STRUCTURAL_DEBT = YES）：游走优化依赖
+  "ORDER BY createdAt + LIMIT 12 + 匹配项足够早出现"；零匹配/极低匹配/
+  typo 查询无法提前终止，仍可能退化到接近基线 Seq Scan 成本（
+  bench-results/search-boundary.json 实测：COMMON 数码 c=100 p99 ~1.2s、
+  RARE midi键盘 c=100 p99 ~2.4s、ZERO 显微镜 c=100 p99 ~2.6s，
+  对应 EXPLAIN 见 bench-results/plans-search-boundary.txt）。通用解
+  （pg_trgm/FTS/中文分词/外部搜索引擎）属 FINAL REPAIR B / backlog。
 - 失效为 TTL eventual consistency：listing 增删改、favorite、订单完成、
   治理 takedown 等 mutation 不主动失效，公开榜单/计数最多陈旧 30s；
   元数据最多 60s。这是记录在案的 SLA 取舍。

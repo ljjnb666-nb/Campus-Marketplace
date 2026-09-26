@@ -434,7 +434,7 @@ model Product {
   moderations ListingModeration[] @relation("ModerationTargetProduct")
 
   // FINAL REPAIR A（LR-013/LR-012）：高频排序/检索 query-shape 索引。
-  // 逐条形状与 EXPLAIN 证据见 migration 20260926120100；软删谓词不作
+  // 逐条形状与 EXPLAIN 证据见 migration 20260926100802；软删谓词不作
   // partial 条件（查询侧恒为字面量，~2% recheck 换取 datamodel 可表达，
   // 保持 drift=NONE 不变量）。
   @@index([campusId, status, createdAt])
