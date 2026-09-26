@@ -74,6 +74,8 @@ for (const t of TABLES) {
   };
 }
 console.log(
+  // 单行 JSON（NDJSON）：cold-burst.sh 按行累积多档结果后汇编为单个
+  // JSON 文档；pretty-print 会破坏按行切分。
   JSON.stringify(
     {
       concurrency,
@@ -90,7 +92,5 @@ console.log(
       dbMaxActive: maxActive,
       scanDelta: delta,
     },
-    null,
-    2,
   ),
 );
