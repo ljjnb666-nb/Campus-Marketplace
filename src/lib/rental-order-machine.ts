@@ -433,8 +433,9 @@ export async function confirmPickupTx(
 export async function requestReturnTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string },
+  activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId);
+  await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
 
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] } },
@@ -595,27 +596,148 @@ export async function cancelRentalOrderTx(
   return { success: true };
 }
 
+/**
+ * AUDIT2-RB03 冻结合同：允许发起/批准续租的订单状态全集。
+ * 不新增状态；PENDING_RETURN / PENDING_INSPECTION / COMPLETED / CANCELLED /
+ * REJECTED / CLOSED / IN_DISPUTE / OVERDUE 一律不得 approve（§25）。
+ */
+export const EXTENSION_ALLOWED_ORDER_STATUSES: readonly RentalOrderStatus[] = [
+  "IN_RENTAL",
+  "PICKED_UP",
+];
+
+type ExtensionOrderRow = {
+  id: string;
+  ownerId: string;
+  renterId: string;
+  rentalListingId: string;
+  status: string;
+  startTime: Date;
+  endTime: Date;
+  quantity: number;
+  unitPriceSnapshot: unknown;
+  pricingUnitSnapshot: string;
+};
+
+/** $queryRaw 行 → 续租计价/会计所需的 order 视图（Decimal/pricingUnit 手动包装）。 */
+function asExtensionOrder(row: ExtensionOrderRow) {
+  return {
+    ...row,
+    status: row.status as RentalOrderStatus,
+    unitPriceSnapshot: new Prisma.Decimal(String(row.unitPriceSnapshot)),
+    pricingUnitSnapshot: row.pricingUnitSnapshot as RentalPricingUnit,
+  };
+}
+
+/** 测试 seam：participant 锁 + 全部校验通过后、winner gate 写入前的受控暂停点（生产不传）。 */
+export type ExtensionRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
+
+/**
+ * 租客发起续租（AUDIT2-RB03 serialization 修复版）。
+ *
+ * 冻结流程（directive §14）：
+ *   1. candidate pre-read（无锁，renterId 收口，仅发现 owner/renter 锁键）
+ *   2. sorted {USER:owner, USER:renter} governance subject locks（完整参与方锁集，
+ *      与 approve/reject/createRentalOrder/erase 同锁域串行；禁止只锁 actor）
+ *   3. actor（renter）lifecycle 复核（assertActiveAccountMutationAllowed，checks-only）
+ *   4. RentalOrder FOR UPDATE（不信任 pre-read snapshot，fresh 重验证 renter/状态）
+ *   5. RentalListing FOR UPDATE（capacity authority 与 createRentalOrderTx 同 mutex）
+ *   6. single-PENDING invariant：已有 PENDING → 稳定业务错误，绝不创建第二个
+ *   7. fresh newEndTime > fresh order.endTime
+ *   8. unavailable period 增量区间 [order.endTime, newEndTime) 命中即拒绝
+ *   9. capacity check（request 阶段仅即时反馈，不是 approval authority）
+ *   10. additionalFee 基于 fresh locked 订单 price snapshot 计价（listing 现价不是 authority）
+ *   11. create PENDING + owner 通知
+ *
+ * seams（仅测试注入；生产不传）：beforeLock（发现锁键后、取锁前）、
+ * afterCheck（actor ACTIVE 复核后、首个域校验前）——语义与
+ * prepareActiveAccountMutation 相同，但锁集升级为完整参与方锁。
+ */
 export async function requestExtensionTx(
   tx: Prisma.TransactionClient,
   input: { orderId: string; userId: string; newEndTime: Date },
   activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
+  // ---- 步骤 1：candidate pre-read（无锁），仅发现 participant 锁键 ----
+  const candidates = await tx.$queryRaw<Array<{ id: string; ownerId: string; renterId: string }>>`
+    SELECT id, "ownerId", "renterId"
+    FROM "RentalOrder"
+    WHERE id = ${input.orderId} AND "renterId" = ${input.userId}
+  `;
+  const candidate = candidates[0];
+  if (!candidate) return { error: "订单状态错误" };
 
-  const order = await tx.rentalOrder.findFirst({
-    where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'PICKED_UP'] } },
+  // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter ----
+  if (activeAccountSeams?.beforeLock) {
+    await activeAccountSeams.beforeLock(tx);
+  }
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.ownerId },
+    { subjectType: "USER", subjectId: candidate.renterId },
+  ]);
+
+  // RB-03：仅 actor（renter）lifecycle 复核；不对既有义务重新定义对手方
+  // suspension 语义（§11）
+  await assertActiveAccountMutationAllowed(tx, input.userId);
+  if (activeAccountSeams?.afterCheck) {
+    await activeAccountSeams.afterCheck(tx);
+  }
+
+  // ---- 步骤 3：RentalOrder FOR UPDATE + fresh 重验证 ----
+  const orderRows = await tx.$queryRaw<ExtensionOrderRow[]>`
+    SELECT id, "ownerId", "renterId", "rentalListingId", status, "startTime", "endTime",
+           quantity, "unitPriceSnapshot", "pricingUnitSnapshot"
+    FROM "RentalOrder"
+    WHERE id = ${candidate.id}
+    FOR UPDATE
+  `;
+  const rawOrder = orderRows[0];
+  // §15：renter 身份以锁内 fresh 行为准，绝不信任 candidate
+  if (!rawOrder || rawOrder.renterId !== input.userId || rawOrder.ownerId !== candidate.ownerId) {
+    return { error: "订单状态错误" };
+  }
+  if (!EXTENSION_ALLOWED_ORDER_STATUSES.includes(rawOrder.status as RentalOrderStatus)) {
+    return { error: "订单状态错误" };
+  }
+  const order = asExtensionOrder(rawOrder);
+
+  // ---- 步骤 4：RentalListing FOR UPDATE（capacity mutex；物理缺失 fail closed）----
+  const listingRows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id
+    FROM "RentalListing"
+    WHERE id = ${order.rentalListingId}
+    FOR UPDATE
+  `;
+  if (!listingRows[0]) return { error: "出租物品不存在或已下架" };
+
+  // ---- 步骤 5：single-PENDING invariant（§16，participant + order locks 内）----
+  const pendingCount = await tx.rentalExtensionRequest.count({
+    where: { orderId: order.id, status: "PENDING" },
   });
-  if (!order) return { error: "订单状态错误" };
+  if (pendingCount > 0) return { error: "已有待处理的续租请求" };
+
+  // ---- 步骤 6：fresh newEndTime（§19，锁内而非 UI）----
   if (input.newEndTime <= order.endTime) return { error: "新结束时间必须晚于当前结束时间" };
 
+  // ---- 步骤 7：unavailable period 增量区间（§22，与 createRentalOrderTx 同谓词）----
+  const unavailable = await tx.rentalUnavailablePeriod.findFirst({
+    where: {
+      rentalListingId: order.rentalListingId,
+      AND: [{ startDate: { lt: input.newEndTime } }, { endDate: { gt: order.endTime } }],
+    },
+  });
+  if (unavailable) return { error: "该时间段已被标记为不可租" };
+
+  // ---- 步骤 8：capacity 即时反馈（§21，approve 阶段仍会重查）----
   const conflict = await checkTimeConflict(tx, order.rentalListingId, order.endTime, input.newEndTime, order.quantity, order.id);
   if (!conflict.available) return { error: "续租时间段库存不足" };
 
+  // ---- 步骤 9：fee 基于订单 price snapshot（§20）----
   const additionalFee = calculateRentalAmount(order.unitPriceSnapshot, order.pricingUnitSnapshot, order.endTime, input.newEndTime);
 
   await tx.rentalExtensionRequest.create({
     data: {
-      orderId: input.orderId,
+      orderId: order.id,
       requesterId: input.userId,
       newEndTime: input.newEndTime,
       additionalFee,
@@ -632,54 +754,180 @@ export async function requestExtensionTx(
   return { success: true };
 }
 
-async function findPendingExtensionForOwner(
-  tx: Prisma.TransactionClient,
-  extensionRequestId: string,
-  userId: string,
-) {
-  const ext = await tx.rentalExtensionRequest.findFirst({
-    where: { id: extensionRequestId, status: 'PENDING' },
-    include: { order: true },
-  });
-  if (!ext || ext.order.ownerId !== userId) return null;
-  return ext;
-}
-
+/**
+ * 出租者批准续租（AUDIT2-RB03 serialization 修复版）。
+ *
+ * 冻结流程（directive §23-§39）：candidate pre-read（仅发现锁键）→
+ * sorted {USER:owner, USER:renter} locks → actor（owner）ACTIVE 复核 →
+ * RentalOrder FOR UPDATE + fresh 重验证（参与者/状态，§24/§25）→
+ * RentalListing FOR UPDATE（capacity mutex，§26）→
+ * RentalExtensionRequest FOR UPDATE + fresh 验证（§28）→
+ * exact single-PENDING cardinality（§29，历史脏数据 fail closed）→
+ * fresh endTime（§30 不得缩短订单）→ fee 重算比对（§31 基线漂移 fail
+ * closed，不静默改价）→ unavailable period（§33）→ capacity（§33）→
+ * racePoint（测试 seam）→ conditional winner gate（§34 updateMany
+ * PENDING→APPROVED count=1）→ 订单 endTime/rentalDuration/rentalAmount/
+ * finalAmount 同事务更新（§35-§37）→ status log（§38）→ renter 通知
+ * （§39 仅 winner 一条）。
+ *
+ * 冲突类失败（unavailable/capacity）时 extension 保持 PENDING（§33）。
+ */
 export async function approveExtensionTx(
   tx: Prisma.TransactionClient,
   input: { extensionRequestId: string; userId: string },
+  racePoint?: ExtensionRacePoint,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId);
+  // ---- 步骤 1：candidate pre-read（无锁），仅发现锁键 ----
+  const candidates = await tx.$queryRaw<
+    Array<{ id: string; orderId: string; ownerId: string; renterId: string; listingId: string }>
+  >`
+    SELECT ext."id", ext."orderId", o."ownerId", o."renterId", o."rentalListingId" AS "listingId"
+    FROM "RentalExtensionRequest" ext
+    JOIN "RentalOrder" o ON ext."orderId" = o."id"
+    WHERE ext."id" = ${input.extensionRequestId}
+  `;
+  const candidate = candidates[0];
+  if (!candidate) return { error: "无效请求" };
 
-  const ext = await findPendingExtensionForOwner(tx, input.extensionRequestId, input.userId);
-  if (!ext) return { error: "无效请求" };
+  // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter ----
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.ownerId },
+    { subjectType: "USER", subjectId: candidate.renterId },
+  ]);
 
-  const conflict = await checkTimeConflict(tx, ext.order.rentalListingId, ext.order.endTime, ext.newEndTime, ext.order.quantity, ext.order.id);
+  // RB-03：仅 actor（owner）lifecycle 复核
+  await assertActiveAccountMutationAllowed(tx, input.userId);
+
+  // ---- 步骤 3：RentalOrder FOR UPDATE + fresh 权威重验证（§24）----
+  const orderRows = await tx.$queryRaw<ExtensionOrderRow[]>`
+    SELECT id, "ownerId", "renterId", "rentalListingId", status, "startTime", "endTime",
+           quantity, "unitPriceSnapshot", "pricingUnitSnapshot"
+    FROM "RentalOrder"
+    WHERE id = ${candidate.orderId}
+    FOR UPDATE
+  `;
+  const rawOrder = orderRows[0];
+  if (!rawOrder) return { error: "无效请求" };
+  if (
+    rawOrder.ownerId !== candidate.ownerId ||
+    rawOrder.renterId !== candidate.renterId ||
+    rawOrder.rentalListingId !== candidate.listingId
+  ) {
+    return { error: "订单状态已变化，请重试" };
+  }
+  if (rawOrder.ownerId !== input.userId) return { error: "无效请求" };
+  if (!EXTENSION_ALLOWED_ORDER_STATUSES.includes(rawOrder.status as RentalOrderStatus)) {
+    return { error: "订单状态已变化，无法续租" };
+  }
+  const order = asExtensionOrder(rawOrder);
+
+  // ---- 步骤 4：RentalListing FOR UPDATE（§26 capacity mutex；物理缺失 fail closed）----
+  const listingRows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id
+    FROM "RentalListing"
+    WHERE id = ${order.rentalListingId}
+    FOR UPDATE
+  `;
+  if (!listingRows[0]) return { error: "出租物品不存在或已下架" };
+
+  // ---- 步骤 5：RentalExtensionRequest FOR UPDATE + fresh 验证（§28）----
+  const extRows = await tx.$queryRaw<
+    Array<{
+      id: string;
+      orderId: string;
+      requesterId: string;
+      newEndTime: Date;
+      additionalFee: unknown;
+      status: string;
+    }>
+  >`
+    SELECT "id", "orderId", "requesterId", "newEndTime", "additionalFee", "status"
+    FROM "RentalExtensionRequest"
+    WHERE id = ${input.extensionRequestId}
+    FOR UPDATE
+  `;
+  const rawExt = extRows[0];
+  if (
+    !rawExt ||
+    rawExt.orderId !== order.id ||
+    rawExt.requesterId !== order.renterId ||
+    rawExt.status !== "PENDING"
+  ) {
+    return { error: "无效请求" };
+  }
+  const ext = {
+    ...rawExt,
+    additionalFee: new Prisma.Decimal(String(rawExt.additionalFee)),
+  };
+
+  // ---- 步骤 6：exact pending cardinality（§29，历史重复 PENDING fail closed）----
+  const pendingCount = await tx.rentalExtensionRequest.count({
+    where: { orderId: order.id, status: "PENDING" },
+  });
+  if (pendingCount !== 1) return { error: "存在多个待处理的续租请求，请先逐个拒绝后再审批" };
+
+  // ---- 步骤 7：fresh base-end 保护（§30，绝不缩短订单）----
+  if (ext.newEndTime <= order.endTime) return { error: "续租请求已过期，请重新提交续租" };
+
+  // ---- 步骤 8：fee 重算比对（§31/§32，基线漂移 fail closed 不改价）----
+  const expectedAdditionalFee = calculateRentalAmount(
+    order.unitPriceSnapshot,
+    order.pricingUnitSnapshot,
+    order.endTime,
+    ext.newEndTime,
+  );
+  if (!expectedAdditionalFee.eq(ext.additionalFee)) {
+    return { error: "续租费用已变化，请重新提交续租" };
+  }
+
+  // ---- 步骤 9：unavailable period（§22/§33，冲突保持 PENDING）----
+  const unavailable = await tx.rentalUnavailablePeriod.findFirst({
+    where: {
+      rentalListingId: order.rentalListingId,
+      AND: [{ startDate: { lt: ext.newEndTime } }, { endDate: { gt: order.endTime } }],
+    },
+  });
+  if (unavailable) return { error: "该时间段已被标记为不可租" };
+
+  // ---- 步骤 10：capacity recheck（§33，冲突保持 PENDING）----
+  const conflict = await checkTimeConflict(tx, order.rentalListingId, order.endTime, ext.newEndTime, order.quantity, order.id);
   if (!conflict.available) return { error: "续租时间段库存不足" };
 
-  await tx.rentalExtensionRequest.update({
-    where: { id: input.extensionRequestId },
-    data: { status: 'APPROVED' },
-  });
+  if (racePoint) {
+    await racePoint(tx);
+  }
 
+  // ---- 步骤 11：winner gate（§34 conditional updateMany，count 必须 = 1）----
+  const gate = await tx.rentalExtensionRequest.updateMany({
+    where: { id: ext.id, status: "PENDING" },
+    data: { status: "APPROVED" },
+  });
+  if (gate.count !== 1) return { error: "无效请求" };
+
+  // ---- 步骤 12：会计一致性（§35-§37：duration 重算，金额各加一次）----
+  const newRentalDuration = calculateRentalDuration(order.pricingUnitSnapshot, order.startTime, ext.newEndTime);
   await tx.rentalOrder.update({
-    where: { id: ext.orderId },
+    where: { id: order.id },
     data: {
       endTime: ext.newEndTime,
-      finalAmount: { increment: ext.additionalFee },
+      rentalDuration: newRentalDuration,
+      rentalAmount: { increment: expectedAdditionalFee },
+      finalAmount: { increment: expectedAdditionalFee },
     },
   });
 
+  // ---- 步骤 13：status log（§38 same-status domain event）----
   await writeStatusLog(tx, {
-    orderId: ext.orderId,
-    fromStatus: ext.order.status,
-    toStatus: ext.order.status,
+    orderId: order.id,
+    fromStatus: order.status,
+    toStatus: order.status,
     operatorId: input.userId,
     note: `出租者同意续租，新结束时间: ${ext.newEndTime.toISOString()}`,
   });
 
+  // ---- 步骤 14：renter 通知（§39 仅 winner 一条）----
   await createNotifications(tx, [{
-    userId: ext.order.renterId,
+    userId: order.renterId,
     type: 'RENTAL',
     title: '续租请求已通过',
     content: `你的续租请求已通过。`,
@@ -687,22 +935,92 @@ export async function approveExtensionTx(
   return { success: true };
 }
 
+/**
+ * 出租者拒绝续租（AUDIT2-RB03 serialization 修复版）。
+ *
+ * 冻结流程（directive §40-§42）：candidate pre-read → sorted participant
+ * locks → owner ACTIVE 复核 → RentalOrder FOR UPDATE →
+ * RentalExtensionRequest FOR UPDATE + fresh 验证 → conditional
+ * PENDING→REJECTED（count=1）→ renter 通知。
+ *
+ * reject 属于 closing a pending request（§41）：不检查订单当前状态——
+ * 订单即使已 PENDING_RETURN / IN_DISPUTE / COMPLETED，owner 仍可拒绝以
+ * 清理 stale request。与 approve 共享同一锁集 + extension 行锁，单胜者。
+ */
 export async function rejectExtensionTx(
   tx: Prisma.TransactionClient,
   input: { extensionRequestId: string; userId: string },
+  racePoint?: ExtensionRacePoint,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId);
+  // ---- 步骤 1：candidate pre-read（无锁），仅发现锁键 ----
+  const candidates = await tx.$queryRaw<
+    Array<{ id: string; orderId: string; ownerId: string; renterId: string }>
+  >`
+    SELECT ext."id", ext."orderId", o."ownerId", o."renterId"
+    FROM "RentalExtensionRequest" ext
+    JOIN "RentalOrder" o ON ext."orderId" = o."id"
+    WHERE ext."id" = ${input.extensionRequestId}
+  `;
+  const candidate = candidates[0];
+  if (!candidate) return { error: "无效请求" };
 
-  const ext = await findPendingExtensionForOwner(tx, input.extensionRequestId, input.userId);
-  if (!ext) return { error: "无效请求" };
+  // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter ----
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.ownerId },
+    { subjectType: "USER", subjectId: candidate.renterId },
+  ]);
 
-  await tx.rentalExtensionRequest.update({
-    where: { id: input.extensionRequestId },
-    data: { status: 'REJECTED' },
+  // RB-03：仅 actor（owner）lifecycle 复核
+  await assertActiveAccountMutationAllowed(tx, input.userId);
+
+  // ---- 步骤 3：RentalOrder FOR UPDATE + fresh 重验证 ----
+  const orderRows = await tx.$queryRaw<
+    Array<{ id: string; ownerId: string; renterId: string; status: string }>
+  >`
+    SELECT id, "ownerId", "renterId", "status"
+    FROM "RentalOrder"
+    WHERE id = ${candidate.orderId}
+    FOR UPDATE
+  `;
+  const rawOrder = orderRows[0];
+  if (!rawOrder) return { error: "无效请求" };
+  if (rawOrder.ownerId !== candidate.ownerId || rawOrder.renterId !== candidate.renterId) {
+    return { error: "订单状态已变化，请重试" };
+  }
+  if (rawOrder.ownerId !== input.userId) return { error: "无效请求" };
+
+  // ---- 步骤 4：RentalExtensionRequest FOR UPDATE + fresh 验证 ----
+  const extRows = await tx.$queryRaw<
+    Array<{ id: string; orderId: string; requesterId: string; status: string }>
+  >`
+    SELECT "id", "orderId", "requesterId", "status"
+    FROM "RentalExtensionRequest"
+    WHERE id = ${input.extensionRequestId}
+    FOR UPDATE
+  `;
+  const rawExt = extRows[0];
+  if (
+    !rawExt ||
+    rawExt.orderId !== rawOrder.id ||
+    rawExt.requesterId !== rawOrder.renterId ||
+    rawExt.status !== "PENDING"
+  ) {
+    return { error: "无效请求" };
+  }
+
+  if (racePoint) {
+    await racePoint(tx);
+  }
+
+  // ---- 步骤 5：conditional PENDING→REJECTED（count 必须 = 1）----
+  const gate = await tx.rentalExtensionRequest.updateMany({
+    where: { id: rawExt.id, status: "PENDING" },
+    data: { status: "REJECTED" },
   });
+  if (gate.count !== 1) return { error: "无效请求" };
 
   await createNotifications(tx, [{
-    userId: ext.order.renterId,
+    userId: rawOrder.renterId,
     type: 'RENTAL',
     title: '续租请求被拒绝',
     content: `你的续租请求被拒绝。`,
