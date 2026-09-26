@@ -215,15 +215,18 @@
   搜索引擎。
 - **priority**：LOW
 - **dependency**：真实搜索词长度分布遥测（未建）
-- **candidate phase**：FINAL REPAIR B / Phase 8
+- **candidate phase**：Phase 8 / post-launch search optimization（backlog）
 - **review_at**：Launch Readiness 复审
 - **blocker**：NON_BLOCKING——PRODUCTION_BLOCKER = NO；STRUCTURAL_DEBT = YES。
   LR-012 正式分类 = MITIGATED_WITH_DOCUMENTED_BOUNDARY（非 FIXED）：
   B-tree 游走优化依赖 ORDER BY createdAt + LIMIT 12 + 匹配项足够早出现；
   零匹配/极低匹配/typo 查询无法提前终止，仍可能退化到接近基线 Seq Scan
   成本（见 REPAIR-A-DEBT-PERF-02 同类边界与 bench-results/search-boundary
-  实测）。通用解（pg_trgm/FTS/中文分词/外部搜索引擎）属 FINAL REPAIR B /
-  backlog，本阶段未交付。
+  实测；authoritative numbers：COMMON 数码 c=100 42.7 rps / p99 3362ms、
+  RARE midi键盘 25.9 / 4653ms、ZERO 显微镜 24.9 / 4378ms）。通用解
+  （pg_trgm/FTS/中文分词/外部搜索引擎）属 Phase 8 / post-launch search
+  optimization（backlog），不扩大 FINAL REPAIR B（LR-001/LR-070/LR-071）
+  scope，本阶段未交付。
 ---
 
 ## REPAIR-A-DEBT-PERF-02

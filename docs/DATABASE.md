@@ -106,10 +106,13 @@ web 实例数 × connection_limit + worker 实例数 × worker_connection_limit
   （PRODUCTION_BLOCKER = NO，STRUCTURAL_DEBT = YES）：游走优化依赖
   "ORDER BY createdAt + LIMIT 12 + 匹配项足够早出现"；零匹配/极低匹配/
   typo 查询无法提前终止，仍可能退化到接近基线 Seq Scan 成本（
-  bench-results/search-boundary.json 实测：COMMON 数码 c=100 p99 ~1.2s、
-  RARE midi键盘 c=100 p99 ~2.4s、ZERO 显微镜 c=100 p99 ~2.6s，
-  对应 EXPLAIN 见 bench-results/plans-search-boundary.txt）。通用解
-  （pg_trgm/FTS/中文分词/外部搜索引擎）属 FINAL REPAIR B / backlog。
+  authoritative run = bench-results/search-boundary.json：COMMON 数码
+  c=100 42.7 rps / p99 3362ms、RARE midi键盘 c=100 25.9 rps / p99 4653ms、
+  ZERO 显微镜 c=100 24.9 rps / p99 4378ms（run-to-run 存在本机噪声，
+  以该次保存的 run 为准；对应 EXPLAIN 见
+  bench-results/plans-search-boundary.txt）。通用解（pg_trgm/FTS/中文
+  分词/外部搜索引擎）属 Phase 8 / post-launch search optimization
+  （backlog），不扩大 FINAL REPAIR B（LR-001/LR-070/LR-071）scope。
 - 失效为 TTL eventual consistency：listing 增删改、favorite、订单完成、
   治理 takedown 等 mutation 不主动失效，公开榜单/计数最多陈旧 30s；
   元数据最多 60s。这是记录在案的 SLA 取舍。
