@@ -26,9 +26,14 @@ const basePrisma =
     datasourceUrl: buildDatasourceUrl(),
   });
 
-if (process.env.NODE_ENV !== "production") {
-  global.prisma = basePrisma;
-}
+// FINAL REPAIR A（LR-014 伴随修复）：生产同样挂 global 单例。
+// Next 的 server bundle 存在多个模块图实例；此前仅在非生产环境缓存 global，
+// 生产端出现多个 PrismaClient，每个各持一个 connection_limit=10 的池
+// （campus_perf 压测实测：单进程 pg_stat_activity 连接峰值 17–18 > 10），
+// 单实例真实连接上限 = 池数 × connection_limit，多实例部署时按实例数倍增。
+// 单例化后每进程恰一个池，LR-014 容量公式（docs/DATABASE.md）才能按
+// connection_limit 直接核算。
+global.prisma = basePrisma;
 
 // 对外导出的客户端统一挂载软删除拦截（deletedAt 过滤/delete 映射），
 // 业务代码无需逐查询手写 deletedAt: null，详见 prisma-soft-delete.ts
