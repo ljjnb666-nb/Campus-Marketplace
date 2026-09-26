@@ -30,6 +30,8 @@ vi.mock("@/repositories/rental-order-repository", () => ({
 }));
 
 import {
+  EXTENSION_ALLOWED_ORDER_STATUSES,
+  approveExtensionTx,
   approveRentalOrderTx,
   canCancelRentalOrder,
   counterpartyId,
@@ -39,10 +41,16 @@ import {
   isDisputableStatus,
   isRentalOrderRoleParticipant,
   recomputeRentalPositiveRate,
+  rejectExtensionTx,
   rejectRentalOrderTx,
+  requestExtensionTx,
   respondDamageClaimTx,
   writeStatusLog,
 } from "@/lib/rental-order-machine";
+import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-account-mutation";
+
+// vi.mock 提升后此导入实际是 mock；vi.mocked 仅用于恢复 mock 类型
+const mockAssertActive = vi.mocked(assertActiveAccountMutationAllowed);
 
 function buildTx() {
   return {
@@ -434,5 +442,515 @@ describe("rental-order-machine", () => {
     ]);
     // FOR UPDATE 必须是最后一次行锁请求，且严格晚于 governance 锁
     expect(calls.indexOf("subject-lock")).toBeLessThan(calls.indexOf("for-update"));
+  });
+});
+
+// ============================================================
+// AUDIT2-RB03：extension lifecycle authority 单元合同
+// 真实并发/真实 PostgreSQL 证明见
+// tests/integration/audit2-rental-extension-authority.test.ts
+// ============================================================
+
+const ORDER_START = new Date("2026-08-08T10:00:00.000Z");
+const ORDER_END = new Date("2026-08-10T10:00:00.000Z");
+const NEW_END = new Date("2026-08-12T10:00:00.000Z");
+
+function extensionOrderRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "order-1",
+    ownerId: "user-owner",
+    renterId: "user-renter",
+    rentalListingId: "listing-1",
+    status: "IN_RENTAL",
+    startTime: ORDER_START,
+    endTime: ORDER_END,
+    quantity: 1,
+    unitPriceSnapshot: "20",
+    pricingUnitSnapshot: "PER_DAY",
+    ...overrides,
+  };
+}
+
+function extensionExtRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "ext-1",
+    orderId: "order-1",
+    requesterId: "user-renter",
+    newEndTime: NEW_END,
+    additionalFee: "40",
+    status: "PENDING",
+    ...overrides,
+  };
+}
+
+/**
+ * extension authority 的状态化 mock 事务客户端：
+ * $queryRaw 按 SQL 形状路由（RentalExtensionRequest / RentalListing /
+ * RentalOrder × FOR UPDATE），并记录 authority 调用序列供锁序断言。
+ */
+function buildExtensionTx(config: {
+  orderPreRead?: unknown[] | null;
+  orderRow?: unknown[] | null;
+  listingRow?: unknown[] | null;
+  extPreRead?: unknown[] | null;
+  extRow?: unknown[] | null;
+  pendingCount?: number;
+  gateCount?: number;
+  unavailable?: unknown;
+  conflictAvailable?: boolean;
+}) {
+  const calls: string[] = [];
+  const tx = {
+    calls,
+    $executeRaw: vi.fn(async () => {
+      calls.push("subject-lock");
+      return 0;
+    }),
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      const forUpdate = sql.includes("FOR UPDATE");
+      if (sql.includes('"RentalExtensionRequest"')) {
+        calls.push(forUpdate ? "ext-for-update" : "ext-pre-read");
+        return (forUpdate ? config.extRow : config.extPreRead) ?? [];
+      }
+      if (sql.includes('"RentalListing"')) {
+        calls.push("listing-for-update");
+        return config.listingRow ?? [];
+      }
+      if (sql.includes('"RentalOrder"')) {
+        calls.push(forUpdate ? "order-for-update" : "order-pre-read");
+        return (forUpdate ? config.orderRow : config.orderPreRead) ?? [];
+      }
+      calls.push("raw-other");
+      return [];
+    }),
+    rentalExtensionRequest: {
+      count: vi.fn(async () => {
+        calls.push("pending-count");
+        return config.pendingCount ?? 0;
+      }),
+      create: vi.fn(async () => ({})),
+      updateMany: vi.fn(async () => {
+        calls.push("winner-gate");
+        return { count: config.gateCount ?? 1 };
+      }),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    rentalUnavailablePeriod: {
+      findFirst: vi.fn(async () => config.unavailable ?? null),
+    },
+    rentalOrder: { update: vi.fn(async () => ({})) },
+    rentalOrderStatusLog: { create: vi.fn(async () => ({})) },
+  };
+  return tx;
+}
+
+function asExtensionTx(tx: ReturnType<typeof buildExtensionTx>): Prisma.TransactionClient {
+  return tx as unknown as Prisma.TransactionClient;
+}
+
+describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
+  beforeEach(() => {
+    createNotifications.mockReset();
+    createNotifications.mockResolvedValue(undefined);
+    checkTimeConflict.mockReset();
+    mockAssertActive.mockReset();
+    mockAssertActive.mockResolvedValue(undefined);
+  });
+
+  it("§9 冻结合同：EXTENSION_ALLOWED_ORDER_STATUSES = IN_RENTAL / PICKED_UP", () => {
+    expect([...EXTENSION_ALLOWED_ORDER_STATUSES].sort()).toEqual(["IN_RENTAL", "PICKED_UP"]);
+  });
+
+  it("§14 request normal：锁序 subject→order→listing，fee 基于订单 snapshot", async () => {
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      pendingCount: 0,
+      conflictAvailable: true,
+    });
+    checkTimeConflict.mockResolvedValue({ available: true });
+
+    const result = await requestExtensionTx(asExtensionTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      newEndTime: NEW_END,
+    });
+
+    expect(result).toEqual({ success: true });
+    // 完整参与方锁（owner+renter 各一把）→ order 行锁 → listing 行锁 → cardinality
+    // （actor ACTIVE 复核位于锁后、order 锁前，由 mock 承接，真实行为见集成测试）
+    expect(tx.calls).toEqual([
+      "order-pre-read",
+      "subject-lock",
+      "subject-lock",
+      "order-for-update",
+      "listing-for-update",
+      "pending-count",
+    ]);
+    expect(tx.rentalExtensionRequest.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: "order-1",
+        requesterId: "user-renter",
+        status: "PENDING",
+        additionalFee: new Prisma.Decimal("40"),
+      }),
+    });
+  });
+
+  it("§16 duplicate pending request blocked：已有 PENDING → 稳定业务错误，零创建", async () => {
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      pendingCount: 1,
+    });
+
+    const result = await requestExtensionTx(asExtensionTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      newEndTime: NEW_END,
+    });
+
+    expect(result).toEqual({ error: "已有待处理的续租请求" });
+    expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("request stale status：PENDING_RETURN 不可发起续租", async () => {
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow({ status: "PENDING_RETURN" })],
+      listingRow: [{ id: "listing-1" }],
+    });
+
+    const result = await requestExtensionTx(asExtensionTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      newEndTime: NEW_END,
+    });
+
+    expect(result).toEqual({ error: "订单状态错误" });
+    expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("§19 request newEnd <= current end：锁内拒绝（非 UI 合同）", async () => {
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      pendingCount: 0,
+    });
+
+    const result = await requestExtensionTx(asExtensionTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      newEndTime: ORDER_END,
+    });
+
+    expect(result).toEqual({ error: "新结束时间必须晚于当前结束时间" });
+    expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
+  });
+
+  it("§11 account inactive：actor 复核失败即抛 AUTH_ACCOUNT_INACTIVE，零写入", async () => {
+    mockAssertActive.mockRejectedValue(
+      Object.assign(new Error("account inactive"), { code: "AUTH_ACCOUNT_INACTIVE" }),
+    );
+    const tx = buildExtensionTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+    });
+
+    await expect(
+      requestExtensionTx(asExtensionTx(tx), {
+        orderId: "order-1",
+        userId: "user-renter",
+        newEndTime: NEW_END,
+      }),
+    ).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
+
+    expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
+    // 锁仍已取得（完整参与方锁集在复核之前）
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("§23-§39 approve normal：锁序 USER→ORDER→LISTING→EXTENSION + winner gate + 会计一致", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+      unavailable: null,
+      conflictAvailable: true,
+      gateCount: 1,
+    });
+    checkTimeConflict.mockResolvedValue({ available: true });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ success: true });
+    // §71 静态合同：participant locks → actor 复核（mock）→ ORDER FOR UPDATE
+    // → LISTING FOR UPDATE → EXTENSION FOR UPDATE → cardinality → winner gate
+    expect(tx.calls).toEqual([
+      "ext-pre-read",
+      "subject-lock",
+      "subject-lock",
+      "order-for-update",
+      "listing-for-update",
+      "ext-for-update",
+      "pending-count",
+      "winner-gate",
+    ]);
+    expect(tx.rentalExtensionRequest.updateMany).toHaveBeenCalledWith({
+      where: { id: "ext-1", status: "PENDING" },
+      data: { status: "APPROVED" },
+    });
+    // §35-§37：duration 重算（8/8→8/12=4），rentalAmount/finalAmount 各加一次
+    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      data: {
+        endTime: NEW_END,
+        rentalDuration: 4,
+        rentalAmount: { increment: new Prisma.Decimal("40") },
+        finalAmount: { increment: new Prisma.Decimal("40") },
+      },
+    });
+    // §38 same-status log
+    expect(tx.rentalOrderStatusLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        fromStatus: "IN_RENTAL",
+        toStatus: "IN_RENTAL",
+        note: expect.stringContaining("出租者同意续租"),
+      }),
+    });
+    // §39 winner 通知恰一条
+    expect(createNotifications).toHaveBeenCalledTimes(1);
+  });
+
+  it("§25 approve stale order state：PENDING_RETURN → 拒绝，extension 保持 PENDING", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow({ status: "PENDING_RETURN" })],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "订单状态已变化，无法续租" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+  });
+
+  it("§30 approve backward end：newEnd <= fresh endTime → STALE，不缩短订单", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow({ newEndTime: ORDER_END })],
+      pendingCount: 1,
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "续租请求已过期，请重新提交续租" });
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("§31 approve stale fee：基线漂移 FAIL CLOSED，金额零写", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow({ additionalFee: "999" })],
+      pendingCount: 1,
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "续租费用已变化，请重新提交续租" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+  });
+
+  it("§29 approve multiple pending anomaly：cardinality != 1 FAIL CLOSED", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+      pendingCount: 2,
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "存在多个待处理的续租请求，请先逐个拒绝后再审批" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+  });
+
+  it("§33 approve unavailable interval：冲突保持 PENDING，零订单写", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+      unavailable: { id: "period-1" },
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "该时间段已被标记为不可租" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+  });
+
+  it("§33 approve capacity conflict：库存不足保持 PENDING，零订单写", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+    });
+    checkTimeConflict.mockResolvedValue({ available: false, reservedQuantity: 1 });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "续租时间段库存不足" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+  });
+
+  it("approve 非 owner actor：无效请求，零写入", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-not-owner",
+    });
+
+    expect(result).toEqual({ error: "无效请求" });
+    expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("double approve 输家：extension 已非 PENDING → 无效请求，不再写订单", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow({ status: "APPROVED" })],
+    });
+
+    const result = await approveExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ error: "无效请求" });
+    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("§40 reject pending：conditional PENDING→REJECTED + renter 通知", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      extRow: [extensionExtRow()],
+      gateCount: 1,
+    });
+
+    const result = await rejectExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(tx.rentalExtensionRequest.updateMany).toHaveBeenCalledWith({
+      where: { id: "ext-1", status: "PENDING" },
+      data: { status: "REJECTED" },
+    });
+    expect(createNotifications).toHaveBeenCalledTimes(1);
+  });
+
+  it("§41 reject after order terminal：COMPLETED 订单仍可拒绝清理 stale request", async () => {
+    const tx = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow({ status: "COMPLETED" })],
+      extRow: [extensionExtRow()],
+      gateCount: 1,
+    });
+
+    const result = await rejectExtensionTx(asExtensionTx(tx), {
+      extensionRequestId: "ext-1",
+      userId: "user-owner",
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(tx.rentalExtensionRequest.updateMany).toHaveBeenCalledWith({
+      where: { id: "ext-1", status: "PENDING" },
+      data: { status: "REJECTED" },
+    });
+  });
+
+  it("§42 approve vs reject 单胜者：approve 后 reject 见非 PENDING → 无效请求", async () => {
+    const winner = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
+      orderRow: [extensionOrderRow()],
+      listingRow: [{ id: "listing-1" }],
+      extRow: [extensionExtRow()],
+      pendingCount: 1,
+      conflictAvailable: true,
+      gateCount: 1,
+    });
+    checkTimeConflict.mockResolvedValue({ available: true });
+
+    expect(
+      await approveExtensionTx(asExtensionTx(winner), { extensionRequestId: "ext-1", userId: "user-owner" }),
+    ).toEqual({ success: true });
+
+    const loser = buildExtensionTx({
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [extensionOrderRow()],
+      extRow: [extensionExtRow({ status: "APPROVED" })],
+    });
+
+    expect(
+      await rejectExtensionTx(asExtensionTx(loser), { extensionRequestId: "ext-1", userId: "user-owner" }),
+    ).toEqual({ error: "无效请求" });
+    // 通知只有 winner 一条
+    expect(createNotifications).toHaveBeenCalledTimes(1);
   });
 });
