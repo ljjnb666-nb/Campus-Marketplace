@@ -106,7 +106,7 @@ export function getRedisClient(): Redis | null {
  */
 function enterRedisFailureCooldown(reason: string, detail: string): void {
   const now = Date.now();
-  const failureUntil = now + REDIS_FAILURE_COOLDOWN_MS;
+  const failureUntil = now + activeCooldownMs();
   if (global.rateLimitRedisFailureUntil && global.rateLimitRedisFailureUntil > now) {
     // 已在冷却窗口内：不重复记事件、不刷新窗口（固定有界）
     return;
@@ -116,7 +116,7 @@ function enterRedisFailureCooldown(reason: string, detail: string): void {
     event: "redis_rate_limit_degraded",
     reason,
     detail,
-    cooldownMs: REDIS_FAILURE_COOLDOWN_MS,
+    cooldownMs: activeCooldownMs(),
   });
 }
 
@@ -134,6 +134,20 @@ function clearRedisFailureCooldown(): void {
 function isRedisFailureCooldownActive(): boolean {
   const failureUntil = global.rateLimitRedisFailureUntil;
   return failureUntil !== undefined && failureUntil > Date.now();
+}
+
+/**
+ * 测试专用：缩短冷却窗口（真实 Redis 故障注入集成测试需要在秒级验证
+ * "冷却到期后允许重新 probe"）。生产代码不得调用。
+ */
+export function setRedisFailureCooldownForTests(ms: number | undefined): void {
+  cooldownOverrideMs = ms;
+}
+
+let cooldownOverrideMs: number | undefined;
+
+function activeCooldownMs(): number {
+  return cooldownOverrideMs ?? REDIS_FAILURE_COOLDOWN_MS;
 }
 
 /**
