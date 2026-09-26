@@ -36,18 +36,11 @@ type RateLimitGlobal = typeof globalThis & {
 
 async function freshModule(url: string) {
   process.env.REDIS_URL = url;
-  viResetModules();
+  // ESM 下 import 会缓存，用查询串绕过缓存即可
   const g = globalThis as RateLimitGlobal;
   g.rateLimitRedis = undefined;
   g.rateLimitRedisReady = undefined;
   return import("@/lib/rate-limit");
-}
-
-// vitest 不在路径上：手工实现 resetModules 等价物——ESM 下 import 会缓存，
-// 用查询串绕过缓存即可
-let moduleCounter = 0;
-async function viResetModules() {
-  moduleCounter += 1;
 }
 
 async function main() {

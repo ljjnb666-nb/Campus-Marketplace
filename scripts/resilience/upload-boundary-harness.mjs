@@ -46,7 +46,6 @@ const BASE = `http://localhost:${APP_PORT}`;
 const PROXY = `http://localhost:${PROXY_PORT}`;
 
 const USER_EMAIL = "resilience-harness@campus.local";
-const USER_PREFIX_HINT = "resilience-harness"; // 仅用于日志；隔离以 userId 为准
 
 /** 登录凭据来自 ensure-resilience-user.ts 写入的本地文件（gitignored，随机轮换）。 */
 function loadCredentials() {
@@ -84,10 +83,6 @@ function log(message) {
 function randomBytes(size) {
   // 固定种子无关紧要：payload 内容只要不是有效图片即可（A9）
   return crypto.randomBytes(size);
-}
-
-function record(title, data) {
-  log(`${title}: ${JSON.stringify(data)}`);
 }
 
 /** 原始 HTTP 请求（node:http），完整控制 header/body/chunked。 */
