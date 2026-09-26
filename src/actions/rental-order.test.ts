@@ -27,6 +27,8 @@ const {
   txExtensionRequestFindFirst,
   txExtensionRequestCreate,
   txExtensionRequestUpdate,
+  txExtensionRequestCount,
+  txExtensionRequestUpdateMany,
   txDamageClaimCreate,
   txDisputeCreate,
   txDisputeFindFirst,
@@ -52,6 +54,8 @@ const {
   const txExtensionRequestFindFirst = vi.fn();
   const txExtensionRequestCreate = vi.fn();
   const txExtensionRequestUpdate = vi.fn();
+  const txExtensionRequestCount = vi.fn();
+  const txExtensionRequestUpdateMany = vi.fn();
   const txDamageClaimCreate = vi.fn();
   const txDisputeCreate = vi.fn();
   const txDisputeFindFirst = vi.fn();
@@ -87,6 +91,8 @@ const {
       findFirst: txExtensionRequestFindFirst,
       create: txExtensionRequestCreate,
       update: txExtensionRequestUpdate,
+      count: txExtensionRequestCount,
+      updateMany: txExtensionRequestUpdateMany,
     },
     rentalDispute: { create: txDisputeCreate, findFirst: txDisputeFindFirst },
     // Phase 7G：dispute 创建的 source-linked holds（TxLocked seam）
@@ -126,6 +132,8 @@ const {
     txExtensionRequestFindFirst,
     txExtensionRequestCreate,
     txExtensionRequestUpdate,
+    txExtensionRequestCount,
+    txExtensionRequestUpdateMany,
     txDamageClaimCreate,
     txDisputeCreate,
     txDisputeFindFirst,
@@ -317,6 +325,8 @@ describe("rental-order actions", () => {
     txExtensionRequestFindFirst.mockReset();
     txExtensionRequestCreate.mockReset();
     txExtensionRequestUpdate.mockReset();
+    txExtensionRequestCount.mockReset();
+    txExtensionRequestUpdateMany.mockReset();
     txDamageClaimCreate.mockReset();
     txDisputeCreate.mockReset();
     txDisputeFindFirst.mockReset();
@@ -873,18 +883,54 @@ describe("rental-order actions", () => {
     expect(result).toEqual({ success: false, message: "订单状态错误" });
   });
 
-  it("submits an extension request for an in-rental order", async () => {
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "IN_RENTAL",
-      ownerId: "user-owner",
-      renterId: "user-renter",
-      rentalListingId: "listing-1",
-      quantity: 1,
-      endTime: new Date("2026-08-10T10:00:00.000Z"),
-      unitPriceSnapshot: new Prisma.Decimal("20"),
-      pricingUnitSnapshot: "PER_DAY",
+  // ---- AUDIT2-RB03：extension authority 重写后的动作层回归 ----
+  // machine 的三个 extension 事务现在全部经 $queryRaw（pre-read / FOR UPDATE
+  // 行锁）读取 order/listing/extension 权威行——按 SQL 形状路由 mock 返回。
+  function mockExtensionRawQueries(input: {
+    orderPreRead?: unknown[] | null;
+    orderRow?: unknown[] | null;
+    listingRow?: unknown[] | null;
+    extPreRead?: unknown[] | null;
+    extRow?: unknown[] | null;
+  }) {
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      const forUpdate = sql.includes("FOR UPDATE");
+      if (sql.includes('"RentalExtensionRequest"')) {
+        return (forUpdate ? input.extRow : input.extPreRead) ?? [];
+      }
+      if (sql.includes('"RentalListing"')) {
+        return input.listingRow ?? [];
+      }
+      if (sql.includes('"RentalOrder"')) {
+        return (forUpdate ? input.orderRow : input.orderPreRead) ?? [];
+      }
+      return [];
     });
+  }
+
+  const baseOrderRow = {
+    id: "order-1",
+    ownerId: "user-owner",
+    renterId: "user-renter",
+    rentalListingId: "listing-1",
+    status: "IN_RENTAL",
+    startTime: new Date("2026-08-08T10:00:00.000Z"),
+    endTime: new Date("2026-08-10T10:00:00.000Z"),
+    quantity: 1,
+    unitPriceSnapshot: "20",
+    pricingUnitSnapshot: "PER_DAY",
+  };
+
+  it("submits an extension request for an in-rental order", async () => {
+    mockExtensionRawQueries({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [baseOrderRow],
+      listingRow: [{ id: "listing-1" }],
+    });
+    txExtensionRequestCount.mockResolvedValue(0);
+    txRentalUnavailableFindFirst.mockResolvedValue(null);
+    checkTimeConflict.mockResolvedValue({ available: true });
 
     const formData = new FormData();
     formData.set("orderId", "order-1");
@@ -893,21 +939,41 @@ describe("rental-order actions", () => {
     const result = await requestExtension(formData);
 
     expect(result).toEqual({ success: true, message: "已发送续租请求" });
+    // fee 基于订单 price snapshot（8/10 → 8/12 = 2 天 × 20）
     expect(txExtensionRequestCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         orderId: "order-1",
         requesterId: "user-renter",
         status: "PENDING",
+        additionalFee: new Prisma.Decimal("40"),
       }),
     });
     expect(checkTimeConflict).toHaveBeenCalled();
   });
 
+  it("blocks a second extension request while one is already pending", async () => {
+    mockExtensionRawQueries({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [baseOrderRow],
+      listingRow: [{ id: "listing-1" }],
+    });
+    txExtensionRequestCount.mockResolvedValue(1);
+
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-08-12T10:00:00.000Z");
+
+    const result = await requestExtension(formData);
+
+    expect(result).toEqual({ success: false, message: "已有待处理的续租请求" });
+    expect(txExtensionRequestCreate).not.toHaveBeenCalled();
+  });
+
   it("rejects an extension that does not extend the end time", async () => {
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "IN_RENTAL",
-      endTime: new Date("2026-08-12T10:00:00.000Z"),
+    mockExtensionRawQueries({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [{ ...baseOrderRow, endTime: new Date("2026-08-12T10:00:00.000Z") }],
+      listingRow: [{ id: "listing-1" }],
     });
 
     const formData = new FormData();
@@ -921,11 +987,12 @@ describe("rental-order actions", () => {
   });
 
   it("rejects extension requests when the slot is unavailable", async () => {
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "IN_RENTAL",
-      endTime: new Date("2026-08-10T10:00:00.000Z"),
+    mockExtensionRawQueries({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [baseOrderRow],
+      listingRow: [{ id: "listing-1" }],
     });
+    txExtensionRequestCount.mockResolvedValue(0);
     checkTimeConflict.mockResolvedValue({ available: false });
 
     const formData = new FormData();
@@ -937,23 +1004,31 @@ describe("rental-order actions", () => {
     expect(result).toEqual({ success: false, message: "续租时间段库存不足" });
   });
 
-  it("approves a pending extension as the owner and extends the order", async () => {
+  it("approves a pending extension as the owner and extends the order with consistent accounting", async () => {
     requireUser.mockResolvedValue({ id: "user-owner" });
-    txExtensionRequestFindFirst.mockResolvedValue({
-      id: "ext-1",
-      orderId: "order-1",
-      newEndTime: new Date("2026-08-12T10:00:00.000Z"),
-      additionalFee: new Prisma.Decimal("40"),
-      order: {
-        id: "order-1",
-        status: "IN_RENTAL",
+    mockExtensionRawQueries({
+      orderRow: [baseOrderRow],
+      listingRow: [{ id: "listing-1" }],
+      extPreRead: [{
+        id: "ext-1",
+        orderId: "order-1",
         ownerId: "user-owner",
         renterId: "user-renter",
-        rentalListingId: "listing-1",
-        quantity: 1,
-        endTime: new Date("2026-08-10T10:00:00.000Z"),
-      },
+        listingId: "listing-1",
+      }],
+      extRow: [{
+        id: "ext-1",
+        orderId: "order-1",
+        requesterId: "user-renter",
+        newEndTime: new Date("2026-08-12T10:00:00.000Z"),
+        additionalFee: "40",
+        status: "PENDING",
+      }],
     });
+    txExtensionRequestCount.mockResolvedValue(1);
+    txRentalUnavailableFindFirst.mockResolvedValue(null);
+    checkTimeConflict.mockResolvedValue({ available: true });
+    txExtensionRequestUpdateMany.mockResolvedValue({ count: 1 });
 
     const formData = new FormData();
     formData.set("extensionRequestId", "ext-1");
@@ -961,23 +1036,45 @@ describe("rental-order actions", () => {
     const result = await approveExtension(formData);
 
     expect(result).toEqual({ success: true, message: "已同意续租请求" });
-    expect(txExtensionRequestUpdate).toHaveBeenCalledWith({
-      where: { id: "ext-1" },
+    // winner gate：conditional PENDING→APPROVED，count 必须 = 1
+    expect(txExtensionRequestUpdateMany).toHaveBeenCalledWith({
+      where: { id: "ext-1", status: "PENDING" },
       data: { status: "APPROVED" },
     });
+    // 会计一致性：endTime / rentalDuration 重算 / rentalAmount+finalAmount 各加一次
     expect(txRentalOrderUpdate).toHaveBeenCalledWith({
       where: { id: "order-1" },
       data: {
         endTime: new Date("2026-08-12T10:00:00.000Z"),
+        rentalDuration: 4,
+        rentalAmount: { increment: new Prisma.Decimal("40") },
         finalAmount: { increment: new Prisma.Decimal("40") },
       },
     });
     expect(revalidatePath).toHaveBeenCalledWith("/rental-orders");
   });
 
-  it("rejects approving an extension from someone other than the owner", async () => {
-    requireUser.mockResolvedValue({ id: "user-owner" });
-    txExtensionRequestFindFirst.mockResolvedValue(null);
+  it("returns invalid request when the approver is not the owner", async () => {
+    requireUser.mockResolvedValue({ id: "user-not-owner" });
+    mockExtensionRawQueries({
+      orderRow: [baseOrderRow],
+      listingRow: [{ id: "listing-1" }],
+      extPreRead: [{
+        id: "ext-1",
+        orderId: "order-1",
+        ownerId: "user-owner",
+        renterId: "user-renter",
+        listingId: "listing-1",
+      }],
+      extRow: [{
+        id: "ext-1",
+        orderId: "order-1",
+        requesterId: "user-renter",
+        newEndTime: new Date("2026-08-12T10:00:00.000Z"),
+        additionalFee: "40",
+        status: "PENDING",
+      }],
+    });
 
     const formData = new FormData();
     formData.set("extensionRequestId", "ext-1");
@@ -985,20 +1082,31 @@ describe("rental-order actions", () => {
     const result = await approveExtension(formData);
 
     expect(result).toEqual({ success: false, message: "无效请求" });
-    expect(txExtensionRequestUpdate).not.toHaveBeenCalled();
+    expect(txExtensionRequestUpdateMany).not.toHaveBeenCalled();
+    expect(txRentalOrderUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects approving a missing extension request", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    mockExtensionRawQueries({ extPreRead: [] });
+
+    const formData = new FormData();
+    formData.set("extensionRequestId", "ext-1");
+
+    const result = await approveExtension(formData);
+
+    expect(result).toEqual({ success: false, message: "无效请求" });
+    expect(txExtensionRequestUpdateMany).not.toHaveBeenCalled();
   });
 
   it("rejects a pending extension as the owner", async () => {
     requireUser.mockResolvedValue({ id: "user-owner" });
-    txExtensionRequestFindFirst.mockResolvedValue({
-      id: "ext-1",
-      orderId: "order-1",
-      order: {
-        id: "order-1",
-        ownerId: "user-owner",
-        renterId: "user-renter",
-      },
+    mockExtensionRawQueries({
+      orderRow: [baseOrderRow],
+      extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      extRow: [{ id: "ext-1", orderId: "order-1", requesterId: "user-renter", status: "PENDING" }],
     });
+    txExtensionRequestUpdateMany.mockResolvedValue({ count: 1 });
 
     const formData = new FormData();
     formData.set("extensionRequestId", "ext-1");
@@ -1006,8 +1114,8 @@ describe("rental-order actions", () => {
     const result = await rejectExtension(formData);
 
     expect(result).toEqual({ success: true, message: "已拒绝续租请求" });
-    expect(txExtensionRequestUpdate).toHaveBeenCalledWith({
-      where: { id: "ext-1" },
+    expect(txExtensionRequestUpdateMany).toHaveBeenCalledWith({
+      where: { id: "ext-1", status: "PENDING" },
       data: { status: "REJECTED" },
     });
     expect(createNotifications).toHaveBeenCalled();
