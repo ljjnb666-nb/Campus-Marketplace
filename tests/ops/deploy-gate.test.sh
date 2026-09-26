@@ -65,7 +65,7 @@ SITE_ADDRESS=campus.example.edu.cn
 POSTGRES_USER=campus_app
 POSTGRES_PASSWORD=SandboxOnly-Not-For-Real-Deploy
 POSTGRES_DB=campus_marketplace
-DATABASE_URL=postgresql://campus_app:SandboxOnly-Not-For-Real-Deploy@postgres:5432/campus_marketplace?schema=public
+DATABASE_URL=postgresql://campus_app:SandboxOnly-Not-For-Real-Deploy@postgres:5432/campus_marketplace?schema=public&connection_limit=10&pool_timeout=10
 REDIS_PASSWORD=SandboxOnly-Not-For-Real-Deploy
 REDIS_URL=redis://:SandboxOnly-Not-For-Real-Deploy@redis:6379
 NEXTAUTH_URL=https://campus.example.edu.cn

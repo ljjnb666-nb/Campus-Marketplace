@@ -86,3 +86,47 @@ describe("production-env-check（self-hosted bucket 契约）", () => {
     }
   }, 150_000);
 });
+
+// FINAL REPAIR A（LR-014）：连接池显式配置 launch gate
+describe("production-env-check（连接池容量 gate）", () => {
+  // FAIL 明细行打印在 stdout（stderr 只有汇总行），故断言 error.stdout
+  async function expectFail(file: string, checkName: string) {
+    try {
+      await runEnvCheck(file);
+      throw new Error(`预期 ${checkName} FAIL，但 env-check 通过了`);
+    } catch (error) {
+      const err = error as { stdout?: string };
+      expect(err.stdout).toContain(`FAIL ${checkName}`);
+    } finally {
+      rmSync(path.dirname(file), { recursive: true, force: true });
+    }
+  }
+
+  it("DATABASE_URL 缺 connection_limit → FAIL 拒绝部署", async () => {
+    const file = buildFixture({
+      DATABASE_URL:
+        "postgresql://campus_app:SyntheticOnly-Not-For-Real-Deploy-2026@postgres:5432/campus_marketplace?schema=public&pool_timeout=10",
+    });
+    await expectFail(file, "DATABASE_URL.connection_limit");
+  }, 150_000);
+
+  it("DATABASE_URL 缺 pool_timeout → FAIL 拒绝部署", async () => {
+    const file = buildFixture({
+      DATABASE_URL:
+        "postgresql://campus_app:SyntheticOnly-Not-For-Real-Deploy-2026@postgres:5432/campus_marketplace?schema=public&connection_limit=10",
+    });
+    await expectFail(file, "DATABASE_URL.pool_timeout");
+  }, 150_000);
+
+  it("connection_limit/pool_timeout 显式配置（synthetic 默认）→ 通过", async () => {
+    const file = buildFixture({});
+    try {
+      const { stdout } = await runEnvCheck(file);
+      expect(stdout).toContain("DATABASE_URL.connection_limit");
+      expect(stdout).toContain("DATABASE_URL.pool_timeout");
+      expect(stdout).toContain("全部");
+    } finally {
+      rmSync(path.dirname(file), { recursive: true, force: true });
+    }
+  }, 150_000);
+});

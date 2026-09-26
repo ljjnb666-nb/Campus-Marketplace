@@ -46,3 +46,74 @@
 - 10 个学生用户
 - 商品、跑腿、服务示例数据
 - 订单、评价、会话与举报示例数据
+
+## 连接池容量规划（FINAL REPAIR A / LR-014）
+
+生产 Postgres `max_connections` 由 `compose.production.yml` 的
+`max_connections=${POSTGRES_MAX_CONNECTIONS:-100}` 提供；应用侧 Prisma 池
+由 `DATABASE_URL` 的 `connection_limit` / `pool_timeout` 控制，二者均由
+`scripts/production-env-check.ts` 在部署前强制校验（launch gate）。
+
+容量公式：
+
+```text
+web 实例数 × connection_limit + worker 实例数 × worker_connection_limit
+  ≤ max_connections − 保留位
+
+保留位 ≥ admin(1) + migration(1) + monitoring/backup(2) + failover 余量(6)
+```
+
+默认拓扑（单 web 实例、无独立 worker、max_connections=100）：
+`connection_limit=10` 留有 90 连接余量，属于保守安全默认，不是"调大=修复"
+的对象；扩容实例时按公式重算并同步修改连接串。
+
+配套事实（FINAL REPAIR A 实测与修复）：
+
+- `src/lib/prisma.ts` 在生产同样挂 global 单例。此前生产每个模块图实例
+  各建一个 PrismaClient，单进程真实连接上限 = 池数 × connection_limit
+  （campus_perf 压测实测峰值 17–18 > 10），容量公式因此失真；单例化后
+  每进程恰一个池，公式按 `connection_limit` 直接核算。
+- `pool_timeout=10`：池饱和时请求最长等待 10s 后失败。该值决定饱和行为
+  是"长尾延迟"而非"快速失败"；在公开读已接入 30s TTL 缓存（下节）后，
+  池饱和概率显著下降。调整该值前必须先看最新压测的 p99 与池等待证据，
+  禁止无证据调参。
+- 单请求 DB fan-out：匿名首页由 12 条查询降为 0 条（缓存命中时）；登录
+  用户仅保留 3 条身份相关查询。`/products` 计数查询（~20ms）为已知成本。
+
+## 公开读缓存策略（FINAL REPAIR A / LR-011）
+
+`src/lib/public-cache.ts` 提供进程内 TTL 缓存，接入范围与 SLA：
+
+| 数据 | SLA | 说明 |
+| --- | --- | --- |
+| 首页榜单/计数（`home-repository` 公共部分） | stale ≤ 30s | key 仅 campusId 维度 |
+| 校区/分类元数据（`getProductFormMeta`） | stale ≤ 60s | 公共元数据 |
+
+契约：
+
+- 只缓存与请求者身份无关的公开共享数据；`userSummary`（未读数/进行中
+  订单）与 favorites 标记等 viewer 相关读一律不缓存，防 cross-user /
+  auth-state / favorite-state 泄漏。
+- 高基数参数（`/search` 的 q、`/products` 的 q/category/status/price/
+  sort/page）不作为缓存 key，搜索结果不做页面/数据级缓存——其性能由
+  query-shape 复合索引承担（migration `20260926100802`，Product/ErrandTask/
+  ServiceListing/RentalListing 四域；检索子查询经 createdAt 索引游走 + LIMIT
+  提前终止）。pg_trgm GIN 经实测评估后不交付：2 字关键词（中文最常见长度）
+  触发全索引扫描回退且无法在 datamodel 表达（drift=NONE 不变量），
+  详见 BACKLOG REPAIR-A-DEBT-PERF-01。
+
+  LR-012 正式分类 = MITIGATED_WITH_DOCUMENTED_BOUNDARY
+  （PRODUCTION_BLOCKER = NO，STRUCTURAL_DEBT = YES）：游走优化依赖
+  "ORDER BY createdAt + LIMIT 12 + 匹配项足够早出现"；零匹配/极低匹配/
+  typo 查询无法提前终止，仍可能退化到接近基线 Seq Scan 成本（
+  authoritative run = bench-results/search-boundary.json：COMMON 数码
+  c=100 42.7 rps / p99 3362ms、RARE midi键盘 c=100 25.9 rps / p99 4653ms、
+  ZERO 显微镜 c=100 24.9 rps / p99 4378ms（run-to-run 存在本机噪声，
+  以该次保存的 run 为准；对应 EXPLAIN 见
+  bench-results/plans-search-boundary.txt）。通用解（pg_trgm/FTS/中文
+  分词/外部搜索引擎）属 Phase 8 / post-launch search optimization
+  （backlog），不扩大 FINAL REPAIR B（LR-001/LR-070/LR-071）scope。
+- 失效为 TTL eventual consistency：listing 增删改、favorite、订单完成、
+  治理 takedown 等 mutation 不主动失效，公开榜单/计数最多陈旧 30s；
+  元数据最多 60s。这是记录在案的 SLA 取舍。
+- 不依赖 Redis：公开页面可用性与 Redis 可用性解耦（单实例 compose 拓扑）。
