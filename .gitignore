@@ -66,3 +66,7 @@ public/uploads/*
 # Local tool state
 .mimosa/
 .vscode/
+
+# Performance benchmark artifacts (FINAL REPAIR A, local-only evidence)
+bench-results/
+bench-server.log
