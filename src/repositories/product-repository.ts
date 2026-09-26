@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import { cachedPublicRead, PUBLIC_META_TTL_MS } from "@/lib/public-cache";
 
 export type ProductListQuery = {
   q?: string;
@@ -189,20 +190,25 @@ export async function getProductList(query: ProductListQuery = {}) {
   };
 }
 
+// FINAL REPAIR A（LR-011）：校区/分类元数据为公开共享读，TTL 60s（SLA 见
+// public-cache.ts）；列表本体（getProductList）因 q/filter/分页高基数且
+// 含 viewer 相关 favorites 标记，不接入缓存。
 export async function getProductFormMeta() {
-  const campuses = await prisma.campus.findMany({
-    where: { isActive: true },
-    orderBy: { createdAt: "asc" },
-    select: { id: true, name: true, schoolName: true },
-  });
+  return cachedPublicRead("product-form-meta", PUBLIC_META_TTL_MS, async () => {
+    const campuses = await prisma.campus.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, schoolName: true },
+    });
 
-  const categories = await prisma.productCategory.findMany({
-    where: { isActive: true },
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    select: { id: true, name: true, slug: true },
-  });
+    const categories = await prisma.productCategory.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+      select: { id: true, name: true, slug: true },
+    });
 
-  return { campuses, categories };
+    return { campuses, categories };
+  });
 }
 
 export async function getProductDetail(
