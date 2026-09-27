@@ -232,6 +232,24 @@ export function collectEnvChecks(vars: Record<string, string | undefined>): EnvC
   // ---- 备份 ----
   check(results, "BACKUP_DIR", (vars.BACKUP_DIR ?? "") !== "", "必须设置（备份目录）");
 
+  // ---- 存储清理 worker（LR-071 release artifact）----
+  // 与 scripts/ops/storage-cleanup-worker.ts 的 production contract 完全一致
+  // （正整数、生产下限 60s、缺省 1800s；静态一致性 gate 见
+  // tests/ops/production-cleanup-topology.test.ts，保证 preflight 与 worker
+  // 的验证 truth 不漂移）。未设置 = worker 默认值，放行。
+  const cleanupIntervalRaw = vars.ASSET_CLEANUP_INTERVAL_SECONDS;
+  if (cleanupIntervalRaw === undefined || cleanupIntervalRaw === "") {
+    check(results, "ASSET_CLEANUP_INTERVAL_SECONDS", true, "未设置（worker 默认 1800s）");
+  } else {
+    const cleanupInterval = Number(cleanupIntervalRaw);
+    check(
+      results,
+      "ASSET_CLEANUP_INTERVAL_SECONDS",
+      Number.isInteger(cleanupInterval) && cleanupInterval >= 60,
+      "必须是整数且 >= 60（生产下限，防止误配成高频 DB/S3 风暴；与 worker 同契约）",
+    );
+  }
+
   // ---- 可观测性：metrics token 安全契约（BLOCKER 3，单一 contract 强制）----
   // 未设置 = 端点关闭（允许）；设置则必须 >=24 字符、非危险默认值、不复用 NEXTAUTH_SECRET
   for (const tokenCheck of metricsTokenEnvChecks(vars)) {

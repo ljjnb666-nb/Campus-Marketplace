@@ -254,9 +254,18 @@ docs/PRODUCTION_SECURITY.md 第 6 节。
 `runStorageCleanup`：stale UPLOADING / 超 UPLOADED 孤儿 / 保留期到期 /
 PENDING_DELETE 重试（语义见 [STORAGE.md §10](./STORAGE.md)）。
 
+- **deploy 接线（FINAL REPAIR B release lifecycle）**：`deploy.sh` 构建
+  release artifact set（`app migrate storage-cleanup`，同一 `GIT_SHA`），
+  在 migrate 完成后切换 worker（绝不在 pre-migration schema 上运行新 worker），
+  并逐一验证：resolved image == `campus-marketplace-cleanup:<GIT_SHA>` →
+  启动 → compose authoritative running 状态 → 运行容器 exact image →
+  `--run-once --dry-run` 无副作用 runtime smoke。任何一步失败 → 部署失败、
+  不写 release log。`.releases.log` 记录 artifact pair：
+  `APP_IMAGE=... CLEANUP_IMAGE=... CLEANUP=running`。
 - 周期：`ASSET_CLEANUP_INTERVAL_SECONDS`（默认 1800；**生产下限 60**，
-  非法配置以非零退出交由 restart policy）。空转周期不输出日志；产生实际
-  工作（删除/标记/失败）时输出 `storage_cleanup_cycle_completed` summary。
+  production-env-check preflight 与 worker 同一契约校验，非法配置以非零
+  退出交由 restart policy）。空转周期不输出日志；产生实际工作（删除/标记/
+  失败）时输出 `storage_cleanup_cycle_completed` summary。
 - **Readiness 解耦**：cleanup backlog 是后台恢复，不是接流量依赖——
   `/api/ready` 仍只看 DB/Redis/Storage（`VERIFIED_AUTOMATIC`，
   见 STORAGE.md §10.1）。
@@ -269,6 +278,16 @@ $COMPOSE run --rm storage-cleanup --run-once
 # 只打印清理计划，不执行任何删除/转移
 $COMPOSE run --rm storage-cleanup --run-once --dry-run
 ```
+
+### 5.2 生产数据库恢复的 writer quiesce（restore）
+
+`restore-production-postgres.sh` 覆盖生产库前必须停止**全部 production DB
+writers**（app + storage-cleanup）并逐一验证已停止；容器不存在 = 无该
+writer（pre-worker release 兼容）；任一存在且无法停止 → FAIL CLOSED，
+绝不执行 terminate/DROP/restore。恢复后（无论成败）全部 writers 保持停止，
+由操作员按目标 release 的 runtime topology 恢复：post-worker release 启动
+app + storage-cleanup；pre-worker 目标仅启动 app（cleanup 保持停止）。
+`rollback.sh --hard` 会自动按该 policy 切换。
 
 ## 6. 迁移纪律
 
@@ -294,8 +313,12 @@ cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/REA
 
 ## 8. 磁盘空间
 
-- `docker system df` 查看占用；定期 `docker image prune -f` 清理悬空镜像
-  （保留最近 2–3 个 `campus-marketplace-app:<sha>` 用于回滚）。
+- `docker system df` 查看占用；定期 `docker image prune -f` 清理悬空镜像。
+  **release artifact pair 成对保留**：每个 release 由
+  `campus-marketplace-app:<sha>` 与 `campus-marketplace-cleanup:<sha>` 组成，
+  最近 2–3 个 release 的两个镜像都需保留（回滚必须成对切换，见 ROLLBACK.md；
+  rollback 前置检查 `docker images 'campus-marketplace-app'` 与
+  `docker images 'campus-marketplace-cleanup'`）。
 - Postgres 卷膨胀：`VACUUM` 由 autovacuum 处理；磁盘告警阈值建议 80%。
 - 备份目录 retention 自动清理（`BACKUP_RETENTION_DAYS`，默认 14 天），
   异地备份见 BACKUP_RESTORE.md。

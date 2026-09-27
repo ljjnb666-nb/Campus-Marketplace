@@ -133,13 +133,16 @@ describe("compose production config（--env-file 统一插值来源）", () => {
         // 插值来自 .env.production：synthetic 值必须出现在渲染结果中
         expect(stdout).toContain("campus.example.edu.cn");
         expect(stdout).toContain("campus_marketplace");
-        // 关键服务全部渲染（config 输出以服务名组织）
+        // 关键服务全部渲染（config 输出以服务名组织）；
+        // storage-cleanup 是 release artifact pair 的必要成员（LR-071），
+        // 被意外从 production topology 删除时 CI 必须失败
         for (const service of [
           "caddy:",
           "app:",
           "postgres:",
           "redis:",
           "migrate:",
+          "storage-cleanup:",
           "minio:",
           "minio-init:",
         ]) {

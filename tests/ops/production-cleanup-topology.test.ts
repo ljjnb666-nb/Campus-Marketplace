@@ -115,3 +115,77 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     expect(health).not.toMatch(/storage-cleanup|cleanup-worker/i);
   });
 });
+
+describe("release lifecycle 静态 gate（FINAL REPAIR B：deploy / restore / rollback）", () => {
+  const deploySh = readFileSync(path.join(repoRoot, "scripts", "ops", "deploy.sh"), "utf8");
+  const restoreSh = readFileSync(
+    path.join(repoRoot, "scripts", "ops", "restore-production-postgres.sh"),
+    "utf8",
+  );
+  const rollbackSh = readFileSync(path.join(repoRoot, "scripts", "ops", "rollback.sh"), "utf8");
+  const envCheck = readFileSync(path.join(repoRoot, "scripts", "production-env-check.ts"), "utf8");
+  const worker = readFileSync(
+    path.join(repoRoot, "scripts", "ops", "storage-cleanup-worker.ts"),
+    "utf8",
+  );
+
+  it("deploy.sh：release artifact set = app + migrate + storage-cleanup，同 GIT_SHA", () => {
+    expect(deploySh).toMatch(/compose_run build app migrate storage-cleanup/);
+    expect(deploySh).toMatch(
+      /campus-marketplace-cleanup:\$\{GIT_SHA\}/,
+    );
+    // release log 记录 artifact pair
+    expect(deploySh).toMatch(/CLEANUP_IMAGE=campus-marketplace-cleanup:\$\{GIT_SHA\}/);
+    expect(deploySh).toMatch(/CLEANUP=running/);
+    // 禁止 cleanup 使用 :local/:latest tag
+    expect(deploySh).not.toMatch(/campus-marketplace-cleanup:(local|latest)\b/);
+    // dry-run smoke 是发布 gate 的一部分（只允许 dry-run，禁止 mutation gate）
+    expect(deploySh).toMatch(/run --rm storage-cleanup --run-once --dry-run/);
+    expect(deploySh).not.toMatch(/run --rm storage-cleanup --run-once(?! --dry-run)/);
+  });
+
+  it("deploy.sh：worker 在 migrate 之后切换（绝不在 pre-migration schema 上运行）", () => {
+    const migrateStep = deploySh.indexOf("migrate deploy");
+    const cleanupSwitch = deploySh.indexOf("切换 storage-cleanup worker");
+    expect(migrateStep).toBeGreaterThan(-1);
+    expect(cleanupSwitch).toBeGreaterThan(migrateStep);
+  });
+
+  it("restore：DROP 前必须 quiesce 全部 production writers（app + storage-cleanup）", () => {
+    const stopApp = restoreSh.indexOf("stop_production_writer app");
+    const stopCleanup = restoreSh.indexOf("stop_production_writer storage-cleanup");
+    const terminate = restoreSh.indexOf("pg_terminate_backend");
+    expect(stopApp).toBeGreaterThan(-1);
+    expect(stopCleanup).toBeGreaterThan(stopApp);
+    expect(terminate).toBeGreaterThan(stopCleanup);
+    // pre-worker 兼容：writer 容器不存在 = 无写流量（不得 fail）
+    expect(restoreSh).toMatch(/容器不存在，无该 writer 写流量/);
+    // 失败语义：production writers 保持停止
+    expect(restoreSh).toMatch(/production writers（app \/ storage-cleanup）保持停止状态/);
+  });
+
+  it("rollback：cleanup 与目标 release 成对（post-worker 切换 / pre-worker 停止）", () => {
+    // cleanup target 判定先于一切 side effect
+    const modeDetect = rollbackSh.indexOf("CLEANUP_TARGET_MODE=");
+    const appInspect = rollbackSh.indexOf('docker image inspect "campus-marketplace-app:');
+    expect(modeDetect).toBeGreaterThan(appInspect);
+    // post-worker：cleanup 精确镜像断言 + running 验证
+    expect(rollbackSh).toMatch(/campus-marketplace-cleanup:\$\{target_sha\}/);
+    // pre-worker：停止并验证，不留 newer worker
+    expect(rollbackSh).toMatch(/stopped_pre_worker_release/);
+    // app 与 cleanup 成对切换（switch_cleanup_to 在 switch_app_to 之后调用）
+    const switchApp = rollbackSh.indexOf('switch_app_to "${PREVIOUS_SHA}"');
+    const switchCleanup = rollbackSh.indexOf('switch_cleanup_to "${PREVIOUS_SHA}"');
+    expect(switchApp).toBeGreaterThan(-1);
+    expect(switchCleanup).toBeGreaterThan(switchApp);
+  });
+
+  it("preflight 与 worker 的 interval 契约完全一致（60 / 1800 同一 truth）", () => {
+    // worker：默认 1800、生产下限 60
+    expect(worker).toMatch(/DEFAULT_INTERVAL_SECONDS = 1800/);
+    expect(worker).toMatch(/MIN_PRODUCTION_INTERVAL_SECONDS = 60/);
+    // production-env-check：同一边界（未设置放行 = 默认 1800；设置则 >= 60）
+    expect(envCheck).toMatch(/worker 默认 1800s/);
+    expect(envCheck).toMatch(/Number\.isInteger\(cleanupInterval\) && cleanupInterval >= 60/);
+  });
+});
