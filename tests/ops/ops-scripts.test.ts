@@ -31,15 +31,17 @@ describe("rollback / restore shell-level regression（tests/ops/rollback-restore
     "safe rollback 不碰 DB；hard 失败阻断回滚；SHA/确认缺失全部 fail",
     async () => {
       // 长耗时命令必须走异步 execFile：execSync 会阻塞 vitest worker 事件循环，
-      // 导致 worker RPC（onTaskUpdate）超时误报 unhandled error
+      // 导致 worker RPC（onTaskUpdate）超时误报 unhandled error。
+      // 超时预算覆盖新增的 restore/rollback cleanup 场景（5b-5d/9f-9h）在
+      // 满载并行下的执行时间（120s 预算实测不够）。
       const { stdout } = await execFileAsync("bash", ["tests/ops/rollback-restore.test.sh"], {
         cwd: repoRoot,
-        timeout: 120_000,
+        timeout: 240_000,
         maxBuffer: 10 * 1024 * 1024,
       });
       expect(stdout).toMatch(/FAIL=0/);
     },
-    150_000,
+    300_000,
   );
 });
 
@@ -50,7 +52,7 @@ describe("deploy release gate shell-level regression（tests/ops/deploy-gate.tes
       try {
         const { stdout } = await execFileAsync("bash", ["tests/ops/deploy-gate.test.sh"], {
           cwd: repoRoot,
-          timeout: 180_000,
+          timeout: 300_000,
           maxBuffer: 10 * 1024 * 1024,
         });
         expect(stdout).toMatch(/FAIL=0/);
