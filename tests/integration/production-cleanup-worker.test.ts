@@ -6,7 +6,6 @@ import {
   killTree,
   runWorker,
   spawnWorkerLoop,
-  WORKER_ENTRY,
 } from "../../scripts/resilience/spawn-worker.mjs";
 
 /**
