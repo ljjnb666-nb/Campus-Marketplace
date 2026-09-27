@@ -255,7 +255,9 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
         const { quota } = await readState(assetId);
         expect(quota).toBe(0);
       } finally {
-        killTree(child);
+        // 必须等 worker 真正退出：孤儿 loop worker 会在 1s 周期上回收
+        // 后续用例（dry-run）的 PENDING_DELETE 种子
+        await killTree(child);
       }
     }, 60_000);
 
