@@ -192,7 +192,7 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
         },
       });
       userId = user.id;
-    });
+    }, 120_000);
 
     afterAll(async () => {
       // 清理测试对象（隔离前缀：userId 下）；隔离库整体 drop

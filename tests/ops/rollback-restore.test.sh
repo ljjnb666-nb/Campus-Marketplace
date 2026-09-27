@@ -238,9 +238,10 @@ start_fake_app() {
     server.listen(0, "127.0.0.1", () => console.log("PORT=" + server.address().port));
   ' "$1" "$2" > "$3" 2>&1 &
   FAKE_APP_PID=$!
-  for _ in $(seq 1 50); do
+  # 20s 启动预算：全量套件并行时 node 启动可能被调度延迟（5s 预算实测抖动）
+  for _ in $(seq 1 100); do
     grep -q "^PORT=" "$3" 2>/dev/null && return 0
-    sleep 0.1
+    sleep 0.2
   done
   echo "fake app 未在预期时间内启动" >&2
   return 1

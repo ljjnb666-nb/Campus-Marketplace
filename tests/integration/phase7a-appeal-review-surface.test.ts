@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { PrismaClient } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// 每用例含多步真实 fixture 写入 + spawnSync 迁移检查；全量套件并行时
+// 默认 5s 在满载下不够（本机 full-run 实测抖动）。文件级放宽，test-only。
+vi.setConfig({ testTimeout: 30_000 });
 
 import { PERMISSION_KEYS } from "@/lib/rbac/permissions";
 import type { AppealQueueItemDto } from "@/lib/appeals/review-queue";
