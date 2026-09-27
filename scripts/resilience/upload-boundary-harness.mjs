@@ -69,6 +69,7 @@ function argValue(name) {
 const PHASE = argValue("--phase") ?? "BEFORE";
 const PROXY_ONLY = args.includes("--proxy-only");
 const SKIP_SPAWN = args.includes("--no-spawn");
+const FOCUSED = args.includes("--focused");
 
 fs.mkdirSync(RESULTS_DIR, { recursive: true });
 const serverLogPath = path.join(RESULTS_DIR, `lr001-${PHASE.toLowerCase()}-server.log`);
@@ -448,9 +449,44 @@ function pushCase(name, data) {
   results.cases.push({ name, ...data });
 }
 
-async function runMatrix(label, base) {
+async function runMatrix(label, base, focused = false) {
   log(`\n===== 矩阵开始：${label}（${base}）=====`);
   await login(base);
+
+  if (focused) {
+    // 审计修复回归集（1.4）：DIRECT=valid near-limit / over-limit / malformed；
+    // PROXY=valid near-limit / over-limit / Caddy envelope over-limit
+    const near = await uploadViaFormData({ base, category: "product", payloadBytes: 10 * MIB });
+    pushCase(`${label}:product-formdata-10MiB`, { filePayloadBytes: 10 * MIB, ...near });
+    const over = await uploadViaFormData({ base, category: "product", payloadBytes: 10 * MIB + 1 });
+    pushCase(`${label}:product-formdata-10MiB+1`, { filePayloadBytes: 10 * MIB + 1, ...over });
+
+    if (label === "DIRECT_NEXT") {
+      const boundary = `----lr001-good${crypto.randomBytes(6).toString("hex")}`;
+      const body = buildMultipartBody({
+        boundary,
+        fields: { category: "product" },
+        file: { filename: "photo.jpg", contentType: "image/jpeg", data: randomBytes(2048) },
+      });
+      const malformed = await rawRequest({
+        port: new URL(base).port,
+        headers: {
+          "content-type": "multipart/form-data; boundary=----lr001-mismatched",
+          "content-length": String(body.byteLength),
+          cookie: cookieHeader(),
+        },
+        body,
+      });
+      pushCase(`${label}:malformed-boundary-mismatch`, {
+        status: malformed.status,
+        body: malformed.body.slice(0, 200),
+      });
+    } else {
+      const envelope = await uploadViaFormData({ base, category: "product", payloadBytes: 13 * MIB });
+      pushCase(`${label}:envelope-13MiB`, { filePayloadBytes: 13 * MIB, ...envelope });
+    }
+    return;
+  }
 
   // 产品类 10MiB 边界
   for (const size of [10 * MIB - 1, 10 * MIB, 10 * MIB + 1, 11 * MIB]) {
@@ -572,11 +608,11 @@ async function main() {
   results.sideEffectsBefore = { ...before, remoteObjects: objectsBefore };
 
   if (!PROXY_ONLY) {
-    await runMatrix("DIRECT_NEXT", BASE);
+    await runMatrix("DIRECT_NEXT", BASE, FOCUSED);
   }
   if (!SKIP_SPAWN || PROXY_ONLY || args.includes("--with-proxy")) {
     await ensureProxyUp();
-    await runMatrix("PRODUCTION_PROXY", PROXY);
+    await runMatrix("PRODUCTION_PROXY", PROXY, FOCUSED);
   }
 
   const after = auditSideEffects();

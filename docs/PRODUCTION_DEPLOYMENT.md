@@ -32,6 +32,9 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
               ▼           ▼           ▼
           postgres     redis      对象存储
         （持久卷）  （限流/EPHEMERAL）
+              ▲
+              │  周期幂等清理（仅 backend 网络，无端口）
+     storage-cleanup（常驻单实例 worker，Dockerfile target cleanup-runner）
 ```
 
 - 端口暴露原则：**只有 caddy 的 80/443 对公网开放**。3000/5432/6379/9000/9001 一律
@@ -234,6 +237,7 @@ deploy 与 rollback 的 SUCCESS 判定只能出自
 COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
 $COMPOSE ps                 # status（含 healthcheck）
 $COMPOSE logs -f app        # 应用日志（tailing）
+$COMPOSE logs -f storage-cleanup   # 存储清理 worker 日志
 $COMPOSE restart app        # 重启单个服务
 $COMPOSE up -d --no-deps --wait app   # 更新 app 后等待 healthy
 $COMPOSE stop && $COMPOSE up -d       # 停机/恢复
@@ -242,6 +246,29 @@ $COMPOSE stop && $COMPOSE up -d       # 停机/恢复
 所有服务 `restart: unless-stopped`：Docker daemon 随主机启动后自动拉起全部服务，
 应用不依赖人工 SSH 启动。重启顺序测试（app/proxy/postgres/redis）见
 docs/PRODUCTION_SECURITY.md 第 6 节。
+
+### 5.1 存储清理 worker（storage-cleanup）
+
+`storage-cleanup` 是常驻单实例后台服务（Dockerfile target `cleanup-runner`，
+仅 backend 网络、无端口发布、与 app 共用 `.env.production`），周期执行幂等的
+`runStorageCleanup`：stale UPLOADING / 超 UPLOADED 孤儿 / 保留期到期 /
+PENDING_DELETE 重试（语义见 [STORAGE.md §10](./STORAGE.md)）。
+
+- 周期：`ASSET_CLEANUP_INTERVAL_SECONDS`（默认 1800；**生产下限 60**，
+  非法配置以非零退出交由 restart policy）。空转周期不输出日志；产生实际
+  工作（删除/标记/失败）时输出 `storage_cleanup_cycle_completed` summary。
+- **Readiness 解耦**：cleanup backlog 是后台恢复，不是接流量依赖——
+  `/api/ready` 仍只看 DB/Redis/Storage（`VERIFIED_AUTOMATIC`，
+  见 STORAGE.md §10.1）。
+- 手动 escape hatch（incident response，无需宿主机 node_modules）：
+
+```bash
+COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
+# 立即执行一轮真实清理后退出
+$COMPOSE run --rm storage-cleanup --run-once
+# 只打印清理计划，不执行任何删除/转移
+$COMPOSE run --rm storage-cleanup --run-once --dry-run
+```
 
 ## 6. 迁移纪律
 

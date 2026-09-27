@@ -261,19 +261,34 @@ HEAD 元数据与 GET 响应头的实际值。`PutObjectInput.cacheControl`
 
 ### 10.1 清理任务的生产运维状态（STORAGE_CLEANUP_OPERATIONAL_STATUS）
 
-当前状态：**OPS_GAP**。
+当前状态：**VERIFIED_AUTOMATIC**（FINAL REPAIR B 审计修复接线）。
 
-- 清理能力本身完备且幂等：`npm run storage:cleanup`（支持 `--dry-run`）
-  覆盖 stale UPLOADING、超期 UPLOADED、保留期到期、PENDING_DELETE 重试。
-- 但生产拓扑（`compose.production.yml`）**没有**任何定时执行机制
-  （无 cron/systemd timer/容器化 scheduler，`scripts/ops/deploy.sh` 亦未
-  接线）。上文 PENDING_DELETE 自动重试语义以「cleanup 会被执行」为前提。
-- 因此 LR-071 的恢复闭环当前为 **operator-runbook 语义**：存储故障导致的
-  PENDING_DELETE 积压需要运维手动执行清理命令。系统不宣称
-  FULLY_SELF_HEALING。
-- Launch 前建议（non-blocking）：以既有 scheduler pattern（或最简 cron）
-  周期执行 `npm run storage:cleanup`；在接线前，运维手册应把该命令列入
-  存储故障的恢复 SOP。
+- 清理能力幂等完备：`npm run storage:cleanup`（支持 `--dry-run`）覆盖
+  stale UPLOADING、超期 UPLOADED、保留期到期、PENDING_DELETE 重试。
+- **生产自动执行**：`compose.production.yml` 的 `storage-cleanup` 常驻单实例
+  服务（Dockerfile target `cleanup-runner`）周期运行
+  `scripts/ops/storage-cleanup-worker.ts`：
+  - 仅 backend 网络、无端口发布、与 app 共用 `.env.production`；
+  - 周期 `ASSET_CLEANUP_INTERVAL_SECONDS`（默认 1800s，生产下限 60s，
+    非法配置非零退出交由 restart policy）；
+  - 周期逻辑 = run → record → bounded sleep → repeat；单周期失败记日志、
+    下个周期重试（cleanup 幂等），无 tight-loop；
+  - 空转周期零日志，产生实际工作时输出 `storage_cleanup_cycle_completed`；
+  - 与 `/api/ready` 完全解耦（cleanup backlog 不是接流量依赖）。
+- **验证证据**：真实 PG + MinIO 集成测试以生产同款 entrypoint 子进程触发
+  （`tests/integration/production-cleanup-worker.test.ts`）——orphan
+  candidate + PENDING_DELETE + 配额占用 → 自动回收（对象删除 / DELETED /
+  配额 exactly-once 释放）→ 重复执行幂等；自动循环模式以 interval 驱动
+  的常驻子进程验证；compose 拓扑由静态 gate
+  （`tests/ops/production-cleanup-topology.test.ts`）锁定。
+- 手动 escape hatch（incident response，生产 topology 下通过 ops 镜像
+  执行，无需宿主机 node_modules）：
+
+```bash
+COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
+$COMPOSE run --rm storage-cleanup --run-once            # 立即执行一轮
+$COMPOSE run --rm storage-cleanup --run-once --dry-run  # 只打印计划
+```
 
 ## 11. 生产环境迁移（provider）
 

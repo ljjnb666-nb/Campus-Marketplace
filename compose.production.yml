@@ -4,12 +4,15 @@
 #   Internet ──80/443──▶ caddy ──▶ app (Next.js standalone)
 #                                   ├─▶ postgres (backend, 无端口发布)
 #                                   ├─▶ redis    (backend, 无端口发布)
-#                                   └─▶ minio    (可选 profile，backend，无端口发布)
+#                                   ├─▶ minio    (可选 profile，backend，无端口发布)
+#                                   └─▶ storage-cleanup (backend, 常驻单实例清理 worker，无端口发布)
 #
 # 原则：
 # - 只有 caddy 发布 80/443；5432/6379/9000/9001/3000 一律不进公网
 # - app 镜像以 GIT_SHA build arg 构建出不可变 tag，/api/health 可回报 release
 # - 迁移不随 app 启动自动执行：由 scripts/ops/deploy.sh 先跑一次 migrate（见下）
+# - storage-cleanup 常驻周期执行幂等清理（PENDING_DELETE / stale UPLOADING /
+#   孤儿对象 / 保留期到期），与 /api/ready 完全解耦（见 docs/STORAGE.md §10）
 # - secrets 全部来自 .env.production（不入 Git），镜像内不含任何秘密
 #
 # 常用命令（在服务器上；插值只来自 --env-file 的 .env.production）：
@@ -92,6 +95,32 @@ services:
     image: campus-marketplace-migrator:${GIT_SHA:-local}
     profiles: ["ops"]
     env_file: .env.production
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---- 存储清理 worker（LR-071 审计修复：PENDING_DELETE 生产自动恢复）----
+  # 单实例常驻（compose 默认 scale=1，绝不手动扩容——多实例仍安全但无必要）：
+  # 仅 backend 网络、无端口发布、与 app 相同 .env.production（同一 S3/DB 配置）。
+  # 周期执行幂等的 runStorageCleanup（stale UPLOADING / 超 UPLOADED /
+  # 保留期到期 / PENDING_DELETE 重试），周期由 ASSET_CLEANUP_INTERVAL_SECONDS
+  # 控制（默认 1800s，production 下限 60s）。与 /api/ready 完全解耦：
+  # cleanup backlog 是后台恢复，不影响接流量判定。
+  # 手动 escape hatch（无需宿主机 node_modules）：
+  #   docker compose --env-file .env.production -f compose.production.yml \
+  #     run --rm storage-cleanup --run-once [--dry-run]
+  storage-cleanup:
+    build:
+      context: .
+      target: cleanup-runner
+    image: campus-marketplace-cleanup:${GIT_SHA:-local}
+    <<: *service-defaults
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      ASSET_CLEANUP_INTERVAL_SECONDS: ${ASSET_CLEANUP_INTERVAL_SECONDS:-1800}
     networks:
       - backend
     depends_on:

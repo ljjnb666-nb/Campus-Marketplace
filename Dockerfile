@@ -91,3 +91,27 @@ COPY package.json prisma.config.ts ./
 COPY prisma ./prisma
 # 只允许 migrate deploy（禁止 dev / db push），由 compose/ops 脚本触发
 ENTRYPOINT ["npx", "prisma", "migrate", "deploy"]
+
+# ---------- cleanup-runner（存储清理 worker，常驻单实例）----------
+# LR-071 审计修复：PENDING_DELETE 的生产自动恢复。与 migrator 同模型：
+# 完整 node_modules（tsx 运行 TS 入口）+ prisma client + src/scripts 源码。
+# 由 compose.production.yml 的 storage-cleanup 服务消费（backend 网络、
+# 无端口、单实例、restart: unless-stopped），周期执行幂等的
+# runStorageCleanup（详见 scripts/ops/storage-cleanup-worker.ts）。
+FROM node:${NODE_VERSION}-bookworm-slim AS cleanup-runner
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json tsconfig.json prisma.config.ts ./
+COPY prisma ./prisma
+COPY src ./src
+COPY scripts ./scripts
+# prisma.config.ts 加载即要求 DATABASE_URL：生成期使用占位值（非秘密，
+# 运行时凭据一律由 compose env 注入），与 builder 阶段同模式
+RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
+    && npx prisma generate
+ENTRYPOINT ["npx", "tsx", "scripts/ops/storage-cleanup-worker.ts"]
