@@ -49,9 +49,23 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# -----------------------------------------------------------------------------
+# 失败消息卫生：必须区分"破坏性恢复是否已可能发生"——
+#   - quiesce 完成前的失败：绝不声称 writers 已停止（此时可能有 writer 仍在
+#     运行，或尚未进入停止阶段），只声明未执行任何破坏性恢复操作；
+#   - quiesce 成功后（app + storage-cleanup 均验证停止）的失败：两个
+#     production writers 确实保持停止。
+# WRITERS_QUIESCED 仅在两个 writer 都验证停止后置 1。
+# -----------------------------------------------------------------------------
+WRITERS_QUIESCED=0
+
 fail() {
   echo "[prod-restore] FAILED: $1" >&2
-  echo "[prod-restore] production writers（app / storage-cleanup）保持停止状态，人工检查后再决定下一步" >&2
+  if [[ "${WRITERS_QUIESCED}" == "1" ]]; then
+    echo "[prod-restore] production writers（app / storage-cleanup）保持停止状态，人工检查后再决定下一步" >&2
+  else
+    echo "[prod-restore] 未执行任何破坏性恢复操作；写流量状态未完全确认，人工检查全部 writers 后再继续" >&2
+  fi
   exit 1
 }
 
@@ -79,32 +93,43 @@ echo "[prod-restore] SHA256 一致"
 # -----------------------------------------------------------------------------
 # 停止全部生产 DB writers（FINAL REPAIR B）：app + storage-cleanup 都是
 # 数据库写入方，覆盖生产库之前必须全部 quiesce。
-# 语义：
-#   - 容器不存在 = 该 writer 本就没有写流量 → OK
+# 语义（全部 fail closed——writer 状态未知 ≠ writer 已停止）：
+#   - compose ps 命令失败 → FAIL CLOSED（绝不把命令失败当成"无容器/已停止"）
+#   - compose ps 成功 + 输出为空 → 容器不存在 = 无该 writer 写流量 → OK
 #     （storage-cleanup 不存在同时兼容 pre-worker release）
-#   - 存在但无法停止 → FAIL CLOSED（绝不带着写流量 DROP/RESTORE）
+#   - compose ps 成功 + 容器存在 → 停止；stop 命令失败 → FAIL CLOSED
+#   - 停止后验证同样两阶段：compose ps 失败 → FAIL CLOSED；只有命令成功后
+#     才判定"仍在 running → FAIL / 不在 running → 已停止"
 # 顺序：先全部停止并验证，然后才允许终止 DB 连接 / DROP / CREATE / restore。
 # -----------------------------------------------------------------------------
 stop_production_writer() {
   local svc="$1"
   local containers=""
-  if ! containers="$(compose_run ps -q "${svc}" 2>/dev/null)"; then
-    containers=""
+  if ! containers="$(compose_run ps -q "${svc}")"; then
+    fail "无法确认 ${svc} writer 状态（compose ps 失败）；未执行任何破坏性恢复操作"
   fi
   if [[ -z "${containers}" ]]; then
     echo "[prod-restore] ${svc} 容器不存在，无该 writer 写流量"
     return 0
   fi
   echo "[prod-restore] 停止 ${svc} 服务（停止写流量）"
-  compose_run stop "${svc}"
-  if compose_run ps --status running --services | grep -qx "${svc}"; then
-    fail "${svc} 服务未能停止，拒绝在写流量未停止时覆盖生产库"
+  if ! compose_run stop "${svc}"; then
+    fail "${svc} 停止命令失败，写流量未确认停止；未执行任何破坏性恢复操作"
+  fi
+  local running_services=""
+  if ! running_services="$(compose_run ps --status running --services)"; then
+    fail "无法确认 ${svc} 停止状态（compose ps 失败）；未执行任何破坏性恢复操作"
+  fi
+  if printf '%s\n' "${running_services}" | grep -qx "${svc}"; then
+    fail "${svc} 服务未能停止，写流量未停止；未执行任何破坏性恢复操作"
   fi
   echo "[prod-restore] ${svc} 已停止"
 }
 
 stop_production_writer app
 stop_production_writer storage-cleanup
+# 两个 writer 均验证停止：此后失败的恢复操作不会造成新的写流量
+WRITERS_QUIESCED=1
 
 # 终止现存连接——此时全部 production writers（app / storage-cleanup）已验证停止
 echo "[prod-restore] 终止 ${TARGET_DB} 现存连接（所有 production writers 已停止）"

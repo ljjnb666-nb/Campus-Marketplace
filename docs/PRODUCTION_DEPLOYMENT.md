@@ -282,10 +282,14 @@ $COMPOSE run --rm storage-cleanup --run-once --dry-run
 ### 5.2 生产数据库恢复的 writer quiesce（restore）
 
 `restore-production-postgres.sh` 覆盖生产库前必须停止**全部 production DB
-writers**（app + storage-cleanup）并逐一验证已停止；容器不存在 = 无该
-writer（pre-worker release 兼容）；任一存在且无法停止 → FAIL CLOSED，
-绝不执行 terminate/DROP/restore。恢复后（无论成败）全部 writers 保持停止，
-由操作员按目标 release 的 runtime topology 恢复：post-worker release 启动
+writers**（app + storage-cleanup）并逐一验证已停止。语义全部 fail closed——
+**writer 状态未知 ≠ writer 已停止**：`compose ps` 命令失败（无论发现阶段还是
+停止后验证阶段）都直接失败，绝不把命令失败解释成"无容器/已停止"；容器不存在 =
+无该 writer（pre-worker release 兼容）；停止命令失败或停止后仍在 running →
+FAIL CLOSED，绝不执行 terminate/DROP/restore。失败消息区分两个阶段：quiesce
+完成前失败只声明"未执行任何破坏性恢复操作"（不声称 writers 已停止）；quiesce
+成功后的失败才声明"production writers 保持停止"。恢复后（无论成败）writers
+状态由操作员按目标 release topology 恢复：post-worker release 启动
 app + storage-cleanup；pre-worker 目标仅启动 app（cleanup 保持停止）。
 `rollback.sh --hard` 会自动按该 policy 切换。
 
