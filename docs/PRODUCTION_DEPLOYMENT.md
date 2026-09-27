@@ -111,6 +111,16 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
    ```
 6. **验证**：`curl https://<域名>/api/health` → `{"status":"ok","release":"<sha>",...}`，
    release 必须等于部署 SHA。
+7. **统一运维检查**（部署后一次性验证 env 契约/依赖连通性/备份健康/release
+   identity 六项，LAUNCH_REHEARSAL_REPAIR R1 起为唯一 canonical 生产命令）：
+   ```bash
+   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
+     -f compose.production.yml --profile ops run --rm --build ops-check
+   ```
+   前提：`BACKUP_DIR` 已配置（宿主机绝对路径；该目录被 ops-check 只读挂载）
+   且已有一次成功备份；生产合同要求 `BACKUP_OFFSITE_TARGET` 异地副本成功，
+   未配置时 `backup_health` FAIL 属 Phase 3B 设计语义。详见
+   [OBSERVABILITY.md §7](./OBSERVABILITY.md#7-统一运维检查)。
 
 日常部署直接用封装脚本：`./scripts/ops/deploy.sh`（= preflight → 备份 → 迁移 →
 滚动更新 → RELEASE READINESS GATE → 写 release 日志）。deploy.sh 与 rollback.sh

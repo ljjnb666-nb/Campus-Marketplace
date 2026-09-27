@@ -216,9 +216,26 @@ unexpected_server_errors_total          {category}
 
 ## 7. 统一运维检查
 
+### 唯一 canonical 生产命令（LAUNCH_REHEARSAL_REPAIR R1）
+
+生产环境的权威执行方式是 compose 的一次性 `ops-check` 服务（`ops-runner`
+镜像：backend 网络、无端口发布、备份目录只读挂载、one-shot）：
+
 ```bash
-npm run ops:check        # scripts/ops/ops-check.ts [--mode production|development|ci]
+GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --build ops-check
 ```
+
+为什么不能在宿主机直接跑 `npm run ops:check` 当生产 gate：compose 安全基线
+不发布 5432/6379/9000（PRODUCTION_SECURITY §1），宿主机无法解析 backend
+服务名（postgres/redis/minio），connectivity 检查必然失败。`ops-check`
+容器在 backend 网络内运行，并把宿主机 `BACKUP_DIR` 以**只读** bind-mount
+到固定容器路径 `/backups`（服务内 `BACKUP_DIR=/backups`；`BACKUP_DIR`
+继续作为宿主机 backup/restore 脚本的权威路径），因此 environment
+contract、release identity（`ops-runner` 镜像 bake `RELEASE_SHA=${GIT_SHA}`，
+身份与执行脚本所在 artifact 对应）、PostgreSQL/Redis/S3 双桶连通性、
+backup freshness/checksum/offsite 六项检查可以在同一位置全部真实执行。
+
+`npm run ops:check`（tsx 直跑）保留给 development/CI 语境。
 
 检查项：environment contract（production 强制）、database/redis/storage 连通性
 （bounded 4s）、backup health、release identity。输出逐行 JSON + 汇总

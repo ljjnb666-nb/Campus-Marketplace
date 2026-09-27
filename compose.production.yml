@@ -101,6 +101,53 @@ services:
       postgres:
         condition: service_healthy
 
+  # ---- 一次性生产运维检查（LAUNCH_REHEARSAL_REPAIR R1 / P1-01）----
+  # 生产 connectivity/backup 检查的唯一权威执行位置。原因：compose 安全
+  # 基线不发布 5432/6379/9000（PRODUCTION_SECURITY §1），宿主机无法解析
+  # backend 服务名；而常驻 storage-cleanup worker 不应长期持有 backup
+  # 目录文件系统权限（least privilege）。因此用专用 one-shot 诊断容器：
+  #   - 仅 backend 网络、无任何端口发布、restart "no"（经 run --rm 执行）
+  #   - release identity bake 进镜像（ops-runner stage 的
+  #     ENV RELEASE_SHA=${GIT_SHA}），不运行时伪装
+  #   - 诊断工件：不进入 deploy.sh 的 release artifact set（不扩部署生命周期）
+  #   - BACKUP_DIR 契约：BACKUP_DIR 继续作为宿主机 backup/restore 脚本的
+  #     权威路径（backup-postgres.sh 往该真实目录写）；本服务把同一宿主机
+  #     目录只读挂载到固定容器路径 /backups（long syntax + read_only +
+  #     create_host_path:false——目录不存在时显式报错，绝不静默挂空目录），
+  #     服务内以 BACKUP_DIR=/backups 覆盖。ops-check 无写/删备份能力。
+  # 唯一 canonical 执行命令（docs/OBSERVABILITY.md §7）：
+  #   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
+  #     -f compose.production.yml --profile ops run --rm --build ops-check
+  ops-check:
+    build:
+      context: .
+      target: ops-runner
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: campus-marketplace-ops-check:${GIT_SHA:-local}
+    profiles: ["ops"]
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      # 容器内一律读 /backups（宿主机真实备份目录的只读视图）
+      BACKUP_DIR: /backups
+    command: ["--mode", "production"]
+    volumes:
+      - type: bind
+        source: ${BACKUP_DIR:?请在 .env.production 中设置 BACKUP_DIR}
+        target: /backups
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
   # ---- 存储清理 worker（LR-071 审计修复：PENDING_DELETE 生产自动恢复）----
   # 单实例常驻（compose 默认 scale=1，绝不手动扩容——多实例仍安全但无必要）：
   # 仅 backend 网络、无端口发布、与 app 相同 .env.production（同一 S3/DB 配置）。

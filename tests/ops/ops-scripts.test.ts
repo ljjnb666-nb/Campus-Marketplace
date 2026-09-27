@@ -82,6 +82,25 @@ describe("backup status artifact shell-level regression（tests/ops/backup-statu
   );
 });
 
+describe("ops-check canonical invocation shell-level regression（tests/ops/ops-check-canonical.test.sh）", () => {
+  it.skipIf(!hasBash() || !hasDocker())(
+    "canonical 生产命令在运行拓扑上六项检查全 PASS 且无秘密输出（拓扑/offsite 不满足时脚本自跳过）",
+    async () => {
+      const { stdout } = await execFileAsync(
+        "bash",
+        ["tests/ops/ops-check-canonical.test.sh"],
+        {
+          cwd: repoRoot,
+          timeout: 600_000,
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      expect(stdout).toMatch(/FAIL=0/);
+    },
+    650_000,
+  );
+});
+
 describe("compose production config（--env-file 统一插值来源）", () => {
   it.skipIf(!hasDocker())(
     "docker compose --env-file <synthetic> -f compose.production.yml config 在 shell 未导出任何生产变量时 PASS",
