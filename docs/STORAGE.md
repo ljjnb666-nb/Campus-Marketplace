@@ -113,11 +113,25 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
 
 ```
 [T1: 预留 + UPLOADING 行] → S3 PUT → [UPLOADED] → attach → [ATTACHED]
-                                        ↓ 标记
-[PENDING_DELETE] → S3 DeleteObject → [T2: DELETED 转移 + 配额减额（同一事务）]
+                                 ↓ PUT 异常（ambiguous outcome，见下）
+                          [PENDING_DELETE] → S3 DeleteObject → [T2: DELETED 转移 + 配额减额（同一事务）]
 ```
 
-- S3 PUT 失败：即时补偿（单事务删行+释放）；补偿失败则行停留 UPLOADING
+- **S3 PUT 失败 = ambiguous outcome（LR-071 / AMBIGUOUS_PUT_OUTCOME）**：
+  putObject 抛错**不能证明远端对象未写入**（典型场景：对象已保存成功、
+  ACK 在网络断开时丢失，client 观察到异常）。因此失败路径**不删行、
+  不提前释放配额**：
+  1. `UPLOADING → PENDING_DELETE`（authoritative recovery row 保留，配额
+     保持占用）；
+  2. 尽力执行一次幂等 `DeleteObject`（可选立即 purge）：
+     - 删除成功 → `[T2] PENDING_DELETE → DELETED`，**同一事务**内配额
+       exactly-once 释放；
+     - 删除失败（存储仍不可用）→ 行停留 `PENDING_DELETE`，cleanup 稍后
+       重试；
+  3. 标记 PENDING_DELETE 本身失败（DB 故障）→ 行停留 `UPLOADING`，由
+     stale-UPLOADING 恢复路径接管（对对象存在/不存在都幂等安全）。
+  客户端收到 `503 + Retry-After + code=STORAGE_UPLOAD_FAILED`（外部依赖
+  不可用语义）；用户重试会创建全新 attempt，失败 attempt 由本恢复链管理。
 - 任意时刻崩溃：UPLOADING 行必然存在，cleanup 按 TTL（24h）回收——
   对象不存在 → deleteObject 幂等无操作；对象已写入 → 删除对象，随后释放配额
 - T2 条件转移保证 exactly-once：两个并发 cleanup worker 只有一路完成转移与减额
@@ -125,6 +139,26 @@ docker compose up minio-init  # 幂等创建 bucket 并设置匿名策略（up -
 前端 `ImageUploader` 选图后立即上传并把 token（公开 URL / `asset:<id>`）放进表单；
 提交时服务端 `resolveImageTokens` 校验归属并把 UPLOADED 资源转成 ATTACHED（绑定业务实体）。
 订单类照片（handover/return/claim/dispute）由 action 上传，maxCount 在服务端强制执行。
+上传客户端无自动重试（失败即向用户展示错误，人工重试）。
+
+### 5.1 上传请求边界合同（LR-001：两层独立限制）
+
+| 层 | 常量 | 职责 | 错误语义 |
+|---|---|---|---|
+| **OUTER REQUEST ENVELOPE**（请求体总上限，含 multipart overhead） | Caddy `request_body max_size 12MB`（生产 authoritative）；app 侧 `UPLOAD_REQUEST_ENVELOPE_MAX_BYTES = 12,000,000`（Content-Length 快速拒绝）；Next `experimental.proxyClientMaxBodySize = 13MB`（防框架在解析前截断） | 资源保护 / 防止无限 multipart body | `413 REQUEST_TOO_LARGE`（Caddy 拒绝时为无 body 413） |
+| **CATEGORY FILE LIMIT**（单文件业务上限） | avatar/verification 5MiB；product/rental/service/handover/return/report 10MiB | 产品业务限制 | `413 FILE_TOO_LARGE` |
+
+- 10MiB 文件 + multipart 开销实测 ≈ 10.51MB，12MB 信封留有余量；
+  **业务文件上限保持 5MiB / 10MiB 不变**（绝不为通过率放宽到信封值）。
+- 生产公网边界由 **Caddy 字节级**执行（覆盖 chunked / 缺失或伪造
+  Content-Length）；app 端口不对公网暴露。app 侧 Content-Length 检查只是
+  直连内部流量的快速拒绝（fast rejection），不是唯一保护。
+- multipart 解析失败（boundary 不匹配 / Content-Type 错误 / body 截断）
+  → `400 INVALID_MULTIPART`，绝不落入 generic 500。
+- 所有 413 / 400 拒绝发生在任何 DB / S3 副作用之前
+  （`S3 PUT = 0`、`UploadedAsset = 0`、`storageUsedBytes delta = 0`）。
+- 真实 HTTP 边界矩阵（production build + 真实 multipart 序列化，direct
+  next 与 Caddy 双通道）证据：`scripts/resilience/upload-boundary-harness.mjs`。
 
 ## 6. 私有资源访问（同源代理式交付）
 
@@ -206,7 +240,7 @@ HEAD 元数据与 GET 响应头的实际值。`PutObjectInput.cacheControl`
 
 | 场景 | 行为 |
 |---|---|
-| S3 上传失败 | 补偿事务删除 UPLOADING 行并释放配额；补偿失败则行停留 UPLOADING 由 cleanup 恢复 |
+| S3 上传失败（PUT 异常） | **ambiguous outcome**：行转 PENDING_DELETE 保留恢复记录、配额保持占用；尽力一次幂等 DeleteObject，删除确认后 T2 转移 DELETED + 同事务配额 exactly-once 释放；删除未完成则停留 PENDING_DELETE 由 cleanup 重试；标记失败则停留 UPLOADING 走 stale 恢复。客户端收 503 + Retry-After + `code=STORAGE_UPLOAD_FAILED` |
 | T1（预留+建行）失败 | 同事务整体回滚：无预留、无行、无对象 |
 | S3 成功后转移失败/崩溃 | 行停留 UPLOADING → cleanup 删除对象并释放配额 |
 | T1 提交后、PUT 前崩溃 | stale UPLOADING（无对象）→ cleanup 释放配额 |
@@ -221,6 +255,40 @@ HEAD 元数据与 GET 响应头的实际值。`PutObjectInput.cacheControl`
 
 原则：DB 与对象存储不会因失败形成无法恢复的不一致；
 删除一律“先标记、后物理”，物理删除失败可重试。
+**配额释放只与「远端对象删除已确认 + DELETED 转移」绑定**——
+绝不因 PUT 异常就提前释放配额（否则 remote object may exist 时
+`storageUsedBytes` 显示空闲而 S3 对象仍占存储）。
+
+### 10.1 清理任务的生产运维状态（STORAGE_CLEANUP_OPERATIONAL_STATUS）
+
+当前状态：**VERIFIED_AUTOMATIC**（FINAL REPAIR B 审计修复接线）。
+
+- 清理能力幂等完备：`npm run storage:cleanup`（支持 `--dry-run`）覆盖
+  stale UPLOADING、超期 UPLOADED、保留期到期、PENDING_DELETE 重试。
+- **生产自动执行**：`compose.production.yml` 的 `storage-cleanup` 常驻单实例
+  服务（Dockerfile target `cleanup-runner`）周期运行
+  `scripts/ops/storage-cleanup-worker.ts`：
+  - 仅 backend 网络、无端口发布、与 app 共用 `.env.production`；
+  - 周期 `ASSET_CLEANUP_INTERVAL_SECONDS`（默认 1800s，生产下限 60s，
+    非法配置非零退出交由 restart policy）；
+  - 周期逻辑 = run → record → bounded sleep → repeat；单周期失败记日志、
+    下个周期重试（cleanup 幂等），无 tight-loop；
+  - 空转周期零日志，产生实际工作时输出 `storage_cleanup_cycle_completed`；
+  - 与 `/api/ready` 完全解耦（cleanup backlog 不是接流量依赖）。
+- **验证证据**：真实 PG + MinIO 集成测试以生产同款 entrypoint 子进程触发
+  （`tests/integration/production-cleanup-worker.test.ts`）——orphan
+  candidate + PENDING_DELETE + 配额占用 → 自动回收（对象删除 / DELETED /
+  配额 exactly-once 释放）→ 重复执行幂等；自动循环模式以 interval 驱动
+  的常驻子进程验证；compose 拓扑由静态 gate
+  （`tests/ops/production-cleanup-topology.test.ts`）锁定。
+- 手动 escape hatch（incident response，生产 topology 下通过 ops 镜像
+  执行，无需宿主机 node_modules）：
+
+```bash
+COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
+$COMPOSE run --rm storage-cleanup --run-once            # 立即执行一轮
+$COMPOSE run --rm storage-cleanup --run-once --dry-run  # 只打印计划
+```
 
 ## 11. 生产环境迁移（provider）
 

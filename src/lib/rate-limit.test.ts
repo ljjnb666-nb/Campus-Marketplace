@@ -16,11 +16,17 @@ vi.mock("ioredis", () => ({
   Redis: vi.fn().mockImplementation(() => mockClient),
 }));
 
-import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
+import {
+  isRateLimited,
+  resetRateLimit,
+  REDIS_FAILURE_COOLDOWN_MS,
+  REDIS_READY_BUDGET_MS,
+} from "@/lib/rate-limit";
 
 type RateLimitGlobal = typeof globalThis & {
   rateLimitRedis?: unknown;
   rateLimitRedisReady?: Promise<boolean> | undefined;
+  rateLimitRedisFailureUntil?: number | undefined;
 };
 
 describe("rate limiter", () => {
@@ -31,6 +37,7 @@ describe("rate limiter", () => {
     vi.stubEnv("REDIS_URL", "");
     (globalThis as RateLimitGlobal).rateLimitRedis = undefined;
     (globalThis as RateLimitGlobal).rateLimitRedisReady = undefined;
+    (globalThis as RateLimitGlobal).rateLimitRedisFailureUntil = undefined;
     mockClient.status = "ready";
     mockClient.eval = evalFn;
     mockClient.del = delFn;
@@ -209,5 +216,160 @@ describe("rate limiter", () => {
     await resetRateLimit("reset-me-redis");
 
     expect(delFn).toHaveBeenCalledWith("ratelimit:reset-me-redis");
+  });
+
+  it("enters cooldown after a failed readiness probe and skips the budget within the window", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "connecting";
+
+    // 第一次失败 probe：支付一次预算后回退
+    const pending = isRateLimited({ key: "cooldown-a", limit: 2, windowMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(REDIS_READY_BUDGET_MS + 50);
+    const first = await pending;
+    expect(first).toEqual({ limited: false, remaining: 1 });
+    const g = globalThis as RateLimitGlobal;
+    expect(g.rateLimitRedisFailureUntil).toBeGreaterThan(Date.now());
+
+    // 冷却窗口内：立即回退，不再支付预算
+    mockClient.status = "connecting";
+    const startWithin = Date.now();
+    const within = await isRateLimited({ key: "cooldown-a", limit: 2, windowMs: 60_000 });
+    expect(within).toEqual({ limited: false, remaining: 0 });
+    expect(Date.now() - startWithin).toBeLessThan(50);
+  });
+
+  it("recovers immediately once the client is ready, even mid-cooldown", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "connecting";
+
+    // 进入冷却
+    const pending = isRateLimited({ key: "recover", limit: 2, windowMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(REDIS_READY_BUDGET_MS + 50);
+    await pending;
+
+    // ioredis 自身重连成功（ready）→ 即使冷却未到期也立即恢复 Redis 路径
+    mockClient.status = "ready";
+    evalFn.mockResolvedValue(1);
+    const result = await isRateLimited({ key: "recover", limit: 2, windowMs: 60_000 });
+
+    expect(result).toEqual({ limited: false, remaining: 1 });
+    expect(evalFn).toHaveBeenCalledTimes(1);
+    expect((globalThis as RateLimitGlobal).rateLimitRedisFailureUntil).toBeUndefined();
+  });
+
+  it("allows a new readiness probe after the cooldown window expires", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "connecting";
+
+    // 进入冷却
+    const pending = isRateLimited({ key: "expiry-cooldown", limit: 2, windowMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(REDIS_READY_BUDGET_MS + 50);
+    await pending;
+
+    // 冷却期内：立即回退
+    mockClient.status = "connecting";
+    await isRateLimited({ key: "expiry-cooldown", limit: 2, windowMs: 60_000 });
+
+    // 冷却到期：允许重新 probe（本次仍失败，但 probe 被重新执行）
+    vi.advanceTimersByTime(REDIS_FAILURE_COOLDOWN_MS + 10);
+    mockClient.status = "connecting";
+    const retry = isRateLimited({ key: "expiry-cooldown", limit: 2, windowMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(REDIS_READY_BUDGET_MS + 50);
+    await retry;
+
+    // 失败状态被刷新（新一轮冷却）
+    expect((globalThis as RateLimitGlobal).rateLimitRedisFailureUntil).toBeGreaterThan(
+      Date.now() - REDIS_FAILURE_COOLDOWN_MS,
+    );
+  });
+
+  it("enters cooldown when a Redis command fails mid-flight and skips the next probes", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    mockClient.status = "ready";
+    evalFn.mockRejectedValue(new Error("Connection restored-then-lost"));
+
+    // 命令失败：本地回退 + 进入冷却
+    const first = await isRateLimited({ key: "cmd-fail", limit: 2, windowMs: 60_000 });
+    expect(first).toEqual({ limited: false, remaining: 1 });
+    expect((globalThis as RateLimitGlobal).rateLimitRedisFailureUntil).toBeGreaterThan(
+      Date.now(),
+    );
+
+    // 冷却窗口内：即使 client 声称非 ready，也不再执行 eval
+    mockClient.status = "connecting";
+    evalFn.mockClear();
+    await isRateLimited({ key: "cmd-fail", limit: 2, windowMs: 60_000 });
+    expect(evalFn).not.toHaveBeenCalled();
+  });
+
+  it("dedupes client-level reconnect error storms into one degraded event per outage episode", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    const loggerModule = await import("@/lib/logger");
+    const warnSpy = vi.spyOn(loggerModule.logger, "warn").mockImplementation(() => undefined);
+    const infoSpy = vi.spyOn(loggerModule.logger, "info").mockImplementation(() => undefined);
+
+    // 创建 client（mock 底层）：触发 on("error") 注册
+    mockClient.status = "ready";
+    evalFn.mockResolvedValue(1);
+    await isRateLimited({ key: "storm", limit: 10, windowMs: 60_000 });
+
+    const errorRegistrations = mockClient.on.mock.calls.filter(
+      ([event]) => event === "error",
+    );
+    expect(errorRegistrations.length).toBeGreaterThan(0);
+    const errorHandler = errorRegistrations[
+      errorRegistrations.length - 1
+    ][1] as (error: Error) => void;
+
+    // 同一持续 outage：12 连发 client error 事件 → degraded WARN 恰好 1 条
+    for (let i = 0; i < 12; i += 1) {
+      errorHandler(new Error(`connect ECONNREFUSED 10.1.2.3:6379 attempt ${i}`));
+    }
+    let degraded = warnSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_degraded"),
+    );
+    expect(degraded).toHaveLength(1);
+    // 日志安全：不落 raw error message（可能含端点）、不落 rate-limit key
+    expect(JSON.stringify(degraded[0])).not.toContain("ECONNREFUSED");
+    expect(JSON.stringify(degraded[0])).not.toContain("storm");
+
+    // 恢复：client ready → 下一次调用清除冷却 → recovered INFO 恰好 1 条
+    await isRateLimited({ key: "storm", limit: 10, windowMs: 60_000 });
+    const recovered = infoSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_recovered"),
+    );
+    expect(recovered).toHaveLength(1);
+
+    // 再次 outage：degraded WARN 恰好 +1
+    for (let i = 0; i < 5; i += 1) {
+      errorHandler(new Error("connect ECONNREFUSED again"));
+    }
+    degraded = warnSpy.mock.calls.filter((call) =>
+      JSON.stringify(call).includes("redis_rate_limit_degraded"),
+    );
+    expect(degraded).toHaveLength(2);
+
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  it("does not log the rate-limit key in cooldown transition events", async () => {
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    const loggerModule = await import("@/lib/logger");
+    const warnSpy = vi.spyOn(loggerModule.logger, "warn").mockImplementation(() => undefined);
+    mockClient.status = "connecting";
+
+    const pending = isRateLimited({ key: "secret-email@campus.local", limit: 2, windowMs: 60_000 });
+    await vi.advanceTimersByTimeAsync(REDIS_READY_BUDGET_MS + 50);
+    await pending;
+
+    const cooldownEvents = warnSpy.mock.calls.filter((call) =>
+      String(call[0]).includes("冷却"),
+    );
+    expect(cooldownEvents.length).toBeGreaterThan(0);
+    for (const call of cooldownEvents) {
+      expect(JSON.stringify(call)).not.toContain("secret-email@campus.local");
+    }
+    warnSpy.mockRestore();
   });
 });

@@ -13,6 +13,15 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(__dirname),
+  // LR-001：proxy（src/proxy.ts，matcher 覆盖全部路由）会缓冲请求 body，
+  // 默认 10MB —— 超过即静默截断流，业务 10MiB 上传在 request.formData()
+  // 阶段必然解析失败（曾被映射为 500）。设为 13MB（bytes 语义 = 13 ×
+  // 1024²）以覆盖生产 Caddy request_body max_size 12MB 的请求信封 + 余量；
+  // 公网流量的字节级上限仍由 Caddy 执行（deploy/Caddyfile），业务类目
+  // 上限（5MiB / 10MiB）不变，见 upload route 的两层 limit contract。
+  experimental: {
+    proxyClientMaxBodySize: "13mb",
+  },
   // 生产容器化部署：build 产出自包含 .next/standalone（含精简 node_modules），
   // Dockerfile 最终阶段仅复制 standalone + static。
   // 仅在容器构建时启用（Dockerfile 设 NEXT_OUTPUT_STANDALONE=1）：

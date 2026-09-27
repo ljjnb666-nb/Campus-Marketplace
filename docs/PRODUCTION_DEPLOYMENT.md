@@ -32,6 +32,9 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
               ▼           ▼           ▼
           postgres     redis      对象存储
         （持久卷）  （限流/EPHEMERAL）
+              ▲
+              │  周期幂等清理（仅 backend 网络，无端口）
+     storage-cleanup（常驻单实例 worker，Dockerfile target cleanup-runner）
 ```
 
 - 端口暴露原则：**只有 caddy 的 80/443 对公网开放**。3000/5432/6379/9000/9001 一律
@@ -234,6 +237,7 @@ deploy 与 rollback 的 SUCCESS 判定只能出自
 COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
 $COMPOSE ps                 # status（含 healthcheck）
 $COMPOSE logs -f app        # 应用日志（tailing）
+$COMPOSE logs -f storage-cleanup   # 存储清理 worker 日志
 $COMPOSE restart app        # 重启单个服务
 $COMPOSE up -d --no-deps --wait app   # 更新 app 后等待 healthy
 $COMPOSE stop && $COMPOSE up -d       # 停机/恢复
@@ -242,6 +246,52 @@ $COMPOSE stop && $COMPOSE up -d       # 停机/恢复
 所有服务 `restart: unless-stopped`：Docker daemon 随主机启动后自动拉起全部服务，
 应用不依赖人工 SSH 启动。重启顺序测试（app/proxy/postgres/redis）见
 docs/PRODUCTION_SECURITY.md 第 6 节。
+
+### 5.1 存储清理 worker（storage-cleanup）
+
+`storage-cleanup` 是常驻单实例后台服务（Dockerfile target `cleanup-runner`，
+仅 backend 网络、无端口发布、与 app 共用 `.env.production`），周期执行幂等的
+`runStorageCleanup`：stale UPLOADING / 超 UPLOADED 孤儿 / 保留期到期 /
+PENDING_DELETE 重试（语义见 [STORAGE.md §10](./STORAGE.md)）。
+
+- **deploy 接线（FINAL REPAIR B release lifecycle）**：`deploy.sh` 构建
+  release artifact set（`app migrate storage-cleanup`，同一 `GIT_SHA`），
+  在 migrate 完成后切换 worker（绝不在 pre-migration schema 上运行新 worker），
+  并逐一验证：resolved image == `campus-marketplace-cleanup:<GIT_SHA>` →
+  启动 → compose authoritative running 状态 → 运行容器 exact image →
+  `--run-once --dry-run` 无副作用 runtime smoke。任何一步失败 → 部署失败、
+  不写 release log。`.releases.log` 记录 artifact pair：
+  `APP_IMAGE=... CLEANUP_IMAGE=... CLEANUP=running`。
+- 周期：`ASSET_CLEANUP_INTERVAL_SECONDS`（默认 1800；**生产下限 60**，
+  production-env-check preflight 与 worker 同一契约校验，非法配置以非零
+  退出交由 restart policy）。空转周期不输出日志；产生实际工作（删除/标记/
+  失败）时输出 `storage_cleanup_cycle_completed` summary。
+- **Readiness 解耦**：cleanup backlog 是后台恢复，不是接流量依赖——
+  `/api/ready` 仍只看 DB/Redis/Storage（`VERIFIED_AUTOMATIC`，
+  见 STORAGE.md §10.1）。
+- 手动 escape hatch（incident response，无需宿主机 node_modules）：
+
+```bash
+COMPOSE="docker compose --env-file .env.production -f compose.production.yml"
+# 立即执行一轮真实清理后退出
+$COMPOSE run --rm storage-cleanup --run-once
+# 只打印清理计划，不执行任何删除/转移
+$COMPOSE run --rm storage-cleanup --run-once --dry-run
+```
+
+### 5.2 生产数据库恢复的 writer quiesce（restore）
+
+`restore-production-postgres.sh` 覆盖生产库前必须停止**全部 production DB
+writers**（app + storage-cleanup）并逐一验证已停止。语义全部 fail closed——
+**writer 状态未知 ≠ writer 已停止**：`compose ps` 命令失败（无论发现阶段还是
+停止后验证阶段）都直接失败，绝不把命令失败解释成"无容器/已停止"；容器不存在 =
+无该 writer（pre-worker release 兼容）；停止命令失败或停止后仍在 running →
+FAIL CLOSED，绝不执行 terminate/DROP/restore。失败消息区分两个阶段：quiesce
+完成前失败只声明"未执行任何破坏性恢复操作"（不声称 writers 已停止）；quiesce
+成功后的失败才声明"production writers 保持停止"。恢复后（无论成败）writers
+状态由操作员按目标 release topology 恢复：post-worker release 启动
+app + storage-cleanup；pre-worker 目标仅启动 app（cleanup 保持停止）。
+`rollback.sh --hard` 会自动按该 policy 切换。
 
 ## 6. 迁移纪律
 
@@ -267,8 +317,12 @@ cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/REA
 
 ## 8. 磁盘空间
 
-- `docker system df` 查看占用；定期 `docker image prune -f` 清理悬空镜像
-  （保留最近 2–3 个 `campus-marketplace-app:<sha>` 用于回滚）。
+- `docker system df` 查看占用；定期 `docker image prune -f` 清理悬空镜像。
+  **release artifact pair 成对保留**：每个 release 由
+  `campus-marketplace-app:<sha>` 与 `campus-marketplace-cleanup:<sha>` 组成，
+  最近 2–3 个 release 的两个镜像都需保留（回滚必须成对切换，见 ROLLBACK.md；
+  rollback 前置检查 `docker images 'campus-marketplace-app'` 与
+  `docker images 'campus-marketplace-cleanup'`）。
 - Postgres 卷膨胀：`VACUUM` 由 autovacuum 处理；磁盘告警阈值建议 80%。
 - 备份目录 retention 自动清理（`BACKUP_RETENTION_DAYS`，默认 14 天），
   异地备份见 BACKUP_RESTORE.md。

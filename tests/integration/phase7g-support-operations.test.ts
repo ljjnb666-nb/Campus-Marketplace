@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+// 每用例多步真实 fixture 写入；全量套件并行时默认 5s 在满载下不够
+// （本机 full-run 实测抖动）。文件级放宽，test-only。
+vi.setConfig({ testTimeout: 30_000 });
+
 // Phase 7G Support Ticket + Appeal SLA closure 集成测试（真实 PostgreSQL）。
 //
 // 覆盖（指令冻结的矩阵，本文件 = support 域 + appeal SLA）：

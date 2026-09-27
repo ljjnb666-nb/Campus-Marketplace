@@ -42,6 +42,13 @@ export { buildAssetReference, isAssetReference, parseAssetReference };
  *     ↓ [事务 T2: 条件转移 DELETED + 同事务配额减额]（exactly-once）
  *   [DELETED]
  *
+ * PUT 失败语义（AMBIGUOUS_PUT_OUTCOME，LR-071）：putObject 抛错不代表远端
+ * 对象未写入（远端可能已提交而 client 观察到异常）。因此失败路径不删行、
+ * 不提前释放配额：UPLOADING → PENDING_DELETE（保留 authoritative recovery
+ * row，配额保持占用）→ 尽力一次幂等 DeleteObject；删除被确认后才经 T2
+ * 转移 DELETED 并释放配额（exactly-once）。删除未完成则停留 PENDING_DELETE，
+ * cleanup 幂等重试。标记失败（DB 故障）则停留 UPLOADING，由 stale 恢复接管。
+ *
  * 崩溃恢复（cleanup）：
  * - stale UPLOADING（TTL 24h）：对象可能存在也可能不存在 → deleteObject（幂等）
  *   → PENDING_DELETE → T2 释放
@@ -280,26 +287,75 @@ export async function uploadImageAsset(params: {
       cacheControl,
     });
   } catch (error) {
-    // CASE A：S3 失败 → 尽力补偿（删行 + 释放配额，同一事务）；
-    // 补偿失败时行保持 UPLOADING，由 cleanup 按 stale 恢复
-    await abandonUploadingAsset(assetId, userId, sizeBytes).catch((abandonError) => {
-      logger.error("UPLOADING 补偿失败，留待 cleanup 恢复", "asset-service", {
-        operation: "upload-compensate",
-        assetId,
-        userId,
-        sizeBytes,
-        error: abandonError,
-      });
-    });
+    // LR-071 / AMBIGUOUS_PUT_OUTCOME：putObject 抛错【不证明】远端对象未写入
+    // ——远端可能已提交成功而 client 观察到错误（连接在 ACK 前断开等）。
+    // 因此禁止"删 UPLOADING 行 + 释放配额"的即时补偿：若对象实际已存在，
+    // 会产生无人追踪的 orphan object（DB 无行、配额已释放、存储仍占用）。
+    //
+    // 安全失败状态（保留 authoritative recovery row）：
+    //   UPLOADING → PENDING_DELETE（配额保持占用），随后尽力一次幂等 purge：
+    //   - purge 成功 → DeleteObject 确认后 T2 转移 DELETED + 同事务释放配额
+    //   - purge 失败 → 行停留 PENDING_DELETE，cleanup 稍后重试（幂等）
+    //   - 标记本身失败（DB 故障）→ 行停留 UPLOADING，既有 stale-UPLOADING
+    //     恢复路径接管（cleanup 对对象存在/不存在都幂等安全）
     logger.error("对象存储上传失败", "asset-service", {
       operation: "upload",
+      event: "storage_upload_unavailable",
       assetId,
       userId,
       category,
       sizeBytes,
       error,
     });
-    throw new AssetServiceError("STORAGE_UPLOAD_FAILED", "图片上传失败，请稍后重试", 500);
+
+    const marked = await prisma.uploadedAsset
+      .updateMany({
+        where: { id: assetId, status: "UPLOADING" },
+        data: { status: "PENDING_DELETE" },
+      })
+      .catch((markError) => {
+        logger.error("失败上传标记 PENDING_DELETE 失败，行保持 UPLOADING 等待 cleanup", "asset-service", {
+          operation: "upload-recover",
+          event: "storage_upload_recovery_pending",
+          assetId,
+          userId,
+          sizeBytes,
+          error: markError,
+        });
+        return { count: 0 };
+      });
+
+    if (batchCount(marked) === 1) {
+      const purged = await purgePendingDeleteAsset({
+        id: assetId,
+        ownerId: userId,
+        bucket,
+        objectKey,
+        sizeBytes,
+      }).catch(() => false);
+      if (purged) {
+        logger.info("失败上传恢复完成：对象已删除、配额已释放", "asset-service", {
+          operation: "upload-recover",
+          event: "storage_upload_recovery_completed",
+          assetId,
+          userId,
+          sizeBytes,
+        });
+      } else {
+        logger.warn("远端对象删除未完成，PENDING_DELETE 保留待 cleanup 重试", "asset-service", {
+          operation: "upload-recover",
+          event: "storage_upload_recovery_pending",
+          assetId,
+          userId,
+          sizeBytes,
+        });
+      }
+    }
+
+    // 对象存储不可用 = external dependency unavailable（非应用 bug）：
+    // 503 + Retry-After 合同（route 层附带 header），引导客户端稍后重试。
+    // 重试会创建全新 attempt；本 attempt 的恢复由 PENDING_DELETE 生命周期管理。
+    throw new AssetServiceError("STORAGE_UPLOAD_FAILED", "图片上传失败，请稍后重试", 503);
   }
 
   // PUT 成功：条件转移 UPLOADING → UPLOADED。
@@ -333,23 +389,6 @@ export async function uploadImageAsset(params: {
     mimeType: processed.mimeType,
     sizeBytes,
   };
-}
-
-/** 放弃一条 UPLOADING 资源：单事务内删行 + 释放配额（上传失败的即时补偿） */
-async function abandonUploadingAsset(
-  assetId: string,
-  userId: string,
-  sizeBytes: number,
-): Promise<void> {
-  await prisma.$transaction(async (rawTx) => {
-    const tx = rawTx as unknown as Prisma.TransactionClient;
-    const removed = await tx.uploadedAsset.deleteMany({
-      where: { id: assetId, status: "UPLOADING" },
-    });
-    if (batchCount(removed) === 1) {
-      await releaseQuotaBytes(tx, userId, sizeBytes);
-    }
-  });
 }
 
 /** 图片内容校验错误统一转成用户可读 message（保留类型码供日志使用） */

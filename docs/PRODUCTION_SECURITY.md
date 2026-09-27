@@ -42,8 +42,12 @@
 ## 4. 应用层控制（已内建，不因部署改变）
 
 - 中间件：同源校验（跨源 API 403）、CSP nonce（`strict-dynamic`）、安全头
-- 登录限流：10 次/15 分钟/邮箱或 IP（Redis 固定窗口 + 单机降级）
-- 上传限流：20 次/分钟/用户；MIME/大小白名单；sharp 服务端重编码
+- 登录限流：10 次/15 分钟/邮箱或 IP（Redis 固定窗口 + 单机降级；
+  Redis 故障时进入 30s 失败冷却、立即本地回退，恢复详见
+  docs/OBSERVABILITY.md「限流的失败冷却合同」）
+- 上传限流：20 次/分钟/用户；请求体外层信封上限（Caddy 12MB 字节级
+  authoritative + app 快速拒绝）；MIME/大小白名单；sharp 服务端重编码
+  （两层限制合同见 docs/STORAGE.md §5.1）
 - 限流依赖 `X-Forwarded-For` 第一跳，Caddy 已配置覆写为真实客户端 IP
   （deploy/Caddyfile），否则该键可被伪造
 

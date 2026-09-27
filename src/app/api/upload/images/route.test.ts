@@ -74,6 +74,7 @@ function buildUploadRequest(
     type: "image/jpeg",
   }),
   category = "product",
+  headers: Record<string, string> = {},
 ) {
   const formData = new FormData();
   if (file) {
@@ -82,7 +83,15 @@ function buildUploadRequest(
   formData.set("category", category);
 
   // 路由只依赖 request.formData()，直接提供桩对象避免跨环境 multipart 序列化
-  return { formData: async () => formData } as unknown as NextRequest;
+  // （multipart 解析层的真实证据由 production-build HTTP harness 覆盖）；
+  // 默认携带合法 multipart Content-Type（CT 预检有独立用例覆盖）
+  return {
+    headers: new Headers({
+      "content-type": "multipart/form-data; boundary=----vitestboundary",
+      ...headers,
+    }),
+    formData: async () => formData,
+  } as unknown as NextRequest;
 }
 
 describe("POST /api/upload/images", () => {
@@ -205,14 +214,125 @@ describe("POST /api/upload/images", () => {
     expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("returns 413 for files beyond the category size limit", async () => {
+  it("returns 413 for files beyond the category size limit with a stable FILE_TOO_LARGE code", async () => {
     const big = new File([new Uint8Array([1])], "photo.jpg", { type: "image/jpeg" });
     Object.defineProperty(big, "size", { value: 6 * 1024 * 1024 });
     const response = await POST(buildUploadRequest(big, "avatar"));
 
     expect(response.status).toBe(413);
-    expect(await response.json()).toEqual({ error: "图片大小不能超过5MB" });
+    expect(await response.json()).toEqual({
+      error: "图片大小不能超过5MB",
+      code: "FILE_TOO_LARGE",
+    });
     expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("fast-rejects requests whose Content-Length exceeds the outer envelope with REQUEST_TOO_LARGE", async () => {
+    const response = await POST(
+      buildUploadRequest(undefined, "product", {
+        "content-length": String(13 * 1000 * 1000),
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      error: "上传请求过大",
+      code: "REQUEST_TOO_LARGE",
+    });
+    // 快速拒绝发生在解析前：formData 不应被消费，更不应有任何业务副作用
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("maps known malformed multipart parser failures to 400 INVALID_MULTIPART", async () => {
+    const request = {
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+        "content-length": "1000",
+      }),
+      formData: async () => {
+        throw new TypeError("Failed to parse body as FormData.");
+      },
+    } as unknown as NextRequest;
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "上传数据格式不正确，请重新选择文件",
+      code: "INVALID_MULTIPART",
+    });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing / non-multipart / boundary-less Content-Type before calling formData", async () => {
+    for (const contentType of [undefined, "application/json", "multipart/form-data"]) {
+      const formDataFn = vi.fn(async () => new FormData());
+      const request = {
+        headers: new Headers(
+          contentType ? { "content-type": contentType } : {},
+        ),
+        formData: formDataFn,
+      } as unknown as NextRequest;
+
+      const response = await POST(request);
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "上传数据格式不正确，请重新选择文件",
+        code: "INVALID_MULTIPART",
+      });
+      expect(formDataFn).not.toHaveBeenCalled();
+      expect(uploadImageAsset).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rethrows unknown formData failures as generic 500 (unknown ≠ client fault)", async () => {
+    // 未知 Error（内部故障）：必须 500，不得伪装为 4xx
+    const unknownErrorRequest = {
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+      }),
+      formData: async () => {
+        throw new Error("unexpected internal parser failure");
+      },
+    } as unknown as NextRequest;
+    const errorResponse = await POST(unknownErrorRequest);
+    expect(errorResponse.status).toBe(500);
+    expect(await errorResponse.json()).toEqual({
+      error: "服务器内部错误，请稍后重试",
+    });
+
+    // 未知 TypeError（框架内部故障）：同样必须 500，不做宽泛 instanceof 归类
+    const unknownTypeErrorRequest = {
+      headers: new Headers({
+        "content-type": "multipart/form-data; boundary=----x",
+      }),
+      formData: async () => {
+        throw new TypeError("unexpected internal framework failure");
+      },
+    } as unknown as NextRequest;
+    const typeErrorResponse = await POST(unknownTypeErrorRequest);
+    expect(typeErrorResponse.status).toBe(500);
+    expect(await typeErrorResponse.json()).toEqual({
+      error: "服务器内部错误，请稍后重试",
+    });
+
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+  });
+
+  it("maps STORAGE_UPLOAD_FAILED to 503 with Retry-After and a stable code", async () => {
+    uploadImageAsset.mockRejectedValue(
+      new AssetServiceError("STORAGE_UPLOAD_FAILED", "图片上传失败，请稍后重试", 503),
+    );
+
+    const response = await POST(buildUploadRequest());
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toEqual({
+      error: "图片上传失败，请稍后重试",
+      code: "STORAGE_UPLOAD_FAILED",
+    });
   });
 
   it("maps quota exceeded errors to 413 with a friendly message", async () => {
@@ -223,7 +343,10 @@ describe("POST /api/upload/images", () => {
     const response = await POST(buildUploadRequest());
 
     expect(response.status).toBe(413);
-    expect(await response.json()).toEqual({ error: "存储空间不足，请删除旧图片后再试" });
+    expect(await response.json()).toEqual({
+      error: "存储空间不足，请删除旧图片后再试",
+      code: "QUOTA_EXCEEDED",
+    });
   });
 
   it("maps image validation errors to 400 without leaking internals", async () => {

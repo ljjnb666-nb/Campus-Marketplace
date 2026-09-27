@@ -23,6 +23,16 @@ type LocalBucket = {
  * 故障，首次使用前做一次有界 readiness 等待（ensureRedisReady）：
  * 超过预算仍未 ready 才回退本地计数——正常环境冷启动只多等一次连接
  * 建立的时间，Redis 真故障时最多等待该预算后快速降级。
+ *
+ * 失败冷却（LR-070）：readiness probe 或命令失败后进入一段有界冷却窗口
+ * （REDIS_FAILURE_COOLDOWN_MS），窗口内的请求不再重复支付 readiness
+ * 预算，立即走本地计数——持续故障下不会每个请求都等 ~1.8s。
+ * 恢复语义：client 一旦真正 ready（ioredis 自身重连成功），下一个请求
+ * 立即恢复 Redis 路径并清除冷却状态——恢复不等冷却到期。
+ * 冷却只在"健康→失败"跳变时记录一次结构化事件（不逐请求 WARN，
+ * 不输出 rate-limit key：key 可能含 email 等用户派生标识）。
+ * /api/ready 的 Redis 健康探测独立于本冷却状态（dependency-health.ts
+ * 直接 PING），业务降级不会让 readiness 误报 Redis 健康。
  */
 
 const FIXED_WINDOW_LUA = `
@@ -36,8 +46,15 @@ return count
 const REDIS_KEY_PREFIX = "ratelimit:";
 
 /** 冷启动 readiness 等待预算（毫秒）：覆盖正常连接建立，不放大故障等待 */
-const REDIS_READY_BUDGET_MS = 1800;
+export const REDIS_READY_BUDGET_MS = 1800;
 const REDIS_READY_POLL_MS = 25;
+
+/**
+ * 失败冷却窗口（毫秒）：probe/命令失败后的短期抑制窗口。
+ * 固定值（非无限 backoff）：到期后允许下一次 readiness probe 重试，
+ * 故障恢复最坏延迟 = 冷却窗口；真实恢复（client ready）不受窗口限制。
+ */
+export const REDIS_FAILURE_COOLDOWN_MS = 30_000;
 
 const localBuckets = new Map<string, LocalBucket>();
 
@@ -45,6 +62,8 @@ declare global {
   var rateLimitRedis: Redis | undefined;
   // 单飞：并发请求共享同一次 readiness 等待，不各自重复等待
   var rateLimitRedisReady: Promise<boolean> | undefined;
+  // 失败冷却：0 = 无冷却；否则为冷却到期时间戳（Date.now() 基准）
+  var rateLimitRedisFailureUntil: number | undefined;
 }
 
 /**
@@ -67,17 +86,74 @@ export function getRedisClient(): Redis | null {
       connectTimeout: 2000,
       commandTimeout: 1500,
     });
-    // 显式消费连接错误事件，避免 ioredis 未处理 error 事件的噪音
+    // 显式消费连接错误事件（避免 ioredis 未处理 error 事件崩溃）。
+    // 日志合同（LR-070 审计修复）：持续 outage 重连期间 ioredis 每次重试
+    // 都会发 error 事件（约每 1-2s 一条）——事件路由进失败冷却状态做
+    // 跳变去重，同一冷却窗口内只产生一次 degraded WARN，不形成 client 级
+    // WARN 风暴。只记录 errorName：error.message 可能包含连接串/端点信息，
+    // 不落日志。
     client.on("error", (error) => {
-      logger.warn("Redis 连接异常，限流回退本地计数", "rate-limit", {
-        error: error.message,
-      });
+      enterRedisFailureCooldown(
+        "connection_error",
+        error instanceof Error ? error.name : "Error",
+      );
     });
     global.rateLimitRedis = client;
     global.rateLimitRedisReady = undefined;
+    global.rateLimitRedisFailureUntil = undefined;
   }
 
   return global.rateLimitRedis;
+}
+
+/**
+ * 进入失败冷却（只在健康→失败跳变时记一次结构化事件）。
+ * 日志不含 rate-limit key（key 可能是 email 等用户派生标识）。
+ */
+function enterRedisFailureCooldown(reason: string, detail: string): void {
+  const now = Date.now();
+  const failureUntil = now + activeCooldownMs();
+  if (global.rateLimitRedisFailureUntil && global.rateLimitRedisFailureUntil > now) {
+    // 已在冷却窗口内：不重复记事件、不刷新窗口（固定有界）
+    return;
+  }
+  global.rateLimitRedisFailureUntil = failureUntil;
+  logger.warn("Redis 限流进入短期降级冷却", "rate-limit", {
+    event: "redis_rate_limit_degraded",
+    reason,
+    detail,
+    cooldownMs: activeCooldownMs(),
+  });
+}
+
+/** 冷却结束或 client 恢复 ready 时清除冷却状态（恢复只记一次事件）。 */
+function clearRedisFailureCooldown(): void {
+  if (global.rateLimitRedisFailureUntil) {
+    global.rateLimitRedisFailureUntil = undefined;
+    logger.info("Redis 限流恢复 Redis 路径", "rate-limit", {
+      event: "redis_rate_limit_recovered",
+    });
+  }
+}
+
+/** 是否处于失败冷却窗口内（窗口到期自动视为不在冷却）。 */
+function isRedisFailureCooldownActive(): boolean {
+  const failureUntil = global.rateLimitRedisFailureUntil;
+  return failureUntil !== undefined && failureUntil > Date.now();
+}
+
+/**
+ * 测试专用：缩短冷却窗口（真实 Redis 故障注入集成测试需要在秒级验证
+ * "冷却到期后允许重新 probe"）。生产代码不得调用。
+ */
+export function setRedisFailureCooldownForTests(ms: number | undefined): void {
+  cooldownOverrideMs = ms;
+}
+
+let cooldownOverrideMs: number | undefined;
+
+function activeCooldownMs(): number {
+  return cooldownOverrideMs ?? REDIS_FAILURE_COOLDOWN_MS;
 }
 
 /**
@@ -157,9 +233,15 @@ type RedisAcquire<T> =
 /**
  * 取得已 ready 的 Redis；不可用时执行 fallback 并返回其结果。
  * 可用性优先：ready 等待有预算上限，绝不因 Redis 故障挂起登录/上传。
+ *
+ * 冷却语义（LR-070）：
+ * - client 已 ready：立即使用（并顺带清除冷却状态）——真实恢复不被
+ *   冷却窗口阻塞；
+ * - 冷却窗口内且未 ready：立即本地回退，不再支付 readiness 预算；
+ * - 冷却窗口外且未 ready：单飞执行一次 readiness probe；失败则进入
+ *   冷却（只记一次事件），成功则正常使用。
  */
 async function acquireReadyRedis<T>(
-  key: string,
   fallback: () => T,
 ): Promise<RedisAcquire<T>> {
   const redis = getRedisClient();
@@ -168,12 +250,22 @@ async function acquireReadyRedis<T>(
     return { ok: false, result: fallback() };
   }
 
+  if (redis.status === "ready") {
+    clearRedisFailureCooldown();
+    return { ok: true, redis };
+  }
+
+  if (isRedisFailureCooldownActive()) {
+    // 冷却窗口内：立即本地回退（不等待、不重复记日志）
+    return { ok: false, result: fallback() };
+  }
+
   const ready = await ensureRedisReady(redis);
   if (!ready) {
-    logger.warn("Redis 未就绪，限流回退本地计数", "rate-limit", {
-      key,
-      status: redis.status,
-    });
+    enterRedisFailureCooldown(
+      "readiness_probe_failed",
+      `status=${redis.status}`,
+    );
     return { ok: false, result: fallback() };
   }
 
@@ -185,9 +277,7 @@ export async function isRateLimited(options: {
   limit: number;
   windowMs: number;
 }): Promise<RateLimitResult> {
-  const acquired = await acquireReadyRedis(options.key, () =>
-    isRateLimitedLocally(options),
-  );
+  const acquired = await acquireReadyRedis(() => isRateLimitedLocally(options));
 
   if (!acquired.ok) {
     return acquired.result;
@@ -208,11 +298,15 @@ export async function isRateLimited(options: {
       remaining: Math.max(0, options.limit - count),
     };
   } catch (error) {
-    // Redis 故障降级为本地计数：可用性优先于跨实例精确性
-    logger.warn("Redis 限流查询失败，回退本地计数", "rate-limit", {
-      key: options.key,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    // Redis 故障降级为本地计数：可用性优先于跨实例精确性。
+    // 命令级连接故障同样进入短期冷却（B4）：否则持续故障下每个请求都会
+    // 重新打一次已知故障的 Redis。tradeoff：无法可靠区分连接故障与
+    // 编程错误（invalid Lua 等）——后者也会被短期降级，但冷却固定有界、
+    // 到期自动重试，最坏影响是 30s 内本地计数，不会静默永久降级。
+    enterRedisFailureCooldown(
+      "command_failed",
+      error instanceof Error ? error.name : "unknown",
+    );
     return isRateLimitedLocally(options);
   }
 }
@@ -221,7 +315,7 @@ export async function isRateLimited(options: {
 export async function resetRateLimit(key: string): Promise<void> {
   localBuckets.delete(key);
 
-  const acquired = await acquireReadyRedis(key, () => undefined);
+  const acquired = await acquireReadyRedis(() => undefined);
 
   if (!acquired.ok) {
     return;
@@ -230,9 +324,9 @@ export async function resetRateLimit(key: string): Promise<void> {
   try {
     await acquired.redis.del(`${REDIS_KEY_PREFIX}${key}`);
   } catch (error) {
-    logger.warn("Redis 限流重置失败", "rate-limit", {
-      key,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    enterRedisFailureCooldown(
+      "command_failed",
+      error instanceof Error ? error.name : "unknown",
+    );
   }
 }

@@ -160,7 +160,7 @@ describe.skipIf(!integrationDatabaseUrl)("上传配额并发与崩溃恢复集�
     expect(assets.every((a) => a.status === "UPLOADED")).toBe(true);
   });
 
-  it("S3 故障：预留与 UPLOADING 行同事务回滚，无脏数据（CASE A）", async () => {
+  it("S3 故障（ambiguous outcome）：PENDING_DELETE 保留 + 立即 purge 回收，配额 exactly-once（LR-071）", async () => {
     // 重置计数，确保本用例能走到 S3 阶段（而非被配额前置拦截）
     await prisma.user.update({
       where: { id: userId },
@@ -171,11 +171,18 @@ describe.skipIf(!integrationDatabaseUrl)("上传配额并发与崩溃恢复集�
 
     await expect(
       uploadImageAsset({ userId, category: "product", file: buildFile() }),
-    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED" });
+    ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
 
-    // 补偿事务已删行并释放配额
+    // 安全失败状态：失败 attempt 留下恢复行（不删行、不提前释放配额），
+    // 随后的立即幂等 purge（替身存储无对象 → DeleteObject 幂等成功）
+    // → DELETED + 同事务释放配额，净配额回到 0。
     expect((await getStorageUsage(userId)).usedBytes).toBe(0);
-    expect(await listAssets()).toHaveLength(3); // 上一轮 3 条仍在，本轮失败不新增
+    const assets = await listAssets();
+    expect(assets).toHaveLength(4); // 上一轮 3 条 + 本轮失败 attempt 的 DELETED 行
+    const newest = assets.reduce((latest, a) =>
+      a.createdAt > latest.createdAt ? a : latest,
+    );
+    expect(newest.status).toBe("DELETED");
     putObjectShouldFail = false;
   });
 

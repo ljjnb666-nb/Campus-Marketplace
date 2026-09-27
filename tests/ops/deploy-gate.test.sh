@@ -103,27 +103,62 @@ GITIGNORE
   git -C "${SANDBOX}" commit -q -m "sandbox init"
 
   # ---- docker stub：记录 side_effect 并模拟 compose 行为 ----
+  # cleanup worker 相关模式（FINAL REPAIR B release artifact pair）：
+  #   WRONG_CLEANUP_IMAGE=1     → config --images 解析出 cleanup:local（镜像 assert 拒绝）
+  #   WORKER_UP_FAILURE=1       → up -d storage-cleanup exit 1
+  #   WORKER_NOT_RUNNING=1      → ps --status running 缺少 storage-cleanup
+  #   WORKER_RUNNING_WRONG_IMAGE=1 → ps --format json 运行容器镜像非目标 SHA
+  #   WORKER_STUB_MODE=invalid  → run --rm storage-cleanup（dry-run smoke）exit 1
   cat > "${SANDBOX}/bin/docker" <<STUB
 #!/usr/bin/env bash
 ARGS="\$*"
 echo "docker_called:\${ARGS}" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
   *"compose"*"build"*)
-    echo "side_effect:build GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    echo "side_effect:build ARGS=\$ARGS GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     exit 0 ;;
   *"compose"*"run --rm migrate"*)
     echo "side_effect:migrate" >> "${SANDBOX}/calls.log"
     echo "No pending migrations"
+    exit 0 ;;
+  *"compose"*"run --rm storage-cleanup"*)
+    echo "side_effect:worker_smoke" >> "${SANDBOX}/calls.log"
+    echo "worker_smoke_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    [[ "\${WORKER_STUB_MODE:-}" == "invalid" ]] && exit 1
+    exit 0 ;;
+  *"compose"*"ps --format json storage-cleanup"*)
+    if [[ -n "\${WORKER_RUNNING_WRONG_IMAGE:-}" ]]; then
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:\${GIT_SHA}\",\"State\":\"running\"}"
+    else
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
+    fi
+    exit 0 ;;
+  *"compose"*"ps --status running --services"*)
+    echo "app"
+    [[ -n "\${WORKER_NOT_RUNNING:-}" ]] || echo "storage-cleanup"
+    exit 0 ;;
+  *"compose"*"up -d"*"storage-cleanup"*)
+    echo "side_effect:cleanup_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    [[ -n "\${WORKER_UP_FAILURE:-}" ]] && exit 1
     exit 0 ;;
   *"compose"*"up -d"*)
     echo "side_effect:app_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>}"
     exit 0 ;;
   *"compose"*"config --images"*)
-    if [[ -n "\${GIT_SHA:-}" ]]; then
-      echo "campus-marketplace-app:\${GIT_SHA}"
+    if [[ -n "\${WRONG_CLEANUP_IMAGE:-}" ]]; then
+      if [[ -n "\${GIT_SHA:-}" ]]; then
+        echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:local"
+      else
+        echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"
+      fi
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"
     else
-      echo "campus-marketplace-app:local"
+      echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"
     fi
     exit 0 ;;
   *"exec -T postgres pg_dump"*)
@@ -196,9 +231,10 @@ start_fake_app() {
   ' "$1" "$2" > "$3" 2>&1 &
   local pid=$!
   NODE_PIDS+=("${pid}")
-  for _ in $(seq 1 50); do
+  # 20s 启动预算：全量套件并行时 node 启动可能被调度延迟（5s 预算实测抖动）
+  for _ in $(seq 1 100); do
     grep -q "^PORT=" "$3" 2>/dev/null && return 0
-    sleep 0.1
+    sleep 0.2
   done
   echo "fake app 未在预期时间内启动" >&2
   return 1
@@ -256,6 +292,28 @@ assert_exit 0 "$rc" "SOURCE-01 deploy"
 assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 以 HEAD 为 release 更新 app"
 assert_contains "RELEASE_SHA=${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 HEAD"
 assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "SOURCE-01 release log readiness"
+
+# FINAL REPAIR B：release artifact set（app + migrate + storage-cleanup）
+assert_contains "build app migrate storage-cleanup" "${SANDBOX}/calls.log" "SOURCE-01 构建 release artifact set"
+# 构建行携带 exact GIT_SHA（docker_called 行与 build side_effect 行都来自同一次调用）
+build_line="$(grep -n "side_effect:build ARGS=" "${SANDBOX}/calls.log" | head -1)"
+if [[ -n "$build_line" && "$(printf '%s' "$build_line" | grep -cF "GIT_SHA=${SANDBOX_HEAD}")" -ge 1 ]]; then
+  pass_test
+else
+  fail_test "SOURCE-01 构建必须使用 exact GIT_SHA"
+fi
+assert_contains "cleanup_up_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 切换 cleanup worker"
+assert_contains "worker_smoke_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 worker dry-run smoke"
+assert_contains "CLEANUP_IMAGE=campus-marketplace-cleanup:${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 cleanup image"
+assert_contains "CLEANUP=running" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 cleanup running"
+# 顺序硬门禁：migrate 必须先于 cleanup worker 切换（worker 绝不在 pre-migration schema 上运行）
+migrate_line="$(grep -n "side_effect:migrate" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+cleanup_up_line="$(grep -n "cleanup_up_called" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+if [[ -n "$migrate_line" && -n "$cleanup_up_line" && "$migrate_line" -lt "$cleanup_up_line" ]]; then
+  pass_test
+else
+  fail_test "cleanup worker 切换必须发生在 migrate 之后"
+fi
 rm -f "${OUT}"
 
 echo "== SOURCE-02：clean tree + 显式 HEAD（大写）→ 正常化后放行 =="
@@ -349,7 +407,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app degraded "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 assert_exit 1 "$rc" "GATE-DEGRADED deploy"
 assert_contains "deployment verification failed" "${OUT}" "GATE-DEGRADED 失败输出"
 assert_contains "READY_DEGRADED" "${OUT}" "GATE-DEGRADED verifier reason"
@@ -363,10 +421,83 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app notready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 assert_exit 1 "$rc" "GATE-NOTREADY deploy"
 assert_contains "READY_NOT_READY" "${OUT}" "GATE-NOTREADY verifier reason"
 assert_file_absent "${SANDBOX}/.releases.log" "GATE-NOTREADY 不写 release log"
+rm -f "${OUT}"
+
+echo "== WORKER-IMAGE：解析出的 cleanup 镜像 != GIT_SHA → FAIL，不切换、不写 release log =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WRONG_CLEANUP_IMAGE=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "WRONG_CLEANUP_IMAGE deploy"
+assert_contains "拒绝发布" "${OUT}" "WORKER-IMAGE 失败原因"
+assert_not_contains "cleanup_up_called" "${SANDBOX}/calls.log" "WORKER-IMAGE 不切换 cleanup"
+assert_file_absent "${SANDBOX}/.releases.log" "WORKER-IMAGE 不写 release log"
+rm -f "${OUT}"
+
+echo "== WORKER-UP：storage-cleanup 启动失败 → FAIL，不写 release log =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_UP_FAILURE=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "WORKER-UP deploy"
+assert_contains "storage-cleanup 启动失败" "${OUT}" "WORKER-UP 失败原因"
+assert_contains "cleanup_up_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "WORKER-UP 切换尝试已发生"
+assert_file_absent "${SANDBOX}/.releases.log" "WORKER-UP 不写 release log"
+rm -f "${OUT}"
+
+echo "== WORKER-NOT-RUNNING：cleanup 未处于 running → FAIL，不写 release log =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_NOT_RUNNING=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "WORKER-NOT-RUNNING deploy"
+assert_contains "未处于 running" "${OUT}" "WORKER-NOT-RUNNING 失败原因"
+assert_file_absent "${SANDBOX}/.releases.log" "WORKER-NOT-RUNNING 不写 release log"
+rm -f "${OUT}"
+
+echo "== WORKER-RUNNING-WRONG-IMAGE：运行容器镜像非目标 SHA → FAIL =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_RUNNING_WRONG_IMAGE=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "WORKER-RUNNING-WRONG-IMAGE deploy"
+assert_contains "运行中的 storage-cleanup 容器镜像" "${OUT}" "WORKER-RUNNING-WRONG-IMAGE 失败原因"
+assert_file_absent "${SANDBOX}/.releases.log" "WORKER-RUNNING-WRONG-IMAGE 不写 release log"
+rm -f "${OUT}"
+
+echo "== WORKER-CONFIG-INVALID：dry-run smoke（worker 配置校验）失败 → FAIL =="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_STUB_MODE=invalid)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "WORKER-CONFIG-INVALID deploy"
+assert_contains "runtime smoke 失败" "${OUT}" "WORKER-CONFIG-INVALID 失败原因"
+assert_contains "worker_smoke_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "WORKER-CONFIG-INVALID smoke 已执行"
+assert_file_absent "${SANDBOX}/.releases.log" "WORKER-CONFIG-INVALID 不写 release log"
 rm -f "${OUT}"
 
 echo "=============================="

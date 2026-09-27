@@ -121,6 +121,30 @@ Readiness 探测方式（无副作用）：
 database/storage 故障 → `not_ready`（503）：无 DB 无法服务任何业务；
 上传与私有资产同源交付是核心能力，存储不可达即不可接流量。
 
+#### 限流的失败冷却合同（LR-070）
+
+业务限流路径在 Redis 故障下的语义（**business circuit state ≠
+dependency health truth**：`/api/ready` 的 Redis 探测独立 PING，不受限流
+冷却状态影响——冷却中仍如实上报 degraded，恢复后如实回到 ok）：
+
+- **HEALTHY**：请求走 Redis 路径（跨实例共享计数）。
+- **FIRST FAILURE / PROBE**：有界 readiness 等待（1800ms 预算，并发单飞
+  共享一次等待）；超过预算仍未 ready → 进入**固定 30s 冷却窗口**
+  （`REDIS_FAILURE_COOLDOWN_MS`）。
+- **COOLDOWN WINDOW**：窗口内每个请求**立即**本地回退，不再重复支付
+  readiness 预算（持续 outage 下不会出现每请求 ~1.8s 的延迟风暴）。
+- **RECOVERY**：ioredis 自身重连 `ready` 即立即恢复 Redis 路径并清除冷却
+  ——恢复**不等冷却窗口到期**。
+- **命令级失败**（readiness 通过但 eval/del 抛错）同样进入冷却，避免持续
+  故障下每请求重新打已知故障的 Redis。tradeoff：无法可靠区分连接故障与
+  编程错误（invalid Lua 等）——后者也会被短期降级，但冷却固定有界、到期
+  自动允许重新 probe，不会静默永久降级。
+- **日志合同**：只在 健康→冷却 跳变时记一条
+  `redis_rate_limit_degraded`（WARN），恢复时记一条
+  `redis_rate_limit_recovered`（INFO）；冷却窗口内逐请求**不**重复 WARN，
+  所有冷却日志**不含 rate-limit key**（key 可能含 email 等用户派生标识）。
+  本地限流模式的行为（登录/上传可用性）不变。
+
 ### 依赖失败事件（不刷屏）
 
 正常探测**零日志**；失败时每依赖一条结构化事件（经 logger redaction，
