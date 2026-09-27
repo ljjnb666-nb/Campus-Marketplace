@@ -13,16 +13,21 @@
 #   1. 参数与环境校验（--production-restore 缺失即拒绝；--target-db 必须与
 #      .env.production 的 POSTGRES_DB 完全一致——这是操作员对生产目标的显式确认）
 #   2. 备份文件存在性 + SHA256 强校验（.sha256 伴随文件必须存在且一致）
-#   3. 停止应用写流量（compose stop app 并确认已停止）
-#   4. 终止目标库现存连接
+#   3. 停止全部生产 DB writers（app + storage-cleanup，FINAL REPAIR B：
+#      cleanup worker 自本 release 起也是 DB writer）并逐一验证已停止；
+#      容器不存在 = 无该 writer（pre-worker release 兼容）；
+#      任一存在且无法停止 → FAIL CLOSED，绝不继续 DROP/RESTORE
+#   4. 终止目标库现存连接（仅在全部 writers 停止之后）
 #   5. DROP + CREATE + pg_restore（--exit-on-error）
 #   6. 完整性检查：业务核心表逐一 COUNT、_prisma_migrations 已完成迁移数 > 0、
 #      孤儿引用抽检
-#   7. 成功：应用保持停止状态，打印后续步骤（rollback.sh --hard 会继续切应用）
-#      失败：非 0 退出，应用同样保持停止，绝不带坏库恢复服务
+#   7. 成功：production writers 保持停止状态，打印后续步骤（rollback.sh --hard
+#      会按目标 release policy 继续切换 app / storage-cleanup）
+#      失败：非 0 退出，production writers 同样全部保持停止，绝不带坏库恢复服务
 #
-# 本脚本从不重启应用、从不执行任何 migration（恢复出的库自带 _prisma_migrations）。
-# 任何失败状态下都不要手工重启应用——先人工检查，再决定恢复备份或修复。
+# 本脚本从不重启任何 writer、从不执行任何 migration（恢复出的库自带
+# _prisma_migrations）。任何失败状态下都不要手工重启 app / storage-cleanup
+# ——先人工检查，再决定恢复备份或修复。
 # =============================================================================
 set -euo pipefail
 
@@ -46,7 +51,7 @@ done
 
 fail() {
   echo "[prod-restore] FAILED: $1" >&2
-  echo "[prod-restore] 应用保持停止状态，人工检查后再决定下一步" >&2
+  echo "[prod-restore] production writers（app / storage-cleanup）保持停止状态，人工检查后再决定下一步" >&2
   exit 1
 }
 
@@ -71,24 +76,38 @@ echo "[prod-restore] 校验 SHA256..."
   || fail "SHA256 校验失败：备份文件损坏或被篡改，拒绝恢复"
 echo "[prod-restore] SHA256 一致"
 
-# 停止应用写流量（app 容器不存在 = 本就没有来自应用的写流量）
-app_containers=""
-if ! app_containers="$(compose_run ps -q app 2>/dev/null)"; then
-  app_containers=""
-fi
-if [[ -z "${app_containers}" ]]; then
-  echo "[prod-restore] app 容器不存在，无应用写流量"
-else
-  echo "[prod-restore] 停止 app 服务（停止写流量）"
-  compose_run stop app
-  if compose_run ps --status running --services | grep -qx "app"; then
-    fail "app 服务未能停止，拒绝在写流量未停止时覆盖生产库"
+# -----------------------------------------------------------------------------
+# 停止全部生产 DB writers（FINAL REPAIR B）：app + storage-cleanup 都是
+# 数据库写入方，覆盖生产库之前必须全部 quiesce。
+# 语义：
+#   - 容器不存在 = 该 writer 本就没有写流量 → OK
+#     （storage-cleanup 不存在同时兼容 pre-worker release）
+#   - 存在但无法停止 → FAIL CLOSED（绝不带着写流量 DROP/RESTORE）
+# 顺序：先全部停止并验证，然后才允许终止 DB 连接 / DROP / CREATE / restore。
+# -----------------------------------------------------------------------------
+stop_production_writer() {
+  local svc="$1"
+  local containers=""
+  if ! containers="$(compose_run ps -q "${svc}" 2>/dev/null)"; then
+    containers=""
   fi
-  echo "[prod-restore] app 已停止"
-fi
+  if [[ -z "${containers}" ]]; then
+    echo "[prod-restore] ${svc} 容器不存在，无该 writer 写流量"
+    return 0
+  fi
+  echo "[prod-restore] 停止 ${svc} 服务（停止写流量）"
+  compose_run stop "${svc}"
+  if compose_run ps --status running --services | grep -qx "${svc}"; then
+    fail "${svc} 服务未能停止，拒绝在写流量未停止时覆盖生产库"
+  fi
+  echo "[prod-restore] ${svc} 已停止"
+}
 
-# 终止现存连接
-echo "[prod-restore] 终止 ${TARGET_DB} 现存连接"
+stop_production_writer app
+stop_production_writer storage-cleanup
+
+# 终止现存连接——此时全部 production writers（app / storage-cleanup）已验证停止
+echo "[prod-restore] 终止 ${TARGET_DB} 现存连接（所有 production writers 已停止）"
 compose_run exec -T postgres psql -U "${POSTGRES_USER}" -d postgres -v ON_ERROR_STOP=1 <<SQL \
   || fail "无法终止目标库现存连接"
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity
@@ -136,6 +155,9 @@ echo "[prod-restore] Product→User 孤儿引用: ${orphans}"
 
 echo "[prod-restore] ============================================"
 echo "[prod-restore] PRODUCTION RESTORE OK → ${TARGET_DB}"
-echo "[prod-restore] 应用当前处于停止状态。继续切回旧镜像请运行 rollback.sh --hard 的后续流程，"
-echo "[prod-restore] 或 $(compose_cmd) start app 直接以当前镜像恢复服务。"
+echo "[prod-restore] production writers（app / storage-cleanup）当前均处于停止状态。"
+echo "[prod-restore] 后续按目标 release 的 runtime topology 恢复："
+echo "[prod-restore]   post-worker release：$(compose_cmd) start app && $(compose_cmd) start storage-cleanup"
+echo "[prod-restore]   pre-worker 目标 release：仅 $(compose_cmd) start app（storage-cleanup 保持停止）"
+echo "[prod-restore] 或直接运行 rollback.sh --hard 的后续流程（会按目标 release policy 切换 writers）。"
 echo "[prod-restore] ============================================"
