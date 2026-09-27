@@ -546,7 +546,11 @@ describe.skipIf(!integrationDatabaseUrl)(
       const page = await loadAuthorizedAppealQueue({
         viewerId: noMembershipReviewer.id,
         access,
-        limit: 50,
+        // 大页值：队列按 reviewDueAt/createdAt asc 排序，新建 fixture 恒在尾部；
+        // 全量套件并行运行时库内 open appeal 可超过 50 条，小页值会让"包含
+        // 断言"非确定性地落在页外。可见性语义不受页大小影响（授权过滤在
+        // 服务端 WHERE 层），负向断言（malformed 不可见）反而更强。
+        limit: 1000,
       });
       const ids = itemIds(page.items);
 
@@ -598,7 +602,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const page = await loadAuthorizedAppealQueue({
         viewerId: campusReviewerA.id,
         access: accessA,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       const ids = itemIds(page.items);
       expect(ids).toContain(appealA.id); // Q-02
@@ -633,7 +639,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const pageBefore = await loadAuthorizedAppealQueue({
         viewerId: reviewer.id,
         access: before.access,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       expect(itemIds(pageBefore.items)).toContain(appeal.id);
 
@@ -646,7 +654,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const pageSuspended = await loadAuthorizedAppealQueue({
         viewerId: reviewer.id,
         access: afterSuspend.access,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       expect(itemIds(pageSuspended.items)).not.toContain(appeal.id);
 
@@ -662,7 +672,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const pageRevoked = await loadAuthorizedAppealQueue({
         viewerId: reviewer.id,
         access: afterRevoke.access,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       expect(itemIds(pageRevoked.items)).not.toContain(appeal.id);
     });
@@ -700,7 +712,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const page = await loadAuthorizedAppealQueue({
         viewerId: campusReviewerAB.id,
         access: accessAB,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       const ids = itemIds(page.items);
       expect(ids).not.toContain(crossAppeal.id); // Q-07B：授权 A+B 也不见 campusId=A/scopeKey=CAMPUS:B
@@ -741,7 +755,9 @@ describe.skipIf(!integrationDatabaseUrl)(
         viewerId: campusReviewerA.id,
         access: accessA,
         cursor: decodeAppealReviewCursor(cursorFromGlobalReviewer)!,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       expect(itemIds(page.items)).not.toContain(appealB.id);
     });
@@ -811,7 +827,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const page = await loadAuthorizedAppealQueue({
         viewerId: globalReviewer.id,
         access,
-        limit: 50,
+        // 大页值（同 Q-01 注释）：asc 排序下新建 fixture 恒在尾部，
+        // 小页值的包含断言在全量并行运行时非确定性落页外
+        limit: 1000,
       });
       const ids = itemIds(page.items);
       expect(ids).not.toContain(submittedAppeal.id);
