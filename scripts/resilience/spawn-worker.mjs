@@ -71,3 +71,27 @@ export function killTree(child) {
     child.kill("SIGTERM");
   }
 }
+
+/**
+ * 运行 prisma CLI 命令（固定参数 + env 注入连接串 + stdin 传 SQL，
+ * 凭据不进 argv）。worker 集成测试用它创建/销毁一次性隔离数据库。
+ */
+export function runPrismaCommand(args, env, stdin) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("npx", ["prisma", ...args], {
+      cwd: process.cwd(),
+      env: { ...process.env, ...env },
+      shell: process.platform === "win32",
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+    child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+    if (stdin !== undefined) {
+      child.stdin.write(stdin);
+    }
+    child.stdin.end();
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}

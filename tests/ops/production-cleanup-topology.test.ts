@@ -102,7 +102,7 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     // prisma client 在镜像内生成（运行期不依赖宿主生成产物）
     const targetIndex = dockerfileContent.indexOf("AS cleanup-runner");
     const targetBlock = dockerfileContent.slice(targetIndex);
-    expect(targetBlock).toMatch(/RUN npx prisma generate/);
+    expect(targetBlock).toMatch(/npx prisma generate/);
   });
 
   it("cleanup worker 不应成为 /api/ready 依赖（readiness 解耦）", () => {

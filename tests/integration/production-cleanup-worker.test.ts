@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // harness 同一模式；测试文件不直接持有进程管理代码）
 import {
   killTree,
+  runPrismaCommand,
   runWorker,
   spawnWorkerLoop,
 } from "../../scripts/resilience/spawn-worker.mjs";
@@ -102,10 +103,42 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       return { objectKey, assetId: asset.id };
     }
 
+    /**
+     * 一次性隔离数据库：worker 循环会回收"全部 PENDING_DELETE"，若跑在
+     * 共享测试库上会与并行测试（asset-storage-fault 等）的恢复中间态互扰。
+     * 本套件建库 → migrate → 测试 → drop，完全消除跨文件干扰。
+     */
+    let isolatedDbName: string;
+    const adminUrlFor = (url: string) => {
+      const parsed = new URL(url);
+      parsed.pathname = "/postgres";
+      return parsed.toString();
+    };
+
     beforeAll(async () => {
-      if (!process.env.DATABASE_URL) {
-        process.env.DATABASE_URL = integrationDatabaseUrl;
-      }
+      const parsed = new URL(integrationDatabaseUrl!);
+      isolatedDbName = `campus_worker_it_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      parsed.pathname = `/${isolatedDbName}`;
+      const isolatedUrl = parsed.toString();
+
+      // 建库（幂等容忍已存在）→ schema migrate（worker 子进程同库）
+      await runPrismaCommand(
+        ["db", "execute", "--stdin"],
+        { DATABASE_URL: adminUrlFor(integrationDatabaseUrl!) },
+        `CREATE DATABASE "${isolatedDbName}";`,
+      );
+      const migrated = await runPrismaCommand(
+        ["migrate", "deploy"],
+        { DATABASE_URL: isolatedUrl },
+      );
+      expect(
+        migrated.code,
+        `migrate deploy failed: ${migrated.stderr.slice(0, 400)}`,
+      ).toBe(0);
+
+      process.env.DATABASE_URL = isolatedUrl;
       ({ prisma } = await import("@/lib/prisma"));
       const campus = await prisma.campus.create({
         data: {
@@ -126,7 +159,7 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
         },
       });
       userId = user.id;
-    });
+    }, 120_000);
 
     afterAll(async () => {
       for (const ref of orphanObjects) {
@@ -135,12 +168,15 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
           .catch(() => undefined);
       }
       if (prisma) {
-        await prisma.uploadedAsset.deleteMany({ where: { ownerId: userId } });
-        await prisma.user.deleteMany({ where: { id: userId, deletedAt: null } });
-        await prisma.campus.deleteMany({ where: { id: campusId } });
         await prisma.$disconnect();
+        // 整库 drop（WITH FORCE 断开残留连接）——不留任何测试残留
+        await runPrismaCommand(
+          ["db", "execute", "--stdin"],
+          { DATABASE_URL: adminUrlFor(integrationDatabaseUrl!) },
+          `DROP DATABASE IF EXISTS "${isolatedDbName}" WITH (FORCE);`,
+        );
       }
-    });
+    }, 30_000);
 
     async function readState(assetId: string) {
       const row = await prisma.uploadedAsset.findUnique({ where: { id: assetId } });
@@ -201,8 +237,9 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       });
 
       try {
-        // 轮询等待 worker 自动完成恢复（不手动调用任何清理函数）
-        const deadline = Date.now() + 20_000;
+        // 轮询等待 worker 自动完成恢复（不手动调用任何清理函数）。
+        // 宽窗口：全量套件并行时单周期可能因 DB 负载失败重试（幂等语义）
+        const deadline = Date.now() + 35_000;
         let recovered = false;
         while (Date.now() < deadline) {
           const { row } = await readState(assetId);
@@ -220,7 +257,7 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       } finally {
         killTree(child);
       }
-    }, 40_000);
+    }, 60_000);
 
     it("生产配置保护：production 下非法 interval（<60s）以非零退出", async () => {
       const result = await runWorker(["--run-once"], {
