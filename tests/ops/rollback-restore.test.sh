@@ -107,10 +107,22 @@ case "\$ARGS" in
     [[ "\${STOP_FAILURE_STUB_MODE:-}" == "storage-cleanup" ]] || state_remove storage-cleanup
     exit 0 ;;
   *"compose"*"ps -q app"*)
+    [[ "\${PS_FAILURE_STUB_MODE:-}" == "query" ]] && exit 1
     state_has app && echo "container-id" ; exit 0 ;;
   *"compose"*"ps -q storage-cleanup"*)
+    [[ "\${PS_FAILURE_STUB_MODE:-}" == "query" ]] && exit 1
     state_has storage-cleanup && echo "container-id" ; exit 0 ;;
+  *"compose"*"ps --format json storage-cleanup"*)
+    if [[ -n "\${WORKER_RUNNING_WRONG_IMAGE:-}" ]]; then
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:\${GIT_SHA}\",\"State\":\"running\"}"
+    else
+      echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
+    fi
+    exit 0 ;;
   *"compose"*"ps --status running --services"*)
+    [[ "\${PS_FAILURE_STUB_MODE:-}" == "verify" ]] && exit 1
     cat "\$STATE" 2>/dev/null; exit 0 ;;
   *"compose"*"up -d"*"storage-cleanup"*)
     echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
@@ -396,6 +408,40 @@ assert_log_contains "app_stop_called"
 assert_log_not_contains "cleanup_stop_called"
 assert_log_contains "pg_restore_called"
 
+echo "== 5e. PS_QUERY_FAILURE（无法确认 writer 状态）→ FAIL CLOSED：不停止、不 terminate、不 DROP =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=query \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psq.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps query failure must fail closed"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app writer 状态" /tmp/rp-psq.$$; then pass_test; else fail_test "缺少 writer 状态确认失败原因"; fi
+
+echo "== 5f. PS_VERIFY_FAILURE（停止后无法验证状态）→ FAIL CLOSED：unknown state ≠ stopped =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=verify \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psv.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps verify failure must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app 停止状态" /tmp/rp-psv.$$; then pass_test; else fail_test "缺少停止状态确认失败原因"; fi
+
 echo "== 6. 缺少 --production-restore 显式确认 → 失败 =="
 make_sandbox
 printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
@@ -545,6 +591,46 @@ assert_log_contains "app_up_called"
 assert_log_contains "cleanup_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then
   fail_test "cleanup 切换失败后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9i. post-worker 运行容器镜像非目标 SHA → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+WORKER_RUNNING_WRONG_IMAGE=1 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "wrong runtime image must fail rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+# run_rollback 的输出文件路径中 $$ 为本测试脚本 PID（整个运行期恒定）
+if grep -qF "运行中的 storage-cleanup 容器镜像不是" "/tmp/rb-out.$$"; then
+  pass_test
+else
+  fail_test "缺少运行容器镜像失败原因"
+fi
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "wrong runtime image 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9j. pre-worker + PS verify failure（无法确认 cleanup 停止状态）→ FAIL CLOSED =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker PS_FAILURE_STUB_MODE=verify run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "pre-worker ps verify failure must fail rollback"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "pre-worker ps failure 后不得写 .releases.log"
 else
   pass_test
 fi

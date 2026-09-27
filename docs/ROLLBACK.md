@@ -26,8 +26,8 @@ rollback 启动时先（只读）判定目标 release 的 cleanup artifact 是�
 
 | 目标 | 判定 | 动作 |
 | --- | --- | --- |
-| **post-worker** | `campus-marketplace-cleanup:<prev_sha>` 存在 | app 与 storage-cleanup 都切到 `<prev_sha>`，逐一验证 running；release log 记录 `CLEANUP_IMAGE=... CLEANUP=running` |
-| **pre-worker** | 该镜像不存在（首次上线 worker 前的 release） | app 切 `<prev_sha>`；**停止 storage-cleanup 并验证已停止**（恢复目标 release 的 runtime topology，不保留 newer worker）；release log 记录 `CLEANUP=stopped_pre_worker_release` |
+| **post-worker** | `campus-marketplace-cleanup:<prev_sha>` 存在 | app 与 storage-cleanup 都切到 `<prev_sha>`，逐一验证 running **+ 运行容器 exact image**（cleanup 无 HTTP release endpoint，runtime identity 由 authoritative runtime inspection 提供）；release log 记录 `CLEANUP_IMAGE=... CLEANUP=running` |
+| **pre-worker** | 该镜像不存在（首次上线 worker 前的 release） | app 切 `<prev_sha>`；**停止 storage-cleanup 并两阶段验证已停止**（`compose ps` 失败 ≠ 已停止，fail closed；恢复目标 release 的 runtime topology，不保留 newer worker）；release log 记录 `CLEANUP=stopped_pre_worker_release` |
 
 ## 决策表
 

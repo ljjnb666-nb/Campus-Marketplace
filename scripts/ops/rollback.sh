@@ -133,8 +133,11 @@ switch_app_to() {
 # -----------------------------------------------------------------------------
 # cleanup worker 切换的唯一路径（safe 与 --hard 共用，app 切换之后执行）：
 # release identity 必须成对——APP_RELEASE 与 CLEANUP_RELEASE 不允许 split。
-# post-worker 目标：config --images 精确断言 + up + running 验证；
-# pre-worker 目标：停止 storage-cleanup 并验证已停止（不保留 newer worker）。
+# post-worker 目标：config --images 精确断言 + up + running 验证 + 运行容器
+# exact image 验证（cleanup 无 HTTP release endpoint，runtime identity 只能
+# 由 authoritative runtime inspection 提供，同 deploy.sh 的验证链）；
+# pre-worker 目标：停止 storage-cleanup 并两阶段验证已停止（compose ps 失败
+# ≠ 已停止，绝不把命令失败解释成 cleanup stopped），不保留 newer worker。
 # 任一步失败 → ROLLBACK FAIL（不写 release log）。
 # -----------------------------------------------------------------------------
 CLEANUP_LOG_TAG=""
@@ -145,10 +148,15 @@ switch_cleanup_to() {
   if [[ "${CLEANUP_TARGET_MODE}" == "pre-worker" ]]; then
     echo "[rollback] 目标 release 为 pre-worker：停止 storage-cleanup（恢复目标 release 的 runtime topology）"
     if ! compose_run stop storage-cleanup; then
-      echo "[rollback][FAIL] storage-cleanup 停止失败，拒绝宣告回滚成功" >&2
+      echo "[rollback][FAIL] storage-cleanup 停止命令失败，拒绝宣告回滚成功" >&2
       exit 1
     fi
-    if compose_run ps --status running --services | grep -qx "storage-cleanup"; then
+    local running_services=""
+    if ! running_services="$(compose_run ps --status running --services)"; then
+      echo "[rollback][FAIL] 无法确认 storage-cleanup 停止状态（compose ps 失败），拒绝宣告回滚成功" >&2
+      exit 1
+    fi
+    if printf '%s\n' "${running_services}" | grep -qx "storage-cleanup"; then
       echo "[rollback][FAIL] storage-cleanup 未停止，拒绝宣告回滚成功" >&2
       exit 1
     fi
@@ -176,6 +184,14 @@ switch_cleanup_to() {
   fi
   if ! compose_run ps --status running --services | grep -qx "storage-cleanup"; then
     echo "[rollback][FAIL] storage-cleanup 未处于 running 状态，拒绝宣告回滚成功" >&2
+    exit 1
+  fi
+  # 运行容器镜像身份必须精确匹配（cleanup 无 HTTP release endpoint，
+  # 这里是唯一的 runtime identity 证据；GIT_SHA 前缀与 config --images /
+  # deploy.sh 同一契约——compose ps 本身不做插值，显式传递使 release
+  # identity 与测试 stub 的插值模型一致）。
+  if ! GIT_SHA="${target_sha}" compose_run ps --format json storage-cleanup | grep -Fq "campus-marketplace-cleanup:${target_sha}"; then
+    echo "[rollback][FAIL] 运行中的 storage-cleanup 容器镜像不是 campus-marketplace-cleanup:${target_sha}，拒绝宣告回滚成功" >&2
     exit 1
   fi
   CLEANUP_LOG_TAG="running"

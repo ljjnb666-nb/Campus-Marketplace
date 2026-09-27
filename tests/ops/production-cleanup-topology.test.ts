@@ -162,6 +162,13 @@ describe("release lifecycle 静态 gate（FINAL REPAIR B：deploy / restore / ro
     expect(restoreSh).toMatch(/容器不存在，无该 writer 写流量/);
     // 失败语义：production writers 保持停止
     expect(restoreSh).toMatch(/production writers（app \/ storage-cleanup）保持停止状态/);
+    // fail closed（终审修复）：writer 状态未知 ≠ 已停止 / 无容器——
+    // discovery 与 stop 验证都必须两阶段（先确认命令成功，再判定状态）
+    expect(restoreSh).toMatch(/无法确认 \$\{svc\} writer 状态/);
+    expect(restoreSh).toMatch(/无法确认 \$\{svc\} 停止状态/);
+    expect(restoreSh).toMatch(/WRITERS_QUIESCED/);
+    // 不允许吞掉 compose ps 失败（2>/dev/null 掩盖命令失败语义）
+    expect(restoreSh).not.toMatch(/ps -q "\$\{svc\}" 2>\/dev\/null/);
   });
 
   it("rollback：cleanup 与目标 release 成对（post-worker 切换 / pre-worker 停止）", () => {
@@ -169,10 +176,13 @@ describe("release lifecycle 静态 gate（FINAL REPAIR B：deploy / restore / ro
     const modeDetect = rollbackSh.indexOf("CLEANUP_TARGET_MODE=");
     const appInspect = rollbackSh.indexOf('docker image inspect "campus-marketplace-app:');
     expect(modeDetect).toBeGreaterThan(appInspect);
-    // post-worker：cleanup 精确镜像断言 + running 验证
+    // post-worker：cleanup 精确镜像断言 + running 验证 + 运行容器 exact image
     expect(rollbackSh).toMatch(/campus-marketplace-cleanup:\$\{target_sha\}/);
-    // pre-worker：停止并验证，不留 newer worker
+    expect(rollbackSh).toMatch(/ps --format json storage-cleanup/);
+    expect(rollbackSh).toMatch(/运行中的 storage-cleanup 容器镜像不是/);
+    // pre-worker：停止并两阶段验证，不留 newer worker；ps 失败 fail closed
     expect(rollbackSh).toMatch(/stopped_pre_worker_release/);
+    expect(rollbackSh).toMatch(/无法确认 storage-cleanup 停止状态/);
     // app 与 cleanup 成对切换（switch_cleanup_to 在 switch_app_to 之后调用）
     const switchApp = rollbackSh.indexOf('switch_app_to "${PREVIOUS_SHA}"');
     const switchCleanup = rollbackSh.indexOf('switch_cleanup_to "${PREVIOUS_SHA}"');
