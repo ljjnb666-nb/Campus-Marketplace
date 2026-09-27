@@ -1,6 +1,8 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import net from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+// 一次性隔离数据库生命周期辅助（与 production-cleanup-worker 套件同模式）
+import { runPrismaCommand } from "../../scripts/resilience/spawn-worker.mjs";
 import type { StorageClient, PutObjectInput } from "@/lib/storage/types";
 
 // 故障边界在 StorageClient 层，图片 decode/重编码不在本测试焦点：
@@ -124,10 +126,42 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
     let campusId: string;
     const leftoverObjects: Array<{ bucket: string; objectKey: string }> = [];
 
+    /**
+     * 一次性隔离数据库：本套件制造 PENDING_DELETE 恢复中间态，而并行运行的
+     * asset-quota 套件会执行 runStorageCleanup 回收共享库的【全部】
+     * PENDING_DELETE——共享库上存在跨文件竞态（上一轮 full run 实测复现）。
+     * 建库 → migrate → 测试 → drop，与 production-cleanup-worker 套件同模式。
+     */
+    let isolatedDbName: string;
+    const adminUrlFor = (url: string) => {
+      const parsed = new URL(url);
+      parsed.pathname = "/postgres";
+      return parsed.toString();
+    };
+
     beforeAll(async () => {
-      if (!process.env.DATABASE_URL) {
-        process.env.DATABASE_URL = integrationDatabaseUrl;
-      }
+      const parsed = new URL(integrationDatabaseUrl!);
+      isolatedDbName = `campus_lrfault_it_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      parsed.pathname = `/${isolatedDbName}`;
+      const isolatedUrl = parsed.toString();
+
+      await runPrismaCommand(
+        ["db", "execute", "--stdin"],
+        { DATABASE_URL: adminUrlFor(integrationDatabaseUrl!) },
+        `CREATE DATABASE "${isolatedDbName}";`,
+      );
+      const migrated = await runPrismaCommand(
+        ["migrate", "deploy"],
+        { DATABASE_URL: isolatedUrl },
+      );
+      expect(
+        migrated.code,
+        `migrate deploy failed: ${migrated.stderr.slice(0, 400)}`,
+      ).toBe(0);
+
+      process.env.DATABASE_URL = isolatedUrl;
       const { S3Storage } = await import("@/lib/storage/s3-storage");
       realStorage = new S3Storage(new S3Client(s3Config));
 
@@ -161,18 +195,20 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
     });
 
     afterAll(async () => {
-      // 清理测试对象（隔离前缀：userId 下）与 DB 行
+      // 清理测试对象（隔离前缀：userId 下）；隔离库整体 drop
       for (const ref of leftoverObjects) {
         await realStorage.deleteObject(ref).catch(() => undefined);
       }
       if (prisma) {
-        await prisma.uploadedAsset.deleteMany({ where: { ownerId: userId } });
-        await prisma.user.deleteMany({ where: { id: userId, deletedAt: null } });
-        await prisma.campus.deleteMany({ where: { id: campusId } });
         await prisma.$disconnect();
+        await runPrismaCommand(
+          ["db", "execute", "--stdin"],
+          { DATABASE_URL: adminUrlFor(integrationDatabaseUrl!) },
+          `DROP DATABASE IF EXISTS "${isolatedDbName}" WITH (FORCE);`,
+        );
       }
       setStorageForTests(null);
-    });
+    }, 30_000);
 
     function buildFile() {
       const bytes = new Uint8Array(16);

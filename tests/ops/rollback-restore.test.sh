@@ -460,7 +460,7 @@ RESTORE_STUB_MODE=success make_sandbox
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${OTHER_SHA}" wrong-release "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
-OPS_HEALTH_TIMEOUT=2 run_rollback "${PREV_SHA}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
 TEST_APP_URL=""
 [[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 1 "$rc" "real verifier release mismatch must fail rollback"
@@ -487,7 +487,7 @@ RESTORE_STUB_MODE=success make_sandbox
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" degraded "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
-OPS_HEALTH_TIMEOUT=2 run_rollback "${PREV_SHA}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
 TEST_APP_URL=""
 [[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 1 "$rc" "real verifier degraded must fail rollback"

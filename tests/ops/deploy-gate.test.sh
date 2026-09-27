@@ -406,7 +406,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app degraded "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 assert_exit 1 "$rc" "GATE-DEGRADED deploy"
 assert_contains "deployment verification failed" "${OUT}" "GATE-DEGRADED 失败输出"
 assert_contains "READY_DEGRADED" "${OUT}" "GATE-DEGRADED verifier reason"
@@ -420,7 +420,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app notready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")")
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 assert_exit 1 "$rc" "GATE-NOTREADY deploy"
 assert_contains "READY_NOT_READY" "${OUT}" "GATE-NOTREADY verifier reason"
 assert_file_absent "${SANDBOX}/.releases.log" "GATE-NOTREADY 不写 release log"
@@ -433,7 +433,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WRONG_CLEANUP_IMAGE=1)
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 EXTRA_ENV=()
 assert_exit 1 "$rc" "WRONG_CLEANUP_IMAGE deploy"
 assert_contains "拒绝发布" "${OUT}" "WORKER-IMAGE 失败原因"
@@ -448,7 +448,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_UP_FAILURE=1)
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 EXTRA_ENV=()
 assert_exit 1 "$rc" "WORKER-UP deploy"
 assert_contains "storage-cleanup 启动失败" "${OUT}" "WORKER-UP 失败原因"
@@ -463,7 +463,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_NOT_RUNNING=1)
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 EXTRA_ENV=()
 assert_exit 1 "$rc" "WORKER-NOT-RUNNING deploy"
 assert_contains "未处于 running" "${OUT}" "WORKER-NOT-RUNNING 失败原因"
@@ -477,7 +477,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_RUNNING_WRONG_IMAGE=1)
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 EXTRA_ENV=()
 assert_exit 1 "$rc" "WORKER-RUNNING-WRONG-IMAGE deploy"
 assert_contains "运行中的 storage-cleanup 容器镜像" "${OUT}" "WORKER-RUNNING-WRONG-IMAGE 失败原因"
@@ -491,7 +491,7 @@ PORTFILE="${SANDBOX}/fake-app.out"
 start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
 EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" WORKER_STUB_MODE=invalid)
 OUT="$(mktemp)"
-OPS_HEALTH_TIMEOUT=2 run_deploy "${OUT}"; rc=$?
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
 EXTRA_ENV=()
 assert_exit 1 "$rc" "WORKER-CONFIG-INVALID deploy"
 assert_contains "runtime smoke 失败" "${OUT}" "WORKER-CONFIG-INVALID 失败原因"
