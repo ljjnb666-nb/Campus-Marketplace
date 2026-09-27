@@ -61,37 +61,75 @@ BACKUP_RETENTION_DAYS=14
 ENV
   sed -i "s|PLACEHOLDER_BACKUP_DIR|${SANDBOX}/backups|" "${SANDBOX}/.env.production"
 
-  # ---- docker stub ----
+  # ---- docker stub（有状态）----
+  # 用 ${SANDBOX}/running.state 模拟 compose 服务运行状态：
+  #   stop <svc>    → 从 state 移除（STOP_FAILURE_STUB_MODE=storage-cleanup
+  #                   时不移除，验证 restore 的 FAIL CLOSED）
+  #   up -d <svc>   → 加入 state（UP_FAILURE_STUB_MODE=<svc> 时 exit 1）
+  #   ps -q <svc>   → state 含该服务则输出 container-id（容器存在）
+  #   ps --status running --services → 输出 state（running 服务清单）
   # config --images 按 $GIT_SHA 模拟 compose 插值：GIT_SHA 未设置/为空 → :local
   # （与 compose.production.yml 的 ${GIT_SHA:-local} 行为一致），以此捕捉
   # "rollback 未显式传递 GIT_SHA" 的 bug；CONFIG_STUB_MODE=broken 强制输出
   # 错误镜像，验证 resolved-image assert 会阻断回滚。
+  # image inspect：app tag 仅接受 PREV_SHA（0f1e...）；cleanup tag 依
+  # CLEANUP_STUB_MODE（默认 post-worker=存在；pre-worker=不存在）。
   cat > "${SANDBOX}/bin/docker" <<STUB
 #!/usr/bin/env bash
 ARGS="\$*"
 echo "docker called:\$ARGS" >> "${SANDBOX}/calls.log"
+STATE="${SANDBOX}/running.state"
+state_has() { grep -qx "\$1" "\$STATE" 2>/dev/null; }
+state_add() { state_has "\$1" || printf '%s\n' "\$1" >> "\$STATE"; }
+state_remove() { grep -vx "\$1" "\$STATE" 2>/dev/null > "\${STATE}.tmp" || true; mv "\${STATE}.tmp" "\$STATE" 2>/dev/null || : > "\$STATE"; }
 case "\$ARGS" in
   *"image inspect"*)
-    [[ "\$ARGS" == *"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]] && exit 0 || exit 1 ;;
+    if [[ "\$ARGS" == *"campus-marketplace-app:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]]; then
+      exit 0
+    elif [[ "\$ARGS" == *"campus-marketplace-cleanup:"* ]]; then
+      [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]] && exit 1 || exit 0
+    else
+      exit 1
+    fi ;;
   *"config --images"*)
     if [[ -n "\${CONFIG_STUB_MODE:-}" && "\${CONFIG_STUB_MODE}" == "broken" ]]; then
       echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
     elif [[ -n "\${GIT_SHA:-}" ]]; then
-      echo "caddy:2-alpine"; echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-migrator:\${GIT_SHA}"; echo "postgres:16-alpine"; echo "redis:7-alpine"
+      echo "caddy:2-alpine"; echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"; echo "campus-marketplace-migrator:\${GIT_SHA}"; echo "postgres:16-alpine"; echo "redis:7-alpine"
     else
       echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
     fi
     exit 0 ;;
   *"compose"*"stop app"*)
-    echo "app_stop_called" >> "${SANDBOX}/calls.log"; exit 0 ;;
-  *"compose"*"ps -q app"*)
-    echo "container-id"; exit 0 ;;
-  *"compose"*"ps --status running --services"*)
+    echo "app_stop_called" >> "${SANDBOX}/calls.log"; state_remove app; exit 0 ;;
+  *"compose"*"stop storage-cleanup"*)
+    echo "cleanup_stop_called" >> "${SANDBOX}/calls.log"
+    [[ "\${STOP_FAILURE_STUB_MODE:-}" == "storage-cleanup" ]] || state_remove storage-cleanup
     exit 0 ;;
+  *"compose"*"ps -q app"*)
+    state_has app && echo "container-id" ; exit 0 ;;
+  *"compose"*"ps -q storage-cleanup"*)
+    state_has storage-cleanup && echo "container-id" ; exit 0 ;;
+  *"compose"*"ps --status running --services"*)
+    cat "\$STATE" 2>/dev/null; exit 0 ;;
+  *"compose"*"up -d"*"storage-cleanup"*)
+    echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    if [[ "\${UP_FAILURE_STUB_MODE:-}" == "storage-cleanup" ]]; then exit 1; fi
+    state_add storage-cleanup; exit 0 ;;
   *"compose"*"up -d"*)
-    echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
+    echo "app_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    if [[ "\${UP_FAILURE_STUB_MODE:-}" == "app" ]]; then exit 1; fi
+    state_add app; exit 0 ;;
   *"compose"*"exec -T postgres psql"*)
-    echo "psql_called:\$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
+    echo "psql_called:\$ARGS" >> "${SANDBOX}/calls.log"
+    # 完整性检查的 -tAc COUNT 查询（SQL 在参数中）：migrations 计数 > 0，
+    # 其余（核心表/孤儿引用）返回 0
+    if [[ "\$ARGS" == *"_prisma_migrations"* ]]; then
+      echo "3"
+    elif [[ "\$ARGS" == *"COUNT(*)"* ]]; then
+      echo "0"
+    fi
+    exit 0 ;;
   *"compose"*"exec -T postgres pg_dump"*)
     echo "pg_dump_called" >> "${SANDBOX}/calls.log"; echo "DUMMYDUMP"; exit 0 ;;
   *"compose"*"exec -T postgres pg_restore"*)
@@ -100,6 +138,10 @@ case "\$ARGS" in
 esac
 STUB
   chmod +x "${SANDBOX}/bin/docker"
+  # 初始运行状态：默认 app + storage-cleanup 均在运行（post-worker release）；
+  # DOCKER_STUB_INITIAL="app" 模拟 pre-worker release（cleanup 容器不存在）
+  # shellcheck disable=SC2126
+  printf '%s\n' ${DOCKER_STUB_INITIAL:-app storage-cleanup} > "${SANDBOX}/running.state"
 
   # ---- curl stub（health 返回的 release 可配置）----
   cat > "${SANDBOX}/bin/curl" <<'STUB'
@@ -264,6 +306,7 @@ CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "hard rollback with restore failure"
 assert_log_contains "restore_called"
 assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
 
 echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA（真实 gate 全绿）=="
 FAKE_OUT="${SANDBOX}/fake-app.out"
@@ -276,6 +319,8 @@ assert_exit 0 "$rc" "hard rollback with restore success"
 assert_log_contains "restore_called"
 assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 assert_log_contains "config --images"
+# post-worker 目标：cleanup 必须与 app 同 SHA 成对切换
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 
 echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
 make_sandbox   # 新沙箱，BACKUP_DIR 为空
@@ -294,6 +339,61 @@ OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "sha mismatch"
 assert_log_not_contains "app_stop_called"
+
+echo "== 5b. restore 成功 → 顺序 = stop app → stop cleanup → 验证停止 → terminate → DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-ok.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore success"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
+# 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
+stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
+stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
+first_psql_line="$(printf '%s' "$CALL_LOG" | grep -n "psql_called" | head -1 | cut -d: -f1)"
+if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$first_psql_line" \
+      && "$stop_app_line" -lt "$first_psql_line" && "$stop_cleanup_line" -lt "$first_psql_line" ]]; then
+  pass_test
+else
+  fail_test "必须在 terminate DB connections 之前停止 app 与 storage-cleanup"
+fi
+
+echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  STOP_FAILURE_STUB_MODE=storage-cleanup \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-stopfail.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "cleanup cannot stop must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+
+echo "== 5d. pre-worker release（cleanup 容器不存在）→ restore 仍成功 =="
+DOCKER_STUB_INITIAL="app" make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  DOCKER_STUB_INITIAL="app" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-preworker.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore with pre-worker topology"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
 
 echo "== 6. 缺少 --production-restore 显式确认 → 失败 =="
 make_sandbox
@@ -393,6 +493,57 @@ TEST_APP_URL=""
 assert_exit 1 "$rc" "real verifier degraded must fail rollback"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then
   fail_test "degraded 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9f. post-worker rollback：cleanup 与 app 成对切换到 EXACT PREVIOUS_SHA + 日志记录 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "post-worker rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_contains_file "CLEANUP_IMAGE=campus-marketplace-cleanup:${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 日志 cleanup image"
+assert_contains_file "CLEANUP=running" "${SANDBOX}/.releases.log" "rollback 日志 cleanup 状态"
+
+echo "== 9g. pre-worker 目标（cleanup 镜像不存在）→ 停止 cleanup 而非失败 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "pre-worker target rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+assert_contains_file "CLEANUP=stopped_pre_worker_release" "${SANDBOX}/.releases.log" "pre-worker rollback 日志"
+if grep -qF "CLEANUP_IMAGE" "${SANDBOX}/.releases.log" 2>/dev/null; then
+  fail_test "pre-worker rollback 日志不应记录 CLEANUP_IMAGE（目标无该 artifact）"
+else
+  pass_test
+fi
+
+echo "== 9h. cleanup 切换失败 → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UP_FAILURE_STUB_MODE=storage-cleanup run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "cleanup switch failure must fail rollback"
+assert_log_contains "app_up_called"
+# 切换尝试已发生（被 stub 以 exit 1 拒绝），rollback 必须整体失败
+assert_log_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "cleanup 切换失败后不得写 .releases.log"
 else
   pass_test
 fi
