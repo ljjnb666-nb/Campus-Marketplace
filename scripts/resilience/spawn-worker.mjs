@@ -63,10 +63,19 @@ export function spawnWorkerLoop(extraEnv) {
 /** Windows shell:true 下必须整树终止，避免孤儿 worker 干扰后续用例 */
 export function killTree(child) {
   if (process.platform === "win32") {
-    // pid 来自本进程创建的 ChildProcess 对象（非外部输入）
-    execFileSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-      stdio: "ignore",
-    });
+    // 进程已自行退出（exitCode/signalCode 就绪）时无需 kill；
+    // taskkill 的 "process not found" 竞态同样容忍——目标已是孤儿
+    if (child.exitCode !== null || child.signalCode) {
+      return;
+    }
+    try {
+      // pid 来自本进程创建的 ChildProcess 对象（非外部输入）
+      execFileSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+      });
+    } catch {
+      // already gone
+    }
   } else {
     child.kill("SIGTERM");
   }
