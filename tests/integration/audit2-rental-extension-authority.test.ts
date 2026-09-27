@@ -797,21 +797,37 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(await requestViaProduction(renterA.id, order.id, T2)).toEqual({ success: true });
       const ext = await rawClient!.rentalExtensionRequest.findFirstOrThrow({ where: { orderId: order.id } });
 
-      // approve 持 participant 锁 + listing 行锁挂起
+      // approve 持 participant 锁 + order/listing 行锁，通过 fresh capacity
+      // recheck 后在 racePoint 挂起。双 barrier：
+      //   approveReachedRacePoint —— 证明 approve 已取得全部锁并通过容量重检
+      //   approveGate             —— 测试确认 create 被阻塞后才放行
+      // （CI #172 根因：旧编排只等 approve「启动」，create 若先取得
+      //   USER:owner，approve 就成为 owner 锁的 waiter，模糊 waiter 集合
+      //   会把它误判成 create 的等待 → create 先提交 → approve 容量复算
+      //   合法失败。barrier 后 approve 必然已在 racePoint，owner 键上的
+      //   waiter 只可能来自新订单事务。）
+      let signalApproveReached!: () => void;
+      const approveReachedRacePoint = new Promise<void>((resolve) => {
+        signalApproveReached = resolve;
+      });
       let releaseApprove!: () => void;
       const approveGate = new Promise<void>((resolve) => {
         releaseApprove = resolve;
       });
       const promiseApprove = approveViaProduction(owner.id, ext.id, async () => {
+        signalApproveReached();
         await approveGate;
       });
+      await approveReachedRacePoint;
 
       // renterB 并发创建与增量区间重叠的新订单：必须等待共享 USER:owner
       const promiseCreate = createOrderViaProduction(renterB.id, listing.id, {
         startTime: new Date(T1.getTime() + 1 * 3600_000),
         endTime: new Date(T2.getTime() - 1 * 3600_000),
       }).catch((e: unknown) => e);
-      await waitForAdvisoryLockWaiter(rawClient!, [`USER:${owner.id}`, `USER:${renterB.id}`]);
+      // approve 已确定在 racePoint（持 USER:owner）：owner 键上的 waiter
+      // 必然来自新订单事务——精确共享 mutex，不用模糊集合推断 winner
+      await waitForAdvisoryLockWaiter(rawClient!, [`USER:${owner.id}`]);
 
       releaseApprove();
       const [approveResult, createResult] = await Promise.all([promiseApprove, promiseCreate]);
