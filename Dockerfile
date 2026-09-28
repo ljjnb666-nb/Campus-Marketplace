@@ -98,6 +98,12 @@ ENTRYPOINT ["npx", "prisma", "migrate", "deploy"]
 # 由 compose.production.yml 的 storage-cleanup 服务消费（backend 网络、
 # 无端口、单实例、restart: unless-stopped），周期执行幂等的
 # runStorageCleanup（详见 scripts/ops/storage-cleanup-worker.ts）。
+# LR-R2（LAUNCH_REHEARSAL_REPAIR R2）：release identity bake 进 worker
+# artifact（与 runner/migrator/ops-runner 同一 provenance 模式）——不可变
+# image tag 是 campus-marketplace-cleanup:${GIT_SHA}，worker 结构化日志的
+# release 字段（src/lib/logger.ts 读 RELEASE_SHA，缺省 "dev"）必须来自同
+# 一构建期 GIT_SHA，否则新镜像的日志身份恒为 "dev"（launch rehearsal 实测）。
+# RELEASE_SHA 是公开的 artifact 元数据（非秘密）；凭据绝不进构建期。
 FROM node:${NODE_VERSION}-bookworm-slim AS cleanup-runner
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssl \
@@ -114,7 +120,24 @@ COPY scripts ./scripts
 # 运行时凭据一律由 compose env 注入），与 builder 阶段同模式
 RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
     && npx prisma generate
-ENTRYPOINT ["npx", "tsx", "scripts/ops/storage-cleanup-worker.ts"]
+# ---- LR-R2（R2 评审修复 CLEANUP_RELEASE_IDENTITY_RUNTIME_OVERRIDE）----
+# release identity 必须是构建期 immutable artifact metadata：ARG/ENV bake
+# 之外，还把值写死进镜像文件 /app/.release-sha。ARG/ENV 置于 COPY 层之后，
+# SHA 变化只 bust 轻量 config 层（deps/prisma 层跨 release 缓存）。
+# ENTRYPOINT 在 worker 进程启动前从 .release-sha 恢复 RELEASE_SHA 并显式
+# export——该赋值发生在容器 env（compose env_file / docker -e）之后，
+# 因此 .env.production 里的任意 RELEASE_SHA 无法伪造日志身份（env_file
+# 优先级高于镜像 Dockerfile ENV，但低于 entrypoint 的显式赋值）。
+# fail closed：.release-sha 缺失/不可读 → set -eu 使 cat 失败 → 非零退出，
+# 绝不 fallback 到 dev/unknown/运行时值（artifact 身份缺失 = 镜像完整性
+# 错误）。形态说明：用内联 sh -c 而非独立 .sh 文件——仓库 core.autocrlf=true
+# 且无 .gitattributes，Windows checkout 会把新增 .sh 以 CRLF 带进镜像
+# （Debian 容器内必然解析失败）；内联在 Dockerfile 中免疫该问题。
+# RELEASE_SHA 为公开 artifact 元数据，凭据绝不进构建期。
+ARG GIT_SHA=unknown
+ENV RELEASE_SHA=${GIT_SHA}
+RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/storage-cleanup-worker.ts \"$@\"", "--"]
 
 # ---------- ops-runner（一次性生产运维检查，compose ops-check 服务）----------
 # LAUNCH_REHEARSAL_REPAIR R1（P1-01）：ops-check 的生产执行合同。

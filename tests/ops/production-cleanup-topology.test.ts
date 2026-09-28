@@ -96,13 +96,64 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
 
   it("Dockerfile 存在 cleanup-runner target，entrypoint 指向清理 worker", () => {
     expect(dockerfileContent).toMatch(/FROM node:\$\{NODE_VERSION\}-bookworm-slim AS cleanup-runner/);
-    expect(dockerfileContent).toMatch(
-      /ENTRYPOINT \["npx", "tsx", "scripts\/ops\/storage-cleanup-worker\.ts"\]/,
-    );
     // prisma client 在镜像内生成（运行期不依赖宿主生成产物）
     const targetIndex = dockerfileContent.indexOf("AS cleanup-runner");
     const targetBlock = dockerfileContent.slice(targetIndex);
     expect(targetBlock).toMatch(/npx prisma generate/);
+  });
+
+  // ---- LR-R2：cleanup worker release identity 构建期 bake ----
+  // 外部身份（image tag campus-marketplace-cleanup:${GIT_SHA}）早已正确；
+  // 本 gate 固化内部身份：worker 结构化日志 release 字段必须与镜像构建
+  // 期 GIT_SHA 同源（logger 读 RELEASE_SHA，缺省 "dev"）。
+
+  it("LR-R2 cleanup-runner 构建期 bake：ARG GIT_SHA + ENV RELEASE_SHA + /app/.release-sha", () => {
+    // end-bounded slice：仅 cleanup-runner 自身（不含 ops-runner 的同名声明）
+    const startIndex = dockerfileContent.indexOf("AS cleanup-runner");
+    const endIndex = dockerfileContent.indexOf("AS ops-runner");
+    expect(startIndex).toBeGreaterThan(-1);
+    expect(endIndex).toBeGreaterThan(startIndex);
+    const stageBlock = dockerfileContent.slice(startIndex, endIndex);
+    expect(stageBlock).toMatch(/ARG GIT_SHA=unknown/);
+    expect(stageBlock).toMatch(/ENV RELEASE_SHA=\$\{GIT_SHA\}/);
+    // R2 评审修复：身份写死进镜像文件（immutable artifact metadata）
+    expect(stageBlock).toMatch(/RUN printf '%s\\n' "\$\{GIT_SHA\}" > \/app\/\.release-sha/);
+    // 防御性默认保持 unknown（构建缺参可显式观测，不静默假造身份）
+    expect(stageBlock).not.toMatch(/ENV RELEASE_SHA="?dev/);
+  });
+
+  it("LR-R2 entrypoint 从 baked metadata 恢复身份（env_file/-e 运行时覆盖无效）+ fail closed", () => {
+    const startIndex = dockerfileContent.indexOf("AS cleanup-runner");
+    const endIndex = dockerfileContent.indexOf("AS ops-runner");
+    const stageBlock = dockerfileContent.slice(startIndex, endIndex);
+    // ENTRYPOINT 链：cat .release-sha → 显式 export → exec worker。
+    // 显式赋值发生在容器 env 之后：env_file/-e 的 RELEASE_SHA 无法伪造。
+    expect(stageBlock).toMatch(/ENTRYPOINT \["\/bin\/sh", "-c",/);
+    expect(stageBlock).toMatch(/cat \/app\/\.release-sha/);
+    expect(stageBlock).toMatch(/export RELEASE_SHA/);
+    expect(stageBlock).toMatch(/exec npx tsx scripts\/ops\/storage-cleanup-worker\.ts/);
+    // fail closed：set -eu 保证 metadata 缺失即退出，无 dev/unknown fallback
+    expect(stageBlock).toMatch(/set -eu;/);
+    expect(stageBlock).not.toMatch(/RELEASE_SHA=dev/);
+    expect(stageBlock).not.toMatch(/RELEASE_SHA=unknown/);
+  });
+
+  it("LR-R2 compose storage-cleanup：build args GIT_SHA 注入 + 无运行时 RELEASE_SHA 覆盖", () => {
+    const block = extractServiceBlock(stripComments(composeContent), "storage-cleanup");
+    const text = block.join("\n");
+    expect(block.length).toBeGreaterThan(0);
+    // 构建期身份来源（BUILD_ARG contract）
+    expect(text).toMatch(/target:\s*cleanup-runner/);
+    expect(text).toMatch(/args:\s*\n\s+GIT_SHA:\s*\$\{GIT_SHA:-unknown\}/);
+    // 运行时覆盖禁止：runtime 注入会让同一镜像冒充任意 release
+    expect(text).not.toMatch(/RELEASE_SHA:/);
+    // immutable tag 契约不变
+    expect(text).toMatch(/image:\s*campus-marketplace-cleanup:\$\{GIT_SHA:-local\}/);
+  });
+
+  it("LR-R2 deploy 构建路径不变：GIT_SHA 前缀 + app/migrate/storage-cleanup 同批", () => {
+    const deploySh = readFileSync(path.join(repoRoot, "scripts", "ops", "deploy.sh"), "utf8");
+    expect(deploySh).toMatch(/GIT_SHA="\$\{GIT_SHA\}" compose_run build app migrate storage-cleanup/);
   });
 
   it("cleanup worker 不应成为 /api/ready 依赖（readiness 解耦）", () => {

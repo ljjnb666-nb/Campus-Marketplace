@@ -91,6 +91,11 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.review.deleteMany();
   // Phase 7E：ModerationCase 1:1 引用 Report（RESTRICT）——先删 case 再删 Report
   await prisma.moderationCase.deleteMany();
+  // Phase 7C：ListingModeration FK 指向 Product/ErrandTask/ServiceListing
+  // （RESTRICT）——必须在 listing 删除之前清理，否则上一轮失败用例遗留的
+  // 审核行会让 product.deleteMany() 撞 FK（实测：moderation spec 失败残留
+  // → 下一轮 setup 崩溃）。
+  await prisma.listingModeration.deleteMany();
   await prisma.report.deleteMany();
   await prisma.notification.deleteMany();
   await prisma.message.deleteMany();
@@ -132,7 +137,6 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.enforcementAction.deleteMany();
   await prisma.riskFlag.deleteMany();
   await prisma.riskState.deleteMany();
-  await prisma.listingModeration.deleteMany();
   await prisma.account.deleteMany();
   await prisma.session.deleteMany();
   await prisma.verificationToken.deleteMany();

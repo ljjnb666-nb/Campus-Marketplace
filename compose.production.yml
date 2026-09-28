@@ -162,6 +162,14 @@ services:
     build:
       context: .
       target: cleanup-runner
+      # LR-R2：release identity 构建期 bake（ENV RELEASE_SHA=${GIT_SHA} +
+      # /app/.release-sha，ENTRYPOINT 启动时从该文件恢复并显式 export），
+      # 与不可变 image tag 同源。绝不改为运行时 environment 注入——
+      # 运行时注入会让同一镜像冒充任意 release；同时 env_file 的
+      # RELEASE_SHA（若存在）也无法伪造身份：entrypoint 的显式赋值
+      # 发生在容器 env 之后，优先级高于 env_file/Dockerfile ENV。
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     image: campus-marketplace-cleanup:${GIT_SHA:-local}
     <<: *service-defaults
     env_file: .env.production

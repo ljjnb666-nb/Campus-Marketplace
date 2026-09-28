@@ -101,6 +101,25 @@ describe("ops-check canonical invocation shell-level regression（tests/ops/ops-
   );
 });
 
+describe("cleanup release provenance shell-level regression（tests/ops/cleanup-release-provenance.test.sh）", () => {
+  it.skipIf(!hasBash() || !hasDocker())(
+    "R2-ID-01/02/03 + fail-closed：docker -e / compose env_file 均无法伪造 baked 身份（无 docker 或无 .env.production 时自跳过）",
+    async () => {
+      const { stdout } = await execFileAsync(
+        "bash",
+        ["tests/ops/cleanup-release-provenance.test.sh"],
+        {
+          cwd: repoRoot,
+          timeout: 900_000,
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+      expect(stdout).toMatch(/FAIL=0/);
+    },
+    950_000,
+  );
+});
+
 describe("compose production config（--env-file 统一插值来源）", () => {
   it.skipIf(!hasDocker())(
     "docker compose --env-file <synthetic> -f compose.production.yml config 在 shell 未导出任何生产变量时 PASS",
