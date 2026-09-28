@@ -98,13 +98,22 @@ ENTRYPOINT ["npx", "prisma", "migrate", "deploy"]
 # 由 compose.production.yml 的 storage-cleanup 服务消费（backend 网络、
 # 无端口、单实例、restart: unless-stopped），周期执行幂等的
 # runStorageCleanup（详见 scripts/ops/storage-cleanup-worker.ts）。
+# LR-R2（LAUNCH_REHEARSAL_REPAIR R2）：release identity bake 进 worker
+# artifact（与 runner/migrator/ops-runner 同一 provenance 模式）——不可变
+# image tag 是 campus-marketplace-cleanup:${GIT_SHA}，worker 结构化日志的
+# release 字段（src/lib/logger.ts 读 RELEASE_SHA，缺省 "dev"）必须来自同
+# 一构建期 GIT_SHA，否则新镜像的日志身份恒为 "dev"（launch rehearsal 实测）。
+# RELEASE_SHA 是公开的 artifact 元数据（非秘密）；凭据绝不进构建期。
 FROM node:${NODE_VERSION}-bookworm-slim AS cleanup-runner
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+ARG GIT_SHA=unknown
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
+# release identity 与不可变 image tag 同源（公开 artifact 元数据，非秘密）
+ENV RELEASE_SHA=${GIT_SHA}
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json prisma.config.ts ./
 COPY prisma ./prisma

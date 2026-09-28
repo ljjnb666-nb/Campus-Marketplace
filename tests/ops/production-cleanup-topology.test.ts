@@ -105,6 +105,42 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     expect(targetBlock).toMatch(/npx prisma generate/);
   });
 
+  // ---- LR-R2：cleanup worker release identity 构建期 bake ----
+  // 外部身份（image tag campus-marketplace-cleanup:${GIT_SHA}）早已正确；
+  // 本 gate 固化内部身份：worker 结构化日志 release 字段必须与镜像构建
+  // 期 GIT_SHA 同源（logger 读 RELEASE_SHA，缺省 "dev"）。
+
+  it("LR-R2 cleanup-runner 构建期 bake：ARG GIT_SHA + ENV RELEASE_SHA=${GIT_SHA}", () => {
+    // end-bounded slice：仅 cleanup-runner 自身（不含 ops-runner 的同名声明）
+    const startIndex = dockerfileContent.indexOf("AS cleanup-runner");
+    const endIndex = dockerfileContent.indexOf("AS ops-runner");
+    expect(startIndex).toBeGreaterThan(-1);
+    expect(endIndex).toBeGreaterThan(startIndex);
+    const stageBlock = dockerfileContent.slice(startIndex, endIndex);
+    expect(stageBlock).toMatch(/ARG GIT_SHA=unknown/);
+    expect(stageBlock).toMatch(/ENV RELEASE_SHA=\$\{GIT_SHA\}/);
+    // 防御性默认保持 unknown（构建缺参可显式观测，不静默假造身份）
+    expect(stageBlock).not.toMatch(/ENV RELEASE_SHA="?dev/);
+  });
+
+  it("LR-R2 compose storage-cleanup：build args GIT_SHA 注入 + 无运行时 RELEASE_SHA 覆盖", () => {
+    const block = extractServiceBlock(stripComments(composeContent), "storage-cleanup");
+    const text = block.join("\n");
+    expect(block.length).toBeGreaterThan(0);
+    // 构建期身份来源（BUILD_ARG contract）
+    expect(text).toMatch(/target:\s*cleanup-runner/);
+    expect(text).toMatch(/args:\s*\n\s+GIT_SHA:\s*\$\{GIT_SHA:-unknown\}/);
+    // 运行时覆盖禁止：runtime 注入会让同一镜像冒充任意 release
+    expect(text).not.toMatch(/RELEASE_SHA:/);
+    // immutable tag 契约不变
+    expect(text).toMatch(/image:\s*campus-marketplace-cleanup:\$\{GIT_SHA:-local\}/);
+  });
+
+  it("LR-R2 deploy 构建路径不变：GIT_SHA 前缀 + app/migrate/storage-cleanup 同批", () => {
+    const deploySh = readFileSync(path.join(repoRoot, "scripts", "ops", "deploy.sh"), "utf8");
+    expect(deploySh).toMatch(/GIT_SHA="\$\{GIT_SHA\}" compose_run build app migrate storage-cleanup/);
+  });
+
   it("cleanup worker 不应成为 /api/ready 依赖（readiness 解耦）", () => {
     // dependency-health 的依赖枚举固定为 database/redis/storage
     const health = readFileSync(
