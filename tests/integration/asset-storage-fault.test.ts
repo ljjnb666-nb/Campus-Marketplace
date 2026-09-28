@@ -1,8 +1,10 @@
 import { S3Client } from "@aws-sdk/client-s3";
 import net from "node:net";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // 一次性隔离数据库生命周期辅助（与 production-cleanup-worker 套件同模式）
 import { runPrismaCommand } from "../../scripts/resilience/spawn-worker.mjs";
+import { createBoundedS3Client } from "@/lib/storage/s3-client-policy";
 import type { StorageClient, PutObjectInput } from "@/lib/storage/types";
 
 // 故障边界在 StorageClient 层，图片 decode/重编码不在本测试焦点：
@@ -72,6 +74,82 @@ function findFreePort(): Promise<number> {
     });
     server.on("error", reject);
   });
+}
+
+/**
+ * R3-05 / RESPONSE_LOST_AFTER_COMMIT 故障注入（transport 级，真实 socket）：
+ * - PUT：请求原样转发给真实 MinIO（对象【真实提交】），但吞掉 MinIO 响应并
+ *   在响应头完整到达后销毁客户端连接——client 观察到连接错误而远端对象已
+ *   存在。这是比应用层合成 throw 更强的 LR-071 歧义证据。
+ * - DELETE：在转发前直接销毁客户端连接（删除请求从未到达 MinIO，对象得以
+ *   存活）——模拟"存储不可用，恢复失败保留 PENDING_DELETE"路径。
+ */
+function startCommitSwallowingProxy(targetPort: number) {
+  let swallowedPuts = 0;
+  const server = net.createServer((clientSocket) => {
+    const upstream = net.connect(targetPort, "127.0.0.1");
+    const swallow = () => undefined;
+    clientSocket.on("error", swallow);
+    upstream.on("error", swallow);
+
+    let requestHead = "";
+    let forwarded = false;
+    clientSocket.on("data", function onData(chunk: Buffer) {
+      if (forwarded) return;
+      requestHead += chunk.toString("latin1");
+      if (!requestHead.includes("\r\n\r\n")) return;
+      forwarded = true;
+      if (requestHead.startsWith("DELETE")) {
+        // 删除请求从未到达远端：对象存活，purge 必然失败
+        clientSocket.destroy();
+        upstream.destroy();
+        return;
+      }
+      // PUT：完整转发请求（含已缓冲字节）——对象真实提交
+      upstream.write(Buffer.from(requestHead, "latin1"));
+      clientSocket.pipe(upstream);
+      let responseBytes = Buffer.alloc(0);
+      upstream.on("data", (responseChunk: Buffer) => {
+        // 下行响应一律吞掉（绝不回写客户端）
+        responseBytes = Buffer.concat([responseBytes, responseChunk]);
+        if (responseBytes.includes("\r\n\r\n")) {
+          swallowedPuts += 1;
+          clientSocket.destroy();
+          upstream.destroy();
+        }
+      });
+    });
+  });
+  return {
+    server,
+    get swallowedPutCount() {
+      return swallowedPuts;
+    },
+    listen: () =>
+      new Promise<number>((resolve, reject) => {
+        server.listen(0, "127.0.0.1", () =>
+          resolve((server.address() as AddressInfo).port),
+        );
+        server.on("error", reject);
+      }),
+  };
+}
+
+/** accept 后永不响应的 blackhole 端点（R3-06 超时 abort 路径） */
+function startBlackholeServer() {
+  const server = net.createServer((socket) => {
+    socket.on("error", () => undefined);
+  });
+  return {
+    server,
+    listen: () =>
+      new Promise<number>((resolve, reject) => {
+        server.listen(0, "127.0.0.1", () =>
+          resolve((server.address() as AddressInfo).port),
+        );
+        server.on("error", reject);
+      }),
+  };
 }
 
 class AmbiguousPutStorage implements StorageClient {
@@ -319,5 +397,126 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
       const afterRow = await prisma.uploadedAsset.findUnique({ where: { id: row!.id } });
       expect(afterRow!.status).toBe("DELETED");
     });
+
+    it("R3-05 RESPONSE_LOST_AFTER_COMMIT（transport 级）：MinIO 真实提交后响应被吞 → 503，对象确证存在，恢复后 exactly-once 回收", async () => {
+      const { S3Storage } = await import("@/lib/storage/s3-storage");
+      const targetPort = Number(new URL(endpoint!).port) || 9100;
+      const proxy = startCommitSwallowingProxy(targetPort);
+      const proxyPort = await proxy.listen();
+      const swallowStorage = new S3Storage(
+        createBoundedS3Client({
+          endpoint: `http://127.0.0.1:${proxyPort}`,
+          region: "us-east-1" as const,
+          forcePathStyle: true,
+          credentials: {
+            accessKeyId: process.env.INTEGRATION_S3_ACCESS_KEY_ID ?? "minioadmin",
+            secretAccessKey: process.env.INTEGRATION_S3_SECRET_ACCESS_KEY ?? "minioadmin",
+          },
+        }),
+      );
+      setStorageForTests(swallowStorage);
+
+      // 远端真实提交（对象写入 MinIO），client 经真实 socket 观察到连接错误
+      await expect(
+        uploadImageAsset({ userId, category: "product", file: buildFile() }),
+      ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
+      expect(proxy.swallowedPutCount).toBeGreaterThanOrEqual(1);
+
+      const row = await prisma.uploadedAsset.findFirst({
+        where: { ownerId: userId },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(row).not.toBeNull();
+      // authoritative recovery row 保留（歧义结果绝不删行）
+      expect(row!.status).toBe("PENDING_DELETE");
+      // 配额未提前释放（client 错误 ≠ 远端不存在）
+      expect((await getStorageUsage(userId)).usedBytes).toBe(row!.sizeBytes);
+
+      // 传输级歧义确证：client 失败而对象真实存在于 MinIO（权威 headObject）
+      // （inline purge 的 DELETE 被代理拦截，从未到达 MinIO）
+      expect(
+        await realStorage.headObject({ bucket: row!.bucket, objectKey: row!.objectKey }),
+      ).not.toBeNull();
+      leftoverObjects.push({ bucket: row!.bucket, objectKey: row!.objectKey });
+
+      // 存储恢复（直连真实 MinIO）→ cleanup 原语回收：对象删除 + DELETED +
+      // 配额 exactly-once 释放
+      setStorageForTests(realStorage);
+      const purged = await purgePendingDeleteAsset({
+        id: row!.id,
+        ownerId: row!.ownerId,
+        bucket: row!.bucket,
+        objectKey: row!.objectKey,
+        sizeBytes: row!.sizeBytes,
+      });
+      expect(purged).toBe(true);
+      expect(
+        await realStorage.headObject({ bucket: row!.bucket, objectKey: row!.objectKey }),
+      ).toBeNull();
+      const afterRow = await prisma.uploadedAsset.findUnique({ where: { id: row!.id } });
+      expect(afterRow!.status).toBe("DELETED");
+      expect((await getStorageUsage(userId)).usedBytes).toBe(0);
+
+      // 重复 cleanup 幂等：条件转移不再命中，无二次释放
+      const repeat = await purgePendingDeleteAsset({
+        id: row!.id,
+        ownerId: row!.ownerId,
+        bucket: row!.bucket,
+        objectKey: row!.objectKey,
+        sizeBytes: row!.sizeBytes,
+      });
+      expect(repeat).toBe(false);
+      expect((await getStorageUsage(userId)).usedBytes).toBe(0);
+    }, 60_000);
+
+    it("R3-06 超时 abort（blackhole 端点）：上传整体有界返回 503，歧义归类，恢复后 exactly-once 回收", async () => {
+      const { S3Storage } = await import("@/lib/storage/s3-storage");
+      const blackhole = startBlackholeServer();
+      const blackholePort = await blackhole.listen();
+      const timeoutStorage = new S3Storage(
+        createBoundedS3Client({
+          endpoint: `http://127.0.0.1:${blackholePort}`,
+          region: "us-east-1" as const,
+          forcePathStyle: true,
+          credentials: {
+            accessKeyId: process.env.INTEGRATION_S3_ACCESS_KEY_ID ?? "minioadmin",
+            secretAccessKey: process.env.INTEGRATION_S3_SECRET_ACCESS_KEY ?? "minioadmin",
+          },
+        }),
+      );
+      setStorageForTests(timeoutStorage);
+
+      // PUT abort（~5s）+ 内联 purge DELETE abort（~3s）——整个上传调用有界
+      const startedAt = Date.now();
+      await expect(
+        uploadImageAsset({ userId, category: "product", file: buildFile() }),
+      ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
+      const elapsed = Date.now() - startedAt;
+      // LR-R3 验收：有界失败（修复前为 ~36s 长尾）
+      expect(elapsed).toBeLessThan(15_000);
+
+      const row = await prisma.uploadedAsset.findFirst({
+        where: { ownerId: userId },
+        orderBy: { createdAt: "desc" },
+      });
+      expect(row).not.toBeNull();
+      // abort ≠ 远端零副作用证明：状态机保持保守（PENDING_DELETE，配额占用）
+      expect(row!.status).toBe("PENDING_DELETE");
+      expect((await getStorageUsage(userId)).usedBytes).toBe(row!.sizeBytes);
+
+      // 存储恢复 → cleanup 原语完成回收（exactly-once）
+      setStorageForTests(realStorage);
+      const purged = await purgePendingDeleteAsset({
+        id: row!.id,
+        ownerId: row!.ownerId,
+        bucket: row!.bucket,
+        objectKey: row!.objectKey,
+        sizeBytes: row!.sizeBytes,
+      });
+      expect(purged).toBe(true);
+      const afterRow = await prisma.uploadedAsset.findUnique({ where: { id: row!.id } });
+      expect(afterRow!.status).toBe("DELETED");
+      expect((await getStorageUsage(userId)).usedBytes).toBe(0);
+    }, 60_000);
   },
 );
