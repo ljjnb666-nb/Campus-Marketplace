@@ -73,8 +73,8 @@ METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志�
 - threshold/window：≥5 分钟（deploy 滚动期不算：配合 `.releases.log` 时间窗）
 - severity：P1（若同时命中 P0-2 则按 P0）
 - initial action：定位第一个 fail 的依赖——
-  `GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --build ops-check`
-  （唯一 canonical 生产命令，详见 OBSERVABILITY.md §7）
+  `GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check`
+  （唯一 canonical 生产命令，OBSERVE ONLY：不启动/修复被观察依赖，详见 OBSERVABILITY.md §7）
 - runbook：INCIDENT_RESPONSE.md §场景 2/4
 
 ### P1-2 备份过期（stale）

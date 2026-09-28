@@ -190,8 +190,9 @@ curl -fsS https://<域名>/api/ready               # readiness：依赖状态（
 curl -fsS https://<域名>/api/health   # {"status":"ok","release":"<期望 SHA>"}（进程/发布层）
 curl -fsS https://<域名>/api/ready    # {"status":"ready", dependencies 全 ok}（依赖层）
 # ops-check（六项全 PASS，exit 0；生产模式无 skip bypass）——唯一 canonical
-# 生产命令（compose 一次性容器；不要在宿主机直跑 npm run ops:check 当生产 gate）：
-GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --build ops-check
+# 生产命令（compose 一次性容器，OBSERVE ONLY：--no-deps 保证不启动/修复
+# 被观察依赖；不要在宿主机直跑 npm run ops:check 当生产 gate）：
+GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
 ```
 
 涉及数据恢复的场景追加：按 docs/BACKUP_RESTORE.md 执行一次 restore drill

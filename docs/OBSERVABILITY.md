@@ -222,8 +222,14 @@ unexpected_server_errors_total          {category}
 镜像：backend 网络、无端口发布、备份目录只读挂载、one-shot）：
 
 ```bash
-GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --build ops-check
+GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
 ```
+
+`--no-deps` 是诊断合同的一部分（OBSERVE ONLY）：健康依赖是**被检查对象**，
+不是启动前置条件——`compose run` 默认会拉起 `depends_on` 依赖，会把
+"依赖已停止"的事故现场修复成"依赖被诊断工具启动后的状态"；因此本服务
+不声明任何 `depends_on`，DB/Redis 不可达由 checker 以 bounded FAIL 表达，
+绝不由诊断命令修复/启动/重启任何依赖。
 
 为什么不能在宿主机直接跑 `npm run ops:check` 当生产 gate：compose 安全基线
 不发布 5432/6379/9000（PRODUCTION_SECURITY §1），宿主机无法解析 backend

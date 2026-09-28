@@ -115,9 +115,14 @@ services:
   #     目录只读挂载到固定容器路径 /backups（long syntax + read_only +
   #     create_host_path:false——目录不存在时显式报错，绝不静默挂空目录），
   #     服务内以 BACKUP_DIR=/backups 覆盖。ops-check 无写/删备份能力。
+  #   - OBSERVE ONLY（R1 评审修复 CANONICAL_OPS_CHECK_MUTATES_OBSERVED_DEPENDENCIES）：
+  #     绝不声明 depends_on——健康依赖是被检查对象，不是启动前置条件；
+  #     否则 compose run 会自动拉起已停止的依赖，checker 观察到的是被
+  #     诊断工具自己修复后的状态，污染事故现场。canonical 命令因此必须
+  #     携带 --no-deps，DB/Redis 不可达由 checker 以 bounded FAIL 表达。
   # 唯一 canonical 执行命令（docs/OBSERVABILITY.md §7）：
   #   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
-  #     -f compose.production.yml --profile ops run --rm --build ops-check
+  #     -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
   ops-check:
     build:
       context: .
@@ -141,11 +146,6 @@ services:
           create_host_path: false
     networks:
       - backend
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     restart: "no"
 
   # ---- 存储清理 worker（LR-071 审计修复：PENDING_DELETE 生产自动恢复）----

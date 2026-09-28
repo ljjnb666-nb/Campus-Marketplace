@@ -115,8 +115,9 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
    identity 六项，LAUNCH_REHEARSAL_REPAIR R1 起为唯一 canonical 生产命令）：
    ```bash
    GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
-     -f compose.production.yml --profile ops run --rm --build ops-check
+     -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
    ```
+   `--no-deps` 为诊断合同（OBSERVE ONLY：不启动/修复被观察依赖）。
    前提：`BACKUP_DIR` 已配置（宿主机绝对路径；该目录被 ops-check 只读挂载）
    且已有一次成功备份；生产合同要求 `BACKUP_OFFSITE_TARGET` 异地副本成功，
    未配置时 `backup_health` FAIL 属 Phase 3B 设计语义。详见

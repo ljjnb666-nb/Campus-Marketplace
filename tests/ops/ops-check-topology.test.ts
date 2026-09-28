@@ -31,7 +31,7 @@ const alertingDoc = readFileSync(path.join(repoRoot, "docs", "ALERTING.md"), "ut
 
 /** 唯一 canonical 生产命令（文档与本 gate 必须保持同一字符串） */
 export const CANONICAL_OPS_CHECK_COMMAND =
-  "GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --build ops-check";
+  "GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check";
 
 /** 去掉 YAML 注释行（注释里的描述不参与契约判定） */
 function stripComments(content: string): string[] {
@@ -74,10 +74,12 @@ describe("生产 ops-check 执行合同静态 gate（R1 P1-01）", () => {
     expect(text).toMatch(/restart:\s*"no"/);
   });
 
-  it("ops-check 仅 backend 网络，依赖 postgres/redis 健康（不依赖 app）", () => {
+  it("ops-check 仅 backend 网络；OPS_CHECK_DEPENDS_ON = NONE（OBSERVE ONLY）", () => {
     expect(text).toMatch(/-\s*backend/);
-    expect(text).toMatch(/postgres:\n\s+condition:\s+service_healthy/);
-    expect(text).toMatch(/redis:\n\s+condition:\s+service_healthy/);
+    // R1 评审修复（CANONICAL_OPS_CHECK_MUTATES_OBSERVED_DEPENDENCIES）：
+    // 诊断工具绝不允许通过 depends_on 让 compose run 自动拉起已停止的
+    // 被观察依赖——健康依赖是被检查对象，不是启动前置条件
+    expect(text).not.toMatch(/depends_on/);
     expect(text).not.toMatch(/app:\n\s+condition:/);
   });
 
@@ -110,6 +112,22 @@ describe("生产 ops-check 执行合同静态 gate（R1 P1-01）", () => {
 
   it("ops-check 以 --mode production 为默认 command（mode fail-closed 契约入口）", () => {
     expect(text).toMatch(/command:\s*\["--mode",\s*"production"\]/);
+  });
+
+  it("CANONICAL_HAS_NO_DEPS = YES：canonical 命令携带 --no-deps（诊断非变异合同）", () => {
+    // 文档里的命令必须带 --no-deps；故障注入测试运行的就是这条命令，
+    // 两者字节语义一致才成立（否则测试悄悄比文档多修依赖）
+    for (const [name, doc] of [
+      ["OBSERVABILITY.md", observabilityDoc],
+      ["INCIDENT_RESPONSE.md", incidentDoc],
+      ["ALERTING.md", alertingDoc],
+    ] as const) {
+      expect(doc, `${name} 必须包含 canonical 命令`).toContain(CANONICAL_OPS_CHECK_COMMAND);
+      // 防止文档里残留无 --no-deps 的旧形态
+      expect(doc, `${name} 不得残留无 --no-deps 的旧 canonical 命令`).not.toContain(
+        CANONICAL_OPS_CHECK_COMMAND.replace(" --no-deps", ""),
+      );
+    }
   });
 
   it("ops-check 不进入 deploy release artifact set（诊断工件，不扩部署生命周期）", () => {
