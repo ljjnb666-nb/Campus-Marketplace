@@ -85,7 +85,11 @@ async function login(base) {
     redirect: "manual",
   });
   storeCookies(loginResponse);
-  if (!cookieJar.has("next-auth.session-token")) {
+  // HTTPS 部署下 NextAuth 会话 cookie 带 __Secure- 前缀；直连 HTTP 无前缀
+  const hasSession =
+    cookieJar.has("next-auth.session-token") ||
+    cookieJar.has("__Secure-next-auth.session-token");
+  if (!hasSession) {
     const detail = await loginResponse.text().catch(() => "");
     throw new Error(
       `登录失败（未获得 session cookie）：${loginResponse.status} ${detail.slice(0, 200)}`,
