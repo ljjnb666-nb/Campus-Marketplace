@@ -9,7 +9,8 @@
 
 信号来源：`/api/health`、`/api/ready`、`/api/internal/metrics`（需
 METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志采集器）、
-`backup-status.json`、`npm run ops:check`。
+`backup-status.json`、ops-check 一次性容器（唯一 canonical 生产命令见
+[OBSERVABILITY.md §7](./OBSERVABILITY.md#7-统一运维检查)）。
 
 原则：
 
@@ -71,7 +72,9 @@ METRICS_BEARER_TOKEN）、结构化日志（`docker compose logs app` 或日志�
 - signal：`/api/ready` 503（database 或 storage failed）持续
 - threshold/window：≥5 分钟（deploy 滚动期不算：配合 `.releases.log` 时间窗）
 - severity：P1（若同时命中 P0-2 则按 P0）
-- initial action：`npm run ops:check`（生产机上）定位第一个 fail 的依赖
+- initial action：定位第一个 fail 的依赖——
+  `GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check`
+  （唯一 canonical 生产命令，OBSERVE ONLY：不启动/修复被观察依赖，详见 OBSERVABILITY.md §7）
 - runbook：INCIDENT_RESPONSE.md §场景 2/4
 
 ### P1-2 备份过期（stale）

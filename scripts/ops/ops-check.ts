@@ -114,22 +114,32 @@ async function checkRedis(): Promise<OpsCheckResult> {
   if (!process.env.REDIS_URL) {
     return { name: "redis_connectivity", status: "skipped", required: false, detail: "REDIS_URL 未配置（本地限流模式）" };
   }
+  // LAUNCH_REHEARSAL_REPAIR R1（P1-01）：健康的 Redis 不得被误报 FAIL。
+  // 旧实现 enableOfflineQueue:false + 构造后立即 ping，在惰性连接尚未
+  // ready 时命令被本地拒绝（"Stream isn't writeable..."）→ 误报。
+  // 确定性合同：lazyConnect 构造（不自动连接）→ 显式 await connect()
+  // （就绪/拒绝，withTimeout bounded）→ ping → disconnect。
+  // retryStrategy():null = 一次性检查只发起一轮连接尝试，绝不重连风暴；
+  // 短命进程 finally disconnect()，不留下任何 handle。
   const redis = new Redis(process.env.REDIS_URL, {
+    lazyConnect: true,
     maxRetriesPerRequest: 1,
-    enableOfflineQueue: false,
     connectTimeout: CONNECT_TIMEOUT_MS,
     commandTimeout: CONNECT_TIMEOUT_MS,
+    retryStrategy: () => null,
     // ops-check 是短命进程，静默消费连接错误事件
     // （错误经检查结果输出，不走 ioredis 事件）
   });
   redis.on("error", () => undefined);
   try {
+    await withTimeout("redis", () => redis.connect());
     const pong = await withTimeout("redis", () => redis.ping());
     if (pong !== "PONG") {
       return { name: "redis_connectivity", status: "fail", required: true, detail: "unexpected PING reply" };
     }
     return { name: "redis_connectivity", status: "pass", required: true };
   } catch (error) {
+    // detail 只含 error class（error.name），绝不输出 REDIS_URL/密码
     return {
       name: "redis_connectivity",
       status: "fail",

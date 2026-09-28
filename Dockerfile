@@ -115,3 +115,18 @@ COPY scripts ./scripts
 RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
     && npx prisma generate
 ENTRYPOINT ["npx", "tsx", "scripts/ops/storage-cleanup-worker.ts"]
+
+# ---------- ops-runner（一次性生产运维检查，compose ops-check 服务）----------
+# LAUNCH_REHEARSAL_REPAIR R1（P1-01）：ops-check 的生产执行合同。
+# 与 migrator/cleanup-runner 同模型（完整 node_modules + tsx 运行 TS 入口），
+# 复用 cleanup-runner 的全部产物层（node_modules/prisma/src/scripts）。
+# release identity 必须 bake 进 artifact（与 runner/migrator 同一 provenance
+# 模式）：release_identity 检查读取的 RELEASE_SHA 来自构建期 GIT_SHA，
+# 绝不允许运行时向无 provenance 的镜像注入任意身份。
+# 诊断工件（非 production writer/runtime dependency）：不进入 deploy.sh
+# 的 release artifact set，由 canonical 命令按需 --build（immutable
+# GIT_SHA tag）。
+FROM cleanup-runner AS ops-runner
+ARG GIT_SHA=unknown
+ENV RELEASE_SHA=${GIT_SHA}
+ENTRYPOINT ["npx", "tsx", "scripts/ops/ops-check.ts"]

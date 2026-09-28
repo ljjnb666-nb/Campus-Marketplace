@@ -20,7 +20,7 @@ detect（探针/告警/用户报告）
   → triage（定 severity：ALERTING.md P0/P1/P2；确认影响面与起始时间）
   → contain（止损优先：rollback/停写/隔离，评估后再动）
   → recover（按对应场景 runbook 执行）
-  → verify（/api/health release 正确 + /api/ready 全绿 + ops:check PASS）
+  → verify（/api/health release 正确 + /api/ready 全绿 + ops:check PASS，命令见 §恢复验证）
   → postmortem（48h 内：时间线、根因、行动项）
 ```
 
@@ -189,7 +189,10 @@ curl -fsS https://<域名>/api/ready               # readiness：依赖状态（
 ```bash
 curl -fsS https://<域名>/api/health   # {"status":"ok","release":"<期望 SHA>"}（进程/发布层）
 curl -fsS https://<域名>/api/ready    # {"status":"ready", dependencies 全 ok}（依赖层）
-npm run ops:check -- --mode production # 全部 PASS（exit 0；生产模式无 skip bypass）
+# ops-check（六项全 PASS，exit 0；生产模式无 skip bypass）——唯一 canonical
+# 生产命令（compose 一次性容器，OBSERVE ONLY：--no-deps 保证不启动/修复
+# 被观察依赖；不要在宿主机直跑 npm run ops:check 当生产 gate）：
+GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
 ```
 
 涉及数据恢复的场景追加：按 docs/BACKUP_RESTORE.md 执行一次 restore drill

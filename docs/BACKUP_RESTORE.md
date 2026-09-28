@@ -22,6 +22,13 @@
 - 监控语义：备份健康检查（`npm run ops:backup-health`）不盲信状态布尔——
   会验证 dump/.sha256 文件仍在并**流式重算 checksum 比对**，
   能发现"备份成功之后文件被损坏/移除"
+- **`BACKUP_DIR` 路径契约（LAUNCH_REHEARSAL_REPAIR R1）**：`BACKUP_DIR`
+  是宿主机的绝对路径，同时承担两个角色——(1) 本脚本/restore 脚本的权威
+  读写目录；(2) compose `ops-check` 一次性服务把同一目录**只读**挂载到
+  容器内固定路径 `/backups`（服务内 `BACKUP_DIR=/backups`），生产 ops:check
+  因此能在此处真实验证 backup freshness/checksum/offsite（见
+  [OBSERVABILITY.md §7](./OBSERVABILITY.md#7-统一运维检查)）。ops-check
+  对备份目录无写/删能力。Windows 宿主机用 `C:/...` 正斜杠盘符风格。
 
 ### 3-2-1 基线
 
