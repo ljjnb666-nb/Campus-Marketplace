@@ -9,6 +9,12 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import {
+  S3_DELETE_OPERATION_TIMEOUT_MS,
+  S3_PUT_OPERATION_TIMEOUT_MS,
+  createBoundedS3Client,
+} from "@/lib/storage/s3-client-policy";
+import { classifyStorageWriteError } from "@/lib/storage/s3-write-error-classifier";
 import { isWellFormedObjectKey } from "@/lib/storage/object-key";
 import type {
   GetObjectResult,
@@ -23,6 +29,9 @@ const KNOWN_DEV_CREDENTIALS = "minioadmin";
 /**
  * S3 兼容实现：MinIO（本地/CI）、AWS S3、Cloudflare R2 等共用同一套
  * 标准 S3 API。业务代码通过 StorageClient 接口访问，不直接依赖 SDK。
+ *
+ * 传输/重试契约由 createBoundedS3Client 统一拥有（LR-R3：存储故障下
+ * 上传请求的有界失败预算），业务层不得另行包装 timeout race。
  */
 export class S3Storage implements StorageClient {
   private readonly client: S3Client;
@@ -38,7 +47,7 @@ export class S3Storage implements StorageClient {
     }
     this.client =
       client ??
-      new S3Client({
+      createBoundedS3Client({
         endpoint: env.S3_ENDPOINT,
         region: env.S3_REGION,
         forcePathStyle: env.S3_FORCE_PATH_STYLE,
@@ -73,24 +82,68 @@ export class S3Storage implements StorageClient {
 
   async putObject(input: PutObjectInput): Promise<void> {
     this.assertRef(input);
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: input.bucket,
-        Key: input.objectKey,
-        Body: input.body,
-        ContentType: input.contentType,
-        // Cache-Control 由调用方按访问级别显式提供（types.ts 契约），
-        // 私有对象禁止落入任何公开缓存
-        CacheControl: input.cacheControl,
-      }),
-    );
+    const startedAt = Date.now();
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: input.bucket,
+          Key: input.objectKey,
+          Body: input.body,
+          ContentType: input.contentType,
+          // Cache-Control 由调用方按访问级别显式提供（types.ts 契约），
+          // 私有对象禁止落入任何公开缓存
+          CacheControl: input.cacheControl,
+        }),
+        // 应用级整个操作预算（含 SDK 重试）：超限 AbortError 终止重试链。
+        // abort ≠ 证明远端未提交——失败方（asset-service）仍按 LR-071
+        // 歧义结果安全路径恢复。
+        { abortSignal: AbortSignal.timeout(S3_PUT_OPERATION_TIMEOUT_MS) },
+      );
+    } catch (error) {
+      this.logWriteFailure("putObject", input, error, startedAt);
+      throw error;
+    }
   }
 
   async deleteObject(ref: ObjectRef): Promise<void> {
     this.assertRef(ref);
-    await this.client.send(
-      new DeleteObjectCommand({ Bucket: ref.bucket, Key: ref.objectKey }),
-    );
+    const startedAt = Date.now();
+    try {
+      await this.client.send(
+        new DeleteObjectCommand({ Bucket: ref.bucket, Key: ref.objectKey }),
+        // 上传失败恢复路径会在上传 HTTP 请求内联执行本方法（幂等 purge），
+        // 预算须与 PUT 合计有界；cleanup worker 超限失败由下个周期重试。
+        { abortSignal: AbortSignal.timeout(S3_DELETE_OPERATION_TIMEOUT_MS) },
+      );
+    } catch (error) {
+      this.logWriteFailure("deleteObject", ref, error, startedAt);
+      throw error;
+    }
+  }
+
+  /**
+   * 写入失败的结构化可观测日志（LR-R3）：错误类别 / attempt 数 / 时长 /
+   * 歧义标记。禁止包含凭据、签名 URL、对象内容或完整连接 URL。
+   */
+  private logWriteFailure(
+    operation: "putObject" | "deleteObject",
+    ref: ObjectRef,
+    error: unknown,
+    startedAt: number,
+  ): void {
+    const classification = classifyStorageWriteError(error);
+    logger.warn("对象存储写入失败", "S3Storage", {
+      operation,
+      event: "storage_write_failure",
+      bucket: ref.bucket,
+      objectKey: ref.objectKey,
+      errorClass: classification.errorClass,
+      ambiguous: !classification.definitePreCommitFailure,
+      attempts: classification.attempts,
+      errorName: classification.errorName,
+      errorCode: classification.errorCode,
+      durationMs: Date.now() - startedAt,
+    });
   }
 
   async headObject(ref: ObjectRef): Promise<ObjectMetadata | null> {
