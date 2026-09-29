@@ -163,6 +163,90 @@ describe("syncLegacyAdminRoles（legacy admin 迁移，幂等）", () => {
   });
 });
 
+describe("syncLegacyAdminRoles 并发收敛（convergent bootstrap，与 ensureCampusMemberships 同一合同）", () => {
+  it("Test A: P2002（并发赢家已写入 assignment）→ 幂等 resolve", async () => {
+    userFindMany.mockResolvedValue([{ id: "admin-1" }]);
+    userRoleAssignmentCreate.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+        code: "P2002",
+        clientVersion: "test",
+        meta: { target: "UserRoleAssignment_userId_roleId_scopeKey_key" },
+      }),
+    );
+
+    const created = await syncLegacyAdminRoles(buildClient());
+
+    expect(created).toBe(0);
+    expect(userRoleAssignmentCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("Test B: P2003 + admin 已被并发删除 → STALE_BOOTSTRAP_SNAPSHOT no-op", async () => {
+    userFindMany.mockResolvedValue([{ id: "admin-1" }]);
+    userRoleAssignmentCreate.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("Foreign key constraint failed", {
+        code: "P2003",
+        clientVersion: "test",
+        meta: { constraint: "UserRoleAssignment_userId_fkey" },
+      }),
+    );
+    userFindUnique.mockResolvedValue(null);
+
+    await expect(syncLegacyAdminRoles(buildClient())).resolves.toBe(0);
+    expect(userFindUnique).toHaveBeenCalledWith({ where: { id: "admin-1" }, select: { id: true } });
+  });
+
+  it("Test C: P2003 + admin 仍在 → rethrow（真实完整性问题不吞）", async () => {
+    userFindMany.mockResolvedValue([{ id: "admin-1" }]);
+    const original = new Prisma.PrismaClientKnownRequestError("Foreign key constraint failed", {
+      code: "P2003",
+      clientVersion: "test",
+      meta: { constraint: "UserRoleAssignment_userId_fkey" },
+    });
+    userRoleAssignmentCreate.mockRejectedValue(original);
+    // beforeEach 默认 userFindUnique → { id: "user-1" }，即 admin 仍存在
+
+    await expect(syncLegacyAdminRoles(buildClient())).rejects.toBe(original);
+  });
+
+  it("Test D: 非 P2002/P2003 错误 → rethrow", async () => {
+    userFindMany.mockResolvedValue([{ id: "admin-1" }]);
+    const boom = new Error("db down");
+    userRoleAssignmentCreate.mockRejectedValue(boom);
+
+    await expect(syncLegacyAdminRoles(buildClient())).rejects.toBe(boom);
+    expect(userFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("seam（testing-only）：afterSnapshot 在 admins/role 快照后、第一次写入前执行一次", async () => {
+    userFindMany.mockResolvedValue([{ id: "admin-1" }]);
+    const order: string[] = [];
+    userFindMany.mockImplementation(async () => {
+      order.push("snapshot");
+      return [{ id: "admin-1" }];
+    });
+    roleFindUnique.mockImplementation(async () => {
+      order.push("role");
+      return { id: "role-1" };
+    });
+    userRoleAssignmentFindFirst.mockImplementation(async () => {
+      order.push("precheck");
+      return null;
+    });
+    userRoleAssignmentCreate.mockImplementation(async () => {
+      order.push("create");
+      return {};
+    });
+
+    await syncLegacyAdminRoles(buildClient(), {
+      afterSnapshot: async () => {
+        order.push("seam");
+      },
+    });
+
+    expect(order).toEqual(["snapshot", "role", "seam", "precheck", "create"]);
+  });
+});
+
 describe("ensureCampusMemberships（membership 补齐，幂等）", () => {
   it("creates ACTIVE memberships only for users missing one", async () => {
     userFindMany.mockResolvedValue([
