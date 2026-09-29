@@ -553,12 +553,13 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     const { withTransaction } = await import("@/lib/prisma");
     const { submitRentalReviewTx } = await import("@/lib/rental-order-machine");
 
+    const ratings = [5, 1];
     const results = await Promise.allSettled([
       withTransaction(async (tx) =>
-        submitRentalReviewTx(tx, { orderId: order.id, userId: renter.id, overallRating: 5 }),
+        submitRentalReviewTx(tx, { orderId: order.id, userId: renter.id, overallRating: ratings[0]! }),
       ),
       withTransaction(async (tx) =>
-        submitRentalReviewTx(tx, { orderId: order.id, userId: renter.id, overallRating: 1 }),
+        submitRentalReviewTx(tx, { orderId: order.id, userId: renter.id, overallRating: ratings[1]! }),
       ),
     ]);
 
@@ -568,13 +569,20 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
         .map((r) => r.reason),
     );
 
-    const values = results.map((r) => (r as PromiseFulfilledResult<unknown>).value);
-    expect(values.filter((v) => JSON.stringify(v) === JSON.stringify({ success: true }))).toHaveLength(1);
-    expect(values.filter((v) => JSON.stringify(v) === JSON.stringify({ error: "已经评价过" }))).toHaveLength(1);
+    // 不假设并发赢家顺序：恰一个 success，其余恰为稳定「已经评价过」
+    const successIndexes = results
+      .map((r, index) => ({ r, index }))
+      .filter(({ r }) => r.status === "fulfilled" && JSON.stringify((r as PromiseFulfilledResult<unknown>).value) === JSON.stringify({ success: true }));
+    expect(successIndexes).toHaveLength(1);
+    const duplicateIndexes = results
+      .map((r, index) => ({ r, index }))
+      .filter(({ r }) => r.status === "fulfilled" && JSON.stringify((r as PromiseFulfilledResult<unknown>).value) === JSON.stringify({ error: "已经评价过" }));
+    expect(duplicateIndexes).toHaveLength(1);
 
     const reviews = await rawClient!.rentalReview.findMany({ where: { orderId: order.id } });
     expect(reviews).toHaveLength(1);
-    expect(reviews[0]!.overallRating).toBe(5);
+    // 存活评价 = 实际赢家的输入评分（锁胜者，不预设 [0]/[1] 顺序）
+    expect(reviews[0]!.overallRating).toBe(ratings[successIndexes[0]!.index]);
     expect(await reviewNotificationCount(owner.id)).toBe(1);
   });
 });
