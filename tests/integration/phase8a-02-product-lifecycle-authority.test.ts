@@ -181,14 +181,25 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (!rawClient) return;
+
+  // 反向 FK 顺序清理（精确 fixture ID 域，不触碰共享数据）。
+  // Campus 被 User/Product/CampusMembership/RiskState.campusId 引用，
+  // 必须最后删除；禁止 silent catch 吞掉 cleanup failure（CI #187：
+  // User_campusId_fkey 违反被吞 → Campus fixture 残留）。
   await rawClient.notification.deleteMany({ where: { userId: { in: userIds } } });
   await rawClient.riskState.deleteMany({ where: { userId: { in: userIds } } });
   await rawClient.order.deleteMany({ where: { id: { in: orderIds } } });
   await rawClient.product.deleteMany({ where: { id: { in: productIds } } });
   await rawClient.productCategory.deleteMany({ where: { id: productCategoryId } });
-  await rawClient.campus.deleteMany({ where: { id: campusId } }).catch(() => {});
   await rawClient.campusMembership.deleteMany({ where: { userId: { in: userIds } } });
   await rawClient.user.deleteMany({ where: { id: { in: userIds } } });
+  await rawClient.campus.deleteMany({ where: { id: campusId } });
+
+  // teardown 完整性：fixture campus 必须清零（FK 顺序错误的哨兵断言）
+  expect(
+    await rawClient.campus.count({ where: { id: campusId } }),
+  ).toBe(0);
+
   await rawClient.$disconnect();
 });
 
