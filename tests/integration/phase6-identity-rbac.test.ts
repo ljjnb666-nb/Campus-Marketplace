@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { waitForAdvisoryLockWaiter } from "./helpers/lock-barrier";
-import { PrismaClient, type VerificationStatus } from "@prisma/client";
+import { Prisma, PrismaClient, type VerificationStatus } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { RbacBootstrapClient } from "@/lib/rbac/bootstrap";
 
 /**
  * Phase 6A 身份 / 校园成员 / 认证 / RBAC 集成测试（真实 PostgreSQL）。
@@ -16,6 +17,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *  7. 跨校区 scope 拒绝（campus-scoped reviewer）
  *  8. self-approval 拒绝
  *  9. legacy admin 同步 → 中央授权上下文可判定
+ *  10. syncLegacyAdminRoles 并发收敛：stale ADMIN snapshot P2003 no-op /
+ *      并发赢家 P2002 幂等 / 真实完整性 P2003 rethrow
  *
  * 服务层经 @/lib/prisma 单例访问 DATABASE_URL（CI job 级已设置并指向
  * INTEGRATION_DATABASE_URL 同库）；清理走独立裸客户端硬删除。
@@ -679,6 +682,134 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 6A 身份/成员/认证/RBAC 集
 
     const gone = await rawClient!.user.findUnique({ where: { id: victim.id } });
     expect(gone).toBeNull();
+  });
+
+  // ============================================================
+  // TEST_INFRA_REPAIR_01：syncLegacyAdminRoles 并发收敛（真实 PostgreSQL）
+  // post-merge CI #182 attempt 1 失败（phase6b-repair2 beforeAll →
+  // P2003 UserRoleAssignment_userId_fkey）的回归锁定：共享集成库上并行
+  // 测试文件各自创建/清理 ADMIN fixture，全库 legacy ADMIN 快照可能在
+  // assignment 写入前过期。seam = testing-only afterSnapshot barrier，
+  // 与 ensureCampusMemberships 同一 deterministic 模式（无 sleep 定序）。
+  // ============================================================
+
+  it("syncLegacyAdminRoles stale snapshot：快照后 legacy ADMIN 被并发硬删 → no-op 不炸（真实 PG P2003 收敛）", async () => {
+    const { ensureRbacFoundation, syncLegacyAdminRoles } = await import("@/lib/rbac/bootstrap");
+    await ensureRbacFoundation(prisma!);
+
+    // 专用 legacy ADMIN fixture：新建于本测试内，此前任何 sync 都不可能覆盖它
+    const victim = await createFixtureUser("快照后删除管理员", campusA.id, { role: "ADMIN" });
+    // 起点：无任何 PLATFORM_ADMIN grant
+    expect(
+      await rawClient!.userRoleAssignment.findFirst({ where: { userId: victim.id } }),
+    ).toBeNull();
+
+    let deleted = false;
+    const afterSnapshot = async () => {
+      if (deleted) {
+        return;
+      }
+      deleted = true;
+      // 独立裸客户端硬删除（模拟并行测试文件 afterAll fixture 清理赢家）：
+      // 只删该 fixture 自己的依赖行（exact userId），先依赖后 user
+      await rawClient!.userRoleAssignment.deleteMany({ where: { userId: victim.id } });
+      await rawClient!.campusMembership.deleteMany({ where: { userId: victim.id } });
+      await rawClient!.user.delete({ where: { id: victim.id } });
+    };
+
+    // 快照含 victim → barrier 内被删 → create 命中真实 FK P2003 →
+    // 复查 user 不存在 → stale snapshot → no-op，function resolves
+    await expect(syncLegacyAdminRoles(prisma!, { afterSnapshot })).resolves.toBeGreaterThanOrEqual(0);
+
+    const gone = await rawClient!.user.findUnique({ where: { id: victim.id } });
+    expect(gone).toBeNull();
+    // 未写入任何 grant 行（stale no-op 收敛）
+    expect(
+      await rawClient!.userRoleAssignment.findFirst({ where: { userId: victim.id } }),
+    ).toBeNull();
+  });
+
+  it("syncLegacyAdminRoles 并发收敛：双 sync 同一 legacy ADMIN → 恰一条 PLATFORM_ADMIN grant、双 resolve（真实 PG P2002 幂等）", async () => {
+    const { ensureRbacFoundation, syncLegacyAdminRoles } = await import("@/lib/rbac/bootstrap");
+    await ensureRbacFoundation(prisma!);
+
+    const target = await createFixtureUser("并发同步管理员", campusA.id, { role: "ADMIN" });
+    const platformAdminRole = await rawClient!.role.findUniqueOrThrow({
+      where: { key: "PLATFORM_ADMIN" },
+      select: { id: true },
+    });
+    expect(
+      await rawClient!.userRoleAssignment.findFirst({ where: { userId: target.id } }),
+    ).toBeNull();
+
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const afterSnapshot = async () => {
+      arrived += 1;
+      if (arrived === 2) {
+        release();
+      }
+      await gate;
+    };
+
+    // 两个执行都持有 target-missing 快照后同时放行 → 并发 create 同一 grant
+    // → @@unique([userId, roleId, scopeKey]) 裁定唯一赢家，loser P2002 幂等收敛
+    await Promise.all([
+      syncLegacyAdminRoles(prisma!, { afterSnapshot }),
+      syncLegacyAdminRoles(prisma!, { afterSnapshot }),
+    ]);
+    expect(arrived).toBe(2);
+
+    const grants = await rawClient!.userRoleAssignment.findMany({
+      where: { userId: target.id, roleId: platformAdminRole.id, scopeKey: "GLOBAL" },
+    });
+    expect(grants).toHaveLength(1);
+  });
+
+  it("syncLegacyAdminRoles：admin 仍在 + P2003 → rethrow（绝不盲目吞 FK 错误）", async () => {
+    const { ensureRbacFoundation, syncLegacyAdminRoles } = await import("@/lib/rbac/bootstrap");
+    await ensureRbacFoundation(prisma!);
+
+    const admin = await createFixtureUser("完整性错误管理员", campusA.id, { role: "ADMIN" });
+
+    const genuine = new Prisma.PrismaClientKnownRequestError(
+      "Foreign key constraint failed on the field: `userId`",
+      {
+        code: "P2003",
+        clientVersion: "test",
+        meta: { constraint: "UserRoleAssignment_userId_fkey" },
+      },
+    );
+
+    // 窄 wrapper：user.findMany 快照隔离到本 fixture（不受共享库其他 ADMIN 干扰），
+    // userRoleAssignment.create 强制抛真实形状的 P2003；role 解析 / findFirst 预检 /
+    // user.findUnique 复查全部转发到真实 PG —— 复查会确认 admin 仍存在 → 必须 rethrow
+    const wrapped = {
+      user: {
+        findMany: async () => [{ id: admin.id }],
+        findUnique: (args: Prisma.UserFindUniqueArgs) => prisma!.user.findUnique(args),
+      },
+      role: {
+        findUnique: (args: Prisma.RoleFindUniqueArgs) => prisma!.role.findUnique(args),
+      },
+      userRoleAssignment: {
+        findFirst: (args: Prisma.UserRoleAssignmentFindFirstArgs) =>
+          prisma!.userRoleAssignment.findFirst(args),
+        create: async () => {
+          throw genuine;
+        },
+      },
+    } as unknown as RbacBootstrapClient;
+
+    await expect(syncLegacyAdminRoles(wrapped)).rejects.toBe(genuine);
+
+    // 复查路径真实走库：admin 仍存在于真实 PostgreSQL（未被执行方删除）
+    expect(
+      await rawClient!.user.findUnique({ where: { id: admin.id }, select: { id: true } }),
+    ).not.toBeNull();
   });
 
   // ============================================================

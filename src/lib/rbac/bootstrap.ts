@@ -116,8 +116,24 @@ export async function ensureRbacFoundation(client: RbacBootstrapClient): Promise
  * legacy admin 迁移（幂等）：role='ADMIN' 的用户补授 PLATFORM_ADMIN。
  * 这是 User.role 字段参与授权的唯一残留用途（bootstrap 同步），
  * 授权判定本身只认 UserRoleAssignment。
+ *
+ * 并发收敛合同（与 ensureCampusMemberships 同一原则——见该函数注释）：
+ * - P2002：并发 bootstrap 已写入同一 assignment → 幂等成功（continue）。
+ * - P2003：快照中的 legacy admin 已被并发删除（STALE_BOOTSTRAP_SNAPSHOT，
+ *   如共享集成库上并行测试文件 afterAll 清理自己的 ADMIN fixture）→ 复查
+ *   User——已不存在则本轮 no-op；admin 仍在则 rethrow（真实数据库完整性
+ *   问题不得静默吞掉）。
+ * - 其余错误一律 rethrow。
+ *
+ * `options.afterSnapshot` 是 internal/testing-only seam（默认 undefined，
+ * production 行为不变）：在 admins 快照 + PLATFORM_ADMIN 角色解析之后、
+ * 第一次 assignment 写入之前插入 barrier，供集成测试确定性复现并发竞态
+ * （替代 sleep 定序）。
  */
-export async function syncLegacyAdminRoles(client: RbacBootstrapClient): Promise<number> {
+export async function syncLegacyAdminRoles(
+  client: RbacBootstrapClient,
+  options?: { afterSnapshot?: () => Promise<void> },
+): Promise<number> {
   const admins = await client.user.findMany({
     where: { role: "ADMIN", erasedAt: null },
     select: { id: true },
@@ -130,6 +146,10 @@ export async function syncLegacyAdminRoles(client: RbacBootstrapClient): Promise
 
   if (!role) {
     throw new Error("PLATFORM_ADMIN 角色不存在，请先运行 ensureRbacFoundation");
+  }
+
+  if (options?.afterSnapshot) {
+    await options.afterSnapshot();
   }
 
   let created = 0;
@@ -153,6 +173,20 @@ export async function syncLegacyAdminRoles(client: RbacBootstrapClient): Promise
         error.code === "P2002"
       ) {
         continue;
+      }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2003"
+      ) {
+        // STALE_BOOTSTRAP_SNAPSHOT 路径：快照中的 admin 已被并发删除
+        // → 本轮 no-op；admin 仍在 → 真实完整性问题，rethrow
+        const adminStillExists = await client.user.findUnique({
+          where: { id: admin.id },
+          select: { id: true },
+        });
+        if (!adminStillExists) {
+          continue;
+        }
       }
       throw error;
     }
