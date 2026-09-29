@@ -45,6 +45,7 @@ import {
   rejectRentalOrderTx,
   requestExtensionTx,
   respondDamageClaimTx,
+  submitRentalReviewTx,
   writeStatusLog,
 } from "@/lib/rental-order-machine";
 import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-account-mutation";
@@ -1034,5 +1035,276 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
     ).toEqual({ success: true });
     expect(approveTx.rentalExtensionRequest.updateMany).toHaveBeenCalledTimes(1);
     expect(approveTx.rentalOrder.update).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================
+// Phase 8A-04：review vs dispute serialization 单元合同
+// 真实并发/真实 PostgreSQL 证明见
+// tests/integration/phase8a-04-rental-review-dispute-serialization.test.ts
+// ============================================================
+
+function reviewOrderRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "order-1",
+    ownerId: "user-owner",
+    renterId: "user-renter",
+    status: "COMPLETED",
+    ...overrides,
+  };
+}
+
+/**
+ * review serialization 的状态化 mock 事务客户端：
+ * $queryRaw 按 SQL 形状路由（RentalOrder pre-read / FOR UPDATE），
+ * $executeRaw 捕获 governance subject 锁键，并记录 authority 调用序列。
+ */
+function buildReviewTx(config: {
+  orderPreRead?: unknown[] | null;
+  orderRow?: unknown[] | null;
+  activeDispute?: unknown;
+  existingReview?: unknown;
+}) {
+  const calls: string[] = [];
+  const lockKeys: string[] = [];
+  const tx = {
+    calls,
+    lockKeys,
+    $executeRaw: vi.fn(async (...args: unknown[]) => {
+      // acquireGovernanceSubjectLocks 模板：strings, namespace, key
+      lockKeys.push(String(args[2]));
+      calls.push("subject-lock");
+      return 0;
+    }),
+    $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      const forUpdate = sql.includes("FOR UPDATE");
+      if (sql.includes('"RentalOrder"')) {
+        calls.push(forUpdate ? "order-for-update" : "order-pre-read");
+        return (forUpdate ? config.orderRow : config.orderPreRead) ?? [];
+      }
+      calls.push("raw-other");
+      return [];
+    }),
+    rentalDispute: {
+      findFirst: vi.fn(async () => {
+        calls.push("active-dispute-check");
+        return config.activeDispute ?? null;
+      }),
+    },
+    rentalReview: {
+      findFirst: vi.fn(async () => {
+        calls.push("dup-check");
+        return config.existingReview ?? null;
+      }),
+      create: vi.fn(async () => {
+        calls.push("review-create");
+        return {};
+      }),
+      count: vi.fn(async () => 0),
+    },
+    user: { update: vi.fn(async () => ({}) as unknown) },
+  };
+  return tx;
+}
+
+function asReviewTx(tx: ReturnType<typeof buildReviewTx>): Prisma.TransactionClient {
+  return tx as unknown as Prisma.TransactionClient;
+}
+
+describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () => {
+  beforeEach(() => {
+    createNotifications.mockReset();
+    createNotifications.mockResolvedValue(undefined);
+    mockAssertActive.mockReset();
+    mockAssertActive.mockResolvedValue(undefined);
+  });
+
+  it("REVIEW-SER-UNIT-01 candidate missing：candidate 不存在 → 稳定错误，零锁零写入", async () => {
+    const tx = buildReviewTx({ orderPreRead: [] });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "订单状态错误" });
+    // 未取任何 governance subject 锁（candidate discovery 失败即返回）
+    expect(tx.calls).toEqual(["order-pre-read"]);
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-02 锁序：pre-read → sorted owner+renter USER locks → FOR UPDATE（非 actor-only）", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ success: true });
+    // 完整参与方锁（owner+renter 两把，而非 actor-only 一把）
+    expect(tx.lockKeys.sort()).toEqual(["USER:user-owner", "USER:user-renter"]);
+    expect(tx.calls).toEqual([
+      "order-pre-read",
+      "subject-lock",
+      "subject-lock",
+      "order-for-update",
+      "active-dispute-check",
+      "dup-check",
+      "review-create",
+    ]);
+  });
+
+  it("REVIEW-SER-UNIT-03 锁后 fresh COMPLETED：allow，target 从 locked 行计算", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 4,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(tx.rentalReview.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        orderId: "order-1",
+        authorId: "user-renter",
+        targetUserId: "user-owner",
+      }),
+    });
+    expect(createNotifications).toHaveBeenCalledTimes(1);
+  });
+
+  it("REVIEW-SER-UNIT-04 锁后 fresh IN_DISPUTE：DENY，review/reputation/notification 全零", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow({ status: "IN_DISPUTE" })],
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "订单状态错误" });
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-05 pre-read 非 authority：candidate COMPLETED 但锁后 IN_DISPUTE → DENY", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      // candidate 与 locked 状态漂移：以 locked 行为准
+      orderRow: [reviewOrderRow({ status: "IN_DISPUTE" })],
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "订单状态错误" });
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-06 participant 漂移：locked 行与 candidate 当事人不一致 → fail closed", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow({ renterId: "user-other-renter" })],
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "订单状态错误" });
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-07 active dispute anomaly：COMPLETED + OPEN dispute → DENY review", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+      activeDispute: { id: "dispute-1" },
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "该订单存在进行中的纠纷，无法评价" });
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-08 duplicate author review：已评价 → 稳定错误，零重复创建", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+      existingReview: { id: "review-1" },
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 5,
+    });
+
+    expect(result).toEqual({ error: "已经评价过" });
+    expect(tx.rentalReview.create).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("§34 双向评价：owner 与 renter 各评一次（不限制整个订单一条）", async () => {
+    const renterTx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+    });
+    expect(
+      await submitRentalReviewTx(asReviewTx(renterTx), {
+        orderId: "order-1",
+        userId: "user-renter",
+        overallRating: 5,
+      }),
+    ).toEqual({ success: true });
+    expect(renterTx.rentalReview.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ authorId: "user-renter", targetUserId: "user-owner" }),
+    });
+
+    const ownerTx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+    });
+    expect(
+      await submitRentalReviewTx(asReviewTx(ownerTx), {
+        orderId: "order-1",
+        userId: "user-owner",
+        overallRating: 3,
+      }),
+    ).toEqual({ success: true });
+    expect(ownerTx.rentalReview.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ authorId: "user-owner", targetUserId: "user-renter" }),
+    });
   });
 });

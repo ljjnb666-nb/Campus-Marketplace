@@ -754,11 +754,16 @@ describe("rental-order actions", () => {
 
   it("recomputes rentalPositiveRate as a ratio when a review is submitted", async () => {
     requireUser.mockResolvedValue({ id: "user-renter" });
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "COMPLETED",
-      ownerId: "user-owner",
-      renterId: "user-renter",
+    // Phase 8A-04：review 走 candidate pre-read + FOR UPDATE 两条 raw SQL
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes('"RentalOrder"')) {
+        if (sql.includes("FOR UPDATE")) {
+          return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter", status: "COMPLETED" }];
+        }
+        return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }];
+      }
+      return [];
     });
     txRentalReviewFindFirst.mockResolvedValue(null);
     txRentalReviewCreate.mockResolvedValue({});
@@ -789,11 +794,15 @@ describe("rental-order actions", () => {
 
   it("blocks a duplicate review", async () => {
     requireUser.mockResolvedValue({ id: "user-renter" });
-    txRentalOrderFindFirst.mockResolvedValue({
-      id: "order-1",
-      status: "COMPLETED",
-      ownerId: "user-owner",
-      renterId: "user-renter",
+    txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = strings.join("");
+      if (sql.includes('"RentalOrder"')) {
+        if (sql.includes("FOR UPDATE")) {
+          return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter", status: "COMPLETED" }];
+        }
+        return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }];
+      }
+      return [];
     });
     txRentalReviewFindFirst.mockResolvedValue({ id: "review-1" });
 
