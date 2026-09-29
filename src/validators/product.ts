@@ -49,9 +49,13 @@ export const productFormSchema = z.object({
   imageUrls: imageUrlsSchema,
 });
 
+// Phase 8A-02（P8-B01）：RESERVED/SOLD 是 system-owned Order lifecycle
+// projection（createProductOrderTx / 订单完成投影），卖家不得直接制造。
+// seller status API 只接受 ACTIVE/OFFLINE——领域服务另有运行时 fail-closed
+// 守卫（不信任 TS 类型作为安全边界）。
 export const productStatusSchema = z.object({
   productId: z.string().trim().min(1),
-  status: z.enum(["ACTIVE", "RESERVED", "SOLD", "OFFLINE"]),
+  status: z.enum(["ACTIVE", "OFFLINE"]),
 });
 
 export type ProductFormInput = z.infer<typeof productFormSchema>;

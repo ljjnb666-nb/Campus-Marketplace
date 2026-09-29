@@ -727,15 +727,17 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       expect(afterRepublish.status).toBe("OFFLINE");
 
-      // wind-down（→RESERVED）放行
+      // wind-down（→OFFLINE）放行（8A-02：RESERVED 已是 system-owned，
+      // seller wind-down 目标 = OFFLINE；测试点不变——wind-down 不要求
+      // marketplace capability，restricted 卖家仍可下架）
       const winddownForm = new FormData();
       winddownForm.set("productId", productA.id);
-      winddownForm.set("status", "RESERVED");
+      winddownForm.set("status", "OFFLINE");
       await updateProductStatus(winddownForm);
       const afterWinddown = await rawClient!.product.findUniqueOrThrow({
         where: { id: productA.id },
       });
-      expect(afterWinddown.status).toBe("RESERVED");
+      expect(afterWinddown.status).toBe("OFFLINE");
 
       await restore(sellerA.id);
 

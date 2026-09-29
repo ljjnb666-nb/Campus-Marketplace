@@ -321,8 +321,9 @@ export async function updateProductStatus(formData: FormData) {
       return;
     }
 
-    // ACTIVE = EXPOSURE_INCREASING（锁内追加 marketplace capability）；
-    // RESERVED/SOLD/OFFLINE = LIFECYCLE_SERIALIZED_WIND_DOWN（仅 lifecycle
+    // Phase 8A-02：seller status 目标只剩 ACTIVE/OFFLINE（validator 收窄 +
+    // 领域运行时守卫）。ACTIVE = EXPOSURE_INCREASING（锁内追加 marketplace
+    // capability）；OFFLINE = LIFECYCLE_SERIALIZED_WIND_DOWN（仅 lifecycle
     // guard）；ownership/deletedAt/status 一律以锁内 fresh row 为准
     await withTransaction(async (tx) => {
       await updateProductStatusTx(tx, user.id, parsed.data.productId, parsed.data.status);

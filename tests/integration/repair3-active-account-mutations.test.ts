@@ -677,7 +677,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
   // RB-03 REVIEW FIX 3：LISTING_STATUS_LIFECYCLE_SERIALIZATION races
   // ============================================================
 
-  it("STATUS-RACE-PRODUCT-01 erase wins：stale RESERVED 挂起 → erase 提交 → 拒绝，Product OFFLINE", async () => {
+  it("STATUS-RACE-PRODUCT-01 erase wins：stale wind-down 挂起 → erase 提交 → 拒绝，Product OFFLINE", async () => {
     const { updateProductStatusTx } = await import("@/lib/listing-status-service");
     const { withTransaction } = await import("@/lib/prisma");
     const { eraseAccount } = await import("@/lib/privacy/account-erasure");
@@ -695,8 +695,10 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       releaseT1 = resolve;
     });
 
+    // 8A-02：seller 目标域 = {ACTIVE, OFFLINE}；本测试点为 erase 序列化，
+    // 用 wind-down 类 OFFLINE 目标挂 seam（RESERVED 已是 system-owned）
     const t1 = withTransaction((tx: Prisma.TransactionClient) =>
-      updateProductStatusTx(tx, seller.id, product.id, "RESERVED", {
+      updateProductStatusTx(tx, seller.id, product.id, "OFFLINE", {
         beforeLock: async () => {
           signalEntered();
           await t1Gate;
@@ -717,7 +719,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     expect(finalProduct.status).toBe("OFFLINE");
   });
 
-  it("STATUS-RACE-PRODUCT-02 mutation wins：RESERVED 先提交 → erase 排队后执行 → OFFLINE 最终权威", async () => {
+  it("STATUS-RACE-PRODUCT-02 mutation wins：wind-down 先提交 → erase 排队后执行 → OFFLINE 最终权威", async () => {
     const { updateProductStatusTx } = await import("@/lib/listing-status-service");
     const { withTransaction } = await import("@/lib/prisma");
     const { eraseAccount } = await import("@/lib/privacy/account-erasure");
@@ -736,8 +738,9 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       releaseT1 = resolve;
     });
 
+    // 8A-02：同上——wind-down 类 OFFLINE 目标挂 seam（RESERVED 已是 system-owned）
     const t1 = withTransaction((tx: Prisma.TransactionClient) =>
-      updateProductStatusTx(tx, seller.id, product.id, "RESERVED", {
+      updateProductStatusTx(tx, seller.id, product.id, "OFFLINE", {
         afterCheck: async () => {
           signalLocked();
           await t1Gate;
@@ -753,7 +756,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     expect(await t1).toBe(true);
     await t2;
 
-    // ERASURE_FINAL_AUTHORITY：erase 看到竞态提交的 RESERVED → 置 OFFLINE
+    // ERASURE_FINAL_AUTHORITY：erase 看到竞态提交的 listing 状态 → 置 OFFLINE
     const finalProduct = await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } });
     expect(finalProduct.status).toBe("OFFLINE");
   });
@@ -946,8 +949,9 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       releaseT1 = resolve;
     });
 
+    // 8A-02：wind-down 类 OFFLINE 目标挂 seam（RESERVED 已是 system-owned）
     const t1 = withTransaction((tx: Prisma.TransactionClient) =>
-      updateProductStatusTx(tx, seller.id, product.id, "RESERVED", {
+      updateProductStatusTx(tx, seller.id, product.id, "OFFLINE", {
         beforeLock: async () => {
           signalEntered();
           await t1Gate;
