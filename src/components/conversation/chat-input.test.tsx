@@ -33,6 +33,38 @@ describe("ChatInput", () => {
     expect(screen.getByPlaceholderText("无法在此发送消息")).toBeInTheDocument();
   });
 
+  it("shows the obligation override warning while keeping the composer enabled（8A-03）", () => {
+    render(
+      <ChatInput
+        conversationId="c1"
+        warningNotice="你们之间存在拉黑关系，但当前仍有正在履行的交易。为完成交接/履约，必要交易沟通仍然开放。"
+      />,
+    );
+
+    expect(contentField()).toBeEnabled();
+    expect(
+      screen.getByText(
+        "你们之间存在拉黑关系，但当前仍有正在履行的交易。为完成交接/履约，必要交易沟通仍然开放。",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/输入沟通内容/)).toBeInTheDocument();
+  });
+
+  it("hides the obligation warning when the composer is disabled", () => {
+    render(
+      <ChatInput
+        conversationId="c1"
+        disabled
+        disabledHint="你们之间存在消息屏蔽，当前无法发送"
+        warningNotice="你们之间存在拉黑关系，但当前仍有正在履行的交易。"
+      />,
+    );
+
+    expect(contentField()).toBeDisabled();
+    expect(screen.getByText("你们之间存在消息屏蔽，当前无法发送")).toBeInTheDocument();
+    expect(screen.queryByText(/必要交易沟通仍然开放/)).not.toBeInTheDocument();
+  });
+
   it("keeps the send button disabled until content exists", () => {
     render(<ChatInput conversationId="c1" />);
 

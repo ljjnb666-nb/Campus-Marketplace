@@ -65,6 +65,12 @@ const {
 
 vi.mock("@/lib/governance/active-account-mutation", () => ({
   prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
+  assertActiveAccountMutationAllowed: vi.fn().mockResolvedValue(undefined),
+}));
+
+// 8A-03：block/unblock 走 sorted participant pair USER 治理锁
+vi.mock("@/lib/governance/governance-lock", () => ({
+  acquireGovernanceSubjectLocks: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("next/cache", () => ({
@@ -823,8 +829,10 @@ describe("trust actions", () => {
 
   it("BLOCK-02：SUSPENDED actor → DENY，零 block 行（RB-03 guard）", async () => {
     const { RbacError } = await import("@/lib/rbac/errors");
-    const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
-    (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    const { assertActiveAccountMutationAllowed } = await import(
+      "@/lib/governance/active-account-mutation"
+    );
+    (assertActiveAccountMutationAllowed as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
     );
 
@@ -839,8 +847,10 @@ describe("trust actions", () => {
 
   it("UNBLOCK-02：SUSPENDED actor → DENY，行保留（RB-03 guard）", async () => {
     const { RbacError } = await import("@/lib/rbac/errors");
-    const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
-    (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+    const { assertActiveAccountMutationAllowed } = await import(
+      "@/lib/governance/active-account-mutation"
+    );
+    (assertActiveAccountMutationAllowed as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new RbacError("AUTH_ACCOUNT_INACTIVE", "账号当前不可用"),
     );
 

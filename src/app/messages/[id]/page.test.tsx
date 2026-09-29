@@ -157,6 +157,13 @@ describe("MessageDetailPage", () => {
         isBlockedByMe: false,
         hasBlockedMe: false,
       },
+      // 8A-03：服务器派生沟通策略（UI 只做呈现）
+      communicationPolicy: {
+        pairBlocked: false,
+        activeObligation: false,
+        canSendMessage: true,
+        mode: "NORMAL",
+      },
       hasActiveOrder: false,
       relatedBiz: null,
     });

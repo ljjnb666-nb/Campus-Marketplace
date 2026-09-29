@@ -5,13 +5,20 @@ import { revalidatePath } from "next/cache";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { isEnforcementError } from "@/lib/enforcement/errors";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
-import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import {
+  MessageSendDeniedError,
+  sendMessageTx,
+} from "@/lib/conversation-messaging";
 import { getOrCreateConversationSafe } from "@/lib/conversation-creation";
 import type { ConversationBizType } from "@/lib/conversation-key";
 import { rereadListingForConversation } from "@/lib/moderation/listing-moderation-query";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
+import {
+  hasActiveOrderObligationTx,
+  hasActiveRentalOrderObligationTx,
+} from "@/lib/trust/communication-policy";
 import {
   errandConversationSchema,
   orderConversationSchema,
@@ -365,31 +372,51 @@ export async function createOrOpenOrderConversation(formData: FormData) {
     bizType = "PRODUCT_ORDER";
   }
 
-  const conversation = await getOrCreateConversationSafe({
-    bizType,
-    bizKeyField: orderKey,
-    bizId: parsed.data.orderId,
-    participantIds: [user.id, counterpartId],
-    initialData: {
-      title: orderTitle,
-      initialMessageContent: `你好，关于“${orderTitle}”想和你沟通一下交接事宜。`,
-      notificationTitle: "收到订单交易联系",
-      notificationContent: `关于“${orderTitle}”，交易对方向你发起了会话。`,
-      counterpartId,
-      currentUserId: user.id,
-    },
-    gate: { kind: "EXISTING_OBLIGATION" },
-  });
+  // 8A-03：pair blocked 时锁后义务复核（object exists + exact pair + ACTIVE），
+  // 历史已完成订单不构成绕过 block 的新聊天通道；未 block 时维持原行为。
+  try {
+    const conversation = await getOrCreateConversationSafe({
+      bizType,
+      bizKeyField: orderKey,
+      bizId: parsed.data.orderId,
+      participantIds: [user.id, counterpartId],
+      initialData: {
+        title: orderTitle,
+        initialMessageContent: `你好，关于“${orderTitle}”想和你沟通一下交接事宜。`,
+        notificationTitle: "收到订单交易联系",
+        notificationContent: `关于“${orderTitle}”，交易对方向你发起了会话。`,
+        counterpartId,
+        currentUserId: user.id,
+      },
+      gate: {
+        kind: "EXISTING_OBLIGATION",
+        rereadObligation: async (tx) =>
+          orderKey === "rentalOrderId"
+            ? hasActiveRentalOrderObligationTx(tx, parsed.data.orderId, [user.id, counterpartId])
+            : hasActiveOrderObligationTx(tx, parsed.data.orderId, [user.id, counterpartId]),
+      },
+    });
 
-  if (!conversation) {
-    redirect("/my/orders");
+    if (!conversation) {
+      redirect("/my/orders");
+    }
+
+    revalidateConversationPages(conversation.id);
+    redirect(`/messages/${conversation.id}`);
+  } catch (error) {
+    // pair blocked ∧ obligation 非 active → 沟通拒绝（fail closed 回订单中心）
+    if (isGovernanceError(error)) {
+      redirect("/my/orders");
+    }
+    throw error;
   }
-
-  revalidateConversationPages(conversation.id);
-  redirect(`/messages/${conversation.id}`);
 }
 
 // 6. 发送文本消息 Action（既有会话回复，不做 marketplace gate）
+// Phase 8A-03：action 仅负责 requireUser / schema / keyword precheck /
+// 事务包装委托 / error mapping / revalidation；conversation authority、
+// pair locks、active-account 复核、block policy、obligation override、
+// message 写入全部在 sendMessageTx 事务边界内（lib/domain 层）。
 export async function sendMessage(
   _prevState: ConversationActionState,
   formData: FormData,
@@ -407,71 +434,23 @@ export async function sendMessage(
 
   const { conversationId, content } = parsed.data;
 
-  // 1. 验证用户是该会话参与者
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      participants: {
-        some: { userId: user.id },
-      },
-    },
-    include: {
-      participants: { select: { userId: true } },
-    },
-  });
-
-  if (!conversation) {
-    return { success: false, message: "无权在该会话中发送消息" };
-  }
-
-  const counterpartId = conversation.participants.find((p) => p.userId !== user.id)?.userId;
-
-  if (counterpartId) {
-    // 2. 检查拉黑状态
-    const blockedByMe = await prisma.blockedUser.findUnique({
-      where: {
-        blockerId_blockedUserId: { blockerId: counterpartId, blockedUserId: user.id },
-      },
-    });
-    if (blockedByMe) {
-      return { success: false, message: "对方对你设置了消息屏蔽，无法发送" };
-    }
-  }
-
-  // 3. 关键词过滤
+  // 关键词过滤保留为事务外 content validation / inexpensive precheck；
+  // block authorization / participant authority / obligation authority
+  // 全部在 sendMessageTx 的事务 + 锁边界内完成。
   if (await containsBannedKeyword(content)) {
     return { success: false, message: "消息包含敏感违规内容，发送失败" };
   }
 
-  // 4. 发送消息并更新会话更新时间
-  // 项目标准交互事务包装（TRANSACTION_TIMEOUT_MS 超时保护）；既有义务沟通
-  // 路径不做 marketplace 能力门（Phase 6C-3 冻结语义）。
-  // RB-03：USER 治理锁 + 锁内 fresh active 复核——已注销/停用账号不得
-  // 再产生新的 durable 消息内容
   try {
-    await withTransaction(async (tx) => {
-      await prepareActiveAccountMutation(tx, user.id);
-
-      await tx.message.create({
-        data: {
-          conversationId,
-          senderId: user.id,
-          type: "DIRECT",
-          content,
-        },
-      });
-
-      await tx.conversation.update({
-        where: { id: conversationId },
-        data: { updatedAt: new Date() },
-      });
-
-      await tx.conversationParticipant.updateMany({
-        where: { conversationId, userId: user.id },
-        data: { lastReadAt: new Date() },
-      });
+    await sendMessageTx({
+      conversationId,
+      senderId: user.id,
+      content,
     });
   } catch (error) {
+    if (error instanceof MessageSendDeniedError) {
+      return { success: false, message: error.message };
+    }
     if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
       return { success: false, message: error.message };
     }

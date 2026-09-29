@@ -42,7 +42,9 @@ export function BlockDialog({
               {isBlockedByMe ? `解除拉黑 ${targetUserName}` : `拉黑用户 ${targetUserName}`}
             </h3>
             <p className="text-xs text-slate-500">
-              {isBlockedByMe ? "解除后该同学将能够恢复与你发送私信沟通。" : "拉黑后该同学将无法继续向你发送私发消息。"}
+              {isBlockedByMe
+                ? "解除后该同学将能够恢复与你发送私信沟通。"
+                : "拉黑后，你们将无法发起新的普通沟通；如双方仍有正在履行的订单或任务，必要的交易沟通将继续开放。"}
             </p>
           </div>
         </div>
@@ -51,7 +53,7 @@ export function BlockDialog({
           <div className="flex items-start gap-2.5 rounded-2xl border border-amber-200 bg-amber-50/70 p-3.5 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-300">
             <ShieldAlert className="size-4 shrink-0 text-amber-600 mt-0.5" />
             <p className="leading-relaxed">
-              提示：你与该同学目前有正在履约中的订单或任务。拉黑后不会影响现有订单状态和交接确认，但可能导致必要交易沟通阻断，请谨慎操作。
+              提示：拉黑不会取消现有订单，也不会阻断当前履约所需的交易沟通；交易结束后，消息屏蔽将继续生效。
             </p>
           </div>
         )}

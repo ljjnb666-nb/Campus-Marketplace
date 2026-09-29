@@ -1,13 +1,15 @@
 "use client";
 
 import { useActionState, useRef, useState } from "react";
-import { Send, AlertCircle, RefreshCw } from "lucide-react";
+import { Send, AlertCircle, RefreshCw, ShieldAlert } from "lucide-react";
 import { sendMessage } from "@/actions/conversation";
 
 interface ChatInputProps {
   conversationId: string;
   disabled?: boolean;
   disabledHint?: string;
+  /** 8A-03：blocked + active obligation 履约例外提醒（输入框保持可用时展示）。 */
+  warningNotice?: string;
   onSentSuccess?: () => void;
 }
 
@@ -15,6 +17,7 @@ export function ChatInput({
   conversationId,
   disabled = false,
   disabledHint,
+  warningNotice,
   onSentSuccess,
 }: ChatInputProps) {
   const [content, setContent] = useState("");
@@ -49,6 +52,13 @@ export function ChatInput({
         <div className="flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2 text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
           <AlertCircle className="size-4 shrink-0 text-amber-500" />
           <span>{disabledHint}</span>
+        </div>
+      )}
+
+      {warningNotice && !disabled && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs font-semibold text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-300">
+          <ShieldAlert className="size-4 shrink-0 text-amber-600 mt-0.5" />
+          <span className="leading-relaxed">{warningNotice}</span>
         </div>
       )}
 
