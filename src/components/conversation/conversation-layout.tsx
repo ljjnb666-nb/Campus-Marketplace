@@ -75,7 +75,8 @@ export function ConversationLayout({
               conversationId={activeConversationPayload.id}
               counterpart={activeConversationPayload.counterpart}
               relatedBiz={activeConversationPayload.relatedBiz}
-              hasActiveOrder={activeItem?.hasActiveOrder}
+              // 8A-03：交易义务提醒以服务器派生政策为准（列表项启发式仅作展示）
+              hasActiveOrder={activeConversationPayload.communicationPolicy.activeObligation || activeItem?.hasActiveOrder || false}
               onBack={onSelectConversation ? () => onSelectConversation("") : undefined}
             />
 
@@ -86,15 +87,21 @@ export function ConversationLayout({
               nextCursor={activeConversationPayload.nextCursor}
             />
 
-            {/* 2.3 消息输入区 */}
+            {/* 2.3 消息输入区（8A-03：禁用/放行一律跟随服务器派生沟通策略；
+                blocked + active obligation 时保持可用并提示履约例外） */}
             <ChatInput
               conversationId={activeConversationPayload.id}
-              disabled={activeConversationPayload.counterpart.isBlockedByMe || activeConversationPayload.counterpart.hasBlockedMe}
+              disabled={!activeConversationPayload.communicationPolicy.canSendMessage}
               disabledHint={
-                activeConversationPayload.counterpart.isBlockedByMe
-                  ? "你已拉黑该同学，解除拉黑后可继续沟通"
-                  : activeConversationPayload.counterpart.hasBlockedMe
-                  ? "对方已对你设置消息屏蔽，无法发送"
+                activeConversationPayload.communicationPolicy.mode === "BLOCKED"
+                  ? activeConversationPayload.counterpart.isBlockedByMe
+                    ? "你已拉黑该同学，解除拉黑后可恢复非交易沟通"
+                    : "你们之间存在消息屏蔽，当前无法发送"
+                  : undefined
+              }
+              warningNotice={
+                activeConversationPayload.communicationPolicy.mode === "EXISTING_OBLIGATION_OVERRIDE"
+                  ? "你们之间存在拉黑关系，但当前仍有正在履行的交易。为完成交接/履约，必要交易沟通仍然开放。"
                   : undefined
               }
               onSentSuccess={onRefresh}

@@ -1,5 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import {
+  resolveConversationCommunicationPolicyTx,
+  type CommunicationPolicy,
+} from "@/lib/trust/communication-policy";
 
 export type BizType =
   | "PRODUCT"
@@ -63,6 +67,9 @@ export type ConversationDetailPayload = {
     isBlockedByMe: boolean;
     hasBlockedMe: boolean;
   };
+  // Phase 8A-03：服务器派生的沟通策略（client 不得自行发明 block 政策——
+  // blocked + active obligation 时输入框必须保持可用，UI 只做呈现）
+  communicationPolicy: CommunicationPolicy;
   relatedBiz?: RelatedBizSnapshot | null;
   messages: ConversationMessageItem[];
   nextCursor?: string | null;
@@ -380,7 +387,7 @@ export async function getConversationDetailPayload(
     return null;
   }
 
-  // 检查拉黑状态
+  // 检查拉黑状态（directional 原始行仍保留给 header/badge 呈现）
   const [blockedByMe, blockedMe] = await Promise.all([
     prisma.blockedUser.findUnique({
       where: {
@@ -393,6 +400,22 @@ export async function getConversationDetailPayload(
       },
     }),
   ]);
+
+  // Phase 8A-03：服务器派生沟通策略（one canonical rule set；历史读取
+  // 永不受 block 影响——本函数其余部分照常返回全部消息）
+  const communicationPolicy = await resolveConversationCommunicationPolicyTx(
+    prisma,
+    {
+      productId: conversation.productId,
+      errandTaskId: conversation.errandTaskId,
+      serviceListingId: conversation.serviceListingId,
+      rentalListingId: conversation.rentalListingId,
+      orderId: conversation.orderId,
+      rentalOrderId: conversation.rentalOrderId,
+    },
+    userId,
+    counterpart.id,
+  );
 
   // 标记当前用户已读并全量已读本会话
   await Promise.all([
@@ -516,6 +539,7 @@ export async function getConversationDetailPayload(
       isBlockedByMe: Boolean(blockedByMe),
       hasBlockedMe: Boolean(blockedMe),
     },
+    communicationPolicy,
     relatedBiz,
     messages,
     nextCursor,

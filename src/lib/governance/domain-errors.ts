@@ -33,6 +33,9 @@ export const GOVERNANCE_ERROR_CODES = [
   "CAMPUS_SLUG_INVALID",
   "CAMPUS_SLUG_CONFLICT",
   "CAMPUS_VERIFICATION_POLICY_IMMUTABLE",
+  // Phase 8A-03（P8-B03）：BlockedUser communication policy 的稳定错误码
+  // （任意方向 pair block，且无 active existing obligation 时的沟通拒绝）
+  "COMMUNICATION_BLOCKED",
 ] as const;
 
 export type GovernanceErrorCode = (typeof GOVERNANCE_ERROR_CODES)[number];
@@ -61,6 +64,7 @@ const STATUS_BY_CODE: Record<GovernanceErrorCode, number> = {
   CAMPUS_SLUG_INVALID: 400,
   CAMPUS_SLUG_CONFLICT: 409,
   CAMPUS_VERIFICATION_POLICY_IMMUTABLE: 409,
+  COMMUNICATION_BLOCKED: 403,
 };
 
 export class GovernanceError extends Error {
@@ -108,6 +112,7 @@ export function governanceError(
     CAMPUS_SLUG_INVALID: "校区标识符格式不合法（仅允许小写字母、数字与连字符）",
     CAMPUS_SLUG_CONFLICT: "该校区标识符已被使用",
     CAMPUS_VERIFICATION_POLICY_IMMUTABLE: "该认证策略已发布或退役，内容不可修改",
+    COMMUNICATION_BLOCKED: "你们之间存在消息屏蔽，当前无法进行此沟通",
   };
 
   const userMessage =

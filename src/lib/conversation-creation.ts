@@ -7,27 +7,43 @@ import {
   requireMarketplaceCapability,
   requireParticipantsMarketplaceEligible,
 } from "@/lib/enforcement/capability-gate";
-import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
+import {
+  assertActiveAccountMutationAllowed,
+} from "@/lib/governance/active-account-mutation";
+import { governanceError } from "@/lib/governance/domain-errors";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { createNotification } from "@/repositories/notification-repository";
+import { resolvePairBlockStateTx } from "@/lib/trust/communication-policy";
 
 /**
- * Phase 6C-3：会话创建领域逻辑（从 conversation action 抽出，对齐
- * order-creation.ts 的"action 解析 + lib 事务领域"分层）。
+ * Phase 6C-3 / Phase 8A-03：会话创建领域逻辑（从 conversation action 抽出，
+ * 对齐 order-creation.ts 的"action 解析 + lib 事务领域"分层）。
  *
- * MARKETPLACE_LISTING 会话串行化模型（Planning Repair 1/2 冻结）：
+ * MARKETPLACE_LISTING 会话串行化模型（Planning Repair 1/2 + 8A-03 冻结）：
  *   事务外 existing fast path（可选加速，不可作为 new/existing 判定依据）
  *   → BEGIN TX
- *   → 完整 sorted 参与方 USER 治理锁（namespace 730501，与全局锁序一致）
+ *   → 完整 sorted 参与方 USER 治理锁（namespace 730501，与全局锁序一致；
+ *     两种 gate kind 统一进入同一 pair lock domain——block / conversation
+ *     create / message send 三者线性化）
+ *   → assertActiveAccountMutationAllowed(actor)（完整锁集持有后的 fresh 复核，
+ *     不再经 prepareActiveAccountMutation 以 actor-first 顺序重取锁）
  *   → POST-LOCK 重读 conversationKey：命中 = 既有沟通，直接放行（不做任何 gate）
- *   → miss：锁后重读权威资源（campus + 参与关系），actor 三门专用校验
- *     （403 族）+ 全参与方资格校验（对手方失效统一 409）
+ *   → miss：PAIR_BLOCK 检查（事务内、位于 create/message/notification 之前）
+ *     —— 任意方向 block ⇒ 新 MARKETPLACE_LISTING contact DENY（零会话/零
+ *     消息/零通知）
+ *   → 锁后重读权威资源（campus + 参与关系），actor 三门专用校验（403 族）
+ *     + 全参与方资格校验（对手方失效统一 409）
  *   → racePoint（测试 seam）→ conversation.create（嵌套 participants + 首条
  *     消息 + 通知）→ COMMIT；P2002 fallback 保留为兜底（同 key ⇒ 同参与方
  *     集 ⇒ 同锁集，正常不可达）。
- * EXISTING_OBLIGATION（订单/租赁订单会话）= 既有义务沟通，不做 gate，
- * 维持原 P2002 fallback 去重路径。
+ *
+ * EXISTING_OBLIGATION（订单/租赁订单会话）= 既有义务沟通：pair 未 block 时
+ * 维持原行为（不做 gate）；pair blocked 时仅在锁后义务复核确认 obligation
+ * 仍然 ACTIVE 才允许创建（历史已完成订单不构成绕过 block 的新聊天通道），
+ * 义务复核 = object exists + exact participants unchanged + canonical state
+ * active（绝不信任 action 事务外 pre-read 的 stale status）。维持原 P2002
+ * fallback 去重路径。
  */
 
 export type ConversationGateRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
@@ -44,13 +60,23 @@ export type ListingResourceRereader = (
   participantIds: string[];
 } | null>;
 
+/**
+ * EXISTING_OBLIGATION gate 的锁后义务复核：order/rentalOrder 权威重读，
+ * 确认 object exists + exact participants unchanged + obligation ACTIVE。
+ */
+export type ObligationRereader = (tx: Prisma.TransactionClient) => Promise<boolean>;
+
 export type ListingConversationGate =
   | {
       kind: "MARKETPLACE_LISTING";
       rereadResource: ListingResourceRereader;
       racePoint?: ConversationGateRacePoint;
     }
-  | { kind: "EXISTING_OBLIGATION" };
+  | {
+      kind: "EXISTING_OBLIGATION";
+      rereadObligation: ObligationRereader;
+      racePoint?: ConversationGateRacePoint;
+    };
 
 export type ConversationCreationInput = {
   bizType: ConversationBizType;
@@ -111,30 +137,53 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
     return existing;
   }
 
-  // 2. 数据库事务：完整参与方锁 → 锁后重读 → 锁内校验 → 创建
+  // 2. 数据库事务：完整参与方锁 → 锁后重读 → 沟通策略/义务 gate → 锁内校验 → 创建
   try {
     const created = await withTransaction(async (tx) => {
-      // RB-03：发起者 active-account 序列化（USER 锁 + 锁内 fresh 复核）。
-      // MARKETPLACE_LISTING 分支随后对同一批 USER 键再取锁为同事务 advisory
-      // 重入（安全）；守卫先行保证发起者身份在 lifecycle 转换后不再产生
-      // 新会话 durable 态
-      await prepareActiveAccountMutation(tx, input.initialData.currentUserId);
+      // 8A-03：sorted 参与方 USER 锁先行（两种 gate kind 同一 lock domain），
+      // 禁止 actor lock → pair lock 的旧顺序（与 block/send 的 pair 锁序
+      // 不一致会扩大 deadlock surface）
+      await acquireGovernanceSubjectLocks(
+        tx,
+        participantIds.map((subjectId) => ({ subjectType: "USER", subjectId })),
+      );
+
+      // RB-03：发起者 active-account fresh 复核（完整参与方锁已持有）
+      await assertActiveAccountMutationAllowed(tx, input.initialData.currentUserId);
+
+      // POST-LOCK 重读：并发首建者已提交 → 按"既有沟通"放行（绝不做 new-activity 拒绝）
+      const existingAfterLock = await tx.conversation.findUnique({
+        where: { conversationKey },
+        select: { id: true },
+      });
+      if (existingAfterLock) {
+        return existingAfterLock;
+      }
+
+      // 8A-03：PAIR_BLOCK 检查——事务内、位于 create/message/notification 之前。
+      // 任意方向 block ⇒ 新 listing contact DENY；EXISTING_OBLIGATION 仅在
+      // 锁后义务复核 ACTIVE 时放行（历史订单不是永久 bypass token）。
+      const blockState = await resolvePairBlockStateTx(
+        tx,
+        input.initialData.currentUserId,
+        input.initialData.counterpartId,
+      );
+      if (blockState.pairBlocked) {
+        if (gate.kind === "EXISTING_OBLIGATION") {
+          const obligationActive = await gate.rereadObligation(tx);
+          if (!obligationActive) {
+            throw governanceError("COMMUNICATION_BLOCKED", {
+              userMessage: "你们之间存在消息屏蔽，且该订单已结束，无法发起沟通",
+            });
+          }
+        } else {
+          throw governanceError("COMMUNICATION_BLOCKED", {
+            userMessage: "你们之间存在消息屏蔽，无法发起新的会话沟通",
+          });
+        }
+      }
 
       if (gate.kind === "MARKETPLACE_LISTING") {
-        await acquireGovernanceSubjectLocks(
-          tx,
-          participantIds.map((subjectId) => ({ subjectType: "USER", subjectId })),
-        );
-
-        // POST-LOCK 重读：并发首建者已提交 → 按"既有沟通"放行（绝不做 new-activity 拒绝）
-        const existingAfterLock = await tx.conversation.findUnique({
-          where: { conversationKey },
-          select: { id: true },
-        });
-        if (existingAfterLock) {
-          return existingAfterLock;
-        }
-
         // 权威资源重读 + 参与关系复核（不盲信事务外 snapshot）
         const fresh = await gate.rereadResource(tx);
         if (!fresh) {
@@ -160,10 +209,10 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
           fresh.campusId,
           "START_NEW_MARKETPLACE_ACTIVITY",
         );
+      }
 
-        if (gate.racePoint) {
-          await gate.racePoint(tx);
-        }
+      if (gate.racePoint) {
+        await gate.racePoint(tx);
       }
 
       const conv = await tx.conversation.create({

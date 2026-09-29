@@ -9,6 +9,11 @@ const {
   messageGroupBy,
   messageUpdateMany,
   blockedUserFindUnique,
+  orderFindUnique,
+  orderFindFirst,
+  rentalOrderFindUnique,
+  rentalOrderFindFirst,
+  errandTaskFindUnique,
   productFindMany,
   serviceListingFindMany,
   errandTaskFindMany,
@@ -24,6 +29,11 @@ const {
   messageGroupBy: vi.fn(),
   messageUpdateMany: vi.fn(),
   blockedUserFindUnique: vi.fn(),
+  orderFindUnique: vi.fn(),
+  orderFindFirst: vi.fn(),
+  rentalOrderFindUnique: vi.fn(),
+  rentalOrderFindFirst: vi.fn(),
+  errandTaskFindUnique: vi.fn(),
   productFindMany: vi.fn(),
   serviceListingFindMany: vi.fn(),
   errandTaskFindMany: vi.fn(),
@@ -58,15 +68,20 @@ vi.mock("@/lib/prisma", () => ({
     },
     errandTask: {
       findMany: errandTaskFindMany,
+      findUnique: errandTaskFindUnique,
     },
     rentalListing: {
       findMany: rentalListingFindMany,
     },
     order: {
       findMany: orderFindMany,
+      findUnique: orderFindUnique,
+      findFirst: orderFindFirst,
     },
     rentalOrder: {
       findMany: rentalOrderFindMany,
+      findUnique: rentalOrderFindUnique,
+      findFirst: rentalOrderFindFirst,
     },
   },
 }));
@@ -87,12 +102,24 @@ describe("conversation repository", () => {
     messageGroupBy.mockReset();
     messageUpdateMany.mockReset();
     blockedUserFindUnique.mockReset();
+    orderFindUnique.mockReset();
+    orderFindFirst.mockReset();
+    rentalOrderFindUnique.mockReset();
+    rentalOrderFindFirst.mockReset();
+    errandTaskFindUnique.mockReset();
     productFindMany.mockReset();
     serviceListingFindMany.mockReset();
     errandTaskFindMany.mockReset();
     rentalListingFindMany.mockReset();
     orderFindMany.mockReset();
     rentalOrderFindMany.mockReset();
+    // 8A-03：communication policy 默认无 block、无 active obligation 行
+    blockedUserFindUnique.mockResolvedValue(null);
+    orderFindUnique.mockResolvedValue(null);
+    orderFindFirst.mockResolvedValue(null);
+    rentalOrderFindUnique.mockResolvedValue(null);
+    rentalOrderFindFirst.mockResolvedValue(null);
+    errandTaskFindUnique.mockResolvedValue(null);
   });
 
   it("counts unread conversations with a single distinct query instead of per-conversation lookups", async () => {
@@ -480,6 +507,226 @@ describe("conversation repository", () => {
     expect(conversationParticipantUpdateMany).toHaveBeenCalledWith({
       where: { conversationId: "conversation-1", userId: "user-1" },
       data: { lastReadAt: expect.any(Date) },
+    });
+  });
+
+  // 8A-03：detail payload 携带服务器派生沟通策略（UI 只做呈现，不自行发明政策）
+  it("exposes a NORMAL communication policy when the pair is not blocked", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-1",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: null,
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-1",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-1",
+        userId: "seller-1",
+        joinedAt: new Date(),
+        user: { id: "seller-1", name: "卖家", schoolName: "示例大学", verificationStatus: "VERIFIED" },
+      },
+    ]);
+    messageFindMany
+      .mockResolvedValueOnce([]) // hydrate: 最后一条消息
+      .mockResolvedValueOnce([]); // 分页消息
+    messageGroupBy.mockResolvedValue([]);
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+
+    const payload = await getConversationDetailPayload("conversation-1", "user-1");
+
+    expect(payload?.communicationPolicy).toEqual({
+      pairBlocked: false,
+      activeObligation: false,
+      canSendMessage: true,
+      mode: "NORMAL",
+    });
+  });
+
+  it("exposes a BLOCKED policy (canSendMessage=false) when the pair is blocked without obligation", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-1",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: null,
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-1",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "我", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-1",
+        userId: "seller-1",
+        joinedAt: new Date(),
+        user: { id: "seller-1", name: "卖家", schoolName: "示例大学", verificationStatus: "VERIFIED" },
+      },
+    ]);
+    messageFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "message-1",
+          conversationId: "conversation-1",
+          senderId: "seller-1",
+          type: "DIRECT",
+          content: "历史消息必须可见（证据保留）",
+          isRead: true,
+          createdAt: new Date("2026-07-17T09:30:00.000Z"),
+          sender: { id: "seller-1", name: "卖家", avatarUrl: null },
+        },
+      ]);
+    messageGroupBy.mockResolvedValue([]);
+    blockedUserFindUnique.mockResolvedValue({ id: "block-1" });
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+
+    const payload = await getConversationDetailPayload("conversation-1", "user-1");
+
+    expect(payload?.communicationPolicy).toEqual({
+      pairBlocked: true,
+      activeObligation: false,
+      canSendMessage: false,
+      mode: "BLOCKED",
+    });
+    // §32：block 不得隐藏既有消息历史
+    expect(payload?.messages).toHaveLength(1);
+    expect(payload?.messages[0]?.content).toContain("历史消息必须可见");
+  });
+
+  it("exposes EXISTING_OBLIGATION_OVERRIDE (canSendMessage=true) when blocked with an active rental order", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-ro",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: "rental-order-1",
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-ro",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "租客", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-ro",
+        userId: "owner-1",
+        joinedAt: new Date(),
+        user: { id: "owner-1", name: "出租者", schoolName: "示例大学", verificationStatus: "VERIFIED" },
+      },
+    ]);
+    messageFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    messageGroupBy.mockResolvedValue([]);
+    blockedUserFindUnique.mockResolvedValue({ id: "block-1" });
+    rentalOrderFindUnique.mockResolvedValue({
+      ownerId: "owner-1",
+      renterId: "user-1",
+      status: "IN_RENTAL",
+    });
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+    rentalListingFindMany.mockResolvedValue([]);
+    rentalOrderFindMany.mockResolvedValue([
+      { id: "rental-order-1", orderNumber: "RT2026082100000001", finalAmount: 40, status: "IN_RENTAL" },
+    ]);
+
+    const payload = await getConversationDetailPayload("conversation-ro", "user-1");
+
+    expect(payload?.communicationPolicy).toEqual({
+      pairBlocked: true,
+      activeObligation: true,
+      canSendMessage: true,
+      mode: "EXISTING_OBLIGATION_OVERRIDE",
+    });
+  });
+
+  it("exposes a BLOCKED policy when blocked and the linked rental order is terminal（历史订单非 bypass token）", async () => {
+    conversationFindFirst.mockResolvedValue({
+      id: "conversation-ro",
+      title: null,
+      productId: null,
+      errandTaskId: null,
+      serviceListingId: null,
+      rentalListingId: null,
+      orderId: null,
+      rentalOrderId: "rental-order-1",
+      createdAt: new Date("2026-07-16T10:00:00.000Z"),
+      updatedAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
+    conversationParticipantFindMany.mockResolvedValue([
+      {
+        conversationId: "conversation-ro",
+        userId: "user-1",
+        joinedAt: new Date(),
+        user: { id: "user-1", name: "租客", schoolName: "示例大学", verificationStatus: "UNVERIFIED" },
+      },
+      {
+        conversationId: "conversation-ro",
+        userId: "owner-1",
+        joinedAt: new Date(),
+        user: { id: "owner-1", name: "出租者", schoolName: "示例大学", verificationStatus: "VERIFIED" },
+      },
+    ]);
+    messageFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    messageGroupBy.mockResolvedValue([]);
+    blockedUserFindUnique.mockResolvedValue({ id: "block-1" });
+    rentalOrderFindUnique.mockResolvedValue({
+      ownerId: "owner-1",
+      renterId: "user-1",
+      status: "CLOSED",
+    });
+    conversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
+    messageUpdateMany.mockResolvedValue({ count: 0 });
+    productFindMany.mockResolvedValue([]);
+    serviceListingFindMany.mockResolvedValue([]);
+    rentalListingFindMany.mockResolvedValue([]);
+    rentalOrderFindMany.mockResolvedValue([
+      { id: "rental-order-1", orderNumber: "RT2026082100000001", finalAmount: 40, status: "CLOSED" },
+    ]);
+
+    const payload = await getConversationDetailPayload("conversation-ro", "user-1");
+
+    expect(payload?.communicationPolicy).toEqual({
+      pairBlocked: true,
+      activeObligation: false,
+      canSendMessage: false,
+      mode: "BLOCKED",
     });
   });
 

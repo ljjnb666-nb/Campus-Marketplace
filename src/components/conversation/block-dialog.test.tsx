@@ -33,7 +33,7 @@ describe("BlockDialog", () => {
     expect(screen.queryByText(/拉黑用户/)).not.toBeInTheDocument();
   });
 
-  it("shows block copy with a reason selector", () => {
+  it("shows block copy with a reason selector（8A-03 冻结文案：履约沟通不被阻断）", () => {
     render(
       <BlockDialog
         open
@@ -47,10 +47,18 @@ describe("BlockDialog", () => {
     expect(screen.getByText("拉黑用户 赵同学")).toBeInTheDocument();
     expect(screen.getByText("拉黑原因说明")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认拉黑" })).toBeInTheDocument();
-    expect(screen.queryByText(/正在履约中的订单/)).not.toBeInTheDocument();
+    // §31：新文案 = 新普通沟通被阻断，但履约沟通继续开放
+    expect(
+      screen.getByText(
+        "拉黑后，你们将无法发起新的普通沟通；如双方仍有正在履行的订单或任务，必要的交易沟通将继续开放。",
+      ),
+    ).toBeInTheDocument();
+    // 旧文案（"无法继续向你发送私发消息"）不再出现
+    expect(screen.queryByText(/无法继续向你发送私发消息/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/可能导致必要交易沟通阻断/)).not.toBeInTheDocument();
   });
 
-  it("warns about in-flight orders before blocking", () => {
+  it("warns that blocking neither cancels orders nor cuts fulfilment communication（§31）", () => {
     render(
       <BlockDialog
         open
@@ -62,7 +70,13 @@ describe("BlockDialog", () => {
       />,
     );
 
-    expect(screen.getByText(/正在履约中的订单/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "提示：拉黑不会取消现有订单，也不会阻断当前履约所需的交易沟通；交易结束后，消息屏蔽将继续生效。",
+      ),
+    ).toBeInTheDocument();
+    // §51：保证不会重新说"拉黑会阻断现有交易沟通"
+    expect(screen.queryByText(/可能导致必要交易沟通阻断/)).not.toBeInTheDocument();
   });
 
   it("shows unblock copy without a reason selector", () => {
