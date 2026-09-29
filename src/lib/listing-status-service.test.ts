@@ -83,7 +83,7 @@ beforeEach(() => {
   requireMarketplaceCapability.mockReset().mockResolvedValue(undefined);
 });
 
-describe("updateProductStatusTx（PSTATUS）", () => {
+describe("updateProductStatusTx（PSTATUS，8A-02 system-owned 权威）", () => {
   it("PSTATUS-01：ACTIVE 目标 → guard + marketplace capability + write", async () => {
     const tx = makeTx({ id: "product-1", campusId: "campus-1", status: "PAUSED" });
 
@@ -98,24 +98,28 @@ describe("updateProductStatusTx（PSTATUS）", () => {
     });
   });
 
-  it("PSTATUS-02：RESERVED 目标 → guard，无 marketplace capability", async () => {
+  it("PSTATUS-02（8A-02）：RESERVED 目标 → 运行时 DENY，零锁零读零写", async () => {
     const tx = makeTx({ id: "product-1", campusId: "campus-1", status: "ACTIVE" });
 
-    await updateProductStatusTx(tx, actor, "product-1", "RESERVED");
+    // 绕过 TS 类型（模拟 as never 直调）也必须在守卫处拒绝
+    expect(
+      await updateProductStatusTx(tx, actor, "product-1", "RESERVED" as never),
+    ).toBe(false);
 
-    expect(tx.product.update).toHaveBeenCalledWith({
-      where: { id: "product-1" },
-      data: { status: "RESERVED" },
-    });
-    expect(requireMarketplaceCapability).not.toHaveBeenCalled();
+    expect(prepareActiveAccountMutation).not.toHaveBeenCalled();
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
+    expect(tx.product.update).not.toHaveBeenCalled();
   });
 
-  it("PSTATUS-03：SOLD 目标 → guard，无 capability", async () => {
+  it("PSTATUS-03（8A-02）：SOLD 目标 → 运行时 DENY，零写", async () => {
     const tx = makeTx({ id: "product-1", campusId: "campus-1", status: "ACTIVE" });
 
-    await updateProductStatusTx(tx, actor, "product-1", "SOLD");
+    expect(
+      await updateProductStatusTx(tx, actor, "product-1", "SOLD" as never),
+    ).toBe(false);
 
-    expect(tx.product.update).toHaveBeenCalled();
+    expect(prepareActiveAccountMutation).not.toHaveBeenCalled();
+    expect(tx.product.update).not.toHaveBeenCalled();
     expect(requireMarketplaceCapability).not.toHaveBeenCalled();
   });
 
@@ -136,9 +140,23 @@ describe("updateProductStatusTx（PSTATUS）", () => {
     ]) {
       const tx = makeTx(null, { productRow });
 
-      expect(await updateProductStatusTx(tx, actor, "product-1", "RESERVED")).toBe(false);
+      expect(await updateProductStatusTx(tx, actor, "product-1", "OFFLINE")).toBe(false);
       expect(tx.product.update).not.toHaveBeenCalled();
     }
+  });
+
+  it("PSTATUS-06（8A-02）：fresh SOLD → 任何 seller 目标都 DENY（seller-terminal）", async () => {
+    // SYSTEM 已完成交易（Product = SOLD）：
+    // SOLD→ACTIVE 不得复活已完成交易（本 PR 新增合同的核心场景）
+    const txActive = makeTx(null, { productRow: { ...lockedProductRow, status: "SOLD" } });
+    expect(await updateProductStatusTx(txActive, actor, "product-1", "ACTIVE")).toBe(false);
+    expect(txActive.product.update).not.toHaveBeenCalled();
+    expect(requireMarketplaceCapability).not.toHaveBeenCalled();
+
+    // SOLD→OFFLINE 同样 DENY（terminal semantics）
+    const txOffline = makeTx(null, { productRow: { ...lockedProductRow, status: "SOLD" } });
+    expect(await updateProductStatusTx(txOffline, actor, "product-1", "OFFLINE")).toBe(false);
+    expect(txOffline.product.update).not.toHaveBeenCalled();
   });
 
   it("PSTATUS-07（AUDIT2-RB01）：RESERVED + active PRODUCT order → ACTIVE 被阻止（安全 NO-OP）", async () => {
@@ -171,14 +189,41 @@ describe("updateProductStatusTx（PSTATUS）", () => {
     });
   });
 
-  it("PSTATUS-06：AUTH_ACCOUNT_INACTIVE → 零 product 写", async () => {
+  it("PSTATUS-09（8A-02）：RESERVED + 无 active order → ACTIVE 恢复（stale RESERVED 安全路径）", async () => {
+    const tx = makeTx(null, {
+      productRow: { ...lockedProductRow, status: "RESERVED" },
+    });
+
+    expect(await updateProductStatusTx(tx, actor, "product-1", "ACTIVE")).toBe(true);
+    expect(requireMarketplaceCapability).toHaveBeenCalledWith(tx, actor, "campus-1");
+    expect(tx.product.update).toHaveBeenCalledWith({
+      where: { id: "product-1" },
+      data: { status: "ACTIVE" },
+    });
+  });
+
+  it("PSTATUS-10（8A-02）：RESERVED → OFFLINE wind-down 放行（不触碰订单权威）", async () => {
+    const tx = makeTx(null, {
+      productRow: { ...lockedProductRow, status: "RESERVED" },
+    });
+
+    expect(await updateProductStatusTx(tx, actor, "product-1", "OFFLINE")).toBe(true);
+    expect(requireMarketplaceCapability).not.toHaveBeenCalled();
+    expect(tx.order.findFirst).not.toHaveBeenCalled();
+    expect(tx.product.update).toHaveBeenCalledWith({
+      where: { id: "product-1" },
+      data: { status: "OFFLINE" },
+    });
+  });
+
+  it("PSTATUS-11：AUTH_ACCOUNT_INACTIVE → 零 product 写", async () => {
     prepareActiveAccountMutation.mockRejectedValue(
       Object.assign(new Error("账号当前不可用"), { code: "AUTH_ACCOUNT_INACTIVE" }),
     );
     const tx = makeTx(null);
 
     await expect(
-      updateProductStatusTx(tx, actor, "product-1", "RESERVED"),
+      updateProductStatusTx(tx, actor, "product-1", "OFFLINE"),
     ).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
     expect(tx.product.update).not.toHaveBeenCalled();
   });

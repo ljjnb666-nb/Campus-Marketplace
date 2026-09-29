@@ -1,10 +1,12 @@
 import { updateProductStatus } from "@/actions/product";
 import { PRODUCT_STATUS_LABELS } from "@/constants/product";
 
+// Phase 8A-02（P8-B01）：RESERVED/SOLD 是 system-owned Order lifecycle
+// projection，不是卖家可主动制造的状态——卖家只能控制 ACTIVE/OFFLINE。
+// SOLD 为 seller-terminal：不渲染任何 lifecycle mutation 操作（再售走
+// 新 listing），状态展示仍由别处的状态标签承担。
 const statusOptions = [
   { value: "ACTIVE", label: "重新上架" },
-  { value: "RESERVED", label: "标记预订" },
-  { value: "SOLD", label: "标记售出" },
   { value: "OFFLINE", label: "下架" },
 ] as const;
 
@@ -15,6 +17,10 @@ export function ProductStatusActions({
   productId: string;
   currentStatus: keyof typeof PRODUCT_STATUS_LABELS;
 }) {
+  if (currentStatus === "SOLD") {
+    return null;
+  }
+
   return (
     <div className="flex flex-wrap gap-2">
       {statusOptions

@@ -556,7 +556,7 @@ describe("product actions", () => {
       expect(txProductUpdate).not.toHaveBeenCalled();
     });
 
-    it("RB-03：SUSPENDED actor → AUTH_ACCOUNT_INACTIVE，零 status 写", async () => {
+    it("RB-03：SUSPENDED actor → AUTH_ACCOUNT_INACTIVE，零 status 写（8A-02：以 OFFLINE 目标验证）", async () => {
       const { RbacError } = await import("@/lib/rbac/errors");
       const { prepareActiveAccountMutation } = await import("@/lib/governance/active-account-mutation");
       (prepareActiveAccountMutation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
@@ -564,9 +564,17 @@ describe("product actions", () => {
       );
       productFindFirst.mockResolvedValue({ id: "product-1" });
 
-      await updateProductStatus(statusFormData("RESERVED"));
+      await updateProductStatus(statusFormData("OFFLINE"));
 
       expect(productUpdate).not.toHaveBeenCalled();
+      expect(txProductUpdate).not.toHaveBeenCalled();
+    });
+
+    it("8A-02：RESERVED/SOLD 目标被 validator 拒绝 → 零事务零写（system-owned）", async () => {
+      for (const status of ["RESERVED", "SOLD"]) {
+        await updateProductStatus(statusFormData(status));
+        expect(transactionMock).not.toHaveBeenCalled();
+      }
       expect(txProductUpdate).not.toHaveBeenCalled();
     });
 
