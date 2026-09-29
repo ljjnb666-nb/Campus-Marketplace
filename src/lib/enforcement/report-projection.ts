@@ -72,6 +72,12 @@ export type ReportTargetContext = {
   campusId: string | null;
   /** 目标业务对象是否存在（用于 createReport 的存在性校验） */
   targetExists: boolean;
+  /**
+   * Phase 8A-01：仅 MESSAGE 有意义——Message.conversationId（服务端权威解析，
+   * 是 MESSAGE 举报资源级授权的唯一权威）。其余 targetType 恒为 null；
+   * 目标消息缺失时亦为 null。
+   */
+  messageConversationId: string | null;
 };
 
 /**
@@ -86,7 +92,7 @@ export async function resolveReportTargetContext(
   switch (ref.targetType) {
     case "USER": {
       if (!ref.targetUserId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.user.findUnique({
         where: { id: ref.targetUserId },
@@ -97,11 +103,12 @@ export async function resolveReportTargetContext(
         ownerUserId: row ? ref.targetUserId : null,
         campusId: null,
         targetExists: Boolean(row),
+        messageConversationId: null,
       };
     }
     case "PRODUCT": {
       if (!ref.productId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.product.findUnique({
         where: { id: ref.productId },
@@ -111,11 +118,12 @@ export async function resolveReportTargetContext(
         ownerUserId: row?.sellerId ?? null,
         campusId: row?.campusId ?? null,
         targetExists: Boolean(row),
+        messageConversationId: null,
       };
     }
     case "ERRAND_TASK": {
       if (!ref.errandTaskId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.errandTask.findUnique({
         where: { id: ref.errandTaskId },
@@ -125,11 +133,12 @@ export async function resolveReportTargetContext(
         ownerUserId: row?.publisherId ?? null,
         campusId: row?.campusId ?? null,
         targetExists: Boolean(row),
+        messageConversationId: null,
       };
     }
     case "SERVICE_LISTING": {
       if (!ref.serviceListingId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.serviceListing.findUnique({
         where: { id: ref.serviceListingId },
@@ -139,13 +148,14 @@ export async function resolveReportTargetContext(
         ownerUserId: row?.providerId ?? null,
         campusId: row?.campusId ?? null,
         targetExists: Boolean(row),
+        messageConversationId: null,
       };
     }
     case "RENTAL_LISTING": {
       // Phase 7E rental report repair：RENTAL_LISTING 举报从创建到审核全链成立。
       // 语义与其余三域一致：owner/campus 从目标对象解析（绝不猜测）。
       if (!ref.rentalListingId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.rentalListing.findUnique({
         where: { id: ref.rentalListingId },
@@ -155,27 +165,76 @@ export async function resolveReportTargetContext(
         ownerUserId: row?.ownerId ?? null,
         campusId: row?.campusId ?? null,
         targetExists: Boolean(row),
+        messageConversationId: null,
       };
     }
     case "MESSAGE": {
       if (!ref.messageId) {
-        return { ownerUserId: null, campusId: null, targetExists: false };
+        return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
       }
       const row = await tx.message.findUnique({
         where: { id: ref.messageId },
-        select: { senderId: true },
+        select: { senderId: true, conversationId: true },
       });
       // MESSAGE 无法可靠推导 campus（conversation 语境不绑定单校区）：
-      // 如实返回 null，禁止用 sender 的 User.campusId 猜测绑定
+      // 如实返回 null，禁止用 sender 的 User.campusId 猜测绑定。
+      // conversationId 服务端权威解析——供 MESSAGE 举报的 participant 授权使用
       return {
         ownerUserId: row?.senderId ?? null,
         campusId: null,
         targetExists: Boolean(row),
+        messageConversationId: row?.conversationId ?? null,
       };
     }
     default:
-      return { ownerUserId: null, campusId: null, targetExists: false };
+      return { ownerUserId: null, campusId: null, targetExists: false, messageConversationId: null };
   }
+}
+
+/**
+ * Phase 8A-01（P8-B02）：举报目标的资源级可访问性断言（唯一实现）。
+ *
+ * MESSAGE 是私有会话内容：reporter 除满足存在性/自举报规则外，还必须是
+ * Message.conversationId 指向会话的 ConversationParticipant。资源关系唯一
+ * 权威 = Message.conversationId → ConversationParticipant(conversationId,
+ * reporterId)——由服务端自行解析，绝不采信客户端提交的任何 conversation
+ * 信息，也不从 User.campusId / sender campus 推导访问权。
+ *
+ * 返回 false = 拒绝。调用方必须以与"举报目标不存在"同类的 fail-closed
+ * 结果响应，不得区分"存在但无权"（no resource oracle）；内部测试可直接
+ * 区分数据库状态。
+ *
+ * 非 MESSAGE 目标（公开 listing / 用户档案）维持既有授权模型，no-op。
+ * 防御性 fail-closed：MESSAGE 语境下 resolver 未给出 conversationId 一律拒绝。
+ */
+export async function assertReportTargetAccessibleToReporter(
+  tx: Prisma.TransactionClient,
+  input: {
+    reporterId: string;
+    targetType: ReportTargetType;
+    targetContext: ReportTargetContext;
+  },
+): Promise<boolean> {
+  if (input.targetType !== "MESSAGE") {
+    return true;
+  }
+
+  const conversationId = input.targetContext.messageConversationId;
+  if (!conversationId) {
+    return false;
+  }
+
+  const participant = await tx.conversationParticipant.findUnique({
+    where: {
+      conversationId_userId: {
+        conversationId,
+        userId: input.reporterId,
+      },
+    },
+    select: { id: true },
+  });
+
+  return Boolean(participant);
 }
 
 const REPORT_FLAG_SOURCE_TYPE = "REPORT";

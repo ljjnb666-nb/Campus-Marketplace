@@ -82,11 +82,13 @@ vi.mock("@/repositories/notification-repository", () => ({
 const reportProjection = vi.hoisted(() => ({
   resolveReportTargetContext: vi.fn(),
   reconcileReportRiskProjection: vi.fn().mockResolvedValue(null),
+  assertReportTargetAccessibleToReporter: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("@/lib/enforcement/report-projection", () => ({
   resolveReportTargetContext: reportProjection.resolveReportTargetContext,
   reconcileReportRiskProjection: reportProjection.reconcileReportRiskProjection,
+  assertReportTargetAccessibleToReporter: reportProjection.assertReportTargetAccessibleToReporter,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -222,6 +224,7 @@ describe("trust actions", () => {
               ownerUserId: row?.senderId ?? null,
               campusId: null,
               targetExists: Boolean(row),
+              messageConversationId: row?.conversationId ?? null,
             };
           }
           default:
@@ -230,6 +233,9 @@ describe("trust actions", () => {
       },
     );
     reportProjection.reconcileReportRiskProjection.mockReset().mockResolvedValue(null);
+    // Phase 8A-01：action 级授权断言默认放行（真实 participant 判定由
+    // report-projection 单测 + 真实 PG 集成测试覆盖）
+    reportProjection.assertReportTargetAccessibleToReporter.mockReset().mockResolvedValue(true);
   });
 
   it("rejects a review when the target user does not match the completed order", async () => {
@@ -480,7 +486,7 @@ describe("trust actions", () => {
   });
 
   it("submits a message report as UNSCOPED（campusId=null）", async () => {
-    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1" });
+    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1", conversationId: "conv-1" });
     txReportCreate.mockResolvedValue({ id: "report-1", createdAt: new Date("2026-09-16T00:00:00.000Z") });
 
     const formData = new FormData();
@@ -511,6 +517,77 @@ describe("trust actions", () => {
         }),
       }),
     );
+  });
+
+  it("8A-01：MESSAGE 授权 helper 收到 resolver 解析的 conversationId（服务端权威）", async () => {
+    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1", conversationId: "conv-1" });
+    txReportCreate.mockResolvedValue({ id: "report-1", createdAt: new Date("2026-09-16T00:00:00.000Z") });
+
+    const formData = new FormData();
+    formData.set("targetType", "MESSAGE");
+    formData.set("reason", "HARASSMENT");
+    formData.set("detail", "骚扰消息");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "message-1");
+
+    await createReport({ success: false, message: "" }, formData);
+
+    expect(reportProjection.assertReportTargetAccessibleToReporter).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        reporterId: "user-1",
+        targetType: "MESSAGE",
+        targetContext: expect.objectContaining({ messageConversationId: "conv-1" }),
+      },
+    );
+  });
+
+  it("8A-01：MESSAGE non-participant → 与'目标不存在'同类 fail-closed，零写入", async () => {
+    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "sender-1", conversationId: "conv-1" });
+    reportProjection.assertReportTargetAccessibleToReporter.mockResolvedValue(false);
+
+    const formData = new FormData();
+    formData.set("targetType", "MESSAGE");
+    formData.set("reason", "HARASSMENT");
+    formData.set("detail", "越权举报他人私信");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "message-1");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "举报目标不存在" });
+    // ZERO DURABLE SIDE EFFECT：授权拒绝发生在任何写入之前
+    expect(txReportFindFirst).not.toHaveBeenCalled();
+    expect(txReportCreate).not.toHaveBeenCalled();
+    expect(txCaseCreate).not.toHaveBeenCalled();
+    expect(createNotification).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("8A-01：participant 举报自己的 MESSAGE → 既有 self-report 保护保持", async () => {
+    messageFindUnique.mockResolvedValue({ id: "message-1", senderId: "user-1", conversationId: "conv-1" });
+
+    const formData = new FormData();
+    formData.set("targetType", "MESSAGE");
+    formData.set("reason", "HARASSMENT");
+    formData.set("detail", "自举报");
+    formData.set("productId", "");
+    formData.set("errandTaskId", "");
+    formData.set("serviceListingId", "");
+    formData.set("targetUserId", "");
+    formData.set("messageId", "message-1");
+
+    const result = await createReport({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({ success: false, message: "不能举报自己发布或发送的内容" });
+    expect(txReportCreate).not.toHaveBeenCalled();
+    expect(txCaseCreate).not.toHaveBeenCalled();
   });
 
   it("blocks another user with an optional reason", async () => {

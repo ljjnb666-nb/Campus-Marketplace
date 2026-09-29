@@ -9,6 +9,7 @@ const {
   txErrandFindUnique,
   txServiceFindUnique,
   txMessageFindUnique,
+  txConversationParticipantFindUnique,
   txRiskFlagFindUnique,
   txRiskFlagCreate,
   txRiskFlagUpdate,
@@ -20,6 +21,7 @@ const {
   txErrandFindUnique: vi.fn(),
   txServiceFindUnique: vi.fn(),
   txMessageFindUnique: vi.fn(),
+  txConversationParticipantFindUnique: vi.fn(),
   txRiskFlagFindUnique: vi.fn(),
   txRiskFlagCreate: vi.fn(),
   txRiskFlagUpdate: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import {
+  assertReportTargetAccessibleToReporter,
   assertReportStatusTransition,
   reconcileReportRiskProjection,
   resolveReportTargetContext,
@@ -45,6 +48,7 @@ const txStub = {
   errandTask: { findUnique: txErrandFindUnique },
   serviceListing: { findUnique: txServiceFindUnique },
   message: { findUnique: txMessageFindUnique },
+  conversationParticipant: { findUnique: txConversationParticipantFindUnique },
   riskFlag: { findUnique: txRiskFlagFindUnique, create: txRiskFlagCreate, update: txRiskFlagUpdate },
 };
 
@@ -61,6 +65,7 @@ beforeEach(() => {
   txErrandFindUnique.mockReset().mockResolvedValue(null);
   txServiceFindUnique.mockReset().mockResolvedValue(null);
   txMessageFindUnique.mockReset().mockResolvedValue(null);
+  txConversationParticipantFindUnique.mockReset().mockResolvedValue(null);
   txRiskFlagFindUnique.mockReset().mockResolvedValue(null);
   txRiskFlagCreate.mockReset().mockResolvedValue({});
   txRiskFlagUpdate.mockReset().mockResolvedValue({});
@@ -90,40 +95,167 @@ describe("resolveReportTargetContext（全 targetType 归属 + campus provenance
     txProductFindUnique.mockResolvedValue({ sellerId: "seller-1", campusId: "campus-p" });
     txErrandFindUnique.mockResolvedValue({ publisherId: "publisher-1", campusId: "campus-e" });
     txServiceFindUnique.mockResolvedValue({ providerId: "provider-1", campusId: "campus-s" });
-    txMessageFindUnique.mockResolvedValue({ senderId: "sender-1" });
+    txMessageFindUnique.mockResolvedValue({ senderId: "sender-1", conversationId: "conv-1" });
 
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "PRODUCT", productId: "p1" }),
-    ).resolves.toEqual({ ownerUserId: "seller-1", campusId: "campus-p", targetExists: true });
+    ).resolves.toEqual({
+      ownerUserId: "seller-1",
+      campusId: "campus-p",
+      targetExists: true,
+      messageConversationId: null,
+    });
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "ERRAND_TASK", errandTaskId: "e1" }),
-    ).resolves.toEqual({ ownerUserId: "publisher-1", campusId: "campus-e", targetExists: true });
+    ).resolves.toEqual({
+      ownerUserId: "publisher-1",
+      campusId: "campus-e",
+      targetExists: true,
+      messageConversationId: null,
+    });
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "SERVICE_LISTING", serviceListingId: "s1" }),
-    ).resolves.toEqual({ ownerUserId: "provider-1", campusId: "campus-s", targetExists: true });
-    // MESSAGE：不猜 campus（如实 null）
+    ).resolves.toEqual({
+      ownerUserId: "provider-1",
+      campusId: "campus-s",
+      targetExists: true,
+      messageConversationId: null,
+    });
+    // MESSAGE：不猜 campus（如实 null）；conversationId 服务端权威解析（8A-01）
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
-    ).resolves.toEqual({ ownerUserId: "sender-1", campusId: null, targetExists: true });
+    ).resolves.toEqual({
+      ownerUserId: "sender-1",
+      campusId: null,
+      targetExists: true,
+      messageConversationId: "conv-1",
+    });
     // USER：无 campus 语境（如实 null）
     txUserFindUnique.mockResolvedValue({ id: "u1" });
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "USER", targetUserId: "u1" }),
-    ).resolves.toEqual({ ownerUserId: "u1", campusId: null, targetExists: true });
+    ).resolves.toEqual({
+      ownerUserId: "u1",
+      campusId: null,
+      targetExists: true,
+      messageConversationId: null,
+    });
   });
 
   it("returns null owner for anonymous message senders", async () => {
-    txMessageFindUnique.mockResolvedValue({ senderId: null });
+    txMessageFindUnique.mockResolvedValue({ senderId: null, conversationId: "conv-1" });
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "MESSAGE", messageId: "m1" }),
-    ).resolves.toEqual({ ownerUserId: null, campusId: null, targetExists: true });
+    ).resolves.toEqual({
+      ownerUserId: null,
+      campusId: null,
+      targetExists: true,
+      messageConversationId: "conv-1",
+    });
   });
 
   it("reports targetExists=false for missing business objects", async () => {
     txProductFindUnique.mockResolvedValue(null);
     await expect(
       resolveReportTargetContext(txStub as never, { targetType: "PRODUCT", productId: "ghost" }),
-    ).resolves.toEqual({ ownerUserId: null, campusId: null, targetExists: false });
+    ).resolves.toEqual({
+      ownerUserId: null,
+      campusId: null,
+      targetExists: false,
+      messageConversationId: null,
+    });
+    // MESSAGE：目标缺失时 conversationId 亦为 null（fail-closed 输入）
+    await expect(
+      resolveReportTargetContext(txStub as never, { targetType: "MESSAGE", messageId: "ghost-msg" }),
+    ).resolves.toEqual({
+      ownerUserId: null,
+      campusId: null,
+      targetExists: false,
+      messageConversationId: null,
+    });
+  });
+
+  it("rental listing target context stays unchanged by the 8A-01 extension", async () => {
+    // RENTAL_LISTING 分支：owner/campus 照旧，messageConversationId 恒 null
+    const rentalTx = {
+      ...txStub,
+      rentalListing: {
+        findUnique: vi.fn().mockResolvedValue({ ownerId: "owner-r", campusId: "campus-r" }),
+      },
+    } as never;
+    await expect(
+      resolveReportTargetContext(rentalTx, { targetType: "RENTAL_LISTING", rentalListingId: "r1" }),
+    ).resolves.toEqual({
+      ownerUserId: "owner-r",
+      campusId: "campus-r",
+      targetExists: true,
+      messageConversationId: null,
+    });
+  });
+});
+
+describe("assertReportTargetAccessibleToReporter（8A-01 MESSAGE 资源级授权，唯一实现）", () => {
+  const targetContext = (messageConversationId: string | null) => ({
+    ownerUserId: "sender-1",
+    campusId: null,
+    targetExists: true,
+    messageConversationId,
+  });
+
+  it("allows a MESSAGE report when the reporter is a participant of the resolved conversation", async () => {
+    txConversationParticipantFindUnique.mockResolvedValue({ id: "participant-1" });
+
+    await expect(
+      assertReportTargetAccessibleToReporter(txStub as never, {
+        reporterId: "reporter-1",
+        targetType: "MESSAGE",
+        targetContext: targetContext("conv-1"),
+      }),
+    ).resolves.toBe(true);
+
+    // 授权查询锚定 exact pair（conversationId, reporterId）
+    expect(txConversationParticipantFindUnique).toHaveBeenCalledWith({
+      where: {
+        conversationId_userId: { conversationId: "conv-1", userId: "reporter-1" },
+      },
+      select: { id: true },
+    });
+  });
+
+  it("denies a MESSAGE report when the reporter is not a participant", async () => {
+    txConversationParticipantFindUnique.mockResolvedValue(null);
+
+    await expect(
+      assertReportTargetAccessibleToReporter(txStub as never, {
+        reporterId: "foreign-user",
+        targetType: "MESSAGE",
+        targetContext: targetContext("conv-1"),
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it("fail-closed denies MESSAGE when the context carries no conversationId", async () => {
+    await expect(
+      assertReportTargetAccessibleToReporter(txStub as never, {
+        reporterId: "reporter-1",
+        targetType: "MESSAGE",
+        targetContext: targetContext(null),
+      }),
+    ).resolves.toBe(false);
+    expect(txConversationParticipantFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op for non-MESSAGE target types（不触碰 participant 权威）", async () => {
+    for (const targetType of ["PRODUCT", "ERRAND_TASK", "SERVICE_LISTING", "RENTAL_LISTING", "USER"] as const) {
+      await expect(
+        assertReportTargetAccessibleToReporter(txStub as never, {
+          reporterId: "reporter-1",
+          targetType,
+          targetContext: targetContext(null),
+        }),
+      ).resolves.toBe(true);
+    }
+    expect(txConversationParticipantFindUnique).not.toHaveBeenCalled();
   });
 });
 

@@ -7,6 +7,7 @@ import { blockUserTx, unblockUserTx } from "@/lib/trust/block-service";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
+  assertReportTargetAccessibleToReporter,
   reconcileReportRiskProjection,
   resolveReportTargetContext,
 } from "@/lib/enforcement/report-projection";
@@ -214,6 +215,20 @@ export async function createReport(
       }
 
       const targetOwnerId = targetContext.ownerUserId;
+
+      // Phase 8A-01（P8-B02）：MESSAGE 举报的资源级授权——reporter 必须是
+      // 目标消息所属会话（服务端权威解析的 conversationId）的 participant，
+      // 在同一事务内、任何写入前判定。拒绝结果与"目标不存在"同类
+      // fail-closed，不产生"存在但无权"的资源存在 oracle。
+      const targetAccessible = await assertReportTargetAccessibleToReporter(tx, {
+        reporterId: user.id,
+        targetType: parsed.data.targetType,
+        targetContext,
+      });
+
+      if (!targetAccessible) {
+        return { ...initialState, message: "举报目标不存在" };
+      }
 
       if (targetOwnerId && targetOwnerId === user.id) {
         return { ...initialState, message: "不能举报自己发布或发送的内容" };
