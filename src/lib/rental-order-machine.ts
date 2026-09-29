@@ -1321,21 +1321,127 @@ export async function initiateDisputeTx(
   return { success: true };
 }
 
+/**
+ * Phase 8A-04：提交租赁评价（review vs dispute serialization 修复版）。
+ *
+ * 修复 P8-B04：旧实现 actor-only USER 锁 + 无行锁 findFirst，与
+ * initiateDisputeTx（sorted participant 锁 + RentalOrder FOR UPDATE）没有
+ * 共享 serialization point——COMPLETED 订单上 review 与 dispute 并发时
+ * 两者都可提交，review 可能在 dispute 已把订单置 IN_DISPUTE 后基于 stale
+ * 快照落库。冻结流程（与 initiateDisputeTx 同一核心锁序）：
+ *
+ *   1. candidate order pre-read（无锁，仅发现 ownerId/renterId 锁键；
+ *      绝不作为 status / participant / 授权 authority）
+ *   2. acquire ONE sorted governance subject lock set：USER:owner + USER:renter
+ *      （与 initiateDisputeTx / extension / erasure 同锁域、同全局锁序）
+ *   3. actor lifecycle 复核（assertActiveAccountMutationAllowed，checks-only——
+ *      完整 pair 锁已持有，禁止为复用 active check 重取 actor-only 锁）
+ *   4. RentalOrder FOR UPDATE（与 initiateDisputeTx 同一 serialization point）
+ *   5. locked fresh 重验证：行存在、candidate owner/renter 未漂移（fail
+ *      closed）、actor 仍是精确当事人、status == COMPLETED（pre-read 快照
+ *      不是 authority）
+ *   6. active dispute defense：存在 OPEN/IN_REVIEW RentalDispute → DENY
+ *      （纵深防御：canonical invariant 是 active dispute ↔ IN_DISPUTE，
+ *      历史 COMPLETED + active dispute 异常不应继续产生新评价。ordinary
+ *      read 即可——serialization authority 是 RentalOrder row lock，
+ *      dispute 发起在本事务前已持有同一行锁；禁止 RentalDispute FOR
+ *      UPDATE，避免与 dispute resolution 的 RentalDispute→RentalOrder
+ *      锁序成 row-lock cycle）
+ *   7. duplicate review check（@@unique([orderId, authorId]) 仍为 DB 兜底）
+ *   8. target 从 locked order 计算（actor==owner → renter；actor==renter →
+ *      owner），绝不使用 candidate 快照
+ *   9. RentalReview.create → recomputeRentalPositiveRate → notification
+ *      （全部 fresh authority 确认后才执行；任何 DENY 三类写入均为零，
+ *      同事务原子回滚）
+ *
+ * 冻结产品语义：评价需要 fresh COMPLETED + 无 active dispute；提交评价
+ * ≠ 放弃发起纠纷权利——review 存在不是 dispute 的 eligibility 输入，
+ * review 先赢后 dispute 仍允许（合法串行历史，不回滚/隐藏既有 review，
+ * retroactive 处理属 Phase 8E Review Integrity）。
+ *
+ * seams（仅测试注入；生产不传）：
+ * - activeAccountSeams.beforeLock：BEFORE sorted pair USER locks（RB-03 冻结语义）
+ * - activeAccountSeams.afterCheck：pair locks + actor 复核之后、RentalOrder
+ *   行锁之前（RB-03 冻结语义）
+ * - afterOrderRowLock：RentalOrder 行锁 + fresh 谓词全部通过之后、
+ *   duplicate check / 写入之前（RD-RACE-02 review-wins waiter 注入）
+ */
 export async function submitRentalReviewTx(
   tx: Prisma.TransactionClient,
-  input: { orderId: string; userId: string; overallRating: number; content?: string },
+  input: {
+    orderId: string;
+    userId: string;
+    overallRating: number;
+    content?: string;
+    /** 测试 seam：fresh 谓词通过后、首个写入之前（生产不传） */
+    afterOrderRowLock?: (tx: Prisma.TransactionClient) => Promise<void>;
+  },
   activeAccountSeams?: ActiveAccountMutationSeams,
 ): Promise<RentalOrderTxError | { success: true }> {
-  await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
+  // ---- 步骤 1：candidate pre-read（无锁），仅发现 participant 锁键 ----
+  const candidates = await tx.$queryRaw<Array<{ id: string; ownerId: string; renterId: string }>>`
+    SELECT id, "ownerId", "renterId"
+    FROM "RentalOrder"
+    WHERE id = ${input.orderId}
+      AND ("ownerId" = ${input.userId} OR "renterId" = ${input.userId})
+  `;
+  const candidate = candidates[0];
+  if (!candidate) return { error: "订单状态错误" };
 
-  const order = await tx.rentalOrder.findFirst({
-    where: { id: input.orderId, status: 'COMPLETED', OR: [{ ownerId: input.userId }, { renterId: input.userId }] },
-  });
+  // ---- 步骤 2：ONE sorted set：USER:owner + USER:renter（全局锁序）----
+  if (activeAccountSeams?.beforeLock) {
+    await activeAccountSeams.beforeLock(tx);
+  }
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.ownerId },
+    { subjectType: "USER", subjectId: candidate.renterId },
+  ]);
+
+  // RB-03：actor lifecycle 复核（checks-only，完整 pair 锁已持有）
+  await assertActiveAccountMutationAllowed(tx, input.userId);
+  if (activeAccountSeams?.afterCheck) {
+    await activeAccountSeams.afterCheck(tx);
+  }
+
+  // ---- 步骤 3：RentalOrder FOR UPDATE（与 dispute 共享 serialization point）----
+  const orderRows = await tx.$queryRaw<
+    Array<{ id: string; ownerId: string; renterId: string; status: string }>
+  >`
+    SELECT id, "ownerId", "renterId", status
+    FROM "RentalOrder"
+    WHERE id = ${candidate.id}
+    FOR UPDATE
+  `;
+  const order = orderRows[0];
+
+  // ---- 步骤 4：locked fresh 重验证（不信任 pre-read snapshot，fail closed）----
   if (!order) return { error: "订单状态错误" };
+  if (order.ownerId !== candidate.ownerId || order.renterId !== candidate.renterId) {
+    return { error: "订单状态错误" };
+  }
+  if (order.ownerId !== input.userId && order.renterId !== input.userId) {
+    return { error: "订单状态错误" };
+  }
+  if ((order.status as RentalOrderStatus) !== "COMPLETED") {
+    return { error: "订单状态错误" };
+  }
 
+  // ---- 步骤 5：active dispute defense（ordinary read，见函数头 §6 说明）----
+  const activeDispute = await tx.rentalDispute.findFirst({
+    where: { orderId: order.id, status: { in: [...DISPUTE_ACTIVE_STATUSES] } },
+    select: { id: true },
+  });
+  if (activeDispute) return { error: "该订单存在进行中的纠纷，无法评价" };
+
+  if (input.afterOrderRowLock) {
+    await input.afterOrderRowLock(tx);
+  }
+
+  // ---- 步骤 6：duplicate review check（行锁内；DB unique 兜底）----
   const exist = await tx.rentalReview.findFirst({ where: { orderId: input.orderId, authorId: input.userId } });
   if (exist) return { error: "已经评价过" };
 
+  // ---- 步骤 7-9：target 以 locked 行为准 + review + 好评率 + 通知 ----
   const targetUserId = counterpartyId(order, input.userId);
 
   await tx.rentalReview.create({
