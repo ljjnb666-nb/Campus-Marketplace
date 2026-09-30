@@ -341,6 +341,15 @@ export async function eraseAccount(
       data: { reason: ERASED_USER_CONTENT_MARKER, evidencePhotos: [] },
     });
 
+    // Phase 8D-01：本人发起 meetup 的 custom location 快照（user-authored
+    // 非空列 → 哨兵标记；作者归属唯一 = proposedById）。catalog 快照
+    // （meetupPointId 非空）是平台参考数据，不改写；scheduledAt / status /
+    // arrival / no-show provenance 等交易结构历史保留。
+    await client.orderMeetup.updateMany({
+      where: { proposedById: userId, meetupPointId: null },
+      data: { locationTextSnapshot: ERASED_USER_CONTENT_MARKER },
+    });
+
     // ---- Repair 4 REVIEW FIX（R4-03）：listing / order 附属 user-authored
     // 内容。STRUCTURAL ROW RETENTION != USER CONTENT RETENTION：行与结构
     // 元数据保留（OFFLINE/CANCELLED 已由上方下架语句处理），自由文本与

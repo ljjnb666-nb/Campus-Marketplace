@@ -100,6 +100,27 @@ enum ProductReservationResolution {
   EXPIRED
 }
 
+// Phase 8D-01：General Order（PRODUCT / SERVICE）线下见面履约状态。
+// 语义冻结：
+//   PROPOSED          一方提出时间地点，尚未获得对方确认
+//   CONFIRMED         另一方确认正式见面约定
+//   COMPLETED         双方都完成 self-arrival confirmation（只表示双方已到场，
+//                     绝不自动表示 Order.COMPLETED / Product.SOLD / 计数累加）
+//   CANCELLED         本次 meetup 被取消（允许之后重新发起新 meetup）
+//   NO_SHOW_REPORTED  一方在满足严格条件后报告另一方爽约（终局，本次 meetup
+//                     不得重新打开）。NO_SHOW 只是 allegation / dispute
+//                     trigger（与 OrderDispute 同事务原子创建），绝不是
+//                     平台自动判责结果。
+// 仅 CANCELLED 允许同一 Order 重新发起 meetup；PROPOSED/CONFIRMED/COMPLETED/
+// NO_SHOW_REPORTED 为 active 集（DB partial unique 兜底唯一性）。
+enum OrderMeetupStatus {
+  PROPOSED
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW_REPORTED
+}
+
 enum PaymentStatus {
   UNPAID
   OFFLINE_PENDING
@@ -271,6 +292,14 @@ model User {
   // Phase 8C-01：General OrderDispute（initiator / 运营领用 SetNull 同上）
   initiatedOrderDisputes  OrderDispute[]            @relation("OrderDisputeInitiator")
   assignedOrderDisputes   OrderDispute[]            @relation("OrderDisputeAssignee")
+  // Phase 8D-01：General Order meetup。proposedById 是 custom location 快照
+  // 的唯一作者归属（erasure 依据）；全部 participant actor FK Restrict——
+  // meetup 是交易 provenance，不随账户行删除丢失（账户走 pseudonymous erasure）。
+  proposedOrderMeetups    OrderMeetup[]             @relation("OrderMeetupProposer")
+  confirmedOrderMeetups   OrderMeetup[]             @relation("OrderMeetupConfirmer")
+  cancelledOrderMeetups   OrderMeetup[]             @relation("OrderMeetupCanceller")
+  noShowReportedMeetups   OrderMeetup[]             @relation("OrderMeetupNoShowReporter")
+  noShowTargetedMeetups   OrderMeetup[]             @relation("OrderMeetupNoShowTarget")
   // Phase 7G：dispute / support 运营领用（claim/release；SetNull 同上）
   assignedDisputes        RentalDispute[]           @relation("DisputeAssignee")
   assignedSupportTickets  SupportTicket[]           @relation("SupportTicketAssignee")
@@ -351,6 +380,9 @@ model Campus {
   // Phase 8C-01：General OrderDispute scope 快照（Restrict 同上）
   orderDisputes        OrderDispute[]             @relation("OrderDisputeScopeCampus")
   supportTickets       SupportTicket[]            @relation("SupportTicketScopeCampus")
+  // Phase 8D-01：meetup campus 权威快照（Restrict 同上）+ 见面点 catalog
+  meetupPoints         MeetupPoint[]              @relation("MeetupPointCampus")
+  orderMeetups         OrderMeetup[]              @relation("OrderMeetupCampus")
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
 }
@@ -620,6 +652,9 @@ model Order {
   status           OrderStatus     @default(PENDING)
   paymentStatus    PaymentStatus   @default(UNPAID)
   amount           Decimal         @db.Decimal(10, 2)
+  // Phase 8D-01 权威状态冻结：本字段只是下单时的初始见面偏好快照
+  // （buyer-authored），绝不是正式见面约定 authority。正式约定 = OrderMeetup
+  // （locationTextSnapshot / scheduledAt / status / arrival fields）。
   meetingLocation  String?
   note             String?
   cancelReason     String?
@@ -649,6 +684,10 @@ model Order {
 
   // Phase 8C-01：General OrderDispute（独立于 RentalDispute 的交易纠纷域）
   orderDisputes OrderDispute[] @relation("OrderDisputeOrder")
+
+  // Phase 8D-01：线下见面履约（正式见面约定 authority；历史 CANCELLED
+  // meetup 保留，active meetup 同期至多一个——DB partial unique 兜底）
+  meetups OrderMeetup[] @relation("OrderMeetupOrder")
 
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
@@ -1422,6 +1461,11 @@ model OrderDispute {
   // 操作员内部备注（OPERATOR_ONLY；queue 结构性不返回，仅授权详情面）
   adminNote String? @db.Text
 
+  // Phase 8D-01：no-show trigger provenance——该 dispute 由哪个 meetup 的
+  // no-show 报告触发（普通用户手动 dispute 恒 null；SetNull：dispute 行
+  // 随 Order 级联消失时 meetup provenance 保留）
+  triggeredByMeetup OrderMeetup? @relation("OrderMeetupTriggeredDispute")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1430,6 +1474,100 @@ model OrderDispute {
   @@index([dueAt, createdAt, id])
   @@index([campusId, scopeKey])
   @@index([assignedToId])
+}
+
+// ============================================================
+// Phase 8D-01：General Order Meetup / MeetupPoint（PRODUCT / SERVICE 专属）
+// ============================================================
+// 领域边界（冻结）：Meetup domain 只支持 PRODUCT / SERVICE General Order
+// （两类均有 meetingLocation 下单快照 + 真实面对面履约语义）。ERRAND（已有
+// pickupLocation/deliveryLocation + ErrandTask lifecycle）与 RENTAL（已有
+// RentalHandoverRecord / RentalReturnRecord 专属语义）不进入本域——不同
+// aggregate 不得复用 Meetup 改写既有履约事实。
+//
+// 权威状态冻结：Order.meetingLocation 自此只是下单时初始偏好快照；正式见面
+// 约定 authority = OrderMeetup（locationTextSnapshot / scheduledAt / status /
+// arrival fields）。MeetupPoint 是 campus catalog 参考数据（来源）；改名 /
+// 停用绝不改写历史 OrderMeetup.locationTextSnapshot（transaction snapshot
+// authority）。
+//
+// 状态 mutation authority = src/lib/meetups/order-meetup-service.ts 的
+// canonical Tx services（锁序冻结：sorted USER pair → Order FOR UPDATE →
+// OrderMeetup FOR UPDATE；禁止 OrderMeetup → Order 反序 deadlock surface）。
+// NO_SHOW_REPORTED 与 OrderDispute OPEN + Order IN_DISPUTE 同事务原子提交。
+model MeetupPoint {
+  id           String        @id @default(cuid())
+  campusId     String
+  campus       Campus        @relation("MeetupPointCampus", fields: [campusId], references: [id], onDelete: Restrict)
+  name         String
+  locationText String
+  isActive     Boolean       @default(true)
+  meetups      OrderMeetup[] @relation("MeetupPointMeetup")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([campusId, name])
+  @@index([campusId, isActive])
+}
+
+model OrderMeetup {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order  @relation("OrderMeetupOrder", fields: [orderId], references: [id], onDelete: Cascade)
+
+  // campus 权威快照：创建时从交易标的归属 campus 取得（PRODUCT →
+  // Product.campusId / SERVICE → ServiceListing.campusId），绝不允许来自
+  // User.campusId / 当前用户 campus / 客户端字段；immutable，无更新写路径
+  campusId String
+  campus   Campus @relation("OrderMeetupCampus", fields: [campusId], references: [id], onDelete: Restrict)
+
+  // catalog 来源（可空；SetNull：点删除/失效不破坏历史 meetup）
+  meetupPointId String?
+  meetupPoint   MeetupPoint? @relation("MeetupPointMeetup", fields: [meetupPointId], references: [id], onDelete: SetNull)
+
+  // location transaction snapshot authority：无论来源（MeetupPoint 或
+  // custom location）都在 proposal 创建时固化，查询绝不重新 join
+  // MeetupPoint 生成历史地点
+  locationTextSnapshot String
+  scheduledAt          DateTime
+
+  status       OrderMeetupStatus @default(PROPOSED)
+  proposedById String
+  proposedBy   User              @relation("OrderMeetupProposer", fields: [proposedById], references: [id], onDelete: Restrict)
+
+  // counterparty 确认（CONFIRMED 唯一写路径；proposer 不得自确认）
+  confirmedById String?
+  confirmedBy   User?     @relation("OrderMeetupConfirmer", fields: [confirmedById], references: [id], onDelete: Restrict)
+  confirmedAt   DateTime?
+
+  // self-arrival attestation：买家只能写 buyerArrivedAt，卖家只能写
+  // sellerArrivedAt（绝不接受 actor 指定 targetUserId）；双方齐 → COMPLETED
+  buyerArrivedAt  DateTime?
+  sellerArrivedAt DateTime?
+
+  cancelledById String?
+  cancelledBy   User?     @relation("OrderMeetupCanceller", fields: [cancelledById], references: [id], onDelete: Restrict)
+  cancelledAt   DateTime?
+
+  // no-show allegation provenance（reporter 已到场 + target 未到场为前提；
+  // 与 OrderDispute 同事务创建，绝不单独构成判责）
+  noShowReportedById String?
+  noShowReportedBy   User?     @relation("OrderMeetupNoShowReporter", fields: [noShowReportedById], references: [id], onDelete: Restrict)
+  noShowTargetId     String?
+  noShowTarget       User?     @relation("OrderMeetupNoShowTarget", fields: [noShowTargetId], references: [id], onDelete: Restrict)
+  noShowReportedAt   DateTime?
+
+  // NO_SHOW_REPORTED → 本次产生的 canonical OrderDispute（nullable unique：
+  // 手动 dispute 恒 null；证明 no-show 与 dispute 的 1:1 provenance）
+  triggeredDisputeId String?       @unique
+  triggeredDispute   OrderDispute? @relation("OrderMeetupTriggeredDispute", fields: [triggeredDisputeId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId, status])
+  @@index([campusId, status])
 }
 
 model RentalReview {

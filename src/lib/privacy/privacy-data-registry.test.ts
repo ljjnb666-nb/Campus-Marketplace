@@ -324,8 +324,8 @@ describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 va
     expect(ERASURE_FIELD_COVERAGE.has("RentalReview.tags")).toBe(true);
   });
 
-  it("FINAL SSOT：当前生产输入清单计数锁定（43；Phase 8C-01 +OrderDispute.reason）", () => {
-    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(43);
+  it("FINAL SSOT：当前生产输入清单计数锁定（44；Phase 8D-01 +OrderMeetup.locationTextSnapshot）", () => {
+    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(44);
   });
 
   it("accessories 不是当前 rentalPickupConfirmSchema 输入（HISTORICAL_ONLY）", () => {
