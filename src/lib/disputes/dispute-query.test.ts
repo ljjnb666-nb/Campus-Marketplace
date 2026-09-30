@@ -359,7 +359,9 @@ describe("loadAuthorizedDisputeQueue（DB 内授权 + filter 收敛；两表统�
       ],
     });
 
-    // 反向：cursor.kind=ORDER → Rental 表（T > C）→ dueAt >= 整段推进
+    // 反向：cursor.kind=ORDER → Rental 表（T > C）：equal (dueAt, createdAt)
+    // 下本表整段在 cursor 后（k > K），但 (d == D, c < C) 必须排除——
+    // 三支 OR tuple 展开，绝不允许 dueAt gte 捷径（review blocker）
     await loadAuthorizedDisputeQueue({
       viewerId: "viewer-1",
       access: GLOBAL_ACCESS,
@@ -371,9 +373,22 @@ describe("loadAuthorizedDisputeQueue（DB 内授权 + filter 收敛；两表统�
         id: "od0",
       },
     });
-    expect(disputeFindMany.mock.calls.at(-1)![0].where.AND.at(-1)).toEqual({
-      dueAt: { gte: new Date("2026-09-21T00:00:00.000Z") },
+    const rentalKindAfter = disputeFindMany.mock.calls.at(-1)![0].where.AND.at(-1);
+    expect(rentalKindAfter).toEqual({
+      OR: [
+        { dueAt: { gt: new Date("2026-09-21T00:00:00.000Z") } },
+        {
+          dueAt: { equals: new Date("2026-09-21T00:00:00.000Z") },
+          createdAt: { gt: new Date("2026-09-19T00:00:00.000Z") },
+        },
+        {
+          dueAt: { equals: new Date("2026-09-21T00:00:00.000Z") },
+          createdAt: { equals: new Date("2026-09-19T00:00:00.000Z") },
+        },
+      ],
     });
+    // NO dueAt gte shortcut：gte 会错误包含 (d == D, c < C) 的已翻页行
+    expect(JSON.stringify(rentalKindAfter)).not.toContain('"gte"');
     // Order 表（T == C）→ 标准 tuple（含 id 条件）
     const orderTuple = JSON.stringify(orderDisputeFindMany.mock.calls.at(-1)![0].where.AND.at(-1));
     expect(orderTuple).toContain('"gt"');
@@ -533,6 +548,170 @@ describe("loadAuthorizedDisputeQueue（DB 内授权 + filter 收敛；两表统�
     // 无重复 / 无遗漏 / 无循环 / 全序稳定
     expect(seen).toEqual(["ORDER:o-A", "ORDER:o-B", "RENTAL:r-A", "RENTAL:r-B"]);
     expect(new Set(seen).size).toBe(seen.length);
+  });
+
+  it("§8 对抗：cursor=ORDER@(D,C) → 同刻 RENTAL 收录、(D, c<C) RENTAL 绝不重现", async () => {
+    campusFindMany.mockResolvedValue([{ id: "A" }]);
+    const D = new Date("2030-05-01T00:00:00.000Z");
+    const C = new Date("2030-05-01T12:00:00.000Z");
+    const base = { campusId: "A", campus: { name: "甲校区" }, scopeKey: "CAMPUS:A", initiatorId: "i-1" };
+    installQueueDatasets(
+      [
+        // (D, C-1s)：位于 cursor 之前（createdAt 优先于 kind），翻页后绝不可重现
+        disputeRow({ ...base, id: "r-before", dueAt: D, createdAt: new Date(C.getTime() - 1000) }),
+        disputeRow({ ...base, id: "r-same", dueAt: D, createdAt: C }),
+        disputeRow({ ...base, id: "r-after", dueAt: D, createdAt: new Date(C.getTime() + 1000) }),
+      ],
+      [orderDisputeRow({ ...base, id: "o-cursor", dueAt: D, createdAt: C })],
+    );
+
+    // global truth: r-before → o-cursor → r-same → r-after；从 cursor=o-cursor 翻页
+    const seen: string[] = [];
+    let cursor: ReturnType<typeof decodeDisputeCursor> = {
+      dueAt: D,
+      createdAt: C,
+      kind: "ORDER",
+      id: "o-cursor",
+    };
+    for (let i = 0; i < 5; i += 1) {
+      const result = await loadAuthorizedDisputeQueue({
+        viewerId: "v1",
+        access: CAMPUS_A_ACCESS,
+        limit: 1,
+        cursor: cursor ?? undefined,
+      });
+      if (result.items.length === 0) break;
+      seen.push(...result.items.map((item) => item.disputeId));
+      if (!result.nextCursor) break;
+      cursor = decodeDisputeCursor(result.nextCursor);
+      expect(cursor).not.toBeNull();
+    }
+
+    expect(seen).toEqual(["r-same", "r-after"]);
+    expect(seen).not.toContain("r-before");
+  });
+
+  it("§9 cross-kind 矩阵：kind 仅在 dueAt+createdAt 相等时参与排序", async () => {
+    campusFindMany.mockResolvedValue([{ id: "A" }]);
+    const D = new Date("2030-06-01T00:00:00.000Z");
+    const C = new Date("2030-06-01T08:00:00.000Z");
+    const base = { campusId: "A", campus: { name: "甲校区" }, scopeKey: "CAMPUS:A", initiatorId: "i-1" };
+
+    const cases: Array<{
+      cursorKind: "ORDER" | "RENTAL";
+      probeKind: "ORDER" | "RENTAL";
+      probeCreatedAt: Date;
+      included: boolean;
+      label: string;
+    }> = [
+      { cursorKind: "ORDER", probeKind: "RENTAL", probeCreatedAt: new Date(C.getTime() - 60_000), included: false, label: "RENTAL same dueAt + earlier createdAt" },
+      { cursorKind: "ORDER", probeKind: "RENTAL", probeCreatedAt: C, included: true, label: "RENTAL same dueAt + same createdAt" },
+      { cursorKind: "ORDER", probeKind: "RENTAL", probeCreatedAt: new Date(C.getTime() + 60_000), included: true, label: "RENTAL same dueAt + later createdAt" },
+      { cursorKind: "RENTAL", probeKind: "ORDER", probeCreatedAt: new Date(C.getTime() - 60_000), included: false, label: "ORDER same dueAt + earlier createdAt" },
+      { cursorKind: "RENTAL", probeKind: "ORDER", probeCreatedAt: C, included: false, label: "ORDER same dueAt + same createdAt" },
+      { cursorKind: "RENTAL", probeKind: "ORDER", probeCreatedAt: new Date(C.getTime() + 60_000), included: true, label: "ORDER same dueAt + later createdAt" },
+    ];
+
+    for (const c of cases) {
+      const rentalRows: Row[] = [];
+      const orderRows: Row[] = [];
+      const cursorRow = { ...base, id: "cur", dueAt: D, createdAt: C };
+      const probeRow = { ...base, id: "probe", dueAt: D, createdAt: c.probeCreatedAt };
+      if (c.cursorKind === "RENTAL") rentalRows.push(disputeRow(cursorRow));
+      else orderRows.push(orderDisputeRow(cursorRow));
+      if (c.probeKind === "RENTAL") rentalRows.push(disputeRow(probeRow));
+      else orderRows.push(orderDisputeRow(probeRow));
+      installQueueDatasets(rentalRows, orderRows);
+
+      const result = await loadAuthorizedDisputeQueue({
+        viewerId: "v1",
+        access: CAMPUS_A_ACCESS,
+        limit: 10,
+        cursor: { dueAt: D, createdAt: C, kind: c.cursorKind, id: "cur" },
+      });
+
+      expect(result.items.map((i) => i.disputeId), c.label).toEqual(
+        c.included ? ["probe"] : [],
+      );
+    }
+
+    // same kind：exact timestamp tie 由 id > cursor.id 决定
+    installQueueDatasets(
+      [
+        disputeRow({ ...base, id: "id-asc", dueAt: D, createdAt: C }),
+        disputeRow({ ...base, id: "id-desc", dueAt: D, createdAt: C }),
+      ],
+      [],
+    );
+    const sameKind = await loadAuthorizedDisputeQueue({
+      viewerId: "v1",
+      access: CAMPUS_A_ACCESS,
+      limit: 10,
+      cursor: { dueAt: D, createdAt: C, kind: "RENTAL", id: "id-asc" },
+    });
+    expect(sameKind.items.map((i) => i.disputeId)).toEqual(["id-desc"]);
+  });
+
+  it("§10 multi-page：same dueAt / mixed createdAt·kind·id 全序独立校验", async () => {
+    campusFindMany.mockResolvedValue([{ id: "A" }]);
+    const D = new Date("2030-07-01T00:00:00.000Z");
+    const at = (hour: number, minute: number) =>
+      new Date(Date.UTC(2030, 6, 1, hour, minute));
+    const base = { campusId: "A", campus: { name: "甲校区" }, scopeKey: "CAMPUS:A", initiatorId: "i-1" };
+
+    // createdAt 优先于 kind——不人工把所有 ORDER 排在 RENTAL 前
+    installQueueDatasets(
+      [
+        disputeRow({ ...base, id: "r1", dueAt: D, createdAt: at(10, 0) }),
+        disputeRow({ ...base, id: "r2", dueAt: D, createdAt: at(10, 30) }),
+        disputeRow({ ...base, id: "r3", dueAt: D, createdAt: at(11, 0) }),
+      ],
+      [
+        orderDisputeRow({ ...base, id: "o1", dueAt: D, createdAt: at(10, 0) }),
+        orderDisputeRow({ ...base, id: "o2", dueAt: D, createdAt: at(11, 0) }),
+        orderDisputeRow({ ...base, id: "o3", dueAt: D, createdAt: at(12, 0) }),
+      ],
+    );
+
+    // §12：测试自建 tuple comparator 独立排序（不复用生产 comparator）
+    const KIND_RANK = { ORDER: 0, RENTAL: 1 } as const;
+    const dataset = [
+      { kind: "ORDER", id: "o1", createdAt: at(10, 0) },
+      { kind: "RENTAL", id: "r1", createdAt: at(10, 0) },
+      { kind: "RENTAL", id: "r2", createdAt: at(10, 30) },
+      { kind: "ORDER", id: "o2", createdAt: at(11, 0) },
+      { kind: "RENTAL", id: "r3", createdAt: at(11, 0) },
+      { kind: "ORDER", id: "o3", createdAt: at(12, 0) },
+    ];
+    const expected = dataset
+      .slice()
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          KIND_RANK[a.kind as keyof typeof KIND_RANK] -
+            KIND_RANK[b.kind as keyof typeof KIND_RANK] ||
+          (a.id < b.id ? -1 : 1),
+      )
+      .map((r) => `${r.kind}:${r.id}`);
+
+    const seen: string[] = [];
+    let cursor: ReturnType<typeof decodeDisputeCursor> = null;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await loadAuthorizedDisputeQueue({
+        viewerId: "v1",
+        access: CAMPUS_A_ACCESS,
+        limit: 1,
+        cursor: cursor ?? undefined,
+      });
+      seen.push(...result.items.map((i) => `${i.disputeKind}:${i.disputeId}`));
+      if (!result.nextCursor) break;
+      cursor = decodeDisputeCursor(result.nextCursor);
+      expect(cursor).not.toBeNull();
+    }
+
+    expect(seen.length).toBe(dataset.length);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toEqual(expected);
   });
 
   it("GQ-09：assignment=mine → 两表各自 DB WHERE 内执行", async () => {

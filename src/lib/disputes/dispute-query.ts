@@ -177,13 +177,25 @@ export async function listDisputeQueueCampuses(
 }
 
 /**
- * 单表 keyset 条件（§31 table-specific；统一全序 (dueAt, createdAt, kind, id)）：
- * - 本表 kind == cursor.kind：标准三列 tuple（dueAt > ∨ =∧createdAt > ∨
- *   =∧=∧id >）；
+ * 单表 keyset 条件（§31 table-specific；统一全序 (dueAt, createdAt, kind, id)）。
+ *
+ * tuple contract（冻结，实现必须精确等价）：row (d, c, k, i) 位于 cursor
+ * (D, C, K, I) 之后 iff
+ *   d > D
+ *   ∨ (d == D ∧ c > C)
+ *   ∨ (d == D ∧ c == C ∧ k > K)
+ *   ∨ (d == D ∧ c == C ∧ k == K ∧ i > I)
+ *
+ * kind 只有在 dueAt + createdAt 都相等时才有资格参与排序——任何
+ * `dueAt >= cursor.dueAt` 型捷径都会错误包含 (d == D, c < C) 的已翻页行
+ * （review blocker，禁止回归）。
+ *
+ * - 本表 kind == cursor.kind：标准四元组展开（equal timestamp tie 由
+ *   id > cursor.id 决定）；
  * - 本表 kind > cursor.kind：equal (dueAt, createdAt) 下本表整段都在 cursor
- *   之后 → dueAt >= 即可（createdAt / id 任意）；
+ *   之后（k > K，无 id 约束）→ 三支 OR；注意 (d == D, c < C) 仍必须排除；
  * - 本表 kind < cursor.kind：equal (dueAt, createdAt) 下本表整段都在 cursor
- *   之前 → 只能靠 dueAt / createdAt 前进（不得加 id 条件——否则跨表翻页漏/重）。
+ *   之前 → 只剩前两支（dueAt / createdAt 前进，无 id 条件）。
  * 禁止简单给两张表都 `id > cursor.id`（跨表 pagination 会漏项/重复）。
  */
 function kindAwareKeysetCondition(
@@ -204,7 +216,14 @@ function kindAwareKeysetCondition(
     };
   }
   if (GOVERNANCE_DISPUTE_KIND_ORDER[tableKind] > GOVERNANCE_DISPUTE_KIND_ORDER[cursor.kind]) {
-    return { dueAt: { gte: cursor.dueAt } };
+    return {
+      OR: [
+        { dueAt: { gt: cursor.dueAt } },
+        { dueAt: { equals: cursor.dueAt }, createdAt: { gt: cursor.createdAt } },
+        // equal (dueAt, createdAt)：k > K → 本表所有 id 都位于 cursor 后
+        { dueAt: { equals: cursor.dueAt }, createdAt: { equals: cursor.createdAt } },
+      ],
+    };
   }
   return {
     OR: [

@@ -958,4 +958,122 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8C-02 dispute surfaces（真实 
       expect(detailRightKind.detail.reason).toBe("IT08 普通订单纠纷原因");
     }
   });
+
+  it("IT-09 §11：cross-kind 对抗翻页——cursor 过 ORDER 后，同刻 (D, c<C) RENTAL 绝不重现", async () => {
+    const seller = await createFixtureUser("IT09卖家", campusIds.Q);
+    const buyer = await createFixtureUser("IT09买家", campusIds.Q);
+
+    // same dueAt D；createdAt 错开——kind 仅在 dueAt+createdAt 都相等时参与排序
+    const D = new Date("2030-04-01T00:00:00.000Z");
+    const C = new Date("2030-04-01T12:00:00.000Z");
+    const hour = 60 * 60 * 1000;
+
+    const mkRental = async (name: string, createdAt: Date) => {
+      const o = await createFixtureUser(`${name}出租`, campusIds.Q);
+      const r = await createFixtureUser(`${name}租客`, campusIds.Q);
+      const fixture = await createRentalFixture({ ownerId: o.id, renterId: r.id, campusId: campusIds.Q });
+      return seedRentalDisputeDirectly({
+        orderId: fixture.order.id,
+        initiatorId: r.id,
+        campusId: campusIds.Q,
+        dueAt: D,
+        createdAt,
+      });
+    };
+    const rentalBefore = await mkRental("IT09B", new Date(C.getTime() - hour));
+    const rentalSame = await mkRental("IT09S", C);
+    const rentalAfter = await mkRental("IT09A", new Date(C.getTime() + hour));
+
+    const product = await createProductFixture(seller.id, campusIds.Q);
+    const orderCursorOrder = await createGeneralOrder({
+      type: "PRODUCT",
+      buyerId: buyer.id,
+      sellerId: seller.id,
+      productId: product.id,
+      status: "ACCEPTED",
+    });
+    const orderCursor = await seedOrderDisputeDirectly({
+      orderId: orderCursorOrder.id,
+      initiatorId: buyer.id,
+      campusId: campusIds.Q,
+      dueAt: D,
+      createdAt: C,
+    });
+
+    const reviewer = await requireCampusReviewer("IT09审核员", campusIds.Q);
+    const { loadAuthorizationContext } = await import("@/lib/rbac/service");
+    const { deriveDisputeReviewAccess } = await import("@/lib/disputes/dispute-access");
+    const { encodeDisputeCursor, decodeDisputeCursor, loadAuthorizedDisputeQueue } = await import(
+      "@/lib/disputes/dispute-query"
+    );
+    const access = deriveDisputeReviewAccess(await loadAuthorizationContext(reviewer.id));
+
+    // ── 显式 cursor = ORDER-cursor：limit=1 走到结尾。global truth：
+    // rental-before → order-cursor → rental-same → rental-after；
+    // cursor 过 ORDER 后只能返回 rental-same / rental-after，
+    // (D, c<C) 的 rental-before 绝不可重现（review blocker 回归）
+    const seen: string[] = [];
+    let rawCursor: string | null = encodeDisputeCursor({
+      dueAt: D,
+      createdAt: C,
+      kind: "ORDER",
+      id: orderCursor.id,
+    });
+    for (let i = 0; i < 5 && rawCursor; i += 1) {
+      const decoded = decodeDisputeCursor(rawCursor);
+      expect(decoded).not.toBeNull();
+      const result = await loadAuthorizedDisputeQueue({
+        viewerId: reviewer.id,
+        access,
+        limit: 1,
+        filters: { campusId: campusIds.Q },
+        cursor: decoded!,
+      });
+      seen.push(...result.items.map((item) => `${item.disputeKind}:${item.disputeId}`));
+      rawCursor = result.nextCursor;
+    }
+    expect(seen).toEqual([`RENTAL:${rentalSame.id}`, `RENTAL:${rentalAfter.id}`]);
+    expect(seen).not.toContain(`RENTAL:${rentalBefore.id}`);
+
+    // ── 完整遍历（campus Q 全量，limit=1）：zero duplicate；adversarial 四行
+    // 按独立计算的 canonical tuple 顺序出现（dueAt → createdAt → kind → id；
+    // 测试自建 comparator，不复用生产 comparator）
+    const KIND_RANK = { ORDER: 0, RENTAL: 1 } as const;
+    const adversarial = [
+      { kind: "RENTAL" as const, id: rentalBefore.id, createdAt: new Date(C.getTime() - hour) },
+      { kind: "ORDER" as const, id: orderCursor.id, createdAt: C },
+      { kind: "RENTAL" as const, id: rentalSame.id, createdAt: C },
+      { kind: "RENTAL" as const, id: rentalAfter.id, createdAt: new Date(C.getTime() + hour) },
+    ];
+    const adversarialExpected = adversarial
+      .slice()
+      .sort(
+        (a, b) =>
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          KIND_RANK[a.kind] - KIND_RANK[b.kind] ||
+          (a.id < b.id ? -1 : 1),
+      )
+      .map((r) => `${r.kind}:${r.id}`);
+
+    const allSeen: string[] = [];
+    let walkCursor: Awaited<ReturnType<typeof decodeDisputeCursor>> = null;
+    for (let i = 0; i < 30; i += 1) {
+      const result = await loadAuthorizedDisputeQueue({
+        viewerId: reviewer.id,
+        access,
+        limit: 1,
+        filters: { campusId: campusIds.Q },
+        cursor: walkCursor ?? undefined,
+      });
+      allSeen.push(...result.items.map((item) => `${item.disputeKind}:${item.disputeId}`));
+      if (!result.nextCursor) break;
+      walkCursor = decodeDisputeCursor(result.nextCursor);
+      expect(walkCursor).not.toBeNull();
+      expect(["ORDER", "RENTAL"]).toContain(walkCursor!.kind);
+    }
+
+    expect(new Set(allSeen).size).toBe(allSeen.length);
+    expect(allSeen.filter((s) => adversarialExpected.includes(s))).toEqual(adversarialExpected);
+    expect(allSeen).toContain(`ORDER:${orderCursor.id}`);
+  });
 });
