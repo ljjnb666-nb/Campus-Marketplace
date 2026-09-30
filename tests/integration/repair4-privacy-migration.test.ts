@@ -8,9 +8,21 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 /**
  * MIGRATION-01/02：Repair 4 data-only migration 行为证明（真实 PostgreSQL）。
  *
- * 在临时库上重放全部 pre-migrations → 种子"迁移前"数据形态（历史通知
- * raw free text / 已注销用户的未清理副本）→ 应用本 migration SQL →
- * 逐字段断言确定性回填 → 重复应用同一 SQL 断言幂等（idempotent in effect）。
+ * 在临时库上按历史时间顺序重放：
+ *   1. pre-repair4 migrations（name < NEW_MIGRATION，精确 pre-repair4 schema）
+ *   2. 种子"迁移前"数据形态（历史通知 raw free text / 已注销用户的未清理副本；
+ *      Order create 用最小 select——当前 client 的 RETURNING 含 8B 新列，
+ *      历史 schema 尚不存在）
+ *   3. 应用 repair4 migration SQL（FIRST EXECUTION，必须先于任何
+ *      post-repair4 migration；两者之间不做任何 Prisma 读）
+ *   4. post-repair4 migrations（name > NEW_MIGRATION，时间序安装后续
+ *      schema-only migrations，使最终断言时 schema 与当前 client 匹配）
+ *   5. 逐字段断言确定性回填
+ *   6. 重复应用同一 repair4 SQL 断言幂等（idempotent in effect）
+ *
+ * 冻结不变量：repair4 首次执行必须发生在任何 post-repair4 migration 之前
+ *（historical migration compatibility proof）；禁止
+ * "all migrations except target" 的乱序重放。
  *
  * 冻结合同：
  * - 无启发式作者猜测（全部经 FK / ownership / explicit actor relation 归属）
@@ -73,17 +85,28 @@ function dropTempDatabase(): void {
 
 function replayPreMigrations(tempUrl: string): void {
   const migrationsDir = join(process.cwd(), "prisma", "migrations");
-  // 重放除 NEW_MIGRATION 自身之外的全部 migrations（含时间上晚于它的
-  // schema-only migrations，如 Phase 8B-01 的 Order reservation 列）：
-  // 临时库 schema 必须与当前生成的 Prisma client 兼容（client 的 Order
-  // 模型含全部现行列），同时保留「种子 pre-NEW_MIGRATION 数据形态 →
-  // 应用 NEW_MIGRATION SQL → 断言回填」的冻结合同。晚于 NEW_MIGRATION
-  // 的 migrations 与 repair4 数据回填正交（索引/独立列），不构成依赖。
+  // 只重放 repair4 之前的 migrations：精确 pre-repair4 schema 是
+  // "迁移前数据形态" 的前提；禁止把 post migrations 提前安装。
   const preMigrations = readdirSync(migrationsDir)
-    .filter((name) => /^\d{14}_/.test(name) && name !== NEW_MIGRATION)
+    .filter((name) => /^\d{14}_/.test(name) && name < NEW_MIGRATION)
     .sort();
   expect(preMigrations.length).toBeGreaterThan(0);
   const sql = preMigrations
+    .map((name) => readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"))
+    .join("\n\n");
+  runPrismaDbExecute(sql, tempUrl);
+}
+
+/** 只重放 repair4 之后的 migrations（时间序）：在 repair4 首次执行之后
+ * 安装后续 schema-only migrations，使最终断言时 schema 与当前生成的
+ * Prisma client 匹配（client 的 Order 模型含全部现行列）。 */
+function replayPostMigrations(tempUrl: string): void {
+  const migrationsDir = join(process.cwd(), "prisma", "migrations");
+  const postMigrations = readdirSync(migrationsDir)
+    .filter((name) => /^\d{14}_/.test(name) && name > NEW_MIGRATION)
+    .sort();
+  expect(postMigrations.length).toBeGreaterThan(0);
+  const sql = postMigrations
     .map((name) => readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"))
     .join("\n\n");
   runPrismaDbExecute(sql, tempUrl);
@@ -362,6 +385,8 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
 
       // FINAL CLOSURE BLOCKER A：erased buyer 的 Order.meetingLocation 原值
+      // 最小 select：pre-repair4 历史 schema 尚无 8B reservation 列，当前
+      // client 默认 RETURNING 全部 scalar 会触发 P2022
       await db.order.create({
         data: {
           orderNo: `GOMIG2${randomUUID().slice(0, 6)}`,
@@ -373,6 +398,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
           buyerId: erased.id,
           sellerId: survivor.id,
         },
+        select: { id: true },
       });
 
       // RentalHandoverRecord participant-erasure（renter=erased）
@@ -434,6 +460,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
           categoryId: productCategory.id,
         },
       });
+      // 最小 select（同上：历史 schema 兼容）；order.id 供 review FK 与终态断言
       const order = await db.order.create({
         data: {
           orderNo: `GOMIG${randomUUID().slice(0, 6)}`,
@@ -447,6 +474,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
           sellerId: survivor.id,
           productId: product.id,
         },
+        select: { id: true },
       });
       await db.review.create({
         data: { orderId: order.id, authorId: erased.id, targetUserId: survivor.id, rating: 5, content: "历史评价原文", tags: ["历史"] },
@@ -497,8 +525,16 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         },
       });
 
-      // ---- 应用新 migration SQL ----
+      // ---- 应用新 migration SQL（FIRST EXECUTION：必须先于任何
+      // post-repair4 migration；两者之间不做任何 Prisma 读——历史 schema
+      // 与当前 client 的 Order 列集不匹配）----
       runPrismaDbExecute(newMigrationSql(), tempUrl);
+
+      // ---- 按历史时间序安装 post-repair4 migrations（perf → Phase 8B），
+      // 最终断言时 schema 与当前 Prisma Client 匹配。种子中的两个 General
+      // PRODUCT Order 均为 COMPLETED：8B migration 不会 backfill deadline、
+      // 不触发 PRODUCT PENDING deadline CHECK——两个 migration concern 正交。
+      replayPostMigrations(tempUrl);
 
       // ---- MIGRATION-NOTIFICATION-01：already-erased owner 的 Notification = DELETE ----
       expect(await db.notification.count({ where: { userId: erased.id } })).toBe(0);
