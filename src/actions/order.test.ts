@@ -61,6 +61,8 @@ const {
       buyerId: "user-1",
       sellerId: "seller-1",
       productId: "product-1",
+      // Phase 8B-01：accept 权威的锁内 fresh deadline 谓词
+      productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
     } as Record<string, unknown> | Record<string, unknown>[],
   };
   const transactionClient = {
@@ -257,6 +259,8 @@ describe("order actions", () => {
       buyerId: "user-1",
       sellerId: "seller-1",
       productId: "product-1",
+      // Phase 8B-01：cancellation 权威的锁内 fresh deadline 谓词
+      productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
     };
     txProductUpdateMany.mockReset();
     txServiceListingUpdate.mockReset();
@@ -379,14 +383,18 @@ describe("order actions", () => {
 
     await updateOrderStatus(formData);
 
-    expect(txOrderUpdateMany).toHaveBeenCalledWith({
-      where: { id: "order-1", status: "PENDING" },
-      data: {
-        status: "CANCELLED",
-        completedAt: null,
-        cancelReason: "用户主动取消",
-      },
-    });
+    expect(txOrderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "order-1", status: "PENDING" },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          completedAt: null,
+          cancelReason: "用户主动取消",
+          // PHASE 8B-01：期限内取消记录 CANCELLED resolution（可审计的关闭原因）
+          productReservationResolution: "CANCELLED",
+        }),
+      }),
+    );
     expect(txProductUpdate).toHaveBeenCalledWith({
       where: { id: "product-1" },
       data: { status: "ACTIVE" },
@@ -555,14 +563,36 @@ describe("order actions", () => {
 
     it("lets the seller accept a pending product order", async () => {
       orderFindUnique.mockResolvedValue(orderFixture({}));
+      // PHASE 8B-01：PRODUCT ACCEPTED 委派 acceptProductOrderTx——锁内
+      // fresh Order 行（identity 与 orderFixture 一致 + 未来 deadline）
+      orderLockRowHolder.row = {
+        id: "order-1",
+        type: "PRODUCT",
+        status: "PENDING",
+        buyerId: "buyer-1",
+        sellerId: "user-1",
+        productId: "product-1",
+        productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      };
 
       await updateOrderStatus(statusFormData("ACCEPTED"));
 
-      expect(txOrderUpdateMany).toHaveBeenCalledWith({
-        where: { id: "order-1", status: "PENDING" },
-        data: { status: "ACCEPTED", completedAt: null, cancelReason: null },
-      });
+      // 写入由 canonical 权威完成（resolution ACCEPTED + 既有 accept 通知语义）
+      expect(txOrderUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "order-1", status: "PENDING" },
+          data: expect.objectContaining({
+            status: "ACCEPTED",
+            completedAt: null,
+            cancelReason: null,
+            productReservationResolution: "ACCEPTED",
+          }),
+        }),
+      );
       expect(createNotifications).toHaveBeenCalled();
+      // pair 锁 + Order 行锁 + deadline 内 accept（无 Product 写）
+      expect(txExecuteRaw).toHaveBeenCalledTimes(2);
+      expect(txProductUpdate).not.toHaveBeenCalled();
     });
 
     it("routes ERRAND completion through the canonical errand lifecycle delegation", async () => {
@@ -758,7 +788,9 @@ describe("order actions", () => {
       const badFormData = new FormData();
       badFormData.set("orderId", "");
       await updateOrderStatus(badFormData);
-      expect(orderFindUnique).toHaveBeenCalledTimes(1);
+      // PHASE 8B-01：ACCEPTED 委派新增锁键 pre-read（delegation candidate
+      // 发现 + general fresh read），未知 order 共两次事务内点查、零 Order 写
+      expect(orderFindUnique).toHaveBeenCalledTimes(2);
     });
   });
 });

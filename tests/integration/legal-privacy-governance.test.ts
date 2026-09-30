@@ -488,6 +488,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         orderNo: pendingOrderNo,
         type: "PRODUCT",
         status: "PENDING",
+        // Phase 8B-01 约束：PRODUCT PENDING 必须有 seller 确认截止
+        productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
         amount: "10.00",
         buyerId: exportOwnerId,
         sellerId: otherUserId,

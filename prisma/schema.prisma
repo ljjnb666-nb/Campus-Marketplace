@@ -75,6 +75,15 @@ enum OrderStatus {
   REFUNDED
 }
 
+// Phase 8B-01：PRODUCT PENDING reservation 的关闭原因（为什么 PENDING
+// reservation 被关闭），不是通用 Order lifecycle 状态——EXPIRED 的业务
+// 结果是 Order CANCELLED + 本 resolution，禁止新增 OrderStatus.EXPIRED。
+enum ProductReservationResolution {
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+}
+
 enum PaymentStatus {
   UNPAID
   OFFLINE_PENDING
@@ -610,9 +619,18 @@ model Order {
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
+  // Phase 8B-01：PRODUCT PENDING reservation deadline（seller 确认截止）。
+  // 仅 type=PRODUCT 拥有：非 PRODUCT 三字段恒 NULL；accept/cancel/expire
+  // 写入 (resolvedAt, resolution) 二元组；EXPIRED = 超时系统关闭。
+  productReservationExpiresAt  DateTime?
+  productReservationResolvedAt DateTime?
+  productReservationResolution ProductReservationResolution?
+
   @@index([buyerId, createdAt])
   @@index([sellerId, createdAt])
   @@index([type, status])
+  // Phase 9 scheduler 发现 PRODUCT PENDING expiresAt <= now 的预留扫描索引
+  @@index([type, status, productReservationExpiresAt])
 }
 
 model Conversation {

@@ -2,7 +2,10 @@ import type { Prisma } from "@prisma/client";
 
 import { transitionErrandOrderTx, type ErrandLifecycleSeams } from "@/lib/errand-lifecycle";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
-import { cancelProductOrderTx } from "@/lib/product-order-lifecycle";
+import {
+  acceptProductOrderTx,
+  cancelProductOrderTx,
+} from "@/lib/product-order-lifecycle";
 import { createNotifications } from "@/repositories/notification-repository";
 
 /**
@@ -26,6 +29,12 @@ import { createNotifications } from "@/repositories/notification-repository";
  * 入口处发现 candidate 后委派唯一 canonical errand lifecycle authority
  * （participant locks → ErrandTask 行锁 → Order 行锁 → pair 谓词 → 写入）。
  * general canTransition 从此不拥有任何 ERRAND 业务 transition。
+ *
+ * PHASE 8B-01：PRODUCT + ACCEPTED 同样不再走 general 路径（无法与
+ * reservation expiry 以同一 deadline 谓词竞争），委派唯一权威实现
+ * acceptProductOrderTx（sorted participant 锁 → Order 行锁 → fresh
+ * deadline 判定：期限内 ACCEPTED / 超期同一事务 materialize EXPIRED）。
+ * general canTransition 从此不拥有任何 PRODUCT ACCEPTED transition。
  *
  * seams 仅测试注入。
  */
@@ -114,6 +123,48 @@ export async function updateOrderStatusTx(
     // 非 ERRAND（或缺失 errandTaskId 的异常行）→ 既有 general 路径（fail closed）
   }
 
+  // PHASE 8B-01：PRODUCT ACCEPTED 委派 canonical accept 权威（期限内
+  // ACCEPTED；超期同一事务 materialize EXPIRED 并返回非 null outcome，
+  // 确保 action 端 revalidate views——绝不能让页面停留 stale PENDING）。
+  // candidate pre-read 只用于锁键发现与分流（type/buyerId/sellerId/
+  // productId），不是 status/participant/deadline 权威——锁后由
+  // acceptProductOrderTx 重读复核。必须在任何 actor-only USER 锁之前委派
+  // （与 PRODUCT CANCELLED 当前 delegation 模式一致），避免先取 actor 锁
+  // 再追加参与者锁破坏全局 sorted lock discipline。
+  if (input.requestedStatus === "ACCEPTED") {
+    const candidate = await tx.order.findUnique({
+      where: { id: orderId },
+      select: { type: true, buyerId: true, sellerId: true, productId: true },
+    });
+
+    if (candidate?.type === "PRODUCT") {
+      const acceptance = await acceptProductOrderTx(
+        tx,
+        actorUserId,
+        orderId,
+        {
+          buyerId: candidate.buyerId,
+          sellerId: candidate.sellerId,
+          productId: candidate.productId,
+        },
+        seams,
+      );
+
+      if (!acceptance) {
+        return null;
+      }
+
+      // EXPIRED materialization 同样非 null：revalidate 必须发生
+      return {
+        productId: candidate.productId,
+        serviceListingId: null,
+        errandTaskId: null,
+        isBuyer: false,
+      };
+    }
+    // SERVICE ACCEPTED → 既有 general actor-only 路径
+  }
+
   // AUDIT2-RB01：PRODUCT CANCELLED 委派 canonical 参与方锁路径。candidate
   // pre-read 只用于锁键发现（buyerId/sellerId/productId/type 分流），
   // 不是 participant/status 权威——锁后由 cancelProductOrderTx 重读复核。
@@ -175,10 +226,12 @@ export async function updateOrderStatusTx(
   const requestedStatus = input.requestedStatus;
 
   const canTransition =
+    // PHASE 8B-01：PRODUCT ACCEPTED 已在入口委派 acceptProductOrderTx；
+    // general 路径只剩 SERVICE ACCEPTED（defensive：不可达 PRODUCT）
     (requestedStatus === "ACCEPTED" &&
       isSeller &&
       order.status === "PENDING" &&
-      (order.type === "PRODUCT" || order.type === "SERVICE")) ||
+      order.type === "SERVICE") ||
     // AUDIT2-RB02：ERRAND IN_PROGRESS / COMPLETED 已在入口委派 canonical
     // errand lifecycle；general 路径不再拥有任何 ERRAND 业务 transition
     (requestedStatus === "IN_PROGRESS" &&

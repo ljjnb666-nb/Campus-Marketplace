@@ -241,6 +241,9 @@ async function main() {
           productId: index < 4 ? products[index].id : null,
           errandTaskId: index >= 4 && index < 7 ? errands[index - 4].id : null,
           serviceListingId: index >= 7 ? services[index - 7].id : null,
+          // Phase 8B-01 约束：PRODUCT PENDING 必须有 seller 确认截止
+          productReservationExpiresAt:
+            index < 4 ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
         },
       }),
     ),
