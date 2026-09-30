@@ -140,6 +140,170 @@ type LockedErrandRow = {
   accepterId: string | null;
 };
 
+export type LockedOrderDisputeContext = {
+  /** 锁内 fresh 权威 Order 行（调用方已 FOR UPDATE 并完成全部 fresh 谓词） */
+  order: LockedOrderRow;
+  /** ERRAND canonical Task 行（PRODUCT / SERVICE 恒 null） */
+  lockedErrand: LockedErrandRow | null;
+  initiatorId: string;
+  reason: string;
+  evidencePhotos: string[];
+  /** 测试 seam：campus/active-dispute 检查之后、首个写入之前（生产不传） */
+  racePoint?: OrderDisputeRacePoint;
+  afterFreshChecks?: (tx: Prisma.TransactionClient) => Promise<void>;
+};
+
+/**
+ * createOrderDisputeFromLockedOrderTx：锁后 dispute 创建的共享内核
+ * （Phase 8D-01 refactor 自 initiateOrderDisputeTx 原步骤 6-8 抽出，语义
+ * 100% 不变——同一 campus snapshot / active dispute 检查 / dispute + holds +
+ * Order IN_DISPUTE + 通知写入序列，禁止任何调用方复制第二套该逻辑）。
+ *
+ * 合同：调用方必须已持有完整 sorted participant USER 锁集 + Order
+ * FOR UPDATE（ERRAND 另 ErrandTask 先序行锁），并完成参与者 / type-FK /
+ * disputable 状态 fresh 校验。本函数只做：
+ *   campus snapshot（交易标的归属，§immutable）→ active dispute 检查
+ *   → dispute + 双方 DataHold + Order IN_DISPUTE（+ ERRAND DISPUTED）+ 通知。
+ */
+export async function createOrderDisputeFromLockedOrderTx(
+  tx: Prisma.TransactionClient,
+  context: LockedOrderDisputeContext,
+): Promise<
+  | { error: string }
+  | {
+      success: true;
+      disputeId: string;
+      productId: string | null;
+      serviceListingId: string | null;
+      errandTaskId: string | null;
+    }
+> {
+  const { order, lockedErrand } = context;
+
+  // ---- campus scope immutable snapshot（§15：来源唯一 = 交易标的
+  // 归属 campus；User.campusId / initiator current campus 禁用。campusId 为
+  // immutable 业务事实，无写路径，plain read 足够，不加行锁）----
+  let campusId: string | null = null;
+  if (order.type === "PRODUCT" && order.productId) {
+    const product = await tx.product.findUnique({
+      where: { id: order.productId },
+      select: { campusId: true },
+    });
+    campusId = product?.campusId ?? null;
+  } else if (order.type === "SERVICE" && order.serviceListingId) {
+    const service = await tx.serviceListing.findUnique({
+      where: { id: order.serviceListingId },
+      select: { campusId: true },
+    });
+    campusId = service?.campusId ?? null;
+  } else if (order.type === "ERRAND" && lockedErrand) {
+    campusId = lockedErrand.campusId;
+  }
+  if (!campusId) {
+    return { error: "无效请求" };
+  }
+
+  // ---- active dispute 检查（§29；DB partial unique 继续兜底）----
+  const activeDispute = await tx.orderDispute.findFirst({
+    where: { orderId: order.id, status: { in: [...DISPUTE_ACTIVE_STATUSES] } },
+    select: { id: true },
+  });
+  if (activeDispute) {
+    return { error: "该订单已有进行中的纠纷" };
+  }
+
+  if (context.racePoint) {
+    await context.racePoint(tx);
+  }
+  if (context.afterFreshChecks) {
+    await context.afterFreshChecks(tx);
+  }
+
+  // ---- dispute + holds + order/errand 状态 + 通知（原子）----
+  const now = new Date();
+  const dispute = await tx.orderDispute.create({
+    data: {
+      orderId: order.id,
+      initiatorId: context.initiatorId,
+      reason: context.reason,
+      evidencePhotos: context.evidencePhotos,
+      status: "OPEN",
+      campusId,
+      scopeKey: disputeCampusScopeKey(campusId),
+      openedFromOrderStatus: order.status as never,
+      openedFromErrandStatus:
+        order.type === "ERRAND" && lockedErrand
+          ? (lockedErrand.status as never)
+          : null,
+      dueAt: computeDisputeDueAt(now),
+      createdAt: now,
+    },
+    select: { id: true },
+  });
+
+  // buyer + seller 各一条 source-linked DISPUTE hold（TxLocked seam：本事务
+  // 已持有双方 subject 锁；partial unique 兜底并发重复 → 幂等收敛）
+  await createHoldTxLocked(tx, {
+    type: "DISPUTE",
+    subjectType: "USER",
+    subjectId: order.buyerId,
+    reasonCode: ORDER_DISPUTE_HOLD_REASON_CODE,
+    sourceType: DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE,
+    sourceId: dispute.id,
+  });
+  await createHoldTxLocked(tx, {
+    type: "DISPUTE",
+    subjectType: "USER",
+    subjectId: order.sellerId,
+    reasonCode: ORDER_DISPUTE_HOLD_REASON_CODE,
+    sourceType: DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE,
+    sourceId: dispute.id,
+  });
+
+  await tx.order.update({
+    where: { id: order.id },
+    data: { status: "IN_DISPUTE" },
+  });
+
+  if (order.type === "ERRAND" && lockedErrand) {
+    await tx.errandTask.update({
+      where: { id: lockedErrand.id },
+      data: { status: "DISPUTED" },
+    });
+  }
+
+  // generic system copy（§35：禁止 reason / title / meetingLocation / note）
+  const isBuyerInitiator = order.buyerId === context.initiatorId;
+  await createNotifications(tx, [
+    {
+      userId: order.buyerId,
+      orderId: order.id,
+      type: "ORDER",
+      title: isBuyerInitiator ? "订单纠纷已提交" : "订单进入纠纷流程",
+      content: isBuyerInitiator
+        ? "你的订单已进入纠纷处理流程。"
+        : "该订单已被交易对方发起纠纷，请留意平台处理进展。",
+    },
+    {
+      userId: order.sellerId,
+      orderId: order.id,
+      type: "ORDER",
+      title: isBuyerInitiator ? "订单进入纠纷流程" : "订单纠纷已提交",
+      content: isBuyerInitiator
+        ? "该订单已被交易对方发起纠纷，请留意平台处理进展。"
+        : "你的订单已进入纠纷处理流程。",
+    },
+  ]);
+
+  return {
+    success: true,
+    disputeId: dispute.id,
+    productId: order.productId,
+    serviceListingId: order.serviceListingId,
+    errandTaskId: order.errandTaskId,
+  };
+}
+
 /**
  * initiateOrderDisputeTx：General Order dispute 创建的唯一权威。
  *
@@ -292,126 +456,18 @@ export async function initiateOrderDisputeTx(
     return { error: "无效请求" };
   }
 
-  // ---- 步骤 6：campus scope immutable snapshot（§15：来源唯一 = 交易标的
-  // 归属 campus；User.campusId / initiator current campus 禁用。campusId 为
-  // immutable 业务事实，无写路径，plain read 足够，不加行锁）----
-  let campusId: string | null = null;
-  if (order.type === "PRODUCT" && order.productId) {
-    const product = await tx.product.findUnique({
-      where: { id: order.productId },
-      select: { campusId: true },
-    });
-    campusId = product?.campusId ?? null;
-  } else if (order.type === "SERVICE" && order.serviceListingId) {
-    const service = await tx.serviceListing.findUnique({
-      where: { id: order.serviceListingId },
-      select: { campusId: true },
-    });
-    campusId = service?.campusId ?? null;
-  } else if (order.type === "ERRAND" && lockedErrand) {
-    campusId = lockedErrand.campusId;
-  }
-  if (!campusId) {
-    return { error: "无效请求" };
-  }
-
-  // ---- 步骤 7：active dispute 检查（§29；DB partial unique 继续兜底）----
-  const activeDispute = await tx.orderDispute.findFirst({
-    where: { orderId: input.orderId, status: { in: [...DISPUTE_ACTIVE_STATUSES] } },
-    select: { id: true },
+  // ---- 步骤 6-11（Phase 8D-01 refactor：共享内核，语义 100% 不变）----
+  // campus snapshot → active dispute 检查 → dispute + holds + Order
+  // IN_DISPUTE（+ ERRAND DISPUTED）+ 通知，全部委托唯一内核
+  // createOrderDisputeFromLockedOrderTx（racePoint / afterFreshChecks seam
+  // 时序原样保留：均在 campus/active-dispute 检查之后、首个写入之前）。
+  return createOrderDisputeFromLockedOrderTx(tx, {
+    order,
+    lockedErrand,
+    initiatorId: input.userId,
+    reason: input.reason,
+    evidencePhotos: input.evidencePhotos,
+    racePoint: input.racePoint,
+    afterFreshChecks: seams?.afterFreshChecks,
   });
-  if (activeDispute) {
-    return { error: "该订单已有进行中的纠纷" };
-  }
-
-  if (input.racePoint) {
-    await input.racePoint(tx);
-  }
-  if (seams?.afterFreshChecks) {
-    await seams.afterFreshChecks(tx);
-  }
-
-  // ---- 步骤 8-11：dispute + holds + order/errand 状态 + 通知（原子）----
-  const now = new Date();
-  const dispute = await tx.orderDispute.create({
-    data: {
-      orderId: input.orderId,
-      initiatorId: input.userId,
-      reason: input.reason,
-      evidencePhotos: input.evidencePhotos,
-      status: "OPEN",
-      campusId,
-      scopeKey: disputeCampusScopeKey(campusId),
-      openedFromOrderStatus: order.status as never,
-      openedFromErrandStatus:
-        order.type === "ERRAND" && lockedErrand
-          ? (lockedErrand.status as never)
-          : null,
-      dueAt: computeDisputeDueAt(now),
-      createdAt: now,
-    },
-    select: { id: true },
-  });
-
-  // buyer + seller 各一条 source-linked DISPUTE hold（TxLocked seam：本事务
-  // 已持有双方 subject 锁；partial unique 兜底并发重复 → 幂等收敛）
-  await createHoldTxLocked(tx, {
-    type: "DISPUTE",
-    subjectType: "USER",
-    subjectId: order.buyerId,
-    reasonCode: ORDER_DISPUTE_HOLD_REASON_CODE,
-    sourceType: DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE,
-    sourceId: dispute.id,
-  });
-  await createHoldTxLocked(tx, {
-    type: "DISPUTE",
-    subjectType: "USER",
-    subjectId: order.sellerId,
-    reasonCode: ORDER_DISPUTE_HOLD_REASON_CODE,
-    sourceType: DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE,
-    sourceId: dispute.id,
-  });
-
-  await tx.order.update({
-    where: { id: input.orderId },
-    data: { status: "IN_DISPUTE" },
-  });
-
-  if (order.type === "ERRAND" && lockedErrand) {
-    await tx.errandTask.update({
-      where: { id: lockedErrand.id },
-      data: { status: "DISPUTED" },
-    });
-  }
-
-  // generic system copy（§35：禁止 reason / title / meetingLocation / note）
-  const isBuyerInitiator = order.buyerId === input.userId;
-  await createNotifications(tx, [
-    {
-      userId: order.buyerId,
-      orderId: order.id,
-      type: "ORDER",
-      title: isBuyerInitiator ? "订单纠纷已提交" : "订单进入纠纷流程",
-      content: isBuyerInitiator
-        ? "你的订单已进入纠纷处理流程。"
-        : "该订单已被交易对方发起纠纷，请留意平台处理进展。",
-    },
-    {
-      userId: order.sellerId,
-      orderId: order.id,
-      type: "ORDER",
-      title: isBuyerInitiator ? "订单进入纠纷流程" : "订单纠纷已提交",
-      content: isBuyerInitiator
-        ? "该订单已被交易对方发起纠纷，请留意平台处理进展。"
-        : "你的订单已进入纠纷处理流程。",
-    },
-  ]);
-
-  return {
-    success: true,
-    disputeId: dispute.id,
-    productId: order.productId,
-    serviceListingId: order.serviceListingId,
-    errandTaskId: order.errandTaskId,
-  };
 }

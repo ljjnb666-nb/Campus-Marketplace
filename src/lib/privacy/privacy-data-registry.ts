@@ -393,6 +393,13 @@ export const LISTING_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
   // （cleanup provenance）。
   field("RentalHandoverRecord", "photos", STORAGE_INTERNAL_FIELD),
   field("RentalReturnRecord", "photos", STORAGE_INTERNAL_FIELD),
+  // ---- OrderMeetup（Phase 8D-01：proposedById 唯一作者）。custom location
+  // 快照是 user-authored 非空列（erasure = REDACT 哨兵，作者注销后不得保留
+  // 明文）；custom 判定依据 immutable locationSource（RB01）而非可空的
+  // meetupPointId——MeetupPoint 行删除后该列被 SET NULL，来源语义仍在。
+  // scheduledAt/status/no-show provenance 等交易结构字段保留（row =
+  // transaction provenance）。
+  field("OrderMeetup", "locationTextSnapshot", REDACTED_USER_CONTENT),
 ];
 
 // ============================================================
@@ -417,6 +424,10 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
   { model: "CampusVerificationPolicy", field: "contentHash", because: "策略完整性哈希" },
   { model: "RentalOrder", field: "cancellationReason", because: "机器可读取消类别枚举（非自由文本）" },
   { model: "Report", field: "reason", because: "机器可读举报类别枚举（非自由文本）" },
+  // Phase 8D-01：见面点 catalog 是平台参考数据（ Campus.name 同构；8D-01 无
+  // admin UI，fixture/未来治理面管理），不是任何用户的自由文本面
+  { model: "MeetupPoint", field: "name", because: "见面点公开名称（平台参考数据）" },
+  { model: "MeetupPoint", field: "locationText", because: "见面点公开位置描述（平台参考数据）" },
 ];
 
 // ============================================================
@@ -504,6 +515,13 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   // initiateGeneralOrderDispute（orderDisputeSchema.reason）开放——
   // writer/source lockstep 登记（明确推进 source inventory，非 allowlist hack）
   { model: "OrderDispute", field: "reason", sources: ["initiateOrderDisputeTx.reason", "initiateGeneralOrderDispute.reason"] },
+  // Phase 8D-01：真实用户输入是 ProposeOrderMeetupInput.locationText
+  // （canonical writer proposeOrderMeetupTx 消费并固化为 persisted derived
+  // snapshot locationTextSnapshot；RB01 source-truth：登记输入属性本身，
+  // 不登记不存在的 input property）。Phase 8D-02 表单入口开放时补充其
+  // schema source。catalog 来源（locationSource=MEETUP_POINT）不是 user
+  // input，不改写本条。
+  { model: "OrderMeetup", field: "locationTextSnapshot", sources: ["proposeOrderMeetupTx.locationText"] },
   { model: "BlockedUser", field: "reason", sources: ["blockUserAction.reason"] },
 ];
 
@@ -611,6 +629,10 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "Order.note",
   "Order.cancelReason",
   "Order.meetingLocation",
+  // Phase 8D-01：custom location 快照 erasure 执行（account-erasure 按
+  // proposedById + locationSource=CUSTOM 精确 REDACT——RB01：不用可空的
+  // meetupPointId 推断来源）
+  "OrderMeetup.locationTextSnapshot",
   "RentalOrder.renterNote",
   "RentalOrder.cancellationNote",
   "RentalOrder.pickupLocationSnapshot",
@@ -658,6 +680,8 @@ export const ERASURE_IMPLEMENTATION_MODELS: ReadonlySet<string> = new Set([
   "RentalUnavailablePeriod",
   "RentalReturnRecord",
   "RentalHandoverRecord",
+  // Phase 8D-01：meetup custom location 快照（proposedById 唯一作者）
+  "OrderMeetup",
 ]);
 
 /** 经外部审计批准的保留例外（本轮 = 空；新增必须附审计证据） */

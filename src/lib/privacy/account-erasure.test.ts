@@ -66,6 +66,10 @@ const txStub = {
   orderDispute: {
     updateMany: vi.fn(),
   },
+  // Phase 8D-01：meetup custom location 快照清理（proposedById 归属）
+  orderMeetup: {
+    updateMany: vi.fn(),
+  },
   rentalDispute: {
     updateMany: vi.fn(),
   },
