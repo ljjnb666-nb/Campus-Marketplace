@@ -73,8 +73,14 @@ function dropTempDatabase(): void {
 
 function replayPreMigrations(tempUrl: string): void {
   const migrationsDir = join(process.cwd(), "prisma", "migrations");
+  // 重放除 NEW_MIGRATION 自身之外的全部 migrations（含时间上晚于它的
+  // schema-only migrations，如 Phase 8B-01 的 Order reservation 列）：
+  // 临时库 schema 必须与当前生成的 Prisma client 兼容（client 的 Order
+  // 模型含全部现行列），同时保留「种子 pre-NEW_MIGRATION 数据形态 →
+  // 应用 NEW_MIGRATION SQL → 断言回填」的冻结合同。晚于 NEW_MIGRATION
+  // 的 migrations 与 repair4 数据回填正交（索引/独立列），不构成依赖。
   const preMigrations = readdirSync(migrationsDir)
-    .filter((name) => /^\d{14}_/.test(name) && name < NEW_MIGRATION)
+    .filter((name) => /^\d{14}_/.test(name) && name !== NEW_MIGRATION)
     .sort();
   expect(preMigrations.length).toBeGreaterThan(0);
   const sql = preMigrations
