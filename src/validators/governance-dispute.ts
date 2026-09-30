@@ -34,6 +34,18 @@ export const disputeQueueFilterSchema = z.object({
 
 export type DisputeQueueFilterInput = z.infer<typeof disputeQueueFilterSchema>;
 
+/**
+ * Phase 8C-02：governance dispute 操作/队列的显式 discriminator。
+ * RentalDispute 与 OrderDispute 是两个独立 aggregate——禁止通过 ID 格式 /
+ * Order type 猜测 / 查表先后推断。
+ * 旧 Rental form contract 兼容：missing → RENTAL（undefined 时生效）；
+ * 所有新渲染 form 必须显式提交；非法值（非 null 且不在枚举内）parse 失败，
+ * 由 action 映射统一 deny。
+ */
+export const governanceDisputeKindSchema = z.enum(["RENTAL", "ORDER"]).default("RENTAL");
+
+export type GovernanceDisputeKindInput = z.infer<typeof governanceDisputeKindSchema>;
+
 export const governanceDisputeClaimSchema = z.object({
   disputeId: z.string().trim().min(1, "缺少纠纷 id"),
 });

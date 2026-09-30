@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { DISPUTE_STATUS_LABELS } from "@/constants/dispute";
+import { DISPUTE_KIND_FILTER_LABELS, DISPUTE_STATUS_LABELS } from "@/constants/dispute";
 import { requireDisputeReviewer } from "@/lib/disputes/dispute-access";
 import {
   decodeDisputeCursor,
@@ -9,6 +9,7 @@ import {
   DISPUTE_QUEUE_DEFAULT_PAGE_SIZE,
   type DisputeCursor,
   type DisputeQueueFilters,
+  type GovernanceDisputeKind,
 } from "@/lib/disputes/dispute-query";
 import { disputeQueueFilterSchema, disputeQueueLimitSchema } from "@/validators/governance-dispute";
 
@@ -32,13 +33,16 @@ function readParam(params: Record<string, string | string[] | undefined>, key: s
 }
 
 /**
- * Phase 7G 纠纷运营队列（授权在 DB 查询内；exact-pair，directive 冻结）。
+ * Phase 7G 纠纷运营队列；Phase 8C-02 起为 RentalDispute + OrderDispute
+ * 统一交易纠纷队列（授权在 DB 查询内；exact-pair，directive 冻结）。
  * - 队列行仅 triage 最小面：无 reason / evidence / adminNote / email 等
- *   （queue privacy DTO 合同）；
- * - 排序 = dueAt ASC, createdAt ASC, id ASC（SLA 优先；canonical keyset cursor）；
- * - 所有 filter 恒 AND 在授权谓词之内（不能通过 filter 扩大授权范围）；
- * - overdue = active ∧ dueAt < now（只读计算，零自动执法——auto RESOLVED/
- *   auto CLOSED/auto restriction/auto suspension 均为冻结禁区）。
+ *   （queue privacy DTO 合同，union 两表不削弱 Phase 7G contract）；
+ * - 每行显式 disputeKind discriminator + 交易类型徽标（不通过标题猜 domain）；
+ * - 排序 = dueAt ASC, createdAt ASC, kind(ORDER<RENTAL) ASC, id ASC
+ *   （SLA 优先；canonical 4-tuple keyset cursor）；
+ * - 所有 filter（含 kind）恒 AND 在授权谓词之内；非法 filter 值 = 未提供
+ *   （filter 是收敛语义，safe ignore 不改变授权范围）；
+ * - overdue = active ∧ dueAt < now（只读计算，零自动执法）。
  */
 export default async function GovernanceDisputesPage({
   searchParams,
@@ -91,6 +95,15 @@ export default async function GovernanceDisputesPage({
       }
     : {};
 
+  // kind 过滤独立解析：invalid kind = safe ignore（与其余 filter 语义一致）；
+  // RENTAL/ORDER 只是收敛可见集合，不能扩大授权范围。
+  let kindFilter: GovernanceDisputeKind | undefined;
+  const rawKind = readParam(params, "kind");
+  if (rawKind === "RENTAL" || rawKind === "ORDER") {
+    kindFilter = rawKind;
+  }
+  filters.kind = kindFilter;
+
   const page = cursorInvalid
     ? { items: [], nextCursor: null }
     : await loadAuthorizedDisputeQueue({
@@ -110,6 +123,7 @@ export default async function GovernanceDisputesPage({
       status: filters.status,
       assignment: filters.assignment,
       overdue: filters.overdueOnly ? "1" : undefined,
+      kind: filters.kind,
       limit: String(limit),
       ...overrides,
     };
@@ -128,7 +142,7 @@ export default async function GovernanceDisputesPage({
       <div className="mb-8">
         <h1 className="text-3xl font-semibold text-slate-950">纠纷处理</h1>
         <p className="mt-2 text-sm text-slate-600">
-          按办理时限排序的租赁纠纷运营队列。纠纷处理结果不构成责任认定，处罚须走执法流程。
+          按办理时限排序的交易纠纷运营队列（租赁 + 商品 + 服务 + 跑腿）。纠纷处理结果不构成责任认定，处罚须走执法流程。
         </p>
       </div>
 
@@ -138,6 +152,21 @@ export default async function GovernanceDisputesPage({
         action="/governance/disputes"
         className="mb-6 flex flex-wrap items-end gap-3 rounded-[24px] border border-slate-200 bg-white p-4"
       >
+        <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
+          纠纷类型
+          <select
+            name="kind"
+            defaultValue={filters.kind ?? ""}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-slate-400"
+          >
+            <option value="">全部</option>
+            {Object.entries(DISPUTE_KIND_FILTER_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="flex flex-col gap-1 text-xs font-medium text-slate-600">
           校区
           <select
@@ -214,12 +243,15 @@ export default async function GovernanceDisputesPage({
         <div className="grid gap-4">
           {page.items.map((item) => (
             <article
-              key={item.disputeId}
+              key={`${item.disputeKind}-${item.disputeId}`}
               className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm"
             >
               <div className="flex flex-wrap items-center gap-3">
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                   {DISPUTE_STATUS_LABELS[item.status]}
+                </span>
+                <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+                  {item.transactionKindLabel}
                 </span>
                 <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
                   校区：{item.campusName}
@@ -244,7 +276,7 @@ export default async function GovernanceDisputesPage({
                 </div>
                 <div className="space-y-3">
                   <Link
-                    href={`/governance/disputes/${item.disputeId}`}
+                    href={`/governance/disputes/${item.disputeId}?kind=${item.disputeKind}`}
                     className="block rounded-full border border-slate-200 px-4 py-2 text-center text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-950"
                   >
                     查看详情

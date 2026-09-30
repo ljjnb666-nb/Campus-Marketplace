@@ -70,13 +70,21 @@ function Feedback({ state }: { state: GovernanceDisputeActionState }) {
   return null;
 }
 
+/**
+ * Phase 8C-02：显式 dispute discriminator——所有 governance dispute forms
+ * 必须显式提交 disputeKind（hidden field）；禁止 ORDER 复制第二套 forms。
+ */
+export type GovernanceDisputeKindProp = "RENTAL" | "ORDER";
+
 /** 纠纷领用（self claim）。已被他人领用时由域服务 fail closed 并回传文案。 */
 export function ClaimDisputeForm({
   action,
   disputeId,
+  disputeKind,
 }: {
   action: (formData: FormData) => Promise<GovernanceDisputeActionState>;
   disputeId: string;
+  disputeKind: GovernanceDisputeKindProp;
 }) {
   const [state, formAction] = useActionState(
     async (_prev: GovernanceDisputeActionState, formData: FormData) => action(formData),
@@ -86,6 +94,7 @@ export function ClaimDisputeForm({
   return (
     <form action={formAction} className="space-y-3" aria-label="领用纠纷">
       <input type="hidden" name="disputeId" value={disputeId} />
+      <input type="hidden" name="disputeKind" value={disputeKind} />
       <SubmitButton label="领用处理" pendingLabel="提交中..." variant="primary" />
       <Feedback state={state} />
     </form>
@@ -96,9 +105,11 @@ export function ClaimDisputeForm({
 export function ReleaseDisputeForm({
   action,
   disputeId,
+  disputeKind,
 }: {
   action: (formData: FormData) => Promise<GovernanceDisputeActionState>;
   disputeId: string;
+  disputeKind: GovernanceDisputeKindProp;
 }) {
   const [state, formAction] = useActionState(
     async (_prev: GovernanceDisputeActionState, formData: FormData) => action(formData),
@@ -108,6 +119,7 @@ export function ReleaseDisputeForm({
   return (
     <form action={formAction} className="space-y-3" aria-label="释放纠纷">
       <input type="hidden" name="disputeId" value={disputeId} />
+      <input type="hidden" name="disputeKind" value={disputeKind} />
       <SubmitButton label="释放领用" pendingLabel="提交中..." variant="secondary" />
       <Feedback state={state} />
     </form>
@@ -157,10 +169,12 @@ export function DisputeDecisionForms({
   resolveAction,
   closeAction,
   disputeId,
+  disputeKind,
 }: {
   resolveAction: (formData: FormData) => Promise<GovernanceDisputeActionState>;
   closeAction: (formData: FormData) => Promise<GovernanceDisputeActionState>;
   disputeId: string;
+  disputeKind: GovernanceDisputeKindProp;
 }) {
   const [resolveState, resolveFormAction] = useActionState(
     async (_prev: GovernanceDisputeActionState, formData: FormData) => resolveAction(formData),
@@ -180,6 +194,7 @@ export function DisputeDecisionForms({
       >
         <h3 className="text-sm font-semibold text-slate-900">解决纠纷</h3>
         <input type="hidden" name="disputeId" value={disputeId} />
+        <input type="hidden" name="disputeKind" value={disputeKind} />
         <label className="flex flex-col gap-2 text-sm">
           处理结果
           <select
@@ -206,6 +221,7 @@ export function DisputeDecisionForms({
       >
         <h3 className="text-sm font-semibold text-slate-900">关闭纠纷</h3>
         <input type="hidden" name="disputeId" value={disputeId} />
+        <input type="hidden" name="disputeKind" value={disputeKind} />
         <ResolutionActionSelect />
         <AdminNoteInput />
         <SubmitButton label="关闭纠纷" pendingLabel="提交中..." variant="secondary" />

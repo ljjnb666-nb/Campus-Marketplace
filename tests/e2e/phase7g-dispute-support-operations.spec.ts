@@ -236,7 +236,8 @@ test("7G-E2E01 租客发起纠纷 → 订单 IN_DISPUTE → campus reviewer 见�
   await expect(reviewerPage.getByRole("heading", { name: "纠纷处理" })).toBeVisible();
   // Phase 2 已知双渲染坑：软导航瞬间同元素短暂成对出现 → 一律 .first()
   const detailLink = reviewerPage
-    .locator(`a[href="/governance/disputes/${dispute.id}"]`)
+    // Phase 8C-02：queue 链接恒显式携带 kind（RENTAL）
+    .locator(`a[href="/governance/disputes/${dispute.id}?kind=RENTAL"]`)
     .first();
   await expect(detailLink).toBeVisible();
 
