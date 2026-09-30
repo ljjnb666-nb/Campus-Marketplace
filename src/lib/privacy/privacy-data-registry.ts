@@ -500,9 +500,10 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   { model: "Appeal", field: "statement", sources: ["appealFormSchema.statement"] },
   { model: "Report", field: "detail", sources: ["reportFormSchema.detail"] },
   { model: "RentalDispute", field: "reason", sources: ["initiateDisputeSchema.reason"] },
-  // Phase 8C-01：domain writer 已存在（UI 8C-02 开放）——source 指向
-  // canonical 领域函数入参
-  { model: "OrderDispute", field: "reason", sources: ["initiateOrderDisputeTx.reason"] },
+  // Phase 8C-01：domain writer 已存在；Phase 8C-02：生产用户入口
+  // initiateGeneralOrderDispute（orderDisputeSchema.reason）开放——
+  // writer/source lockstep 登记（明确推进 source inventory，非 allowlist hack）
+  { model: "OrderDispute", field: "reason", sources: ["initiateOrderDisputeTx.reason", "initiateGeneralOrderDispute.reason"] },
   { model: "BlockedUser", field: "reason", sources: ["blockUserAction.reason"] },
 ];
 

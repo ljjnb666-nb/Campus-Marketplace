@@ -224,6 +224,11 @@ export type ResolveOrderDisputeResult = {
   orderStatus: string;
   errandStatus: string | null;
   releasedHolds: number;
+  /** locked authoritative Order 的 type-FK 上下文（Phase 8C-02：仅供
+   * action 层 revalidateOrderViews，禁止事务外二次 authority read） */
+  productId: string | null;
+  serviceListingId: string | null;
+  errandTaskId: string | null;
 };
 
 /**
@@ -285,6 +290,7 @@ type TerminalOrderRow = {
   buyerId: string;
   sellerId: string;
   productId: string | null;
+  serviceListingId: string | null;
   errandTaskId: string | null;
 };
 
@@ -352,7 +358,7 @@ async function resolveOrderDisputeTxLocked(
   const lockedErrand = errandRows[0] ?? null;
 
   const orderRows = await tx.$queryRaw<TerminalOrderRow[]>`
-    SELECT "id", "type", "status", "buyerId", "sellerId", "productId", "errandTaskId"
+    SELECT "id", "type", "status", "buyerId", "sellerId", "productId", "serviceListingId", "errandTaskId"
     FROM "Order"
     WHERE "id" = ${dispute.orderId}
     FOR UPDATE`;
@@ -508,5 +514,8 @@ async function resolveOrderDisputeTxLocked(
     orderStatus: nextOrderStatus,
     errandStatus: nextErrandStatus,
     releasedHolds,
+    productId: order.productId,
+    serviceListingId: order.serviceListingId,
+    errandTaskId: order.errandTaskId,
   };
 }

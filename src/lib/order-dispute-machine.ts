@@ -143,8 +143,11 @@ type LockedErrandRow = {
 /**
  * initiateOrderDisputeTx：General Order dispute 创建的唯一权威。
  *
- * 返回 { success: true }（disputeId 携带给未来 action 层）或 { error }（统一
- * SAFE 文案，不泄漏治理/参与方状态）。任何 DENY 零写入零通知。
+ * 成功结果携带 locked authoritative Order 的 type-FK 上下文
+ * （Phase 8C-02：仅供 action 层 revalidate 用户视图，禁止以此做任何
+ * 事务外二次 authority read——最终裁决仍是本服务锁内 fresh check）。
+ * 返回 { error }（统一 SAFE 文案，不泄漏治理/参与方状态）。任何 DENY
+ * 零写入零通知。
  */
 export async function initiateOrderDisputeTx(
   tx: Prisma.TransactionClient,
@@ -160,7 +163,16 @@ export async function initiateOrderDisputeTx(
     beforeSubjectLocks?: OrderDisputeRacePoint;
   },
   seams?: OrderDisputeSeams,
-): Promise<{ error: string } | { success: true; disputeId: string }> {
+): Promise<
+  | { error: string }
+  | {
+      success: true;
+      disputeId: string;
+      productId: string | null;
+      serviceListingId: string | null;
+      errandTaskId: string | null;
+    }
+> {
   // ---- 步骤 1：candidate pre-read（无锁，仅锁键发现；§22 不得信任 status /
   // campus / business state）----
   const candidateRow = await tx.order.findUnique({
@@ -395,5 +407,11 @@ export async function initiateOrderDisputeTx(
     },
   ]);
 
-  return { success: true, disputeId: dispute.id };
+  return {
+    success: true,
+    disputeId: dispute.id,
+    productId: order.productId,
+    serviceListingId: order.serviceListingId,
+    errandTaskId: order.errandTaskId,
+  };
 }

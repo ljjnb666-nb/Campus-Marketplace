@@ -12,7 +12,20 @@ import { DisputeDialog } from "@/components/order/dispute-dialog";
 import { createOrOpenOrderConversation } from "@/actions/conversation";
 import { updateOrderStatus } from "@/actions/order";
 import { createReview } from "@/actions/trust";
+import { initiateGeneralOrderDispute } from "@/actions/order-dispute";
 import { cancelRentalOrder, submitRentalReview, initiateDispute } from "@/actions/rental-order";
+
+/**
+ * ERRAND 合法 dispute 发起源 canonical pair（Order.status ↔ ErrandTask.status）。
+ * 纯展示便利副本：领域权威是 initiateOrderDisputeTx 锁内 fresh 校验
+ * （order-dispute-machine 的 DISPUTABLE_ERRAND_PAIRS 冻结矩阵，两处同形）。
+ */
+const ERRAND_DISPUTABLE_PAIRS: readonly (readonly [orderStatus: string, taskStatus: string])[] = [
+  ["ACCEPTED", "CLAIMED"],
+  ["IN_PROGRESS", "IN_PROGRESS"],
+  ["IN_PROGRESS", "PENDING_CONFIRMATION"],
+  ["COMPLETED", "COMPLETED"],
+];
 
 export interface UnifiedOrderData {
   id: string;
@@ -91,16 +104,33 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
 
   const canReview = (order.status === "COMPLETED" || order.status === "COMPLETED") && !order.hasReviewed;
 
-  // PHASE 8C-01 SAFETY FIX：general（PRODUCT/SERVICE/ERRAND） dispute action
-  // 曾错误路由到 rental 专属 initiateDispute（rental-order-machine / 押金语义）。
-  // General OrderDispute 用户入口 8C-02 才开放——本阶段收窄为仅 RENTAL 保留
-  // 原 dispute 行为，general orders 不再渲染 dispute 按钮。
+  // Phase 8C-02：General（PRODUCT/SERVICE/ERRAND）dispute 入口重新开放。
+  // 以下只是展示便利 predicate（与 initiateOrderDisputeTx 的 disputable
+  // 冻结矩阵同形）；stale UI 错误显示时 canonical domain 仍 fail closed。
+  // RENTAL 保持 8C-01 收窄前的原行为不变。
+  const generalDisputable =
+    (order.type === "PRODUCT" &&
+      (order.status === "ACCEPTED" || order.status === "COMPLETED")) ||
+    (order.type === "SERVICE" &&
+      (order.status === "ACCEPTED" ||
+        order.status === "IN_PROGRESS" ||
+        order.status === "COMPLETED")) ||
+    // ERRAND 必须使用 Order.status + errandStatus canonical pair，不能仅看
+    // Order.status；malformed pair → 按钮隐藏
+    (order.type === "ERRAND" &&
+      order.errandStatus != null &&
+      ERRAND_DISPUTABLE_PAIRS.some(
+        ([orderStatus, taskStatus]) =>
+          orderStatus === order.status && taskStatus === order.errandStatus,
+      ));
+
   const canDispute =
-    order.type === "RENTAL" &&
-    order.status !== "IN_DISPUTE" &&
-    order.status !== "CANCELLED" &&
-    order.status !== "COMPLETED" &&
-    order.status !== "REJECTED";
+    order.type === "RENTAL"
+      ? order.status !== "IN_DISPUTE" &&
+        order.status !== "CANCELLED" &&
+        order.status !== "COMPLETED" &&
+        order.status !== "REJECTED"
+      : generalDisputable;
 
   const typeLabels: Record<string, string> = {
     PRODUCT: "二手商品",
@@ -124,6 +154,12 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
     }
     return createReview({ success: false, message: "" }, formData);
   };
+
+  // Phase 8C-02 §19：dispute action 按 kind 显式分发——RENTAL → 既有 rental
+  // initiateDispute；PRODUCT/SERVICE/ERRAND → canonical initiateGeneralOrderDispute。
+  // 禁止 General 回落到 Rental action（押金/租期语义不同 aggregate）。
+  const disputeAction =
+    order.type === "RENTAL" ? initiateDispute : initiateGeneralOrderDispute;
 
   return (
     <>
@@ -360,7 +396,7 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
       <DisputeDialog
         open={disputeOpen}
         onOpenChange={setDisputeOpen}
-        action={initiateDispute}
+        action={disputeAction}
         orderId={order.id}
       />
     </>

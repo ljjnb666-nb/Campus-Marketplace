@@ -29,8 +29,10 @@ export function DisputeDialog({
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!reason.trim()) {
-      setErrorMsg("请填写申诉纠纷的具体原因与证据说明");
+    // 客户端输入体验（min 5 / max 1000，与 rental/order dispute 服务端
+    // validator 同形）；服务端 validator 才是 authority。
+    if (reason.trim().length < 5) {
+      setErrorMsg("请填写纠纷原因（至少5个字）");
       return;
     }
     setErrorMsg(null);
@@ -89,6 +91,8 @@ export function DisputeDialog({
               name="reason"
               rows={4}
               required
+              minLength={5}
+              maxLength={1000}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="详细描述争议情况（如：物品与描述不符、未按时履约、设备存在隐蔽故障等）..."

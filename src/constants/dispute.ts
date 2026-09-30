@@ -26,3 +26,22 @@ export const DISPUTE_RESOLUTION_ACTION_LABELS: Record<DisputeResolutionAction, s
   RESTORE_PREVIOUS: "恢复纠纷前订单状态",
   CLOSE_ORDER: "关闭订单",
 };
+
+/**
+ * Phase 8C-02：统一交易纠纷运营面的 kind 标签。
+ * 队列"纠纷类型"过滤用 DISPUTE_KIND_FILTER_LABELS；详情顶部"纠纷类型"
+ * 徽标用 DISPUTE_KIND_DETAIL_LABELS（显式 discriminator，不要通过标题猜）。
+ */
+export const GOVERNANCE_DISPUTE_KINDS = ["RENTAL", "ORDER"] as const;
+
+export type GovernanceDisputeKindValue = (typeof GOVERNANCE_DISPUTE_KINDS)[number];
+
+export const DISPUTE_KIND_FILTER_LABELS: Record<GovernanceDisputeKindValue, string> = {
+  RENTAL: "租赁纠纷",
+  ORDER: "普通订单纠纷",
+};
+
+export const DISPUTE_KIND_DETAIL_LABELS: Record<GovernanceDisputeKindValue, string> = {
+  RENTAL: "租赁订单",
+  ORDER: "普通订单",
+};

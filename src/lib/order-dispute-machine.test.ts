@@ -136,7 +136,15 @@ describe("initiateOrderDisputeTx：disputable 状态矩阵", () => {
 
     const outcome = await initiateOrderDisputeTx(m.tx, baseInput);
 
-    expect(outcome).toMatchObject({ success: true, disputeId: "dispute-1" });
+    // Phase 8C-02：success result 携带 locked authoritative Order 的
+    // type-FK revalidation context（仅 context extension，语义零变化）
+    expect(outcome).toEqual({
+      success: true,
+      disputeId: "dispute-1",
+      productId,
+      serviceListingId: null,
+      errandTaskId: null,
+    });
     expect(m.disputeCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

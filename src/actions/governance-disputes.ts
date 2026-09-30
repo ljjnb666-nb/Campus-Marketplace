@@ -9,26 +9,40 @@ import {
   releaseDispute,
   resolveDispute,
 } from "@/lib/disputes/dispute-service";
+import {
+  claimOrderDispute,
+  closeOrderDispute,
+  releaseOrderDispute,
+  resolveOrderDispute,
+} from "@/lib/disputes/order-dispute-service";
 import { isDisputeError } from "@/lib/disputes/errors";
 import { deriveDisputeReviewAccess } from "@/lib/disputes/dispute-access";
+import { revalidateOrderViews } from "@/lib/revalidate";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 import {
   governanceDisputeClaimSchema,
   governanceDisputeCloseSchema,
+  governanceDisputeKindSchema,
   governanceDisputeResolveSchema,
 } from "@/validators/governance-dispute";
 
 /**
- * Phase 7G：纠纷运营治理面的薄 Server Action 适配层（7A/7E 同款冻结约定）。
+ * Phase 7G 纠纷运营治理面薄 Server Action 适配层；Phase 8C-02 起按显式
+ * disputeKind dispatch 到 RentalDispute / OrderDispute 两个 canonical 服务
+ * （7A/7E 同款冻结约定）。
  *
  * 硬合同：
  * - actorId 一律来自 requireUser()，绝不信 FormData 的任何身份字段；
- * - 仅做：validate → 服务端身份 → 有效 access fail-fast → canonical 域服务
+ * - 仅做：validate（含 disputeKind discriminator，missing → RENTAL 兼容旧
+ *   form contract）→ 服务端身份 → 有效 access fail-fast → canonical 域服务
  *   （全部锁/锁后授权重读/状态机/order 收敛/hold 生命周期/审计/通知都在
  *   canonical 服务内）→ revalidate。零域逻辑复制；
- * - 授权结构不可暴露：missing/越权统一文案；领用冲突/终局/RESTORE 不可用
- *   保留域内安全文案。
+ * - wrong kind / missing ID / 越权：两域共享统一 deny 文案（anti-oracle，
+ *   不区分"不存在/另一种纠纷/无权限"）；领用冲突/终局/RESTORE 不可用保留
+ *   域内安全文案；
+ * - ORDER 终局成功后除治理面外另 revalidateOrderViews（domain result 携带
+ *   locked Order 的 type-FK 上下文）。
  */
 
 export type GovernanceDisputeActionState = {
@@ -69,11 +83,44 @@ async function loadOperatorAccess() {
   return { user, access };
 }
 
+/**
+ * 显式 discriminator 解析（§7）：missing → RENTAL（旧 Rental bookmark/form
+ * contract 兼容）；非法值 → null（调用方映射统一 deny——所有新渲染 form
+ * 必须显式提交，非法输入不产生"另一种"错误语义）。
+ */
+function parseDisputeKind(formData: FormData): "RENTAL" | "ORDER" | null {
+  const raw = formData.get("disputeKind");
+  const parsed = governanceDisputeKindSchema.safeParse(raw === null ? undefined : raw);
+  return parsed.success ? parsed.data : null;
+}
+
+/** 终局 ORDER 成功后的用户视图刷新（§49：Order/ErrandTask/Product/notifications）。 */
+function revalidateOrderTerminalViews(result: {
+  productId: string | null;
+  serviceListingId: string | null;
+  errandTaskId: string | null;
+}) {
+  revalidateOrderViews({
+    productId: result.productId ?? undefined,
+    serviceId: result.serviceListingId ?? undefined,
+    errandId: result.errandTaskId ?? undefined,
+  });
+}
+
+function revalidateGovernanceDisputeViews(disputeId: string) {
+  revalidatePath("/governance/disputes");
+  revalidatePath(`/governance/disputes/${disputeId}`);
+}
+
 /** 纠纷领用（self claim；OPEN → IN_REVIEW，并发由行锁串行）。 */
 export async function claimGovernanceDispute(
   formData: FormData,
 ): Promise<GovernanceDisputeActionState> {
   try {
+    const kind = parseDisputeKind(formData);
+    if (kind === null) {
+      return uniformDeny();
+    }
     const parsed = governanceDisputeClaimSchema.safeParse({
       disputeId: formData.get("disputeId"),
     });
@@ -86,13 +133,12 @@ export async function claimGovernanceDispute(
       return uniformDeny();
     }
 
-    const result = await claimDispute({
-      actorId: user.id,
-      disputeId: parsed.data.disputeId,
-    });
+    const result =
+      kind === "ORDER"
+        ? await claimOrderDispute({ actorId: user.id, disputeId: parsed.data.disputeId })
+        : await claimDispute({ actorId: user.id, disputeId: parsed.data.disputeId });
 
-    revalidatePath("/governance/disputes");
-    revalidatePath(`/governance/disputes/${parsed.data.disputeId}`);
+    revalidateGovernanceDisputeViews(parsed.data.disputeId);
     return { success: true, outcome: result.outcome };
   } catch (error) {
     return governanceDisputeActionError(error, "claimGovernanceDispute");
@@ -104,6 +150,10 @@ export async function releaseGovernanceDispute(
   formData: FormData,
 ): Promise<GovernanceDisputeActionState> {
   try {
+    const kind = parseDisputeKind(formData);
+    if (kind === null) {
+      return uniformDeny();
+    }
     const parsed = governanceDisputeClaimSchema.safeParse({
       disputeId: formData.get("disputeId"),
     });
@@ -116,13 +166,12 @@ export async function releaseGovernanceDispute(
       return uniformDeny();
     }
 
-    const result = await releaseDispute({
-      actorId: user.id,
-      disputeId: parsed.data.disputeId,
-    });
+    const result =
+      kind === "ORDER"
+        ? await releaseOrderDispute({ actorId: user.id, disputeId: parsed.data.disputeId })
+        : await releaseDispute({ actorId: user.id, disputeId: parsed.data.disputeId });
 
-    revalidatePath("/governance/disputes");
-    revalidatePath(`/governance/disputes/${parsed.data.disputeId}`);
+    revalidateGovernanceDisputeViews(parsed.data.disputeId);
     return { success: true, outcome: result.outcome };
   } catch (error) {
     return governanceDisputeActionError(error, "releaseGovernanceDispute");
@@ -134,6 +183,10 @@ export async function resolveGovernanceDispute(
   formData: FormData,
 ): Promise<GovernanceDisputeActionState> {
   try {
+    const kind = parseDisputeKind(formData);
+    if (kind === null) {
+      return uniformDeny();
+    }
     const parsed = governanceDisputeResolveSchema.safeParse({
       disputeId: formData.get("disputeId"),
       resolutionCode: formData.get("resolutionCode"),
@@ -149,16 +202,26 @@ export async function resolveGovernanceDispute(
       return uniformDeny();
     }
 
-    await resolveDispute({
-      actorId: user.id,
-      disputeId: parsed.data.disputeId,
-      resolutionCode: parsed.data.resolutionCode,
-      resolutionAction: parsed.data.resolutionAction,
-      adminNote: parsed.data.adminNote || null,
-    });
+    if (kind === "ORDER") {
+      const result = await resolveOrderDispute({
+        actorId: user.id,
+        disputeId: parsed.data.disputeId,
+        resolutionCode: parsed.data.resolutionCode,
+        resolutionAction: parsed.data.resolutionAction,
+        adminNote: parsed.data.adminNote || null,
+      });
+      revalidateOrderTerminalViews(result);
+    } else {
+      await resolveDispute({
+        actorId: user.id,
+        disputeId: parsed.data.disputeId,
+        resolutionCode: parsed.data.resolutionCode,
+        resolutionAction: parsed.data.resolutionAction,
+        adminNote: parsed.data.adminNote || null,
+      });
+    }
 
-    revalidatePath("/governance/disputes");
-    revalidatePath(`/governance/disputes/${parsed.data.disputeId}`);
+    revalidateGovernanceDisputeViews(parsed.data.disputeId);
     return { success: true };
   } catch (error) {
     return governanceDisputeActionError(error, "resolveGovernanceDispute");
@@ -170,6 +233,10 @@ export async function closeGovernanceDispute(
   formData: FormData,
 ): Promise<GovernanceDisputeActionState> {
   try {
+    const kind = parseDisputeKind(formData);
+    if (kind === null) {
+      return uniformDeny();
+    }
     const parsed = governanceDisputeCloseSchema.safeParse({
       disputeId: formData.get("disputeId"),
       resolutionAction: formData.get("resolutionAction"),
@@ -184,15 +251,24 @@ export async function closeGovernanceDispute(
       return uniformDeny();
     }
 
-    await closeDispute({
-      actorId: user.id,
-      disputeId: parsed.data.disputeId,
-      resolutionAction: parsed.data.resolutionAction,
-      adminNote: parsed.data.adminNote || null,
-    });
+    if (kind === "ORDER") {
+      const result = await closeOrderDispute({
+        actorId: user.id,
+        disputeId: parsed.data.disputeId,
+        resolutionAction: parsed.data.resolutionAction,
+        adminNote: parsed.data.adminNote || null,
+      });
+      revalidateOrderTerminalViews(result);
+    } else {
+      await closeDispute({
+        actorId: user.id,
+        disputeId: parsed.data.disputeId,
+        resolutionAction: parsed.data.resolutionAction,
+        adminNote: parsed.data.adminNote || null,
+      });
+    }
 
-    revalidatePath("/governance/disputes");
-    revalidatePath(`/governance/disputes/${parsed.data.disputeId}`);
+    revalidateGovernanceDisputeViews(parsed.data.disputeId);
     return { success: true };
   } catch (error) {
     return governanceDisputeActionError(error, "closeGovernanceDispute");
