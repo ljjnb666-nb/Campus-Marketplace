@@ -54,10 +54,15 @@ const orderId = "order-1";
 const productId = "product-1";
 const candidate = { buyerId, sellerId, productId };
 
-const FUTURE_DEADLINE = new Date("2026-09-30T12:00:00.000Z");
-const BEFORE_DEADLINE = new Date("2026-09-30T11:59:59.999Z");
-const AT_DEADLINE = new Date("2026-09-30T12:00:00.000Z");
-const AFTER_DEADLINE = new Date("2026-09-30T12:00:00.001Z");
+// 时间基准相对化（原为固定日期 2026-09-30T12:00Z——真实时钟越过即翻转
+// 期限内/超期语义，CASE A 类真实时钟用例必炸）。关系冻结：AT == FUTURE、
+// BEFORE = FUTURE - 1ms；注入 seam now 的边界用例语义不变，只有 fixture
+// 死线跟随真实时钟。
+const RESERVATION_DEADLINE_OFFSET_MS = 24 * 60 * 60 * 1000;
+const FUTURE_DEADLINE = new Date(Date.now() + RESERVATION_DEADLINE_OFFSET_MS);
+const BEFORE_DEADLINE = new Date(Date.now() + RESERVATION_DEADLINE_OFFSET_MS - 1);
+const AT_DEADLINE = new Date(Date.now() + RESERVATION_DEADLINE_OFFSET_MS);
+const AFTER_DEADLINE = new Date(Date.now() + RESERVATION_DEADLINE_OFFSET_MS + 1);
 
 type TxMocks = {
   tx: Prisma.TransactionClient;
