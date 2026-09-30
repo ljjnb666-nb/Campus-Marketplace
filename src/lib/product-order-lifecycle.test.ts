@@ -284,7 +284,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
         productId,
         type: "PRODUCT",
         id: { not: orderId },
-        status: { in: ["PENDING", "ACCEPTED"] },
+        status: { in: ["PENDING", "ACCEPTED", "IN_DISPUTE"] },
       },
       select: { id: true },
     });
@@ -761,8 +761,9 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
 });
 
 describe("ACTIVE_PRODUCT_ORDER_STATUSES 冻结值", () => {
-  it("只包含 PENDING / ACCEPTED（COMPLETED/CANCELLED 不占 reservation）", () => {
-    expect([...ACTIVE_PRODUCT_ORDER_STATUSES]).toEqual(["PENDING", "ACCEPTED"]);
+  it("包含 PENDING / ACCEPTED / IN_DISPUTE（COMPLETED/CANCELLED/CLOSED 不占 reservation）", () => {
+    // Phase 8C-01：IN_DISPUTE 属 dispute 治理冻结，仍占 reservation occupancy
+    expect([...ACTIVE_PRODUCT_ORDER_STATUSES]).toEqual(["PENDING", "ACCEPTED", "IN_DISPUTE"]);
   });
 });
 

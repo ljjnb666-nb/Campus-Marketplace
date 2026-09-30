@@ -63,6 +63,9 @@ const txStub = {
   rentalOrderStatusLog: {
     updateMany: vi.fn(),
   },
+  orderDispute: {
+    updateMany: vi.fn(),
+  },
   rentalDispute: {
     updateMany: vi.fn(),
   },

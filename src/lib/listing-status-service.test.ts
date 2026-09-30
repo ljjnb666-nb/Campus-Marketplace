@@ -170,7 +170,7 @@ describe("updateProductStatusTx（PSTATUS，8A-02 system-owned 权威）", () =>
       where: {
         productId: "product-1",
         type: "PRODUCT",
-        status: { in: ["PENDING", "ACCEPTED"] },
+        status: { in: ["PENDING", "ACCEPTED", "IN_DISPUTE"] },
       },
       select: { id: true },
     });
