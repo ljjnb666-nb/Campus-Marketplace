@@ -105,6 +105,7 @@ export const FROZEN_PERSONAL_MODELS = [
   "RentalOrder",
   "RentalOrderStatusLog",
   "RentalDispute",
+  "OrderDispute",
   "SupportTicket",
   "UploadedAsset",
   "PrivacyRequest",
@@ -164,6 +165,11 @@ export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPol
   },
   RentalDispute: {
     model: "RentalDispute",
+    ...entry("USER_AUTHORED_CONTENT", "EXCLUDE", "REDACT", false, false),
+  },
+  // Phase 8C-01：与 RentalDispute 同分类同基调（governance provenance 保留）
+  OrderDispute: {
+    model: "OrderDispute",
     ...entry("USER_AUTHORED_CONTENT", "EXCLUDE", "REDACT", false, false),
   },
   SupportTicket: {
@@ -266,6 +272,10 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("RentalDispute", "reason", USER_CONTENT_FIELD),
   field("RentalDispute", "evidencePhotos", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
   field("RentalDispute", "adminNote", OPERATOR_ONLY_FIELD),
+  // ---- OrderDispute（Phase 8C-01：分类与 RentalDispute 完全一致）----
+  field("OrderDispute", "reason", USER_CONTENT_FIELD),
+  field("OrderDispute", "evidencePhotos", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
+  field("OrderDispute", "adminNote", OPERATOR_ONLY_FIELD),
   // ---- SupportTicket：subject/description/resolutionMessage=用户可见，
   //      internalNote=OPERATOR_ONLY ----
   field("SupportTicket", "subject", USER_CONTENT_FIELD),
@@ -490,6 +500,9 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   { model: "Appeal", field: "statement", sources: ["appealFormSchema.statement"] },
   { model: "Report", field: "detail", sources: ["reportFormSchema.detail"] },
   { model: "RentalDispute", field: "reason", sources: ["initiateDisputeSchema.reason"] },
+  // Phase 8C-01：domain writer 已存在（UI 8C-02 开放）——source 指向
+  // canonical 领域函数入参
+  { model: "OrderDispute", field: "reason", sources: ["initiateOrderDisputeTx.reason"] },
   { model: "BlockedUser", field: "reason", sources: ["blockUserAction.reason"] },
 ];
 
@@ -581,6 +594,8 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "BlockedUser.reason",
   "RentalDispute.reason",
   "RentalDispute.evidencePhotos",
+  "OrderDispute.reason",
+  "OrderDispute.evidencePhotos",
   "Report.detail",
   "Review.content",
   "Review.tags",
@@ -627,6 +642,7 @@ export const ERASURE_IMPLEMENTATION_MODELS: ReadonlySet<string> = new Set([
   "RentalOrder",
   "RentalOrderStatusLog",
   "RentalDispute",
+  "OrderDispute",
   "SupportTicket",
   "Session",
   "Product",

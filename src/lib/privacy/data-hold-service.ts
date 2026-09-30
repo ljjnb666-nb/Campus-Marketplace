@@ -35,6 +35,16 @@ export const DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE = "RENTAL_DISPUTE";
 /** dispute 派生 hold 的 reasonCode（owner/renter 同码）。 */
 export const DISPUTE_HOLD_REASON_CODE = "ACTIVE_RENTAL_DISPUTE";
 
+/**
+ * Phase 8C-01：General OrderDispute 派生 hold 的 sourceType（与
+ * RENTAL_DISPUTE 平行；releaseHoldsBySourceTxLocked 按 source 精确隔离，
+ * 两类 dispute hold 互不触碰）。
+ */
+export const DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE = "ORDER_DISPUTE";
+
+/** General OrderDispute hold 的 reasonCode（buyer/seller 同码）。 */
+export const ORDER_DISPUTE_HOLD_REASON_CODE = "ACTIVE_ORDER_DISPUTE";
+
 /** P2002 目标列判定（meta.target 存在 string / string[] 双形态）。 */
 function isUniqueViolationOn(error: unknown, column: string): boolean {
   if (

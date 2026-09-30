@@ -34,7 +34,9 @@ import { ERASED_USER_CONTENT_MARKER } from "@/lib/privacy/privacy-data-registry"
  */
 
 /** 仍在履行的订单状态（存在即阻断注销） */
-const ACTIVE_ORDER_STATUSES = ["PENDING", "ACCEPTED", "IN_PROGRESS"] as const;
+// Phase 8C-01：IN_DISPUTE = active obligation（dispute 治理冻结中的交易
+// 阻断注销；primary gate 是 dispute DataHold，此列表为同语义纵深防御）
+const ACTIVE_ORDER_STATUSES = ["PENDING", "ACCEPTED", "IN_PROGRESS", "IN_DISPUTE"] as const;
 
 /** 仍在履行的租赁订单状态（存在即阻断注销） */
 const ACTIVE_RENTAL_ORDER_STATUSES = [
@@ -327,6 +329,14 @@ export async function eraseAccount(
     // 已由上方 REPORT category PENDING_DELETE 收敛；status/resolution
     // 机器记录与 adminNote（OPERATOR_ONLY，governance）保留。
     await client.rentalDispute.updateMany({
+      where: { initiatorId: userId },
+      data: { reason: ERASED_USER_CONTENT_MARKER, evidencePhotos: [] },
+    });
+
+    // Phase 8C-01：General OrderDispute 同款处理（active dispute 已被前置
+    // DataHold 检查阻断，此处只可能是 terminal）——reason/evidencePhotos
+    // 清理；status/resolution 机器记录与 adminNote（OPERATOR_ONLY）保留。
+    await client.orderDispute.updateMany({
       where: { initiatorId: userId },
       data: { reason: ERASED_USER_CONTENT_MARKER, evidencePhotos: [] },
     });
