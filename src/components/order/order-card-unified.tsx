@@ -91,7 +91,12 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
 
   const canReview = (order.status === "COMPLETED" || order.status === "COMPLETED") && !order.hasReviewed;
 
+  // PHASE 8C-01 SAFETY FIX：general（PRODUCT/SERVICE/ERRAND） dispute action
+  // 曾错误路由到 rental 专属 initiateDispute（rental-order-machine / 押金语义）。
+  // General OrderDispute 用户入口 8C-02 才开放——本阶段收窄为仅 RENTAL 保留
+  // 原 dispute 行为，general orders 不再渲染 dispute 按钮。
   const canDispute =
+    order.type === "RENTAL" &&
     order.status !== "IN_DISPUTE" &&
     order.status !== "CANCELLED" &&
     order.status !== "COMPLETED" &&

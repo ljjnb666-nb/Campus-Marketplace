@@ -51,11 +51,17 @@ import { createNotifications } from "@/repositories/notification-repository";
  * explicit expire 无 user actor：不做任何 ACTIVE account 检查。
  */
 
-/** 会阻止 Product reactivation 的订单状态（COMPLETED/CANCELLED 不占 reservation）。 */
-export const ACTIVE_PRODUCT_ORDER_STATUSES: readonly ["PENDING", "ACCEPTED"] = [
+/**
+ * 会阻止 Product reactivation 的订单状态（COMPLETED/CANCELLED/CLOSED 不占
+ * reservation）。Phase 8C-01：IN_DISPUTE 属 dispute 治理冻结，仍是 active
+ * reservation occupancy——否则其它 release path 可能在 dispute 期间错误释放
+ * Product（dispute CLOSE 才触发 release projection）。
+ */
+export const ACTIVE_PRODUCT_ORDER_STATUSES: readonly [
   "PENDING",
   "ACCEPTED",
-];
+  "IN_DISPUTE",
+] = ["PENDING", "ACCEPTED", "IN_DISPUTE"];
 
 /** 锁键发现用 candidate（非 participant/status 权威；锁后必须重读）。 */
 export type ProductOrderCancellationCandidate = {
@@ -517,7 +523,7 @@ async function expireLockedProductReservation(
  *   D. deletedAt != null → 不写（禁止复活 contradictory lifecycle state）
  *   E. 存在其它 PENDING/ACCEPTED PRODUCT order → 保持 RESERVED
  */
-async function projectProductAfterReservationRelease(
+export async function projectProductAfterReservationRelease(
   tx: Prisma.TransactionClient,
   releasedOrderId: string,
   input: { productId: string; sellerId: string },

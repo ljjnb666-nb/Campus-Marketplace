@@ -39,6 +39,20 @@ export function getUnifiedStatusMeta(
           hint: "交易已关闭取消",
           variant: "neutral",
         };
+      // Phase 8C-01：General OrderDispute lifecycle 展示（仅状态徽标，
+      // 8C-02 前无用户发起入口）
+      case "IN_DISPUTE":
+        return {
+          label: "纠纷处理中",
+          hint: "订单已进入平台纠纷处理流程",
+          variant: "danger",
+        };
+      case "CLOSED":
+        return {
+          label: "订单已关闭",
+          hint: "订单经纠纷治理终局关闭",
+          variant: "neutral",
+        };
       default:
         return { label: status, hint: "", variant: "neutral" };
     }
@@ -78,6 +92,21 @@ export function getUnifiedStatusMeta(
           hint: "跑腿任务已取消关闭",
           variant: "neutral",
         };
+      // Phase 8C-01：DISPUTED = ErrandTask 侧纠纷冻结态；
+      // IN_DISPUTE = Order 侧冻结态（card 可能传任一侧状态）
+      case "DISPUTED":
+      case "IN_DISPUTE":
+        return {
+          label: "纠纷处理中",
+          hint: "任务已进入平台纠纷处理流程",
+          variant: "danger",
+        };
+      case "CLOSED":
+        return {
+          label: "任务已关闭",
+          hint: "任务经纠纷治理终局关闭",
+          variant: "neutral",
+        };
       default:
         return { label: status, hint: "", variant: "neutral" };
     }
@@ -109,6 +138,19 @@ export function getUnifiedStatusMeta(
         return {
           label: "预约已取消",
           hint: "服务预约已取消",
+          variant: "neutral",
+        };
+      // Phase 8C-01：General OrderDispute lifecycle 展示（仅状态徽标）
+      case "IN_DISPUTE":
+        return {
+          label: "纠纷处理中",
+          hint: "服务订单已进入平台纠纷处理流程",
+          variant: "danger",
+        };
+      case "CLOSED":
+        return {
+          label: "服务订单已关闭",
+          hint: "服务订单经纠纷治理终局关闭",
           variant: "neutral",
         };
       default:

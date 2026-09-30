@@ -6,4 +6,6 @@ export const ERRAND_STATUS_LABELS = {
   COMPLETED: "已完成",
   CANCELLED: "已取消",
   DISPUTED: "申诉中",
+  // Phase 8C-01：纠纷治理终局关闭（Order.CLOSED canonical pair）
+  CLOSED: "已关闭",
 } as const;

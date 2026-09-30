@@ -30,8 +30,13 @@ import type { Prisma } from "@prisma/client";
  *     PENDING_CONFIRMATION | DISPUTED；OPEN/COMPLETED/CANCELLED 非义务。
  */
 
-/** Order（PRODUCT / SERVICE / ERRAND 型共享 OrderStatus）terminal 状态集。 */
-export const TERMINAL_ORDER_STATUSES = ["COMPLETED", "CANCELLED", "REFUNDED"] as const;
+/**
+ * Order（PRODUCT / SERVICE / ERRAND 型共享 OrderStatus）terminal 状态集。
+ * Phase 8C-01：CLOSED（纠纷治理终局关闭）加入 terminal——IN_DISPUTE 保持
+ * active obligation（block 的双方仍可必要履约沟通），CLOSED 不得永久绕过
+ * BlockUser。
+ */
+export const TERMINAL_ORDER_STATUSES = ["COMPLETED", "CANCELLED", "REFUNDED", "CLOSED"] as const;
 
 /** RentalOrder terminal 状态集（canonical rental lifecycle 冻结）。 */
 export const TERMINAL_RENTAL_ORDER_STATUSES = [

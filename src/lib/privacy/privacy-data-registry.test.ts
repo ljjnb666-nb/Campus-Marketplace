@@ -82,8 +82,8 @@ const schemaFields = parseSchemaModelFields(schemaText);
 const schemaModelNames = parseSchemaModelNames(schemaText);
 
 describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", () => {
-  it("16 个冻结 personal-bearing models 全部有 model 级 policy", () => {
-    expect(FROZEN_PERSONAL_MODELS).toHaveLength(16);
+  it("17 个冻结 personal-bearing models 全部有 model 级 policy（Phase 8C-01 +OrderDispute）", () => {
+    expect(FROZEN_PERSONAL_MODELS).toHaveLength(17);
 
     for (const model of FROZEN_PERSONAL_MODELS) {
       const policy = getModelPrivacyPolicy(model);
@@ -324,8 +324,8 @@ describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 va
     expect(ERASURE_FIELD_COVERAGE.has("RentalReview.tags")).toBe(true);
   });
 
-  it("FINAL SSOT：当前生产输入清单计数锁定（42）", () => {
-    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(42);
+  it("FINAL SSOT：当前生产输入清单计数锁定（43；Phase 8C-01 +OrderDispute.reason）", () => {
+    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(43);
   });
 
   it("accessories 不是当前 rentalPickupConfirmSchema 输入（HISTORICAL_ONLY）", () => {
