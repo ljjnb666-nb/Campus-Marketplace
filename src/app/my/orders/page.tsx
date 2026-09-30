@@ -38,8 +38,8 @@ export default async function MyOrdersPage({
   const searchKeyword = params.q?.trim() || "";
 
   // 1. 并行拉取用户参与的 Order 与 RentalOrder 模型数据(经仓储层访问数据库)
-  const [orders, renterRentalOrders, ownerRentalOrders] = await Promise.all([
-    // 普通商品/跑腿/服务 Orders
+  const [{ orders, serverNow }, renterRentalOrders, ownerRentalOrders] = await Promise.all([
+    // 普通商品/跑腿/服务 Orders（serverNow = 查询时刻 server clock 快照）
     getOrdersInvolvingUser(user.id),
 
     // 我的租用 RentalOrders
@@ -103,6 +103,17 @@ export default async function MyOrdersPage({
       hasReviewed: o.reviews.some((r) => r.authorId === user.id),
       // ERRAND 需要跑腿工作流状态驱动"确认完成"入口与状态徽标
       errandStatus: o.type === "ERRAND" ? (o.errandTask?.status ?? null) : null,
+      // Phase 8B-01：Product PENDING 预留 deadline 最小可见性。deadline 已过
+      // 但 expire 尚未被 materialize（Phase 9 scheduler 前）时提示"等待系统
+      // 释放"（serverNow 快照，非客户端 countdown）；server 事务锁内 fresh
+      // deadline 才是最终裁决
+      productReservationExpiresAt: o.productReservationExpiresAt,
+      productReservationResolution: o.productReservationResolution,
+      productReservationOverdue:
+        o.type === "PRODUCT" &&
+        o.status === "PENDING" &&
+        o.productReservationExpiresAt !== null &&
+        serverNow >= o.productReservationExpiresAt.getTime(),
     });
   }
 

@@ -4,6 +4,7 @@ import { decimalValue } from "@/lib/decimal";
 import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
 import { createOrderNo } from "@/lib/order-no";
 import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
+import { computeProductReservationExpiresAt } from "@/lib/product-reservation";
 import { createNotifications } from "@/repositories/notification-repository";
 import {
   withObligationGuard,
@@ -53,6 +54,8 @@ export async function createProductOrderTx(
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
   domainRacePoint?: ListingModerationRacePoint,
+  /** Phase 8B-01：deadline 计算的可注入时钟（仅测试；生产不传）。 */
+  options?: { now?: Date },
 ) {
   return withObligationGuard(
     tx,
@@ -106,6 +109,10 @@ export async function createProductOrderTx(
         return null;
       }
 
+      // Phase 8B-01：deadline 基于同一次事务内捕获的单一 now（禁止多次
+      // new Date() 漂移）；reservation resolution 二元组保持 NULL（未关闭）。
+      const reservationNow = options?.now ?? new Date();
+
       const order = await tx.order.create({
         data: {
           orderNo: createOrderNo(),
@@ -117,6 +124,7 @@ export async function createProductOrderTx(
           buyerId: input.buyerId,
           sellerId: fresh.sellerId,
           productId: fresh.id,
+          productReservationExpiresAt: computeProductReservationExpiresAt(reservationNow),
         },
       });
 

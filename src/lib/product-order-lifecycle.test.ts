@@ -26,17 +26,26 @@ vi.mock("@/repositories/notification-repository", () => ({
 }));
 
 import {
+  acceptProductOrderTx,
   cancelProductOrderTx,
   ACTIVE_PRODUCT_ORDER_STATUSES,
+  expireProductReservationTx,
 } from "@/lib/product-order-lifecycle";
+import { PRODUCT_RESERVATION_TTL_MS } from "@/lib/product-reservation";
 
 /**
- * AUDIT2-RB01：PRODUCT cancellation → listing 投影的唯一权威状态机单元合同。
+ * AUDIT2-RB01 + PHASE 8B-01：PRODUCT accept / cancel / reservation expiry
+ * 的唯一权威状态机单元合同。
  *
- * 冻结不变量：ORDER WIND-DOWN ≠ LISTING EXPOSURE AUTHORITY——
- * PENDING → CANCELLED 后 Product 只在「RESERVED + 未删除 + 无其它
- * active order + seller capability PASS」时 ACTIVE；卖家显式 OFFLINE /
- * 软删除 / 其它 active order / seller 不具备重新曝光资格时不得 ACTIVE。
+ * 冻结不变量：
+ *   - ORDER WIND-DOWN ≠ LISTING EXPOSURE AUTHORITY：Product 只在
+ *     「RESERVED + 未删除 + 无其它 active order + seller capability PASS」
+ *     时重新 ACTIVE。
+ *   - reservation deadline：now >= expiresAt = EXPIRED（中央判定共享）；
+ *     期限内 accept → ACCEPTED resolution；超期 accept/cancel 同一事务
+ *     materialize EXPIRED（deadline truth > late user intent）；
+ *   - explicit expire 无 user actor：不要求任何账号 ACTIVE 检查；
+ *   - 幂等：非 PENDING fresh 行 → NOOP，零重复通知零重复投影。
  */
 
 const buyerId = "buyer-1";
@@ -45,12 +54,18 @@ const orderId = "order-1";
 const productId = "product-1";
 const candidate = { buyerId, sellerId, productId };
 
+const FUTURE_DEADLINE = new Date("2026-09-30T12:00:00.000Z");
+const BEFORE_DEADLINE = new Date("2026-09-30T11:59:59.999Z");
+const AT_DEADLINE = new Date("2026-09-30T12:00:00.000Z");
+const AFTER_DEADLINE = new Date("2026-09-30T12:00:00.001Z");
+
 type TxMocks = {
   tx: Prisma.TransactionClient;
   executeRaw: ReturnType<typeof vi.fn>;
   queryRaw: ReturnType<typeof vi.fn>;
   orderUpdateMany: ReturnType<typeof vi.fn>;
   orderFindFirst: ReturnType<typeof vi.fn>;
+  orderFindUnique: ReturnType<typeof vi.fn>;
   productUpdate: ReturnType<typeof vi.fn>;
 };
 
@@ -67,6 +82,7 @@ function makeTx(input: {
     buyerId,
     sellerId,
     productId,
+    productReservationExpiresAt: FUTURE_DEADLINE,
   };
   const orderRow =
     input.orderRow === undefined ? defaultOrderRow : input.orderRow;
@@ -88,6 +104,11 @@ function makeTx(input: {
   const orderFindFirst = vi
     .fn()
     .mockResolvedValue(input.otherActiveOrder ?? null);
+  const orderFindUnique = vi.fn(async () => {
+    if (!orderRow) return null;
+    const { type, buyerId: b, sellerId: s, productId: p } = orderRow;
+    return { type, buyerId: b, sellerId: s, productId: p };
+  });
   const productUpdate = vi.fn().mockResolvedValue({});
 
   const tx = {
@@ -96,13 +117,22 @@ function makeTx(input: {
     order: {
       updateMany: orderUpdateMany,
       findFirst: orderFindFirst,
+      findUnique: orderFindUnique,
     },
     product: {
       update: productUpdate,
     },
   } as unknown as Prisma.TransactionClient;
 
-  return { tx, executeRaw, queryRaw, orderUpdateMany, orderFindFirst, productUpdate };
+  return {
+    tx,
+    executeRaw,
+    queryRaw,
+    orderUpdateMany,
+    orderFindFirst,
+    orderFindUnique,
+    productUpdate,
+  };
 }
 
 const reservedProduct = {
@@ -113,6 +143,11 @@ const reservedProduct = {
   deletedAt: null,
 };
 
+function expiredNotifications(createNotifications: ReturnType<typeof vi.fn>) {
+  // createNotifications(tx, notifications)：第 2 参才是通知数组
+  return createNotifications.mock.calls.flatMap((call) => call[1] ?? []);
+}
+
 beforeEach(() => {
   assertActiveAccountMutationAllowed.mockReset().mockResolvedValue(undefined);
   evaluateMarketplaceCapability.mockReset().mockResolvedValue({ allowed: true });
@@ -120,20 +155,24 @@ beforeEach(() => {
 });
 
 describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
-  it("CASE A：RESERVED + 无其它 active order + capability PASS → ACTIVE", async () => {
+  it("CASE A：期限内取消 → CANCELLED resolution + ACTIVE 投影", async () => {
     const m = makeTx({ productRow: reservedProduct });
 
     const result = await cancelProductOrderTx(m.tx, buyerId, orderId, candidate);
 
     expect(result).toEqual({ isBuyer: true });
-    expect(m.orderUpdateMany).toHaveBeenCalledWith({
-      where: { id: orderId, status: "PENDING" },
-      data: {
-        status: "CANCELLED",
-        completedAt: null,
-        cancelReason: "用户主动取消",
-      },
-    });
+    expect(m.orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: orderId, status: "PENDING" },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          completedAt: null,
+          cancelReason: "用户主动取消",
+          productReservationResolution: "CANCELLED",
+        }),
+      }),
+    );
+    expect(m.orderUpdateMany.mock.calls[0]![0].data.productReservationResolvedAt).toBeInstanceOf(Date);
     expect(evaluateMarketplaceCapability).toHaveBeenCalledWith(
       m.tx,
       sellerId,
@@ -255,9 +294,9 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
   it("订单行缺失 / 非 PRODUCT / 已非 PENDING → null 零写入零通知", async () => {
     for (const orderRow of [
       null,
-      { id: orderId, type: "SERVICE", status: "PENDING", buyerId, sellerId, productId },
-      { id: orderId, type: "PRODUCT", status: "ACCEPTED", buyerId, sellerId, productId },
-      { id: orderId, type: "PRODUCT", status: "CANCELLED", buyerId, sellerId, productId },
+      { id: orderId, type: "SERVICE", status: "PENDING", buyerId, sellerId, productId, productReservationExpiresAt: null },
+      { id: orderId, type: "PRODUCT", status: "ACCEPTED", buyerId, sellerId, productId, productReservationExpiresAt: FUTURE_DEADLINE },
+      { id: orderId, type: "PRODUCT", status: "CANCELLED", buyerId, sellerId, productId, productReservationExpiresAt: null },
     ]) {
       const m = makeTx({ orderRow });
 
@@ -288,6 +327,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
         buyerId: "someone-else",
         sellerId,
         productId,
+        productReservationExpiresAt: FUTURE_DEADLINE,
       },
     });
 
@@ -346,6 +386,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
         buyerId,
         sellerId,
         productId: null,
+        productReservationExpiresAt: FUTURE_DEADLINE,
       },
     });
 
@@ -371,6 +412,352 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
     expect(m.executeRaw).toHaveBeenCalledTimes(2);
     expect(m.queryRaw).toHaveBeenCalledTimes(2);
   });
+
+  it("超期取消：deadline truth > late user intent → materialize EXPIRED（不记 CANCELLED resolution）", async () => {
+    const m = makeTx({
+      productRow: reservedProduct,
+      orderRow: {
+        id: orderId,
+        type: "PRODUCT",
+        status: "PENDING",
+        buyerId,
+        sellerId,
+        productId,
+        // 已过期的 deadline（锁内真实 now 必然超期）
+        productReservationExpiresAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    });
+
+    const result = await cancelProductOrderTx(m.tx, buyerId, orderId, candidate);
+
+    expect(result).toEqual({ isBuyer: true });
+    expect(m.orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: orderId, status: "PENDING" },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          cancelReason: "商品预留超时自动释放",
+          productReservationResolution: "EXPIRED",
+        }),
+      }),
+    );
+    expect(m.productUpdate).toHaveBeenCalledWith({
+      where: { id: productId },
+      data: { status: "ACTIVE" },
+    });
+    // 超期取消不发"用户主动取消"文案，只发 expiry 通知对
+    expect(expiredNotifications(createNotifications)).toEqual([
+      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
+      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    ]);
+  });
+});
+
+describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () => {
+  it("期限内：PENDING → ACCEPTED + resolution ACCEPTED，Product 保持原状", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await acceptProductOrderTx(
+      m.tx,
+      sellerId,
+      orderId,
+      candidate,
+      undefined,
+      { now: BEFORE_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ reservationResolution: "ACCEPTED" });
+    expect(m.orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: orderId, status: "PENDING" },
+        data: expect.objectContaining({
+          status: "ACCEPTED",
+          completedAt: null,
+          cancelReason: null,
+          productReservationResolvedAt: BEFORE_DEADLINE,
+          productReservationResolution: "ACCEPTED",
+        }),
+      }),
+    );
+    // accept 不拥有 listing 投影权威：Product remains as-is（通常 RESERVED）
+    expect(m.productUpdate).not.toHaveBeenCalled();
+    expect(m.queryRaw).toHaveBeenCalledTimes(1); // 只锁 Order 行，不触 Product 行
+    // 既有 accept 通知语义逐字保留（general path 同款文案）
+    expect(expiredNotifications(createNotifications)).toEqual([
+      expect.objectContaining({ userId: buyerId, title: "订单状态更新：已接单" }),
+      expect.objectContaining({ userId: sellerId, title: "订单状态更新：已接单" }),
+    ]);
+  });
+
+  it("at deadline（now == expiresAt）：不得接受 → 同一事务 materialize EXPIRED", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await acceptProductOrderTx(
+      m.tx,
+      sellerId,
+      orderId,
+      candidate,
+      undefined,
+      { now: AT_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ reservationResolution: "EXPIRED" });
+    expect(m.orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: orderId, status: "PENDING" },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          cancelReason: "商品预留超时自动释放",
+          productReservationResolution: "EXPIRED",
+        }),
+      }),
+    );
+    expect(m.productUpdate).toHaveBeenCalledWith({
+      where: { id: productId },
+      data: { status: "ACTIVE" },
+    });
+    // 绝不能发"已接单"通知；只有 expiry 通知对
+    expect(expiredNotifications(createNotifications)).toEqual([
+      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
+      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    ]);
+  });
+
+  it("after deadline：同样 EXPIRED", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await acceptProductOrderTx(
+      m.tx,
+      sellerId,
+      orderId,
+      candidate,
+      undefined,
+      { now: AFTER_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ reservationResolution: "EXPIRED" });
+    expect(expiredNotifications(createNotifications)).toHaveLength(2);
+  });
+
+  it("buyer 不是 accept actor → null（actor 必须 = seller）", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    expect(
+      await acceptProductOrderTx(m.tx, buyerId, orderId, candidate, undefined, {
+        now: BEFORE_DEADLINE,
+      }),
+    ).toBeNull();
+    expect(m.orderUpdateMany).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("无 deadline 的 PENDING PRODUCT 异常行 → fail closed null", async () => {
+    const m = makeTx({
+      productRow: reservedProduct,
+      orderRow: {
+        id: orderId,
+        type: "PRODUCT",
+        status: "PENDING",
+        buyerId,
+        sellerId,
+        productId,
+        productReservationExpiresAt: null,
+      },
+    });
+
+    expect(
+      await acceptProductOrderTx(m.tx, sellerId, orderId, candidate, undefined, {
+        now: BEFORE_DEADLINE,
+      }),
+    ).toBeNull();
+    expect(m.orderUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("非 PENDING / 非 PRODUCT / candidate 失配 / 缺行 → null 零写入", async () => {
+    for (const orderRow of [
+      null,
+      { id: orderId, type: "SERVICE", status: "PENDING", buyerId, sellerId, productId, productReservationExpiresAt: null },
+      { id: orderId, type: "PRODUCT", status: "ACCEPTED", buyerId, sellerId, productId, productReservationExpiresAt: FUTURE_DEADLINE },
+      { id: orderId, type: "PRODUCT", status: "PENDING", buyerId: "other", sellerId, productId, productReservationExpiresAt: FUTURE_DEADLINE },
+    ]) {
+      const m = makeTx({ orderRow });
+
+      expect(
+        await acceptProductOrderTx(m.tx, sellerId, orderId, candidate, undefined, {
+          now: BEFORE_DEADLINE,
+        }),
+      ).toBeNull();
+      expect(m.orderUpdateMany).not.toHaveBeenCalled();
+      expect(createNotifications).not.toHaveBeenCalled();
+    }
+  });
+
+  it("条件 transition 失抢 → null（safety belt）", async () => {
+    const m = makeTx({ productRow: reservedProduct, transitionCount: 0 });
+
+    expect(
+      await acceptProductOrderTx(m.tx, sellerId, orderId, candidate, undefined, {
+        now: BEFORE_DEADLINE,
+      }),
+    ).toBeNull();
+    expect(m.productUpdate).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("锁序：sorted pair locks → Order 行锁（禁止 actor-only 先锁）", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    await acceptProductOrderTx(m.tx, sellerId, orderId, candidate, undefined, {
+      now: BEFORE_DEADLINE,
+    });
+
+    const advisory = m.executeRaw.mock.invocationCallOrder[0]!;
+    const rowLock = m.queryRaw.mock.invocationCallOrder[0]!;
+    expect(advisory).toBeLessThan(rowLock);
+    expect(m.executeRaw).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
+  it("NOT_DUE：期限内 → 零写零通知", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await expireProductReservationTx(
+      m.tx,
+      orderId,
+      undefined,
+      { now: BEFORE_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ kind: "NOT_DUE" });
+    expect(m.orderUpdateMany).not.toHaveBeenCalled();
+    expect(m.productUpdate).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("DUE：PENDING → CANCELLED/EXPIRED + Product release + 恰一对通知", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await expireProductReservationTx(
+      m.tx,
+      orderId,
+      undefined,
+      { now: AT_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ kind: "EXPIRED" });
+    expect(m.orderUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: orderId, status: "PENDING" },
+        data: expect.objectContaining({
+          status: "CANCELLED",
+          cancelReason: "商品预留超时自动释放",
+          productReservationResolvedAt: AT_DEADLINE,
+          productReservationResolution: "EXPIRED",
+        }),
+      }),
+    );
+    expect(m.productUpdate).toHaveBeenCalledWith({
+      where: { id: productId },
+      data: { status: "ACTIVE" },
+    });
+    expect(expiredNotifications(createNotifications)).toEqual([
+      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
+      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    ]);
+  });
+
+  it("幂等：已非 PENDING（fresh 行）→ NOT_PENDING，零重复副作用", async () => {
+    const m = makeTx({
+      productRow: reservedProduct,
+      orderRow: {
+        id: orderId,
+        type: "PRODUCT",
+        status: "CANCELLED",
+        buyerId,
+        sellerId,
+        productId,
+        productReservationExpiresAt: FUTURE_DEADLINE,
+      },
+    });
+
+    const outcome = await expireProductReservationTx(
+      m.tx,
+      orderId,
+      undefined,
+      { now: AFTER_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ kind: "NOT_PENDING" });
+    expect(m.orderUpdateMany).not.toHaveBeenCalled();
+    expect(m.productUpdate).not.toHaveBeenCalled();
+    expect(createNotifications).not.toHaveBeenCalled();
+  });
+
+  it("无 user actor：不做任何账号 ACTIVE 检查（suspended 参与方不阻止过期）", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    await expireProductReservationTx(m.tx, orderId, undefined, { now: AT_DEADLINE });
+
+    expect(assertActiveAccountMutationAllowed).not.toHaveBeenCalled();
+    expect(m.orderUpdateMany).toHaveBeenCalled();
+  });
+
+  it("candidate pre-read 缺行 / 非 PRODUCT → null（pre-read 非权威，仅锁键发现）", async () => {
+    const missing = makeTx({ orderRow: null });
+    expect(
+      await expireProductReservationTx(missing.tx, orderId, undefined, { now: AT_DEADLINE }),
+    ).toBeNull();
+
+    const serviceOrder = makeTx({
+      orderRow: { id: orderId, type: "SERVICE", status: "PENDING", buyerId, sellerId, productId, productReservationExpiresAt: null },
+    });
+    expect(
+      await expireProductReservationTx(serviceOrder.tx, orderId, undefined, { now: AT_DEADLINE }),
+    ).toBeNull();
+
+    for (const m of [missing, serviceOrder]) {
+      expect(m.orderUpdateMany).not.toHaveBeenCalled();
+      expect(m.productUpdate).not.toHaveBeenCalled();
+      expect(createNotifications).not.toHaveBeenCalled();
+    }
+  });
+
+  it("锁序：candidate pre-read → sorted pair locks → Order 行锁 → Product 行锁", async () => {
+    const m = makeTx({ productRow: reservedProduct });
+
+    await expireProductReservationTx(m.tx, orderId, undefined, { now: AT_DEADLINE });
+
+    const preRead = m.orderFindUnique.mock.invocationCallOrder[0]!;
+    const advisory = m.executeRaw.mock.invocationCallOrder[0]!;
+    const orderRowLock = m.queryRaw.mock.invocationCallOrder[0]!;
+    expect(preRead).toBeLessThan(advisory);
+    expect(advisory).toBeLessThan(orderRowLock);
+    expect(m.executeRaw).toHaveBeenCalledTimes(2);
+    expect(m.queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("seller capability FAIL（历史异常/风控）→ OFFLINE 投影，过期本身不受影响", async () => {
+    evaluateMarketplaceCapability.mockResolvedValue({
+      allowed: false,
+      denialReason: "RISK_RESTRICTED",
+    });
+    const m = makeTx({ productRow: reservedProduct });
+
+    const outcome = await expireProductReservationTx(
+      m.tx,
+      orderId,
+      undefined,
+      { now: AFTER_DEADLINE },
+    );
+
+    expect(outcome).toEqual({ kind: "EXPIRED" });
+    expect(m.productUpdate).toHaveBeenCalledWith({
+      where: { id: productId },
+      data: { status: "OFFLINE" },
+    });
+    expect(expiredNotifications(createNotifications)).toHaveLength(2);
+  });
 });
 
 describe("ACTIVE_PRODUCT_ORDER_STATUSES 冻结值", () => {
@@ -379,7 +766,13 @@ describe("ACTIVE_PRODUCT_ORDER_STATUSES 冻结值", () => {
   });
 });
 
-describe("静态契约（AUDIT2-RB01 §47）", () => {
+describe("TTL 常量冻结", () => {
+  it("accept/expire 共享 24h TTL 单一定义", () => {
+    expect(PRODUCT_RESERVATION_TTL_MS).toBe(24 * 60 * 60 * 1000);
+  });
+});
+
+describe("静态契约（AUDIT2-RB01 §47 + PHASE 8B-01）", () => {
   const readSource = (rel: string) =>
     readFileSync(join(process.cwd(), rel), "utf8");
 
@@ -397,6 +790,22 @@ describe("静态契约（AUDIT2-RB01 §47）", () => {
     expect(source).toMatch(/requestedStatus\s*===\s*"CANCELLED"/);
   });
 
+  it("PHASE 8B-01：order-status-service 对 PRODUCT + ACCEPTED 委派 acceptProductOrderTx，general 路径不再拥有 PRODUCT ACCEPTED", () => {
+    const source = readSource("src/lib/order-status-service.ts");
+
+    expect(source).toContain("acceptProductOrderTx");
+    expect(source).toMatch(/requestedStatus\s*===\s*"ACCEPTED"/);
+    // general canTransition 的 ACCEPTED 分支只允许 SERVICE
+    expect(source).toMatch(
+      /requestedStatus === "ACCEPTED" &&\s*\n\s*isSeller &&\s*\n\s*order\.status === "PENDING" &&\s*\n\s*order\.type === "SERVICE"/,
+    );
+    // 委派必须发生在任何 actor-only USER 锁之前（prepareActiveAccountMutation 之后不得再分流 PRODUCT ACCEPTED）
+    const delegationAt = source.indexOf('input.requestedStatus === "ACCEPTED"');
+    const actorLockAt = source.indexOf("prepareActiveAccountMutation(tx, actorUserId");
+    expect(delegationAt).toBeGreaterThan(-1);
+    expect(actorLockAt).toBeGreaterThan(delegationAt);
+  });
+
   it("product-order-lifecycle 的 ACTIVE 投影必须以锁内 capability 为条件", () => {
     const source = readSource("src/lib/product-order-lifecycle.ts");
 
@@ -404,5 +813,15 @@ describe("静态契约（AUDIT2-RB01 §47）", () => {
     // Order / Product 行锁（FOR UPDATE）两侧权威都必须存在
     expect(source).toMatch(/FROM "Order"[\s\S]*?FOR UPDATE/);
     expect(source).toMatch(/FROM "Product"[\s\S]*?FOR UPDATE/);
+  });
+
+  it("PHASE 8B-01：EXPIRED materialization 必须为共享实现（三路合一同 helper）", () => {
+    const source = readSource("src/lib/product-order-lifecycle.ts");
+
+    expect(source).toContain("expireLockedProductReservation");
+    // 中央时间边界：禁止各路径自行比较时间
+    expect(source.match(/isProductReservationExpired/g)?.length).toBeGreaterThanOrEqual(3);
+    // EXPIRED 写入只在共享 helper 内出现一次
+    expect(source.match(/productReservationResolution:\s*"EXPIRED"/g)?.length).toBe(1);
   });
 });

@@ -87,6 +87,8 @@ describe.skipIf(!integrationDatabaseUrl)(
           orderNo: `${RUN_TAG}${Math.floor(Math.random() * 0xffffffff).toString(16)}`,
           type: "PRODUCT",
           status: "PENDING",
+          // Phase 8B-01 约束：PRODUCT PENDING 必须有 seller 确认截止
+          productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
           buyerId: buyer.id,
           sellerId: seller.id,
           productId: product.id,
@@ -253,6 +255,8 @@ describe.skipIf(!integrationDatabaseUrl)(
           orderNo: `${RUN_TAG}${Math.floor(Math.random() * 0xffffffff).toString(16)}`,
           type: "PRODUCT",
           status: "PENDING",
+          // Phase 8B-01 约束：PRODUCT PENDING 必须有 seller 确认截止
+          productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
           buyerId: buyer.id,
           sellerId: seller.id,
           productId: product.id,

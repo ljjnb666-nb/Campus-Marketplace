@@ -93,6 +93,11 @@ describe("order repository", () => {
       },
       orderBy: { createdAt: "desc" },
     });
-    expect(result).toEqual([{ id: "order-1" }]);
+    // PHASE 8B-01：返回 { orders, serverNow }——serverNow 为查询时刻快照，
+    // 供 UI 判定"deadline 已过但 expiry 尚未 materialize"的展示提示
+    expect(result).toEqual({
+      orders: [{ id: "order-1" }],
+      serverNow: expect.any(Number),
+    });
   });
 });

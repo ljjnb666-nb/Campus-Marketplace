@@ -39,6 +39,12 @@ export interface UnifiedOrderData {
    * "接单者已提交完成、待发布者确认"（该阶段 Order 仍为 IN_PROGRESS），
    * 判定发布者可确认完成必须以此为准，不能从 Order.status 推断 */
   errandStatus?: string | null;
+  /** Phase 8B-01：PRODUCT 预留 deadline（seller 确认截止）最小可见性；
+   * 纯展示——server 事务锁内 fresh deadline 才是最终裁决 */
+  productReservationExpiresAt?: Date | string | null;
+  productReservationResolution?: string | null;
+  /** 服务端渲染时刻 deadline 已过但 expiry 尚未 materialize（Phase 9 前） */
+  productReservationOverdue?: boolean;
 }
 
 export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
@@ -176,6 +182,30 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
             <p className="text-[11px] text-slate-400">
               下单时间：{formatDate(order.createdAt)}
             </p>
+
+            {/* Phase 8B-01：PRODUCT 预留 deadline 最小可见性（禁止客户端
+                countdown / mutation——server 事务裁决才是 authority） */}
+            {order.type === "PRODUCT" &&
+              order.status === "PENDING" &&
+              order.productReservationExpiresAt != null && (
+                <p
+                  className={`text-[11px] ${
+                    order.productReservationOverdue
+                      ? "font-semibold text-amber-600 dark:text-amber-400"
+                      : "text-slate-400"
+                  }`}
+                >
+                  {order.productReservationOverdue
+                    ? "预留已到期，等待系统释放"
+                    : `卖家确认截止：${formatDate(order.productReservationExpiresAt)}`}
+                </p>
+              )}
+
+            {order.type === "PRODUCT" &&
+              order.status === "CANCELLED" &&
+              order.productReservationResolution === "EXPIRED" && (
+                <p className="text-[11px] text-slate-400">预留超时释放</p>
+              )}
           </div>
 
           {/* 右侧金额 */}

@@ -121,6 +121,9 @@ async function createOrderFixture(input: {
       orderNo: `${RUN_TAG}${Math.floor(Math.random() * 0xffffffff).toString(16)}`,
       type: "PRODUCT",
       status: input.status,
+      // Phase 8B-01 约束：PRODUCT PENDING 必须有 seller 确认截止
+      productReservationExpiresAt:
+        input.status === "PENDING" ? new Date(Date.now() + 60 * 60 * 1000) : null,
       buyerId: input.buyerId,
       sellerId: input.sellerId,
       productId: input.productId,

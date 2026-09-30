@@ -50,7 +50,7 @@ afterEach(() => {
 describe("MyOrdersPage Unified Order Center Test Suite", () => {
   it("renders header, tab bar and empty state when user has no orders", async () => {
     requireUser.mockResolvedValue({ id: "user-1" });
-    getOrdersInvolvingUser.mockResolvedValue([]);
+    getOrdersInvolvingUser.mockResolvedValue({ orders: [], serverNow: Date.now() });
     getMyRenterOrdersDetailed.mockResolvedValue([]);
     getMyOwnerOrdersDetailed.mockResolvedValue([]);
 
@@ -71,7 +71,10 @@ describe("MyOrdersPage Unified Order Center Test Suite", () => {
     requireUser.mockResolvedValue({ id: "user-1" });
 
     // Mock 综合订单数据
-    getOrdersInvolvingUser.mockResolvedValue([
+    // PHASE 8B-01：{ orders, serverNow } 形状
+    getOrdersInvolvingUser.mockResolvedValue({
+      serverNow: Date.now(),
+      orders: [
       {
         id: "order-product-1",
         orderNo: "PO202607190001",
@@ -110,7 +113,8 @@ describe("MyOrdersPage Unified Order Center Test Suite", () => {
         serviceListing: null,
         reviews: [],
       },
-    ]);
+      ],
+    });
 
     getMyRenterOrdersDetailed.mockResolvedValue([
       {
@@ -152,5 +156,83 @@ describe("MyOrdersPage Unified Order Center Test Suite", () => {
     expect(links[0].getAttribute("href")).toBe("/rental-orders/rental-order-1");
     expect(links[1].getAttribute("href")).toBe("/errands/errand-1");
     expect(links[2].getAttribute("href")).toBe("/products/prod-1");
+  });
+
+  it("PHASE 8B-01：Product PENDING 显示确认截止；到期未 materialize 显示等待系统释放；CANCELLED+EXPIRED 显示预留超时释放", async () => {
+    requireUser.mockResolvedValue({ id: "user-1" });
+
+    const serverNow = Date.parse("2026-10-01T00:00:00.000Z");
+    getOrdersInvolvingUser.mockResolvedValue({
+      serverNow,
+      orders: [
+        {
+          id: "order-pending-live",
+          orderNo: "PO202610010001",
+          type: "PRODUCT",
+          status: "PENDING",
+          amount: "10.00",
+          createdAt: new Date("2026-09-30T20:00:00.000Z"),
+          buyerId: "user-1",
+          sellerId: "user-2",
+          buyer: { id: "user-1", name: "我自己", avatarUrl: null, schoolName: "示例大学" },
+          seller: { id: "user-2", name: "未来卖家", avatarUrl: null, schoolName: "示例大学" },
+          product: { id: "prod-live", title: "进行中预留商品", images: [] },
+          errandTask: null,
+          serviceListing: null,
+          reviews: [],
+          productReservationExpiresAt: new Date("2026-10-01T12:00:00.000Z"),
+          productReservationResolution: null,
+        },
+        {
+          id: "order-pending-overdue",
+          orderNo: "PO202610010002",
+          type: "PRODUCT",
+          status: "PENDING",
+          amount: "10.00",
+          createdAt: new Date("2026-09-29T20:00:00.000Z"),
+          buyerId: "user-1",
+          sellerId: "user-2",
+          buyer: { id: "user-1", name: "我自己", avatarUrl: null, schoolName: "示例大学" },
+          seller: { id: "user-2", name: "未来卖家", avatarUrl: null, schoolName: "示例大学" },
+          product: { id: "prod-overdue", title: "到期未释放商品", images: [] },
+          errandTask: null,
+          serviceListing: null,
+          reviews: [],
+          productReservationExpiresAt: new Date("2026-09-30T12:00:00.000Z"),
+          productReservationResolution: null,
+        },
+        {
+          id: "order-cancelled-expired",
+          orderNo: "PO202610010003",
+          type: "PRODUCT",
+          status: "CANCELLED",
+          amount: "10.00",
+          createdAt: new Date("2026-09-28T20:00:00.000Z"),
+          buyerId: "user-1",
+          sellerId: "user-2",
+          buyer: { id: "user-1", name: "我自己", avatarUrl: null, schoolName: "示例大学" },
+          seller: { id: "user-2", name: "未来卖家", avatarUrl: null, schoolName: "示例大学" },
+          product: { id: "prod-expired", title: "已超时释放商品", images: [] },
+          errandTask: null,
+          serviceListing: null,
+          reviews: [],
+          productReservationExpiresAt: new Date("2026-09-29T12:00:00.000Z"),
+          productReservationResolution: "EXPIRED",
+        },
+      ],
+    });
+    getMyRenterOrdersDetailed.mockResolvedValue([]);
+    getMyOwnerOrdersDetailed.mockResolvedValue([]);
+
+    render(await MyOrdersPage({ searchParams: Promise.resolve({ type: "all" }) }));
+
+    // 期限内：显示 seller 确认截止（§58）
+    expect(screen.getByText(/卖家确认截止：/)).toBeTruthy();
+
+    // 到期未 materialize：仅到期卡片显示"等待系统释放"（§59）
+    expect(screen.getAllByText("预留已到期，等待系统释放")).toHaveLength(1);
+
+    // CANCELLED + EXPIRED：显示"预留超时释放"（§60，不引入新 OrderStatus）
+    expect(screen.getByText("预留超时释放")).toBeTruthy();
   });
 });
