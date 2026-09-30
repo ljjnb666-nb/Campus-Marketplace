@@ -203,8 +203,11 @@ export async function proposeOrderMeetupTx(
     return meetupErrorResult("MEETUP_INVALID_TRANSITION");
   }
 
-  // ---- 步骤 6：location authority 固化（proposal 创建时定死 snapshot）----
+  // ---- 步骤 6：location authority 固化（proposal 创建时定死 snapshot 与
+  // 来源 provenance；RB01：来源语义 immutable，MeetupPoint 删除后
+  // MEETUP_POINT 不降级为 CUSTOM）----
   let locationTextSnapshot: string;
+  let locationSource: "CUSTOM" | "MEETUP_POINT";
   let resolvedMeetupPointId: string | null = null;
   if (input.meetupPointId) {
     // catalog 来源：锁内 fresh 校验存在 + isActive + campus 匹配；
@@ -217,6 +220,7 @@ export async function proposeOrderMeetupTx(
       return meetupErrorResult("MEETUP_POINT_INVALID");
     }
     locationTextSnapshot = point.locationText;
+    locationSource = "MEETUP_POINT";
     resolvedMeetupPointId = input.meetupPointId;
   } else {
     // custom location：与既有 meetingLocation UX 同级（trim 2..80）
@@ -224,6 +228,7 @@ export async function proposeOrderMeetupTx(
       return meetupErrorResult("MEETUP_LOCATION_INVALID");
     }
     locationTextSnapshot = input.locationText.trim();
+    locationSource = "CUSTOM";
   }
 
   if (!isMeetupProposalTimeValid(input.scheduledAt, new Date())) {
@@ -250,6 +255,7 @@ export async function proposeOrderMeetupTx(
       campusId,
       meetupPointId: resolvedMeetupPointId,
       locationTextSnapshot,
+      locationSource,
       scheduledAt: input.scheduledAt,
       status: "PROPOSED",
       proposedById: input.proposerId,

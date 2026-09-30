@@ -214,6 +214,7 @@ describe("proposeOrderMeetupTx：支持矩阵（D01-UNIT-03..08）", () => {
           campusId: "campus-1",
           meetupPointId: null,
           locationTextSnapshot: "东门快递柜旁",
+          locationSource: "CUSTOM",
           status: "PROPOSED",
           proposedById: buyerId,
         }),
@@ -417,6 +418,7 @@ describe("MeetupPoint 校验（D01-UNIT-10/11）", () => {
         data: expect.objectContaining({
           meetupPointId: "point-1",
           locationTextSnapshot: "图书馆北门",
+          locationSource: "MEETUP_POINT",
         }),
       }),
     );

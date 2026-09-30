@@ -431,6 +431,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8D-01 meetup domain（真实 PG�
     expect(stored.status).toBe("PROPOSED");
     expect(stored.campusId).toBe(campusId); // 交易标的（ServiceListing）campus
     expect(stored.meetupPointId).toBeNull();
+    expect(stored.locationSource).toBe("CUSTOM"); // RB01：custom provenance
     expect(stored.proposedById).toBe(buyer.id);
     expect(stored.confirmedById).toBeNull();
 
@@ -472,6 +473,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8D-01 meetup domain（真实 PG�
 
     const stored = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: meetupId } });
     expect(stored.meetupPointId).toBe(point.id);
+    expect(stored.locationSource).toBe("MEETUP_POINT"); // RB01：catalog provenance
     expect(stored.locationTextSnapshot).toBe("图书馆北门台阶");
 
     // point 改名 / 停用：历史 snapshot 不变
@@ -824,6 +826,96 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8D-01 meetup domain（真实 PG�
     // provenance 结构保留
     expect(customAfter.status).toBe("CONFIRMED");
     expect(customAfter.scheduledAt).not.toBeNull();
+  });
+
+  it("D01-PG-12：MeetupPoint 删除后 provenance 不丢失（locationSource 恒 MEETUP_POINT；erasure 保留 catalog snapshot）", async () => {
+    const seller = await createFixtureUser("PG12卖家");
+    const buyer = await createFixtureUser("PG12买家");
+
+    // ---- 订单 1：catalog point meetup（proposer = buyer）----
+    const product1 = await createProductFixture(seller.id);
+    const order1 = await placeRealOrder({
+      buyerId: buyer.id,
+      product: { id: product1.id, price: "10", sellerId: seller.id, campusId },
+    });
+    expect(order1).not.toBeNull();
+    expect(await transitionOrder(seller.id, order1!.id, "ACCEPTED")).not.toBeNull();
+
+    const point = await createMeetupPoint({ campusId, locationText: "图书馆北门台阶" });
+    const proposed = await proposeMeetup({
+      orderId: order1!.id,
+      proposerId: buyer.id,
+      meetupPointId: point.id,
+    });
+    expect(proposed).toMatchObject({ success: true, locationTextSnapshot: "图书馆北门台阶" });
+    const meetupId = (proposed as { meetupId: string }).meetupId;
+
+    const created = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: meetupId } });
+    expect(created.locationSource).toBe("MEETUP_POINT");
+    expect(created.meetupPointId).toBe(point.id);
+    expect(created.locationTextSnapshot).toBe("图书馆北门台阶");
+
+    // ---- 删除 MeetupPoint（ON DELETE SET NULL）→ 来源语义绝不降级 ----
+    await rawClient!.meetupPoint.delete({ where: { id: point.id } });
+    const afterDelete = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: meetupId } });
+    expect(afterDelete.meetupPointId).toBeNull();
+    expect(afterDelete.locationSource).toBe("MEETUP_POINT");
+    expect(afterDelete.locationTextSnapshot).toBe("图书馆北门台阶");
+
+    // ---- 订单 2：custom control（同 proposer）+ DB CHECK 探针 ----
+    const product2 = await createProductFixture(seller.id);
+    const order2 = await placeRealOrder({
+      buyerId: buyer.id,
+      product: { id: product2.id, price: "10", sellerId: seller.id, campusId },
+    });
+    expect(order2).not.toBeNull();
+    expect(await transitionOrder(seller.id, order2!.id, "ACCEPTED")).not.toBeNull();
+
+    // DB invariant：CUSTOM ⇒ meetupPointId IS NULL（直接构造违规行被 CHECK 拒绝）
+    const probePoint = await createMeetupPoint({ campusId, locationText: "探针见面点" });
+    await expect(
+      rawClient!.orderMeetup.create({
+        data: {
+          orderId: order2!.id,
+          campusId,
+          meetupPointId: probePoint.id,
+          locationTextSnapshot: "探针快照",
+          locationSource: "CUSTOM",
+          scheduledAt: new Date(Date.now() + HOUR),
+          status: "PROPOSED",
+          proposedById: buyer.id,
+        },
+      }),
+    ).rejects.toThrow(/location_source_consistency/);
+
+    const customProposed = await proposeMeetup({
+      orderId: order2!.id,
+      proposerId: buyer.id,
+      locationText: "私下小树林入口",
+    });
+    expect(customProposed).toMatchObject({ success: true });
+    const customMeetupId = (customProposed as { meetupId: string }).meetupId;
+    const customRow = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: customMeetupId } });
+    expect(customRow.locationSource).toBe("CUSTOM");
+    expect(customRow.meetupPointId).toBeNull();
+
+    // ---- 终结两个订单（erasure 前置：无 active order）----
+    expect(await transitionOrder(buyer.id, order1!.id, "COMPLETED")).not.toBeNull();
+    expect(await transitionOrder(buyer.id, order2!.id, "COMPLETED")).not.toBeNull();
+
+    // ---- proposer 注销：catalog snapshot（原 point 已删除）必须保留 ----
+    const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+    await eraseAccount(buyer.id);
+
+    const catalogAfterErase = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: meetupId } });
+    expect(catalogAfterErase.locationSource).toBe("MEETUP_POINT");
+    expect(catalogAfterErase.meetupPointId).toBeNull();
+    expect(catalogAfterErase.locationTextSnapshot).toBe("图书馆北门台阶");
+    expect(catalogAfterErase.locationTextSnapshot).not.toBe("（该内容已随账号注销删除）");
+
+    const customAfterErase = await rawClient!.orderMeetup.findUniqueOrThrow({ where: { id: customMeetupId } });
+    expect(customAfterErase.locationSource).toBe("CUSTOM");
+    expect(customAfterErase.locationTextSnapshot).toBe("（该内容已随账号注销删除）");
   });
 
   // ============================================================

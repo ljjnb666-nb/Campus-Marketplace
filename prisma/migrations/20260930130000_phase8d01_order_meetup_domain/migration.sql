@@ -10,12 +10,18 @@
 --     Order IN_DISPUTE 同事务原子提交。
 --   * MeetupPoint 是 campus catalog 参考数据；改名 / 停用（isActive=false）
 --     不改写历史 OrderMeetup.locationTextSnapshot（transaction snapshot
---     authority）；行删除走 SET NULL，快照保留。
+--     authority）；行删除走 SET NULL，快照保留。locationSource（RB01）是
+--     immutable 来源 provenance：MeetupPoint 删除后 MEETUP_POINT 来源语义
+--     绝不降级为 CUSTOM，erasure 依据它判定 custom location。
 --   * partial unique / CHECK 不在 Prisma schema 表达（显式 SQL，重放保持
 --     无 drift）。
 
 -- CreateEnum
 CREATE TYPE "OrderMeetupStatus" AS ENUM ('PROPOSED', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'NO_SHOW_REPORTED');
+
+-- CreateEnum（RB01：location 来源 immutable provenance；MeetupPoint 删除后
+-- MEETUP_POINT 来源语义绝不降级为 CUSTOM）
+CREATE TYPE "OrderMeetupLocationSource" AS ENUM ('CUSTOM', 'MEETUP_POINT');
 
 -- CreateTable
 CREATE TABLE "MeetupPoint" (
@@ -37,6 +43,7 @@ CREATE TABLE "OrderMeetup" (
     "campusId" TEXT NOT NULL,
     "meetupPointId" TEXT,
     "locationTextSnapshot" TEXT NOT NULL,
+    "locationSource" "OrderMeetupLocationSource" NOT NULL,
     "scheduledAt" TIMESTAMP(3) NOT NULL,
     "status" "OrderMeetupStatus" NOT NULL DEFAULT 'PROPOSED',
     "proposedById" TEXT NOT NULL,
@@ -155,4 +162,15 @@ ALTER TABLE "OrderMeetup" ADD CONSTRAINT "OrderMeetup_proposed_purity_check" CHE
         AND "buyerArrivedAt" IS NULL
         AND "sellerArrivedAt" IS NULL
     )
+);
+
+-- ---
+-- RB01 location source consistency：CUSTOM ⇒ meetupPointId IS NULL。
+-- MEETUP_POINT 不强制 meetupPointId IS NOT NULL——MeetupPoint 行删除走
+-- ON DELETE SET NULL 后必须允许 (MEETUP_POINT, NULL)，catalog 来源
+-- provenance 仍然正确（immutable，绝不回改成 CUSTOM）。
+-- ---
+ALTER TABLE "OrderMeetup" ADD CONSTRAINT "OrderMeetup_location_source_consistency_check" CHECK (
+    "locationSource" <> 'CUSTOM'
+    OR "meetupPointId" IS NULL
 );

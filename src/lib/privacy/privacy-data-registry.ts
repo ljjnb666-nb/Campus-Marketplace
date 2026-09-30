@@ -395,9 +395,10 @@ export const LISTING_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
   field("RentalReturnRecord", "photos", STORAGE_INTERNAL_FIELD),
   // ---- OrderMeetup（Phase 8D-01：proposedById 唯一作者）。custom location
   // 快照是 user-authored 非空列（erasure = REDACT 哨兵，作者注销后不得保留
-  // 明文）；catalog 快照（meetupPointId 非空）是平台参考数据，执行侧按
-  // meetupPointId 区分、不改写。scheduledAt/status/no-show provenance 等
-  // 交易结构字段保留（row = transaction provenance）。
+  // 明文）；custom 判定依据 immutable locationSource（RB01）而非可空的
+  // meetupPointId——MeetupPoint 行删除后该列被 SET NULL，来源语义仍在。
+  // scheduledAt/status/no-show provenance 等交易结构字段保留（row =
+  // transaction provenance）。
   field("OrderMeetup", "locationTextSnapshot", REDACTED_USER_CONTENT),
 ];
 
@@ -514,10 +515,13 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   // initiateGeneralOrderDispute（orderDisputeSchema.reason）开放——
   // writer/source lockstep 登记（明确推进 source inventory，非 allowlist hack）
   { model: "OrderDispute", field: "reason", sources: ["initiateOrderDisputeTx.reason", "initiateGeneralOrderDispute.reason"] },
-  // Phase 8D-01：custom location 快照经 canonical writer proposeOrderMeetupTx
-  // 固化（locationTextSnapshot）；Phase 8D-02 表单入口开放时补充其 schema
-  // source。catalog 来源（meetupPointId 非空）不是 user input，不改写本条。
-  { model: "OrderMeetup", field: "locationTextSnapshot", sources: ["proposeOrderMeetupTx.locationTextSnapshot"] },
+  // Phase 8D-01：真实用户输入是 ProposeOrderMeetupInput.locationText
+  // （canonical writer proposeOrderMeetupTx 消费并固化为 persisted derived
+  // snapshot locationTextSnapshot；RB01 source-truth：登记输入属性本身，
+  // 不登记不存在的 input property）。Phase 8D-02 表单入口开放时补充其
+  // schema source。catalog 来源（locationSource=MEETUP_POINT）不是 user
+  // input，不改写本条。
+  { model: "OrderMeetup", field: "locationTextSnapshot", sources: ["proposeOrderMeetupTx.locationText"] },
   { model: "BlockedUser", field: "reason", sources: ["blockUserAction.reason"] },
 ];
 
@@ -626,7 +630,8 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "Order.cancelReason",
   "Order.meetingLocation",
   // Phase 8D-01：custom location 快照 erasure 执行（account-erasure 按
-  // proposedById + meetupPointId null 精确 REDACT）
+  // proposedById + locationSource=CUSTOM 精确 REDACT——RB01：不用可空的
+  // meetupPointId 推断来源）
   "OrderMeetup.locationTextSnapshot",
   "RentalOrder.renterNote",
   "RentalOrder.cancellationNote",

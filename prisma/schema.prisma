@@ -121,6 +121,16 @@ enum OrderMeetupStatus {
   NO_SHOW_REPORTED
 }
 
+// Phase 8D-01（RB01）：meetup location snapshot 的 immutable 来源 provenance。
+// MEETUP_POINT 恒不变——即使 MeetupPoint 之后被删除（meetupPointId 走
+// ON DELETE SET NULL），历史快照的平台 catalog 来源语义绝不降级为 CUSTOM；
+// erasure 依据本字段（而非可空的 meetupPointId）判定 user-authored custom
+// location。DB CHECK 冻结 CUSTOM ⇒ meetupPointId IS NULL。
+enum OrderMeetupLocationSource {
+  CUSTOM
+  MEETUP_POINT
+}
+
 enum PaymentStatus {
   UNPAID
   OFFLINE_PENDING
@@ -1530,6 +1540,10 @@ model OrderMeetup {
   // custom location）都在 proposal 创建时固化，查询绝不重新 join
   // MeetupPoint 生成历史地点
   locationTextSnapshot String
+  // 来源 immutable provenance（RB01）：CUSTOM = 用户自定义地点（erasure 随
+  // 作者注销 REDACT）；MEETUP_POINT = 平台 catalog 快照（erasure 保留，即使
+  // meetupPointId 已被 ON DELETE SET NULL 置空）。创建后绝不回改。
+  locationSource       OrderMeetupLocationSource
   scheduledAt          DateTime
 
   status       OrderMeetupStatus @default(PROPOSED)

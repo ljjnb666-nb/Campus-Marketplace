@@ -342,11 +342,13 @@ export async function eraseAccount(
     });
 
     // Phase 8D-01：本人发起 meetup 的 custom location 快照（user-authored
-    // 非空列 → 哨兵标记；作者归属唯一 = proposedById）。catalog 快照
-    // （meetupPointId 非空）是平台参考数据，不改写；scheduledAt / status /
-    // arrival / no-show provenance 等交易结构历史保留。
+    // 非空列 → 哨兵标记；作者归属唯一 = proposedById）。RB01：custom 判定
+    // 依据 immutable locationSource（而非可空的 meetupPointId——MeetupPoint
+    // 行删除后该列被 SET NULL，来源语义仍在）。MEETUP_POINT 快照（含原点
+    // 已删除的）是平台 catalog 数据，不改写；scheduledAt / status / arrival
+    // / no-show provenance 等交易结构历史保留。
     await client.orderMeetup.updateMany({
-      where: { proposedById: userId, meetupPointId: null },
+      where: { proposedById: userId, locationSource: "CUSTOM" },
       data: { locationTextSnapshot: ERASED_USER_CONTENT_MARKER },
     });
 

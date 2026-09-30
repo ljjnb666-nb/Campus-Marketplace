@@ -328,6 +328,36 @@ describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 va
     expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(44);
   });
 
+  it("RB01 SOURCE TRUTH：OrderMeetup.locationTextSnapshot 登记的是真实输入属性（非字符串占位）", () => {
+    // registry 登记 source = 真实 canonical writer 的 input property
+    const entry = USER_INPUT_FIELD_EXPECTATIONS.find(
+      (e) => e.model === "OrderMeetup" && e.field === "locationTextSnapshot",
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.sources).toEqual(["proposeOrderMeetupTx.locationText"]);
+
+    // canonical writer 源码真实存在（不是虚构 symbol），且：
+    // 1. input 类型声明 locationText 属性（真实用户输入）
+    // 2. 写入点固化 locationTextSnapshot（persisted derived snapshot）
+    // 3. 写入点引用 locationSource（来源 provenance，RB01）
+    const serviceSource = readValidatorFile(
+      resolvePath(process.cwd(), "src", "lib", "meetups", "order-meetup-service.ts"),
+      "utf8",
+    );
+    expect(serviceSource.includes("ProposeOrderMeetupInput")).toBe(true);
+    expect(serviceSource.includes("locationText")).toBe(true);
+    expect(serviceSource.includes("locationTextSnapshot")).toBe(true);
+    expect(serviceSource.includes("locationSource")).toBe(true);
+    // input 属性与 persisted snapshot 不是同一个 property（derived 关系）
+    expect(serviceSource.includes("locationTextSnapshot:")).toBe(true);
+    // erasure 执行侧按 immutable source（而非可空 meetupPointId）判定 custom
+    const erasureSource = readValidatorFile(
+      resolvePath(process.cwd(), "src", "lib", "privacy", "account-erasure.ts"),
+      "utf8",
+    );
+    expect(erasureSource.includes('locationSource: "CUSTOM"')).toBe(true);
+  });
+
   it("accessories 不是当前 rentalPickupConfirmSchema 输入（HISTORICAL_ONLY）", () => {
     // rental.ts 无 accessories 输入（唯一 accessoriesComplete 属 damageClaim
     // 评分面，非 handover）
