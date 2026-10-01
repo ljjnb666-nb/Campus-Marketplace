@@ -55,7 +55,7 @@ ROADMAP STRUCTURE FREEZE != PHASE STATUS FREEZE）：
 | Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，Phase 6A/6B/6C 全部关闭） |
 | Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
-| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C 已推进并合并至 PR #51；8D Meetup / No-show 实施链进行中；未关闭前不得标记 Phase 8 DONE） |
+| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 Meetup / No-show Domain Foundation 已于 PR #52 合并并经 post-merge master CI run 36755621679 双绿关闭；NEXT = 8D-02 Meetup User Surface & End-to-End Closure） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
@@ -177,7 +177,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
-| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C 已有 merged slices；8D+ 尚未全部收口） |
+| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 CLOSED / MASTER-GREEN；NEXT = 8D-02） |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
@@ -337,8 +337,8 @@ Trust / risk / enforcement invariants（closure 时最终合同）：
   `MEMBERSHIP_SUSPEND_VS_LISTING_CREATE = SERIALIZED`、
   `REPORT_REVIEW_TRANSITION = ROW_LOCK_SERIALIZED`
 - **Phase 6B final reviewed baseline**（Final Repair 验证轮）：
-  243 test files / 1567 tests（1463 passed + 104 env-gated skip）；coverage
-  83.33 / 82.36 / 82.27 / 83.33；真实 PostgreSQL 集成：
+  243 test files / 1567 tests（1463 passed + 104 env-gated skip）；
+  coverage 83.33 / 82.36 / 82.27 / 83.33；真实 PostgreSQL 集成：
   Phase 6B 27 条（Phase 6A 17 条保留）；Playwright 36/36 × 3
   （workers=2、retry=0）；Mimosa NEW_HIGH = 0 / NEW_CRITICAL = 0
 - Known non-blocking（`NON_BLOCKING / TEST_INFRA_DEBT`，非生产授权 fail-open）：
@@ -423,31 +423,38 @@ campus configuration、system / operational overview。
 **重要**：未来的支付运营能力将**扩展本阶段建立的运营后台**，
 而不是另建一套互不相关的第二个 admin console。
 
-**Phase 7 Closure record（2026-09-22）**：
+**Phase 7 Final Closure Record（2026-09-22）**：
 
-- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
-- Implementation chain：PR #20–#27；final canonical merge = PR #27
-- Canonical master SHA：`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**（canonical Phase 7
+  code baseline：`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，PR #27 合并提交）
+- 实施链（八个切片，全部经独立验收 + exact-head CI 后合并）：
+
+  | 切片 | PR | Merge commit |
+  | --- | --- | --- |
+  | 7A Appeals | #20 | `f2d5aeaa644f9b77e1afea24abbecabc89b4dea9` |
+  | 7B Roles | #21 | `f5a29f2caf9c159d5a47a8b76f1e42f74b5cef96` |
+  | 7C Moderation | #22 | `caf8c22d650d70f738e5ce3056d1c187f6d17c50` |
+  | 7D Visibility | #23 | `85fcee88431a99585911803f7d78eb083eb90fe0` |
+  | 7E Reports / Cases | #24 | `6aeda72d1f2d91ab4f59b8b1a0b9db4fa90f32b0` |
+  | 7F User Verification Ops | #25 | `585c94ba86b1488478146b0995a94503cc1b4dfc` |
+  | 7G Disputes / Support | #26 | `8a0355cc7fabe6c8652983dc299e83161cd441b5` |
+  | 7H Ops Overview / Campus Admin | #27 | `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5` |
+
 - Post-merge master CI：run 35713347538 —— event = push、branch = master、
-  head = canonical master、attempt = 1、verify = success、e2e = success
-- Final exact-head baseline：353 test files / 2840 tests，全部通过；
-  coverage = lines 88.94 / branches 85.57 / functions 89.44 /
-  statements 88.94；Playwright critical-path = 72/72（workers=2、retry=0）；
-  Phase 7H real-PG contract = 26/26
-- Canonical scope：18/18 capability families =
-  dashboard overview、users、verification、product/service/errand/rental
-  moderation、reports、moderation cases、enforcement、appeals、
-  rental disputes、support、ops queues、SLA、audit、campus admin、
-  policy admin、governance metrics
-- Authorization final state：
-  `User.role` authorization writes / auth callsites = 0，
-  `PERMISSION_MAP` 运行时 fallback = 0，
-  `LEGACY_ALLOWLIST` = 0，
-  `MISSING` = 0；
-  governance mutation authority 为唯一 server-side authority
+  **attempt = 1**、verify = SUCCESS（353 files / 2840 tests）、e2e = SUCCESS
+  （72 passed）、coverage 88.94 / 85.57 / 89.44 / 88.94
+- **Capability closure（`PHASE_7_CANONICAL_CAPABILITY_CLOSURE = 18 / 18`）**：
+  TOTAL = 18、COMPLETE = 18、PARTIAL = 0、FOUNDATION_ONLY = 0、
+  LEGACY_ONLY = 0（within canonical Phase 7 scope）、MISSING = 0——
+  operations dashboard、user management、campus verification review、
+  product / errand / service / rental moderation、reports、moderation cases、
+  enforcement actions、appeals、disputes、support tickets、operations queues、
+  SLA / dueAt、audit visibility、campus configuration、
+  system / operational overview
 - Legacy admin audit：`/admin`、`/admin/users`、`/admin/verifications`、
-  `/admin/products`、`/admin/services`、`/admin/errands`、`/admin/rentals`、
-  `/admin/reports` 已切换到 canonical governance
+  `/admin/reports`、`/admin/products`、`/admin/errands`、`/admin/services`
+  均已退役为 `/governance/*` redirect——canonical governance operations
+  console = `/governance`，**不存在第二套 active Phase 7 governance
   authority**；剩余 legacy maintenance surface：`/admin/categories`、
   `/admin/keywords`（OUTSIDE Phase 7 canonical 18-capability scope、
   NON_BLOCKING，见 [BACKLOG.md](BACKLOG.md)
