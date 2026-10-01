@@ -160,6 +160,13 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.errandCategory.deleteMany();
   await prisma.serviceCategory.deleteMany();
   await prisma.rentalCategory.deleteMany();
+
+  // Phase 8D-02：meetup 表。OrderMeetup 随上方 order.deleteMany() 级联，
+  // 显式清理作兜底；MeetupPoint.campusId 为 Restrict——必须先于
+  // campus.deleteMany()，否则 E2E 残留的见面点会阻塞校区重置。
+  await prisma.orderMeetup.deleteMany();
+  await prisma.meetupPoint.deleteMany();
+
   await prisma.campus.deleteMany();
 }
 

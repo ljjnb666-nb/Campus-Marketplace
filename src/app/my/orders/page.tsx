@@ -114,6 +114,8 @@ export default async function MyOrdersPage({
         o.status === "PENDING" &&
         o.productReservationExpiresAt !== null &&
         serverNow >= o.productReservationExpiresAt.getTime(),
+      // Phase 8D-02：最近一条 meetup 的存在性（最小元数据，见 repository 注释）
+      hasMeetupHistory: (o.meetups?.length ?? 0) > 0,
     });
   }
 

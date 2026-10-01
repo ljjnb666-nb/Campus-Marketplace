@@ -54,6 +54,15 @@ export async function getOrdersInvolvingUser(userId: string) {
         errandTask: { select: { id: true, title: true, status: true } },
         serviceListing: { select: { id: true, title: true, coverImageUrl: true } },
         reviews: { select: { authorId: true } },
+        // Phase 8D-02：见面约定入口的最小元数据——只取"是否已有 meetup
+        // 历史"（最近一条的存在性），不把 meetup relation 无限制传给
+        // Client Component。用于 no-show → IN_DISPUTE 后入口仍可见
+        // （用户可回看历史结果）；状态细节以 meetup 页面权威投影为准
+        meetups: {
+          orderBy: { createdAt: "desc" as const },
+          take: 1,
+          select: { status: true },
+        },
       },
       orderBy: { createdAt: "desc" },
     }),

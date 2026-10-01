@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { ChevronRight, MessageSquare } from "lucide-react";
+import { ChevronRight, MessageSquare, MapPin } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { OrderStatusBadgeUnified } from "@/components/order/order-status-badge-unified";
 import { OrderCancelDialog } from "@/components/order/order-cancel-dialog";
@@ -58,6 +58,9 @@ export interface UnifiedOrderData {
   productReservationResolution?: string | null;
   /** 服务端渲染时刻 deadline 已过但 expiry 尚未 materialize（Phase 9 前） */
   productReservationOverdue?: boolean;
+  /** Phase 8D-02：是否已有 meetup 历史（订单中心"见面约定"入口判定之一；
+   * no-show → IN_DISPUTE 后入口仍可见，用户可回看历史结果） */
+  hasMeetupHistory?: boolean;
 }
 
 export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
@@ -131,6 +134,15 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
         order.status !== "COMPLETED" &&
         order.status !== "REJECTED"
       : generalDisputable;
+
+  // Phase 8D-02：见面约定入口（PRODUCT / SERVICE 专属——ERRAND 是
+  // pickup/delivery lifecycle、RENTAL 是 handover/return lifecycle，不进入
+  // General Meetup 域）。展示便利 predicate：ACCEPTED 可发起；已有 meetup
+  // 历史（即使订单后来 IN_DISPUTE / CLOSED）仍可进入查看历史结果。
+  // 恶意构造的 stale 请求由 meetup 页面授权 + canonical service FAIL CLOSED。
+  const meetupEntryVisible =
+    (order.type === "PRODUCT" || order.type === "SERVICE") &&
+    (order.status === "ACCEPTED" || order.hasMeetupHistory === true);
 
   const typeLabels: Record<string, string> = {
     PRODUCT: "二手商品",
@@ -345,6 +357,16 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
               <span className="rounded-xl bg-slate-100 px-3 py-1 text-xs text-slate-500 font-medium dark:bg-slate-800 dark:text-slate-400">
                 已评价
               </span>
+            )}
+
+            {meetupEntryVisible && (
+              <Link
+                href={`/my/orders/${order.id}/meetup`}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-1.5 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300"
+              >
+                <MapPin className="size-3.5" />
+                <span>见面约定</span>
+              </Link>
             )}
 
             {canDispute && (
