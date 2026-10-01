@@ -90,6 +90,12 @@ describe("order repository", () => {
         errandTask: { select: { id: true, title: true, status: true } },
         serviceListing: { select: { id: true, title: true, coverImageUrl: true } },
         reviews: { select: { authorId: true } },
+        // Phase 8D-02：见面约定入口最小元数据（最近一条 meetup 存在性）
+        meetups: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { status: true },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
