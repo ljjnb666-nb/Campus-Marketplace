@@ -34,12 +34,14 @@ export const ORDER_MEETUP_LOCATION_SOURCE_LABELS: Record<
   CUSTOM: "自定义地点",
 };
 
+/** fail-safe：未知值（含未来新增 enum 未同步 UI 时）不回显 raw enum */
 export function orderMeetupStatusLabel(status: string): string {
-  return ORDER_MEETUP_STATUS_LABELS[status as OrderMeetupStatusValue] ?? status;
+  return ORDER_MEETUP_STATUS_LABELS[status as OrderMeetupStatusValue] ?? "未知状态";
 }
 
 export function orderMeetupLocationSourceLabel(source: string): string {
   return (
-    ORDER_MEETUP_LOCATION_SOURCE_LABELS[source as OrderMeetupLocationSourceValue] ?? source
+    ORDER_MEETUP_LOCATION_SOURCE_LABELS[source as OrderMeetupLocationSourceValue] ??
+    "未知地点类型"
   );
 }

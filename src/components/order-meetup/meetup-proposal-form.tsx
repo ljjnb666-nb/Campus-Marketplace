@@ -12,21 +12,16 @@ import type { MeetupPointOption } from "@/lib/meetups/order-meetup-query";
 
 const initialState: OrderMeetupActionState = { success: false, message: "" };
 
-/** datetime-local 的本地时间格式（YYYY-MM-DDTHH:mm；浏览器本地时区） */
-function toLocalInputValue(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`;
-}
-
 interface MeetupProposalFormProps {
   orderId: string;
   /** authoritative campus 的 active MeetupPoint 候选（server 投影） */
   meetupPointOptions: MeetupPointOption[];
-  /** server render 时刻的时间快照（UX min / 默认值；非 authority） */
-  minAt: Date;
-  defaultAt: Date;
+  /**
+   * server 预生成的 canonical campus-local "YYYY-MM-DDTHH:mm" 文本
+   * （RB01-D：min / 默认值不做 client 端 Date→local 二次时区转换）
+   */
+  minAtLocal: string;
+  defaultAtLocal: string;
 }
 
 /**
@@ -36,13 +31,14 @@ interface MeetupProposalFormProps {
  * UX 约束（min / required / 长度提示）只是客户端体验；服务器 authority
  * 恒为 canonical proposeOrderMeetupTx 锁内 fresh revalidate——时间窗、
  * point 存在性 / active / campus 匹配、custom 长度（复用 meetup-policy
- * 常量，无第二套 2..80）、active meetup 唯一性全部由领域裁决。
+ * 常量，无第二套 2..80）、active meetup 唯一性全部由领域裁决。提交的
+ * datetime-local 文本由 canonical marketplace timezone 解释（RB01-B）。
  */
 export function MeetupProposalForm({
   orderId,
   meetupPointOptions,
-  minAt,
-  defaultAt,
+  minAtLocal,
+  defaultAtLocal,
 }: MeetupProposalFormProps) {
   const [state, formAction, isPending] = useActionState(proposeOrderMeetupAction, initialState);
   const [source, setSource] = useState<"MEETUP_POINT" | "CUSTOM">(
@@ -63,8 +59,8 @@ export function MeetupProposalForm({
           name="scheduledAt"
           type="datetime-local"
           required
-          min={toLocalInputValue(minAt)}
-          defaultValue={toLocalInputValue(defaultAt)}
+          min={minAtLocal}
+          defaultValue={defaultAtLocal}
           className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-indigo-500 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
         />
         <p className="text-[11px] text-slate-400">请选择一个未来的时间</p>

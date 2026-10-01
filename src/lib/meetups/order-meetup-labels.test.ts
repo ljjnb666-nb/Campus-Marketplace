@@ -29,10 +29,10 @@ describe("order-meetup-labels：中文状态单一映射", () => {
     });
   });
 
-  it("helper 对未知值回退原值（防御性，不抛错）", () => {
+  it("helper 对未知值 fail-safe 回退中文占位，不回显 raw enum", () => {
     expect(orderMeetupStatusLabel("PROPOSED")).toBe("待对方确认");
-    expect(orderMeetupStatusLabel("FUTURE_STATUS")).toBe("FUTURE_STATUS");
+    expect(orderMeetupStatusLabel("FUTURE_STATUS")).toBe("未知状态");
     expect(orderMeetupLocationSourceLabel("MEETUP_POINT")).toBe("校内推荐见面点");
-    expect(orderMeetupLocationSourceLabel("UNKNOWN")).toBe("UNKNOWN");
+    expect(orderMeetupLocationSourceLabel("UNKNOWN")).toBe("未知地点类型");
   });
 });

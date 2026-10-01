@@ -108,13 +108,17 @@ describe("order-meetup actions：actor 身份来自 session only（ACTION-01..05
     const [tx, input] = proposeOrderMeetupTx.mock.calls[0];
     // actor 唯一来源 = session user；伪造身份字段不进入 canonical input
     expect(input.proposerId).toBe("user-1");
+    // TIME-04：datetime-local 文本经 canonical Asia/Shanghai 解释为绝对
+    // instant（2026-10-05T14:30 campus wall-clock ≡ 06:30Z），绝不依赖
+    // server local timezone
     expect(input).toEqual({
       orderId: "order-1",
       proposerId: "user-1",
-      scheduledAt: new Date("2026-10-05T14:30"),
+      scheduledAt: new Date("2026-10-05T06:30:00.000Z"),
       meetupPointId: "point-1",
       locationText: null,
     });
+    expect((input.scheduledAt as Date).toISOString()).toBe("2026-10-05T06:30:00.000Z");
     expect(tx).toBeDefined();
     expect(revalidateOrderMeetupViews).toHaveBeenCalledWith("order-1");
   });
@@ -346,6 +350,10 @@ describe("order-meetup actions：validator DENY（ACTION-08）", () => {
     const invalidPayloads: Array<Record<string, string>> = [
       // invalid Date
       { orderId: "order-1", scheduledAt: "not-a-date", locationSource: "CUSTOM", locationText: "东门快递柜旁" },
+      // 越界字段 / offset 伪装 datetime-local（RB01 TIME-02）
+      { orderId: "order-1", scheduledAt: "2026-99-99T25:99", locationSource: "CUSTOM", locationText: "东门快递柜旁" },
+      { orderId: "order-1", scheduledAt: "2026-10-05T14:30+08:00", locationSource: "CUSTOM", locationText: "东门快递柜旁" },
+      { orderId: "order-1", scheduledAt: "2026-02-30T10:00", locationSource: "CUSTOM", locationText: "东门快递柜旁" },
       // 缺 scheduledAt
       { orderId: "order-1", scheduledAt: "", locationSource: "CUSTOM", locationText: "东门快递柜旁" },
       // invalid location（CUSTOM 1 个字）

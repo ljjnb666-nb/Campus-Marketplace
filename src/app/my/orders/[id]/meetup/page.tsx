@@ -18,6 +18,10 @@ import {
 import { MeetupProposalForm } from "@/components/order-meetup/meetup-proposal-form";
 import { NoShowSection } from "@/components/order-meetup/no-show-dialog";
 import {
+  formatMarketplaceDateTime,
+  formatMarketplaceDateTimeLocalInput,
+} from "@/lib/marketplace-time";
+import {
   orderMeetupLocationSourceLabel,
   orderMeetupStatusLabel,
 } from "@/lib/meetups/order-meetup-labels";
@@ -33,16 +37,6 @@ import { requireUser } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
 
-function formatDateTime(value: Date) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(value);
-}
-
 /**
  * Phase 8D-02：见面约定用户操作页（/my/orders/[id]/meetup，PRODUCT /
  * SERVICE 专属）。
@@ -50,16 +44,23 @@ function formatDateTime(value: Date) {
  * 冻结边界：
  * - 参与方授权 / type authority / 历史 location snapshot 全部由
  *   getOrderMeetupView read projection 决定（非参与方统一 notFound）；
+ *   null = 业务性 DENY（订单不存在 / 非参与方 / 不支持的 type）；
+ *   query 基础设施异常（DB outage / Prisma error / 编程 bug）正常向
+ *   上抛出，走 Next 服务端错误路径，绝不伪装成 404（RB02）；
  * - 本页所有"按钮是否展示"只是 server render 时刻的 convenience
  *   projection（复用 meetup-policy 窗口谓词，零规则复制）；stale UI
  *   提交由 canonical Tx service 锁内 FAIL CLOSED；
+ * - 全部用户可见时间经 formatMarketplaceDateTime 按 canonical campus
+ *   时区格式化（RB01：不依赖 server default timezone）；表单 min /
+ *   defaultValue 由 server 预生成 campus-local 文本，客户端不做
+ *   Date→local 二次时区转换；
  * - Meetup COMPLETED ≠ Order COMPLETED（页面明确标注，不触发任何
  *   订单完成语义）；NO_SHOW_REPORTED = allegation，不是判责。
  */
 export default async function OrderMeetupPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const user = await requireUser();
-  const view = await getOrderMeetupView(id, user.id).catch(() => null);
+  const view = await getOrderMeetupView(id, user.id);
 
   if (!view) {
     notFound();
@@ -164,7 +165,7 @@ export default async function OrderMeetupPage({ params }: { params: Promise<{ id
           <div className="space-y-1.5 text-xs text-slate-600 dark:text-slate-400">
             <p className="flex items-center gap-1.5">
               <CalendarClock className="size-3.5 text-indigo-500" />
-              <span>约定时间：{formatDateTime(current.scheduledAt)}</span>
+              <span>约定时间：{formatMarketplaceDateTime(current.scheduledAt)}</span>
             </p>
             <p className="flex items-center gap-1.5">
               <MapPin className="size-3.5 text-indigo-500" />
@@ -230,7 +231,7 @@ export default async function OrderMeetupPage({ params }: { params: Promise<{ id
               {waitingCounterpartInGrace && (
                 <p className="text-xs text-slate-400">
                   约定时间后 15 分钟才可报告未到场（约{" "}
-                  {formatDateTime(new Date(current.scheduledAt.getTime() + MEETUP_NO_SHOW_GRACE_MS))}{" "}
+                  {formatMarketplaceDateTime(new Date(current.scheduledAt.getTime() + MEETUP_NO_SHOW_GRACE_MS))}{" "}
                   开放）。
                 </p>
               )}
@@ -288,7 +289,7 @@ export default async function OrderMeetupPage({ params }: { params: Promise<{ id
           </div>
           <div className="space-y-1.5 text-xs text-slate-600 dark:text-slate-400">
             <p>该次见面约定已取消，历史记录保留如下。</p>
-            <p>原约定时间：{formatDateTime(latest.scheduledAt)}</p>
+            <p>原约定时间：{formatMarketplaceDateTime(latest.scheduledAt)}</p>
             <p>
               原约定地点：{latest.locationTextSnapshot}（
               {orderMeetupLocationSourceLabel(latest.locationSource)}）
@@ -307,8 +308,10 @@ export default async function OrderMeetupPage({ params }: { params: Promise<{ id
           <MeetupProposalForm
             orderId={view.order.id}
             meetupPointOptions={view.meetupPointOptions}
-            minAt={now}
-            defaultAt={new Date(now.getTime() + 60 * 60 * 1000)}
+            minAtLocal={formatMarketplaceDateTimeLocalInput(now)}
+            defaultAtLocal={formatMarketplaceDateTimeLocalInput(
+              new Date(now.getTime() + 60 * 60 * 1000),
+            )}
           />
         </section>
       )}
@@ -338,7 +341,7 @@ export default async function OrderMeetupPage({ params }: { params: Promise<{ id
                     {orderMeetupStatusLabel(meetup.status)}
                   </span>
                   <span className="text-[11px] text-slate-400">
-                    {formatDateTime(meetup.scheduledAt)}
+                    {formatMarketplaceDateTime(meetup.scheduledAt)}
                   </span>
                 </div>
                 <p className="mt-1 text-slate-500">

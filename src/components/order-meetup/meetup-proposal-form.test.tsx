@@ -35,17 +35,18 @@ function locationSourceInput(): HTMLInputElement {
   return input as HTMLInputElement;
 }
 
-// server render 时刻快照 props（本测试只关心 UX 合同，不关心具体值）
-const minAt = new Date("2026-10-01T12:00:00");
-const defaultAt = new Date("2026-10-01T13:00:00");
+// server 预生成的 canonical campus-local input 文本（RB01-D：本测试只
+// 关心 UX 合同——文本原样进入 min/defaultValue，客户端零时区换算）
+const minAtLocal = "2026-10-01T12:00";
+const defaultAtLocal = "2026-10-01T13:00";
 
 function renderForm(props: Partial<Parameters<typeof MeetupProposalForm>[0]> = {}) {
   return render(
     <MeetupProposalForm
       orderId="order-1"
       meetupPointOptions={[{ id: "point-1", name: "图书馆北门", locationText: "图书馆北门台阶" }]}
-      minAt={minAt}
-      defaultAt={defaultAt}
+      minAtLocal={minAtLocal}
+      defaultAtLocal={defaultAtLocal}
       {...props}
     />,
   );
@@ -72,6 +73,10 @@ describe("MeetupProposalForm", () => {
     const hidden = locationSourceInput();
     expect(hidden.value).toBe("MEETUP_POINT");
     expect(hidden.type).toBe("hidden");
+    // RB01-D：min/defaultValue 原样使用 server 预生成的 campus-local 文本
+    const scheduledInput = screen.getByLabelText(/约定时间/) as HTMLInputElement;
+    expect(scheduledInput.min).toBe("2026-10-01T12:00");
+    expect(scheduledInput.defaultValue).toBe("2026-10-01T13:00");
     // CUSTOM 文本框不渲染
     expect(screen.queryByRole("textbox", { name: "自定义见面地点" })).toBeNull();
   });

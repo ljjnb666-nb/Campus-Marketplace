@@ -108,7 +108,7 @@ describe("OrderMeetupPage：状态机 UX（§13）", () => {
     expectNoRawEnumVisible();
   });
 
-  it("A-ERRAND：type authority——查询投影 null → notFound（不泄露任何内容）", async () => {
+  it("A-ERRAND / QUERY-NULL-01：type authority——查询投影 null → notFound（不泄露任何内容）", async () => {
     requireUser.mockResolvedValue({ id: "user-1" });
     getOrderMeetupView.mockResolvedValue(null);
 
@@ -116,6 +116,18 @@ describe("OrderMeetupPage：状态机 UX（§13）", () => {
       OrderMeetupPage({ params: Promise.resolve({ id: "order-1" }) }),
     ).rejects.toThrow("notFound");
     expect(notFound).toHaveBeenCalledTimes(1);
+  });
+
+  it("QUERY-ERROR-01：query 基础设施异常正常抛出——不转换为 404（RB02）", async () => {
+    requireUser.mockResolvedValue({ id: "user-1" });
+    getOrderMeetupView.mockRejectedValue(new Error("db down"));
+    notFound.mockClear();
+
+    // 页面 reject 原 error（走 Next 服务端错误路径），notFound 不被调用
+    await expect(
+      OrderMeetupPage({ params: Promise.resolve({ id: "order-1" }) }),
+    ).rejects.toThrow("db down");
+    expect(notFound).not.toHaveBeenCalled();
   });
 
   it("B：PROPOSED proposer 视角 → 待对方确认 + 仅可取消", async () => {

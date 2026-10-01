@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { formatMarketplaceDateTimeLocalInput } from "../../src/lib/marketplace-time";
 import { e2eDb } from "./helpers/db";
 import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
 
@@ -23,17 +24,14 @@ import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
  *    IN_DISPUTE + 2 DataHold ACTIVE + 无任何自动判责
  *  - E2E-03 unauthorized：第三方直接访问 /my/orders/{id}/meetup → 404，
  *    不泄露地点 / 时间 / 到场 / dispute
+ *  - E2E-TIME-01 跨时区：America/Los_Angeles 浏览器提交 campus-local
+ *    14:30 → DB scheduledAt = Asia/Shanghai 14:30 的绝对 instant，
+ *    页面回显仍是 campus-local 14:30（旧实现 new Date(naive) 在 UTC
+ *    server 上必然得 14:30Z，该测试必然失败）
  *  - Mobile 390x844：核心表单可操作、无横向溢出
  */
 
 const MIN = 60 * 1000;
-
-function localDatetimeValue(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
-    date.getHours(),
-  )}:${pad(date.getMinutes())}`;
-}
 
 async function createProductFixture(tag: string) {
   const db = e2eDb();
@@ -154,7 +152,7 @@ test("8D-02 E2E-01：PRODUCT 正常 Meetup 全链路（发起→确认→双方�
   await buyer.page
     .getByRole("combobox", { name: "选择校内推荐见面点" })
     .selectOption({ value: point.id });
-  await buyer.page.getByLabel("约定时间").fill(localDatetimeValue(new Date(Date.now() + 60 * MIN)));
+  await buyer.page.getByLabel("约定时间").fill(formatMarketplaceDateTimeLocalInput(new Date(Date.now() + 60 * MIN)));
   await buyer.page.getByRole("button", { name: "发起见面约定" }).click();
 
   // 发起成功 → 页面刷新为 PROPOSED（中文状态，无 raw enum）
@@ -230,7 +228,7 @@ test("8D-02 E2E-02：SERVICE no-show → 纠纷原子创建（allegation 语义�
   await buyer.page
     .getByRole("textbox", { name: "自定义见面地点" })
     .fill("E2E 自定义地点 快递柜旁");
-  await buyer.page.getByLabel("约定时间").fill(localDatetimeValue(new Date(Date.now() + 60 * MIN)));
+  await buyer.page.getByLabel("约定时间").fill(formatMarketplaceDateTimeLocalInput(new Date(Date.now() + 60 * MIN)));
   await buyer.page.getByRole("button", { name: "发起见面约定" }).click();
   await expect(buyer.page.getByText("待对方确认").first()).toBeVisible({ timeout: 30_000 });
 
@@ -361,7 +359,7 @@ test("8D-02 Mobile 390x844：核心表单可操作、无横向溢出", async ({ 
 
   // datetime / select / custom location 可输入（可见且无溢出）
   await expect(page.getByLabel("约定时间")).toBeVisible();
-  await page.getByLabel("约定时间").fill(localDatetimeValue(new Date(Date.now() + 60 * MIN)));
+  await page.getByLabel("约定时间").fill(formatMarketplaceDateTimeLocalInput(new Date(Date.now() + 60 * MIN)));
   await page.getByRole("radio", { name: "自定义地点" }).click();
   const customBox = page.getByRole("textbox", { name: "自定义见面地点" });
   await expect(customBox).toBeVisible();
@@ -371,6 +369,57 @@ test("8D-02 Mobile 390x844：核心表单可操作、无横向溢出", async ({ 
 
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(scrollWidth).toBeLessThanOrEqual(390);
+
+  await context.close();
+});
+
+test("8D-02 E2E-TIME-01：America/Los_Angeles 浏览器提交 campus-local 14:30 → canonical instant", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const tag = uniqueTag("p8d02t");
+  const { db, order } = await createProductFixture(tag);
+
+  // 期望的 campus wall-clock：canonical 上海时区"明天"的 14:30
+  //（+24h 后的 Shanghai 日期恒为"今天+1"，且 14:30 恒在未来、满足 min）
+  const shanghaiDate = formatMarketplaceDateTimeLocalInput(
+    new Date(Date.now() + 24 * 60 * 60 * 1000),
+  ).slice(0, 10);
+  const campusLocalInput = `${shanghaiDate}T14:30`;
+  // Asia/Shanghai = UTC+08:00（无夏令时）：14:30 campus wall-clock 的
+  // 唯一绝对 instant
+  const expectedInstant = `${shanghaiDate}T06:30:00.000Z`;
+
+  const context = await browser.newContext({
+    storageState: storageStatePath("buyer"),
+    // 跨时区负例关键：浏览器机器时区 = America/Los_Angeles（UTC-7/-8）。
+    // 若实现把 datetime-local 交给 server local timezone 或浏览器时区
+    // 解释，本测试在旧实现上必然失败。
+    timezoneId: "America/Los_Angeles",
+  });
+  const page = await context.newPage();
+  await page.goto(`/my/orders/${order.id}/meetup`);
+  await expect(page.getByRole("heading", { name: "见面约定", exact: true })).toBeVisible();
+
+  await page.getByRole("radio", { name: "自定义地点" }).click();
+  await page.getByRole("textbox", { name: "自定义见面地点" }).fill("E2E 跨时区地点");
+  await page.getByLabel("约定时间").fill(campusLocalInput);
+  await page.getByRole("button", { name: "发起见面约定" }).click();
+  await expect(page.getByText("待对方确认").first()).toBeVisible({ timeout: 30_000 });
+
+  // DB 不变量：scheduledAt = Asia/Shanghai 14:30 的绝对 instant
+  //（不是 LA 14:30 = 21:30/22:30Z，也不是 server-local 14:30 = 14:30Z）
+  await expect
+    .poll(
+      async () =>
+        (await db.orderMeetup.findFirstOrThrow({ where: { orderId: order.id } })).scheduledAt.toISOString(),
+      { timeout: 15_000 },
+    )
+    .toBe(expectedInstant);
+
+  // 重新打开页面：仍显示用户选择的 campus-local 14:30
+  await page.reload();
+  await expect(page.getByText(/约定时间：.*14:30/)).toBeVisible();
 
   await context.close();
 });

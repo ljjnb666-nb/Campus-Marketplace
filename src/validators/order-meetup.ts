@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 import {
   MEETUP_LOCATION_MAX_LENGTH,
   MEETUP_LOCATION_MIN_LENGTH,
@@ -15,22 +16,26 @@ import {
  * - 长度常量直接复用 meetup-policy（禁止第二套 2..80 常量）；客户端
  *   提交的 campusId / actorId / targetUserId 不是合法输入，schema 不设
  *   这些字段，Action 层也绝不当作 authority 读取。
- * - scheduledAt 以 string 接收（datetime-local），parse 失败 DENY；
- *   「必须是未来时间」的窗口裁决属于 meetup-policy + Tx service，这里
- *   只拒绝无法 parse 的值。
+ * - scheduledAt 以 datetime-local 文本接收，经 canonical marketplace
+ *   timezone（RB01：parseMarketplaceDateTimeLocal）确定性解释为绝对
+ *   instant——绝不使用 new Date("YYYY-MM-DDTHH:mm")（会退化为 server
+ *   local timezone 语义）；「必须是未来时间」的窗口裁决属于
+ *   meetup-policy + Tx service，这里只拒绝无法解释的值。
  */
+
+const marketplaceDateTimeLocal = z
+  .string()
+  .trim()
+  .min(1, "请选择约定时间")
+  .refine((value) => parseMarketplaceDateTimeLocal(value) !== null, {
+    message: "约定时间无效",
+  })
+  .transform((value) => parseMarketplaceDateTimeLocal(value) as Date);
 
 export const proposeOrderMeetupSchema = z
   .object({
     orderId: z.string().trim().min(1, "订单不存在"),
-    scheduledAt: z
-      .string()
-      .trim()
-      .min(1, "请选择约定时间")
-      .refine((value) => !Number.isNaN(new Date(value).getTime()), {
-        message: "约定时间无效",
-      })
-      .transform((value) => new Date(value)),
+    scheduledAt: marketplaceDateTimeLocal,
     locationSource: z.enum(["MEETUP_POINT", "CUSTOM"], {
       message: "请选择见面地点来源",
     }),
