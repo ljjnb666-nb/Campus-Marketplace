@@ -8,6 +8,7 @@ const {
   errandTaskCount,
   serviceListingCount,
   campusFindMany,
+  reviewAggregate,
 } = vi.hoisted(() => ({
   getUnreadConversationCount: vi.fn(),
   getUnreadNotificationCount: vi.fn(),
@@ -16,6 +17,8 @@ const {
   errandTaskCount: vi.fn(),
   serviceListingCount: vi.fn(),
   campusFindMany: vi.fn(),
+  // Phase 8E：好评率 = canonical visible Review 聚合
+  reviewAggregate: vi.fn(),
 }));
 
 vi.mock("@/repositories/conversation-repository", () => ({
@@ -43,6 +46,9 @@ vi.mock("@/lib/prisma", () => ({
     campus: {
       findMany: campusFindMany,
     },
+    review: {
+      aggregate: reviewAggregate,
+    },
   },
 }));
 
@@ -61,6 +67,7 @@ describe("user repository", () => {
     errandTaskCount.mockReset();
     serviceListingCount.mockReset();
     campusFindMany.mockReset();
+    reviewAggregate.mockReset().mockResolvedValue({ _avg: { rating: 4.5 }, _count: { rating: 2 } });
   });
 
   it("returns profile dashboard data with unread counters", async () => {
@@ -120,6 +127,9 @@ describe("user repository", () => {
       },
       unreadNotifications: 7,
       unreadConversations: 8,
+      // Phase 8E：published-only 评价统计（avg 4.5/5 = 0.9，count 2）
+      publishedReviewCount: 2,
+      publishedPositiveReviewRate: 0.9,
     });
   });
 
@@ -153,7 +163,6 @@ describe("user repository", () => {
         grade: true,
         verificationStatus: true,
         completedOrdersCount: true,
-        positiveReviewRate: true,
         createdAt: true,
         campus: {
           select: {
@@ -239,6 +248,9 @@ describe("user repository", () => {
         createdErrandTasks: 2,
         serviceListings: 3,
       },
+      // Phase 8E：published-only 评价统计
+      publishedReviewCount: 2,
+      publishedPositiveReviewRate: 0.9,
     });
   });
 

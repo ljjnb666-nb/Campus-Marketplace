@@ -58,10 +58,11 @@ export default async function PublicUserPage({
   const user = await getPublicUserProfile(id);
   const isVerified = user.verificationStatus === "VERIFIED";
 
-  // 好评率防误导处理
-  const hasReviewData = user.completedOrdersCount > 0 && typeof user.positiveReviewRate === "number";
+  // Phase 8E（§21）：好评率防误导 = published-only——publishedReviewCount == 0
+  // → 暂无评价；> 0 → xx%（不再用 completedOrdersCount 猜"是否有评价"）
+  const hasReviewData = user.publishedReviewCount > 0;
   const reviewText = hasReviewData
-    ? `${Math.round((user.positiveReviewRate ?? 1) * 100)}%`
+    ? `${Math.round((user.publishedPositiveReviewRate ?? 0) * 100)}%`
     : "暂无评价";
 
   return (

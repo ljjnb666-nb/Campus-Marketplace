@@ -238,11 +238,17 @@ model User {
   verificationStatus      VerificationStatus        @default(UNVERIFIED)
   creditScore             Int                       @default(100)
   completedOrdersCount    Int                       @default(0)
+  // Phase 8E：NON_AUTHORITATIVE_DERIVED_CACHE——公开好评率的 canonical
+  // truth 是 visible 评价的 query-time 聚合（getPublishedGeneralReviewStats，
+  // 见 src/lib/reviews/review-query.ts）。本缓存仅为兼容保留，任何
+  // PUBLIC/USER_VISIBLE 读面禁止直接信任（blind/纠纷隐藏评价不得进入）。
   positiveReviewRate      Float                     @default(0)
   // 租赁统计字段
   rentalOwnerCount        Int                       @default(0)
   rentalRenterCount       Int                       @default(0)
   onTimeReturnRate        Float                     @default(0)
+  // Phase 8E：NON_AUTHORITATIVE_DERIVED_CACHE——canonical truth 是
+  // visible RentalReview 的 query-time 聚合（getPublishedRentalReviewStats）
   rentalPositiveRate      Float                     @default(0)
   rentalDisputeCount      Int                       @default(0)
   // 上传存储配额：已占用字节数（含 PENDING_DELETE 待回收部分）。

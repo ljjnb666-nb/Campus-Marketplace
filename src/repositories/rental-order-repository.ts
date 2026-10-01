@@ -6,13 +6,15 @@ import { prisma } from "@/lib/prisma";
 const MY_ORDERS_LIMIT = 100;
 
 // 用户公开摘要字段（避免查询 passwordHash 等敏感字段，与 user-summary-card 展示需求对齐）
+// Phase 8E：positiveReviewRate 已移除——PUBLIC/USER_VISIBLE 好评率一律走
+// canonical visible 聚合（src/lib/reviews/review-query.ts），stored User 字段
+// 是 NON_AUTHORITATIVE_DERIVED_CACHE，禁止继续向外供给
 const userSummarySelect = {
   id: true,
   name: true,
   avatarUrl: true,
   schoolName: true,
   completedOrdersCount: true,
-  positiveReviewRate: true,
   verificationStatus: true,
   createdAt: true,
 } satisfies Prisma.UserSelect;

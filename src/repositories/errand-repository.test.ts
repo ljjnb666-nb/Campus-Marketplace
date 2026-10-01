@@ -6,6 +6,7 @@ const {
   errandTaskCount,
   errandTaskFindFirst,
   errandCategoryFindMany,
+  reviewAggregate,
 } = vi.hoisted(() => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
@@ -14,6 +15,8 @@ const {
   errandTaskCount: vi.fn(),
   errandTaskFindFirst: vi.fn(),
   errandCategoryFindMany: vi.fn(),
+  // Phase 8E：发布者好评率 = canonical visible Review 聚合
+  reviewAggregate: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({ notFound }));
@@ -28,6 +31,8 @@ vi.mock("@/lib/prisma", () => ({
     errandCategory: {
       findMany: errandCategoryFindMany,
     },
+    // Phase 8E：发布者好评率 = canonical visible Review 聚合
+    review: { aggregate: reviewAggregate },
   },
 }));
 
@@ -46,6 +51,8 @@ describe("errand repository", () => {
     errandTaskCount.mockReset();
     errandTaskFindFirst.mockReset();
     errandCategoryFindMany.mockReset();
+    // Phase 8E：默认无 visible 评价（count 0）
+    reviewAggregate.mockReset().mockResolvedValue({ _avg: { rating: null }, _count: { rating: 0 } });
   });
 
   it("builds errand list filters, sorting, deadline window and categories", async () => {

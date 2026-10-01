@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 
 export type ErrandListQuery = {
   q?: string;
@@ -248,7 +249,7 @@ export async function getErrandDetail(errandId: string) {
           name: true,
           schoolName: true,
           completedOrdersCount: true,
-          positiveReviewRate: true,
+          // Phase 8E：好评率由 getPublishedGeneralReviewStats canonical 覆写
           verificationStatus: true,
           createdAt: true,
         },
@@ -320,7 +321,19 @@ export async function getErrandDetail(errandId: string) {
       }),
     }));
 
-  return { errand, relatedErrands };
+  // Phase 8E（§19/§20）：PUBLIC 发布者好评率 = canonical visible 评价聚合
+  const publisherReviewStats = await getPublishedGeneralReviewStats(errand.publisherId);
+  return {
+    errand: {
+      ...errand,
+      publisher: {
+        ...errand.publisher,
+        positiveReviewRate: publisherReviewStats.positiveRate,
+        publishedReviewCount: publisherReviewStats.count,
+      },
+    },
+    relatedErrands,
+  };
 }
 
 export async function getErrandForEdit(errandId: string, userId: string) {

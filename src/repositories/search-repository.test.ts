@@ -8,6 +8,7 @@ const {
   productGroupBy,
   errandGroupBy,
   serviceGroupBy,
+  reviewGroupBy,
 } = vi.hoisted(() => ({
   productFindMany: vi.fn(),
   errandFindMany: vi.fn(),
@@ -16,6 +17,8 @@ const {
   productGroupBy: vi.fn(),
   errandGroupBy: vi.fn(),
   serviceGroupBy: vi.fn(),
+  // Phase 8E：用户好评率 = canonical visible Review 批量聚合
+  reviewGroupBy: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -35,6 +38,9 @@ vi.mock("@/lib/prisma", () => ({
     user: {
       findMany: userFindMany,
     },
+    review: {
+      groupBy: reviewGroupBy,
+    },
   },
 }));
 
@@ -49,6 +55,7 @@ describe("getSearchResults", () => {
     productGroupBy.mockReset();
     errandGroupBy.mockReset();
     serviceGroupBy.mockReset();
+    reviewGroupBy.mockReset().mockResolvedValue([]);
   });
 
   it("returns empty results immediately for a blank keyword", async () => {
@@ -75,10 +82,13 @@ describe("getSearchResults", () => {
         name: "李同学",
         bio: "一起打球",
         schoolName: "示例大学",
-        positiveReviewRate: 0.9,
         completedOrdersCount: 8,
         campus: { id: "campus-1", name: "主校区" },
       },
+    ]);
+    // Phase 8E：用户好评率 = canonical visible Review 批量聚合（avg 4.5/5、1 条）
+    reviewGroupBy.mockResolvedValue([
+      { targetUserId: "user-1", _avg: { rating: 4.5 }, _count: { rating: 1 } },
     ]);
     productGroupBy.mockResolvedValue([{ sellerId: "user-1", _count: { sellerId: 2 } }]);
     errandGroupBy.mockResolvedValue([{ publisherId: "user-1", _count: { publisherId: 1 } }]);
@@ -97,6 +107,7 @@ describe("getSearchResults", () => {
           bio: "一起打球",
           schoolName: "示例大学",
           positiveReviewRate: 0.9,
+          publishedReviewCount: 1,
           completedOrdersCount: 8,
           campus: { id: "campus-1", name: "主校区" },
           visibleCounts: {
@@ -170,7 +181,6 @@ describe("getSearchResults", () => {
         name: true,
         bio: true,
         schoolName: true,
-        positiveReviewRate: true,
         completedOrdersCount: true,
         campus: {
           select: {

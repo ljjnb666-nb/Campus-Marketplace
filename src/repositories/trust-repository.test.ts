@@ -1,103 +1,66 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const {
-  reviewFindMany,
-  reportFindMany,
-} = vi.hoisted(() => ({
-  reviewFindMany: vi.fn(),
+const { reportFindMany } = vi.hoisted(() => ({
   reportFindMany: vi.fn(),
 }));
 
+const getMyReviewsReadModel = vi.hoisted(() => vi.fn());
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    review: {
-      findMany: reviewFindMany,
-    },
     report: {
       findMany: reportFindMany,
     },
   },
 }));
 
+// Phase 8E：getMyReviews 完全委托 canonical read model——委托合同是本测试
+// 的唯一域（visible 谓词/归一化由 review-query 单测 + 真实 PG 集成覆盖）
+vi.mock("@/lib/reviews/review-query", () => ({
+  getMyReviewsReadModel,
+}));
+
 import { getMyReports, getMyReviews } from "@/repositories/trust-repository";
 
 describe("trust repository", () => {
   beforeEach(() => {
-    reviewFindMany.mockReset();
     reportFindMany.mockReset();
+    getMyReviewsReadModel.mockReset();
   });
 
-  it("returns written and received reviews with related users and orders", async () => {
-    reviewFindMany
-      .mockResolvedValueOnce([
+  it("getMyReviews 委托 canonical read model（written 全量 + received visible-only）", async () => {
+    const readModel = {
+      written: [
         {
           id: "review-1",
-          authorId: "user-1",
-          targetUser: { id: "user-2", name: "卖家同学" },
-          order: { id: "order-1", orderNo: "CM202607170001", type: "PRODUCT" },
-        },
-      ])
-      .mockResolvedValueOnce([
-        {
-          id: "review-2",
-          targetUserId: "user-1",
-          author: { id: "user-3", name: "买家同学" },
-          order: { id: "order-2", orderNo: "CM202607170002", type: "SERVICE" },
-        },
-      ]);
-
-    const result = await getMyReviews("user-1");
-
-    expect(reviewFindMany).toHaveBeenNthCalledWith(1, {
-      where: { authorId: "user-1" },
-      orderBy: { createdAt: "desc" },
-      include: {
-        targetUser: {
-          select: { id: true, name: true },
-        },
-        order: {
-          select: {
-            id: true,
-            orderNo: true,
-            type: true,
-          },
-        },
-      },
-    });
-    expect(reviewFindMany).toHaveBeenNthCalledWith(2, {
-      where: { targetUserId: "user-1" },
-      orderBy: { createdAt: "desc" },
-      include: {
-        author: {
-          select: { id: true, name: true },
-        },
-        order: {
-          select: {
-            id: true,
-            orderNo: true,
-            type: true,
-          },
-        },
-      },
-    });
-    expect(result).toEqual({
-      writtenReviews: [
-        {
-          id: "review-1",
-          authorId: "user-1",
-          targetUser: { id: "user-2", name: "卖家同学" },
-          order: { id: "order-1", orderNo: "CM202607170001", type: "PRODUCT" },
+          orderNo: "CM202607170001",
+          orderTypeLabel: "二手商品",
+          counterpartyName: "卖家同学",
+          rating: 5,
+          content: null,
+          tags: [],
+          createdAt: new Date("2026-07-17T08:00:00.000Z"),
+          statusLabel: "已公开",
         },
       ],
-      receivedReviews: [
+      received: [
         {
           id: "review-2",
-          targetUserId: "user-1",
-          author: { id: "user-3", name: "买家同学" },
-          order: { id: "order-2", orderNo: "CM202607170002", type: "SERVICE" },
+          orderNo: "CM202607170002",
+          orderTypeLabel: "技能服务",
+          counterpartyName: "买家同学",
+          rating: 4,
+          content: null,
+          tags: [],
+          createdAt: new Date("2026-07-17T09:00:00.000Z"),
+          statusLabel: null,
         },
       ],
-    });
+    };
+    getMyReviewsReadModel.mockResolvedValue(readModel);
+
+    expect(await getMyReviews("user-1")).toBe(readModel);
+    expect(getMyReviewsReadModel).toHaveBeenCalledWith("user-1");
   });
 
   it("returns reports with all supported target relations", async () => {

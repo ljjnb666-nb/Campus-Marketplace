@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { cachedPublicRead, PUBLIC_META_TTL_MS } from "@/lib/public-cache";
+import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 
 export type ProductListQuery = {
   q?: string;
@@ -228,7 +229,8 @@ export async function getProductDetail(
           schoolName: true,
           verificationStatus: true,
           completedOrdersCount: true,
-          positiveReviewRate: true,
+          // Phase 8E：positiveReviewRate 不再从 User 行读取（stale cache），
+          // 由 getPublishedGeneralReviewStats 在返回前 canonical 覆写
           createdAt: true,
         },
       },
@@ -310,7 +312,20 @@ export async function getProductDetail(
       }),
     }));
 
-  return { product, relatedProducts };
+  // Phase 8E（§19/§20）：PUBLIC 卖家好评率 = canonical visible 评价聚合，
+  // 绝不相信 stored User.positiveReviewRate（blind/纠纷隐藏评价不进入）
+  const sellerReviewStats = await getPublishedGeneralReviewStats(product.sellerId);
+  return {
+    product: {
+      ...product,
+      seller: {
+        ...product.seller,
+        positiveReviewRate: sellerReviewStats.positiveRate,
+        publishedReviewCount: sellerReviewStats.count,
+      },
+    },
+    relatedProducts,
+  };
 }
 
 /**
