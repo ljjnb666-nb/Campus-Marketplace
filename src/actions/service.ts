@@ -6,6 +6,7 @@ import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { updateServiceStatusTx } from "@/lib/listing-status-service";
+import { deleteServiceListingTx } from "@/lib/listings/listing-lifecycle-service";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateServiceViews } from "@/lib/revalidate";
@@ -304,39 +305,37 @@ export async function deleteService(formData: FormData) {
     redirect("/my/services");
   }
 
-  const service = await prisma.serviceListing.findFirst({
-    where: {
-      id: serviceId,
-      providerId: user.id,
-      deletedAt: null,
-    },
-    select: { id: true, coverImageUrl: true },
-  });
-
-  if (!service) {
-    redirect("/my/services");
+  // Phase 8F（§28/§31）：删除写权威 = USER 锁 → ServiceListing FOR UPDATE →
+  // fresh ownership/deletedAt → active SERVICE order 检查 → canonical 软删除
+  // （OFFLINE + deletedAt）。有 active order 时 provider 仍可暂停/下架，
+  // 但 delete DENY（stop new business != destroy active obligation context）
+  let outcome: Awaited<ReturnType<typeof deleteServiceListingTx>>;
+  try {
+    outcome = await withTransaction((tx) => deleteServiceListingTx(tx, user.id, serviceId));
+  } catch (error) {
+    return { success: false, message: actionErrorMessage(error, "deleteService") };
   }
 
-  try {
-    await prisma.serviceListing.update({
+  if (outcome === "DELETED") {
+    // 软删除服务时标记封面资源待删除（transaction 外读仅资产发现，非权威）
+    const cover = await prisma.serviceListing.findUnique({
       where: { id: serviceId },
-      data: {
-        status: "OFFLINE",
-        deletedAt: new Date(),
-      },
+      select: { coverImageUrl: true },
     });
-
-    // 软删除服务时标记封面资源待删除
-    if (service.coverImageUrl) {
-      await markAssetsForValuesPendingDelete(user.id, [service.coverImageUrl]).catch(
+    if (cover?.coverImageUrl) {
+      await markAssetsForValuesPendingDelete(user.id, [cover.coverImageUrl]).catch(
         () => undefined,
       );
     }
 
     revalidateServiceViews(serviceId);
-  } catch (error) {
-    actionErrorMessage(error, "deleteService");
+    redirect("/my/services");
   }
 
+  if (outcome === "ACTIVE_OBLIGATION") {
+    return { success: false, message: "该服务存在进行中的预约，暂时无法删除，请先完成或结束现有订单" };
+  }
+
+  // MISSING_OR_FORBIDDEN / ALREADY_DELETED → 幂等安全结局：回列表
   redirect("/my/services");
 }

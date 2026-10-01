@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Calendar, Flag, Edit3, Trash2, MapPin, Star, CheckSquare } from "lucide-react";
+import { MessageSquare, Calendar, Flag, Edit3, MapPin, Star, CheckSquare } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -15,6 +15,7 @@ import { ListingContactForm } from "@/components/conversation/listing-contact-fo
 import { createOrOpenServiceConversation } from "@/actions/conversation";
 import { createServiceOrder } from "@/actions/order";
 import { deleteService } from "@/actions/service";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 type ServiceListingStatus = "ACTIVE" | "PAUSED" | "OFFLINE" | string;
 
@@ -141,16 +142,13 @@ export function ServiceDetailConsole({
                   <Edit3 className="size-4" />
                   <span>编辑服务</span>
                 </Link>
-                <form action={deleteService}>
-                  <input type="hidden" name="serviceId" value={service.id} />
-                  <button
-                    type="submit"
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                  >
-                    <Trash2 className="size-4" />
-                    <span>删除服务</span>
-                  </button>
-                </form>
+                <DeleteListingForm
+                  action={deleteService}
+                  hiddenFieldName="serviceId"
+                  hiddenValue={service.id}
+                  label="删除服务"
+                  buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                />
               </div>
               <ServiceStatusActions
                 serviceId={service.id}

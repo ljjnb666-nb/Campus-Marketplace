@@ -5,6 +5,10 @@ import { PRODUCT_STATUS_LABELS } from "@/constants/product";
 // projection，不是卖家可主动制造的状态——卖家只能控制 ACTIVE/OFFLINE。
 // SOLD 为 seller-terminal：不渲染任何 lifecycle mutation 操作（再售走
 // 新 listing），状态展示仍由别处的状态标签承担。
+// Phase 8F（§42）：RESERVED + active order 时 ACTIVE/OFFLINE 服务端一律
+// DENY（system-owned projection 不可手工覆盖）——UI 不渲染两个必然失败的
+// 按钮；stale RESERVED 的恢复路径保留在 server authority（fresh 判定无
+// active order 时 ACTIVE 仍放行），UI 不基于 stale snapshot 猜。
 const statusOptions = [
   { value: "ACTIVE", label: "重新上架" },
   { value: "OFFLINE", label: "下架" },
@@ -17,7 +21,7 @@ export function ProductStatusActions({
   productId: string;
   currentStatus: keyof typeof PRODUCT_STATUS_LABELS;
 }) {
-  if (currentStatus === "SOLD") {
+  if (currentStatus === "SOLD" || currentStatus === "RESERVED") {
     return null;
   }
 

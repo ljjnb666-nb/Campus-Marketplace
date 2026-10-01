@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Repeat, Flag, Edit3, Trash2, MapPin, Eye } from "lucide-react";
+import { MessageSquare, Repeat, Flag, Edit3, MapPin, Eye } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
 import { RentalBookingDrawer } from "@/components/rental/rental-booking-drawer";
@@ -14,6 +14,7 @@ import { ListingContactForm } from "@/components/conversation/listing-contact-fo
 import { createOrOpenRentalConversation } from "@/actions/conversation";
 import { createRentalOrder } from "@/actions/rental-order";
 import { deleteRentalListing } from "@/actions/rental-listing";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 import type { RentalListingStatus } from "@prisma/client";
 
@@ -159,16 +160,13 @@ export function RentalDetailConsole({
                   <Edit3 className="size-4" />
                   <span>编辑物品</span>
                 </Link>
-                <form action={deleteRentalListing}>
-                  <input type="hidden" name="listingId" value={listing.id} />
-                  <button
-                    type="submit"
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                  >
-                    <Trash2 className="size-4" />
-                    <span>删除物品</span>
-                  </button>
-                </form>
+                <DeleteListingForm
+                  action={deleteRentalListing}
+                  hiddenFieldName="listingId"
+                  hiddenValue={listing.id}
+                  label="删除物品"
+                  buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                />
               </div>
             </div>
           ) : (

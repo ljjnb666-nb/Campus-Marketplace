@@ -111,12 +111,12 @@ export const RENTAL_STATUS_TARGETS: ReadonlySet<string> = new Set([
  * PENDING / ACCEPTED / IN_PROGRESS / IN_DISPUTE（Phase 8C：dispute 治理
  * 冻结仍属 active obligation）；COMPLETED / CANCELLED / CLOSED 是 terminal。
  */
-export const ACTIVE_SERVICE_ORDER_STATUSES: readonly string[] = [
+export const ACTIVE_SERVICE_ORDER_STATUSES: readonly [
   "PENDING",
   "ACCEPTED",
   "IN_PROGRESS",
   "IN_DISPUTE",
-];
+] = ["PENDING", "ACCEPTED", "IN_PROGRESS", "IN_DISPUTE"];
 
 /**
  * Rental Order 的 terminal 状态（§32）：COMPLETED / CANCELLED / REJECTED /
@@ -124,12 +124,12 @@ export const ACTIVE_SERVICE_ORDER_STATUSES: readonly string[] = [
  * PENDING_* / IN_RENTAL / PICKED_UP）均为 active。删除判定用
  * `status NOT IN terminal` 表达，与既有 deleteRentalListing 语义同源。
  */
-export const RENTAL_TERMINAL_ORDER_STATUSES: readonly string[] = [
+export const RENTAL_TERMINAL_ORDER_STATUSES: readonly [
   "COMPLETED",
   "CANCELLED",
   "REJECTED",
   "CLOSED",
-];
+] = ["COMPLETED", "CANCELLED", "REJECTED", "CLOSED"];
 
 // ── §45 Wind-down 详情提示（owner / 履约参与方可见的中文状态说明）────────
 

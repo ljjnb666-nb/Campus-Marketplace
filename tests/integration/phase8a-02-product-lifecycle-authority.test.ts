@@ -263,23 +263,24 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(finalOrder.status).toBe("PENDING");
     });
 
-    it("PROD-AUTH-05：RESERVED → OFFLINE wind-down；取消订单 → Product remains OFFLINE", async () => {
+    it("PROD-AUTH-05（Phase 8F 收紧）：RESERVED + active order → seller OFFLINE DENY；订单取消后 Product 重投影（CASE A/B）", async () => {
       const seller = await createFixtureUser("AUTH05卖家");
       const buyer = await createFixtureUser("AUTH05买家");
       const product = await createProductFixture(seller.id, "RESERVED");
       const order = await createOrderFixture({ buyerId: buyer.id, sellerId: seller.id, productId: product.id, status: "PENDING" });
 
-      // wind-down：不需要 marketplace capability，订单不受影响
+      // Phase 8F（§4/§48）：RESERVED 是 system-owned projection——active
+      // order 存续期间 seller 的 OFFLINE 与 ACTIVE 一律 DENY（真实 action 入口）
       await sellerStatusAction(seller.id, product.id, "OFFLINE");
       expect(
         (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
-      ).toBe("OFFLINE");
+      ).toBe("RESERVED");
       expect(
         (await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } })).status,
       ).toBe("PENDING");
 
-      // 取消订单：cancellation projection 只重投影 RESERVED 态——
-      // seller 显式 OFFLINE 不得被复活为 ACTIVE
+      // 取消订单：cancellation projection 拥有 release 后的重投影权威——
+      // capability PASS → RESERVED → ACTIVE（CASE A）
       const cancelled = await transitionOrder(buyer.id, order.id, "CANCELLED");
       expect(cancelled).not.toBeNull();
 
@@ -288,7 +289,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       ).toBe("CANCELLED");
       expect(
         (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
-      ).toBe("OFFLINE");
+      ).toBe("ACTIVE");
     });
 
     it("PROD-AUTH-06/07/08：真实全链成交 → Product SOLD（system）；seller ACTIVE/OFFLINE 均 DENY", async () => {

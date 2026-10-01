@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Flag, Edit3, Trash2, MapPin, Navigation, Clock, CreditCard, ShieldCheck } from "lucide-react";
+import { MessageSquare, Flag, Edit3, MapPin, Navigation, Clock, CreditCard, ShieldCheck } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge, StatusBadgeVariant } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -14,6 +14,7 @@ import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { ListingContactForm } from "@/components/conversation/listing-contact-form";
 import { createOrOpenErrandConversation } from "@/actions/conversation";
 import { claimErrand, deleteErrand } from "@/actions/errand";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 import type { ErrandTaskStatus } from "@prisma/client";
 
@@ -180,16 +181,13 @@ export function ErrandDetailConsole({
                   </Link>
                 )}
                 {(isOpen || errand.status === "CANCELLED") && (
-                  <form action={deleteErrand}>
-                    <input type="hidden" name="errandId" value={errand.id} />
-                    <button
-                      type="submit"
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                    >
-                      <Trash2 className="size-4" />
-                      <span>删除任务</span>
-                    </button>
-                  </form>
+                  <DeleteListingForm
+                    action={deleteErrand}
+                    hiddenFieldName="errandId"
+                    hiddenValue={errand.id}
+                    label="删除任务"
+                    buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                  />
                 )}
               </div>
 

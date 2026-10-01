@@ -7,6 +7,7 @@ import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { updateRentalListingStatusTx, type RentalStatusTarget } from "@/lib/listing-status-service";
+import { deleteRentalListingTx } from "@/lib/listings/listing-lifecycle-service";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { prisma, withTransaction } from "@/lib/prisma";
@@ -349,28 +350,17 @@ export async function deleteRentalListing(formData: FormData) {
   const user = await requireUser();
   const listingId = String(formData.get("listingId") ?? "");
 
-  const listing = await prisma.rentalListing.findFirst({
-    where: { id: listingId, ownerId: user.id, deletedAt: null },
-    select: { id: true },
-  });
-
-  if (!listing) redirect('/my/rental-listings');
-
-  const activeOrders = await prisma.rentalOrder.count({
-    where: {
-      rentalListingId: listingId,
-      status: { notIn: ['COMPLETED', 'CANCELLED', 'REJECTED', 'CLOSED'] },
-    },
-  });
-
-  if (activeOrders > 0) return;
-
+  // Phase 8F（§28/§32）：删除写权威 = USER 锁 → RentalListing FOR UPDATE →
+  // fresh ownership/deletedAt → 锁内 fresh active RentalOrder 检查
+  // （active = NOT IN terminal SSOT，取代既有事务外 count）→ canonical 软删除
+  let outcome: Awaited<ReturnType<typeof deleteRentalListingTx>>;
   try {
-    await prisma.rentalListing.update({
-      where: { id: listingId },
-      data: { deletedAt: new Date(), status: 'OFFLINE' },
-    });
+    outcome = await withTransaction((tx) => deleteRentalListingTx(tx, user.id, listingId));
+  } catch (error) {
+    return { success: false, message: actionErrorMessage(error, "deleteRentalListing") };
+  }
 
+  if (outcome === "DELETED") {
     // 软删除时标记图片资源待删除（对象由 cleanup 异步物理清理）
     const images = await prisma.rentalListingImage.findMany({
       where: { rentalListingId: listingId },
@@ -385,9 +375,13 @@ export async function deleteRentalListing(formData: FormData) {
 
     revalidatePath('/rentals');
     revalidatePath('/my/rental-listings');
-  } catch (error) {
-    actionErrorMessage(error, "deleteRentalListing");
+    redirect('/my/rental-listings');
   }
 
+  if (outcome === "ACTIVE_OBLIGATION") {
+    return { success: false, message: "该物品存在进行中的租赁订单，暂时无法删除，请先完成或结束现有订单" };
+  }
+
+  // MISSING_OR_FORBIDDEN / ALREADY_DELETED → 幂等安全结局：回列表
   redirect('/my/rental-listings');
 }

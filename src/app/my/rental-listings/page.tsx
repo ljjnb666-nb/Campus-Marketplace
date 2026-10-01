@@ -88,11 +88,13 @@ export default async function MyRentalListingsPage() {
                 
                 <div className="flex flex-col gap-2 border-l border-slate-100 pl-4 sm:flex-row sm:items-center">
                   <form action={updateRentalListingStatus} className="flex gap-2">
-                    <input type="hidden" name="id" value={item.id} />
+                    {/* Phase 8F 修复：action 权威读取 "listingId"，此前 name="id"
+                        导致整页状态按钮静默 no-op */}
+                    <input type="hidden" name="listingId" value={item.id} />
                     {item.status === "AVAILABLE" && (
                       <>
                         <button type="submit" name="status" value="PAUSED" className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
-                          暂停
+                          暂停出租
                         </button>
                         <button type="submit" name="status" value="OFFLINE" className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
                           下架
@@ -100,9 +102,14 @@ export default async function MyRentalListingsPage() {
                       </>
                     )}
                     {item.status === "PAUSED" && (
-                      <button type="submit" name="status" value="AVAILABLE" className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100">
-                        恢复
-                      </button>
+                      <>
+                        <button type="submit" name="status" value="AVAILABLE" className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100">
+                          恢复出租
+                        </button>
+                        <button type="submit" name="status" value="OFFLINE" className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50">
+                          下架
+                        </button>
+                      </>
                     )}
                     {item.status === "OFFLINE" && (
                       <button type="submit" name="status" value="AVAILABLE" className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100">

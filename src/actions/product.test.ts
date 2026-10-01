@@ -75,6 +75,14 @@ vi.mock("@/lib/upload", () => ({
   markAssetsForValuesPendingDelete,
 }));
 
+const { deleteProductListingTx } = vi.hoisted(() => ({
+  deleteProductListingTx: vi.fn(),
+}));
+
+vi.mock("@/lib/listings/listing-lifecycle-service", () => ({
+  deleteProductListingTx,
+}));
+
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
@@ -263,7 +271,10 @@ describe("product actions", () => {
   });
 
   it("soft deletes the owner's product and marks its images for deletion", async () => {
-    productFindFirst.mockResolvedValue({ id: "product-1" });
+    // Phase 8F：删除写权威在 deleteProductListingTx（USER 锁 → Product FOR
+    // UPDATE → SOLD/active-order 检查 → canonical 软删除）；action 层只负责
+    // outcome → 资产标记 / revalidate / redirect 映射
+    deleteProductListingTx.mockResolvedValue("DELETED");
     productImageFindMany.mockResolvedValue([
       { url: "http://localhost:9100/campus-public/public/products/user-1/photo.webp" },
     ]);
@@ -273,13 +284,11 @@ describe("product actions", () => {
 
     await expect(deleteProduct(formData)).rejects.toThrow("REDIRECT:/my/products");
 
-    expect(productUpdate).toHaveBeenCalledWith({
-      where: { id: "product-1" },
-      data: {
-        status: "OFFLINE",
-        deletedAt: expect.any(Date),
-      },
-    });
+    expect(deleteProductListingTx).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "product-1",
+    );
     // 软删除时图片资源标记待删除，由 cleanup 异步物理清理
     expect(markAssetsForValuesPendingDelete).toHaveBeenCalledWith("user-1", [
       "http://localhost:9100/campus-public/public/products/user-1/photo.webp",
@@ -289,14 +298,31 @@ describe("product actions", () => {
   });
 
   it("does not delete products owned by other users", async () => {
-    productFindFirst.mockResolvedValue(null);
+    deleteProductListingTx.mockResolvedValue("MISSING_OR_FORBIDDEN");
 
     const formData = new FormData();
     formData.set("productId", "product-1");
 
     await expect(deleteProduct(formData)).rejects.toThrow("REDIRECT:/my/products");
 
-    expect(productUpdate).not.toHaveBeenCalled();
+    expect(markAssetsForValuesPendingDelete).not.toHaveBeenCalled();
+  });
+
+  it("Phase 8F：ACTIVE_OBLIGATION / SOLD_TERMINAL → 中文 denial，不 redirect", async () => {
+    deleteProductListingTx.mockResolvedValue("ACTIVE_OBLIGATION");
+    const formData = new FormData();
+    formData.set("productId", "product-1");
+
+    const blocked = await deleteProduct(formData);
+    expect(blocked).toMatchObject({ success: false });
+    expect((blocked as { message: string }).message).toContain("进行中的交易");
+    expect(redirect).not.toHaveBeenCalled();
+
+    deleteProductListingTx.mockResolvedValue("SOLD_TERMINAL");
+    const sold = await deleteProduct(formData);
+    expect(sold).toMatchObject({ success: false });
+    expect((sold as { message: string }).message).toContain("成交记录");
+    expect(redirect).not.toHaveBeenCalled();
   });
 
   describe("toggleFavorite", () => {

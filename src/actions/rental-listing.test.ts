@@ -56,6 +56,22 @@ vi.mock("@/lib/upload", () => ({
   markAssetsForValuesPendingDelete,
 }));
 
+const {
+  updateRentalListingStatusTx,
+  deleteRentalListingTx,
+} = vi.hoisted(() => ({
+  updateRentalListingStatusTx: vi.fn(),
+  deleteRentalListingTx: vi.fn(),
+}));
+
+vi.mock("@/lib/listing-status-service", () => ({
+  updateRentalListingStatusTx,
+}));
+
+vi.mock("@/lib/listings/listing-lifecycle-service", () => ({
+  deleteRentalListingTx,
+}));
+
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   enforceMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
   requireMarketplaceCapability: vi.fn().mockResolvedValue(undefined),
@@ -326,12 +342,11 @@ describe("rental listing actions", () => {
   });
 
   describe("updateRentalListingStatus", () => {
-    it("updates an owned listing to a valid status via in-tx fresh authority（RB-03）", async () => {
-      rentalListingFindFirst.mockResolvedValue({
-        id: "listing-1",
-        campusId: "campus-1",
-        status: "AVAILABLE",
-      });
+    // Phase 8F：action 层合同 = validator 收窄 + tx 内 domain 委派；
+    // fresh 行锁 / BANNED / PENDING_REVIEW / FULLY_BOOKED fail-closed 语义
+    // 权威在 listing-status-service（单元 + 集成测试覆盖）
+    it("valid status → tx 内委派 updateRentalListingStatusTx", async () => {
+      updateRentalListingStatusTx.mockResolvedValue(true);
 
       const formData = new FormData();
       formData.set("listingId", "listing-1");
@@ -339,96 +354,57 @@ describe("rental listing actions", () => {
 
       await updateRentalListingStatus(formData);
 
-      expect(rentalListingUpdate).toHaveBeenCalledWith({
-        where: { id: "listing-1" },
-        data: { status: "PAUSED" },
-      });
+      expect(updateRentalListingStatusTx).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "listing-1",
+        "PAUSED",
+      );
     });
 
-    it("RB-03：fresh BANNED → NO-OP 零写", async () => {
-      rentalListingFindFirst.mockResolvedValue({
-        id: "listing-1",
-        campusId: "campus-1",
-        status: "BANNED",
-      });
-
-      const formData = new FormData();
-      formData.set("listingId", "listing-1");
-      formData.set("status", "PAUSED");
-
-      await updateRentalListingStatus(formData);
-
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
-    });
-
-    it("RB-03：fresh PENDING_REVIEW → NO-OP 零写", async () => {
-      rentalListingFindFirst.mockResolvedValue({
-        id: "listing-1",
-        campusId: "campus-1",
-        status: "PENDING_REVIEW",
-      });
-
-      const formData = new FormData();
-      formData.set("listingId", "listing-1");
-      formData.set("status", "PAUSED");
-
-      await updateRentalListingStatus(formData);
-
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
-    });
-
-    it("ignores invalid statuses", async () => {
+    it("invalid status（白名单外）→ 零委派", async () => {
       const formData = new FormData();
       formData.set("listingId", "listing-1");
       formData.set("status", "BANNED");
 
       await updateRentalListingStatus(formData);
 
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
-    });
-
-    it("skips listings owned by others or in locked states", async () => {
-      rentalListingFindFirst.mockResolvedValue(null);
-      const formData = new FormData();
-      formData.set("listingId", "listing-1");
-      formData.set("status", "PAUSED");
-
-      await updateRentalListingStatus(formData);
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
-
-      rentalListingFindFirst.mockResolvedValue({ id: "listing-1", status: "BANNED" });
-      await updateRentalListingStatus(formData);
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
+      expect(updateRentalListingStatusTx).not.toHaveBeenCalled();
     });
   });
 
   describe("deleteRentalListing", () => {
-    it("soft-deletes a listing without active orders and redirects", async () => {
+    it("DELETED → revalidate + redirect", async () => {
+      deleteRentalListingTx.mockResolvedValue("DELETED");
+
       const formData = new FormData();
       formData.set("listingId", "listing-1");
 
       await deleteRentalListing(formData);
 
-      expect(rentalListingUpdate).toHaveBeenCalledWith({
-        where: { id: "listing-1" },
-        data: { deletedAt: expect.any(Date), status: "OFFLINE" },
-      });
+      expect(deleteRentalListingTx).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "listing-1",
+      );
       expect(redirect).toHaveBeenCalledWith("/my/rental-listings");
     });
 
-    it("keeps the listing when active orders exist", async () => {
-      rentalOrderCount.mockResolvedValue(2);
+    it("Phase 8F：ACTIVE_OBLIGATION → 中文 denial，不 redirect（取代 silent no-op）", async () => {
+      deleteRentalListingTx.mockResolvedValue("ACTIVE_OBLIGATION");
+
       const formData = new FormData();
       formData.set("listingId", "listing-1");
 
-      await deleteRentalListing(formData);
+      const result = await deleteRentalListing(formData);
 
-      expect(rentalListingUpdate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: false });
+      expect((result as { message: string }).message).toContain("进行中的租赁订单");
       expect(redirect).not.toHaveBeenCalled();
     });
 
     it("redirects when the listing is not found or not owned", async () => {
-      rentalListingFindFirst.mockResolvedValue(null);
+      deleteRentalListingTx.mockResolvedValue("MISSING_OR_FORBIDDEN");
       const formData = new FormData();
       formData.set("listingId", "listing-x");
 

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { deleteService } from "@/actions/service";
 import { ServiceStatusActions } from "@/components/service/service-status-actions";
 import { ModerationPendingBadge } from "@/components/listing/moderation-state";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import {
   SERVICE_PRICING_UNIT_LABELS,
   SERVICE_STATUS_LABELS,
@@ -90,15 +91,7 @@ export default async function MyServicesPage() {
                   >
                     编辑
                   </Link>
-                  <form action={deleteService}>
-                    <input type="hidden" name="serviceId" value={service.id} />
-                    <button
-                      type="submit"
-                      className="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-300 hover:text-rose-800"
-                    >
-                      删除
-                    </button>
-                  </form>
+                  <DeleteListingForm action={deleteService} hiddenFieldName="serviceId" hiddenValue={service.id} />
                 </div>
               </div>
               <div className="flex flex-col gap-2 lg:items-end">

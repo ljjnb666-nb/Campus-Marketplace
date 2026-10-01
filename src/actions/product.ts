@@ -6,6 +6,7 @@ import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { updateProductStatusTx } from "@/lib/listing-status-service";
+import { deleteProductListingTx } from "@/lib/listings/listing-lifecycle-service";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
@@ -343,28 +344,18 @@ export async function deleteProduct(formData: FormData) {
     redirect("/my/products");
   }
 
-  const product = await prisma.product.findFirst({
-    where: {
-      id: productId,
-      sellerId: user.id,
-      deletedAt: null,
-    },
-    select: { id: true },
-  });
-
-  if (!product) {
-    redirect("/my/products");
+  // Phase 8F（§28/§30）：删除写权威 = USER 锁 → Product FOR UPDATE →
+  // fresh ownership/deletedAt → SOLD terminal / active PRODUCT order 检查 →
+  // canonical 软删除（OFFLINE + deletedAt）。事务外 pre-read 与裸 update
+  // 的旧竞态窗口关闭；denial 返回稳定中文 outcome（§70/§72 禁止 silent no-op）
+  let outcome: Awaited<ReturnType<typeof deleteProductListingTx>>;
+  try {
+    outcome = await withTransaction((tx) => deleteProductListingTx(tx, user.id, productId));
+  } catch (error) {
+    return { success: false, message: actionErrorMessage(error, "deleteProduct") };
   }
 
-  try {
-    await prisma.product.update({
-      where: { id: productId },
-      data: {
-        status: "OFFLINE",
-        deletedAt: new Date(),
-      },
-    });
-
+  if (outcome === "DELETED") {
     // 软删除商品时标记其图片资源待删除（对象由 cleanup 异步物理清理）
     const images = await prisma.productImage.findMany({
       where: { productId },
@@ -378,10 +369,18 @@ export async function deleteProduct(formData: FormData) {
     }
 
     revalidateProductViews(productId);
-  } catch (error) {
-    actionErrorMessage(error, "deleteProduct");
+    redirect("/my/products");
   }
 
+  if (outcome === "ACTIVE_OBLIGATION") {
+    return { success: false, message: "该商品存在进行中的交易，暂时无法删除，请先完成或结束现有订单" };
+  }
+
+  if (outcome === "SOLD_TERMINAL") {
+    return { success: false, message: "已售出的商品会保留成交记录，无法删除" };
+  }
+
+  // MISSING_OR_FORBIDDEN / ALREADY_DELETED → 幂等安全结局：回列表
   redirect("/my/products");
 }
 

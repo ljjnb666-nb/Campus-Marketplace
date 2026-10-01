@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, ShoppingBag, Flag, Edit3, Trash2, MapPin, Eye } from "lucide-react";
+import { MessageSquare, ShoppingBag, Flag, Edit3, MapPin, Eye } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -16,6 +16,7 @@ import { ListingContactForm } from "@/components/conversation/listing-contact-fo
 import { createOrOpenProductConversation } from "@/actions/conversation";
 import { createProductOrder } from "@/actions/order";
 import { deleteProduct } from "@/actions/product";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 type ProductStatus = "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE" | "PAUSED" | string;
 type ProductCondition = "NEW" | "LIKE_NEW" | "LIGHTLY_USED" | "NORMAL_USED" | "HEAVILY_USED" | string;
@@ -133,16 +134,13 @@ export function ProductDetailConsole({
                   <Edit3 className="size-4" />
                   <span>编辑商品</span>
                 </Link>
-                <form action={deleteProduct}>
-                  <input type="hidden" name="productId" value={product.id} />
-                  <button
-                    type="submit"
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                  >
-                    <Trash2 className="size-4" />
-                    <span>删除商品</span>
-                  </button>
-                </form>
+                <DeleteListingForm
+                  action={deleteProduct}
+                  hiddenFieldName="productId"
+                  hiddenValue={product.id}
+                  label="删除商品"
+                  buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                />
               </div>
 
               <ProductStatusActions productId={product.id} currentStatus={product.status as "ACTIVE" | "PAUSED" | "SOLD" | "RESERVED" | "OFFLINE"} />

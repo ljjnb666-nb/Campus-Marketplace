@@ -30,6 +30,22 @@ const {
   serviceListingUpdate: vi.fn(),
 }));
 
+const {
+  updateServiceStatusTx,
+  deleteServiceListingTx,
+} = vi.hoisted(() => ({
+  updateServiceStatusTx: vi.fn(),
+  deleteServiceListingTx: vi.fn(),
+}));
+
+vi.mock("@/lib/listing-status-service", () => ({
+  updateServiceStatusTx,
+}));
+
+vi.mock("@/lib/listings/listing-lifecycle-service", () => ({
+  deleteServiceListingTx,
+}));
+
 vi.mock("@/lib/governance/active-account-mutation", () => ({
   prepareActiveAccountMutation: vi.fn().mockResolvedValue(undefined),
 }));
@@ -73,6 +89,7 @@ vi.mock("@/lib/prisma", () => ({
     serviceListing: {
       create: serviceListingCreate,
       findFirst: serviceListingFindFirst,
+      findUnique: serviceListingFindFirst,
       update: serviceListingUpdate,
     },
   },
@@ -233,26 +250,38 @@ describe("service actions", () => {
   });
 
   it("soft deletes the owner's service and redirects back to my services", async () => {
-    serviceListingFindFirst.mockResolvedValue({ id: "service-1" });
+    // Phase 8F：删除写权威在 deleteServiceListingTx（USER 锁 → ServiceListing
+    // FOR UPDATE → active SERVICE order 检查 → canonical 软删除）
+    deleteServiceListingTx.mockResolvedValue("DELETED");
 
     const formData = new FormData();
     formData.set("serviceId", "service-1");
 
     await expect(deleteService(formData)).rejects.toThrow("REDIRECT:/my/services");
 
-    expect(serviceListingUpdate).toHaveBeenCalledWith({
-      where: { id: "service-1" },
-      data: {
-        status: "OFFLINE",
-        deletedAt: expect.any(Date),
-      },
-    });
+    expect(deleteServiceListingTx).toHaveBeenCalledWith(
+      expect.anything(),
+      "user-1",
+      "service-1",
+    );
     expect(revalidatePath).toHaveBeenCalledWith("/services/service-1");
     expect(revalidatePath).toHaveBeenCalledWith("/my/services");
   });
 
+  it("Phase 8F：ACTIVE_OBLIGATION → 中文 denial，不 redirect", async () => {
+    deleteServiceListingTx.mockResolvedValue("ACTIVE_OBLIGATION");
+
+    const formData = new FormData();
+    formData.set("serviceId", "service-1");
+
+    const blocked = await deleteService(formData);
+    expect(blocked).toMatchObject({ success: false });
+    expect((blocked as { message: string }).message).toContain("进行中的预约");
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it("does not delete services owned by other users", async () => {
-    serviceListingFindFirst.mockResolvedValue(null);
+    deleteServiceListingTx.mockResolvedValue("MISSING_OR_FORBIDDEN");
 
     const formData = new FormData();
     formData.set("serviceId", "service-1");
@@ -357,9 +386,8 @@ describe("service actions", () => {
   });
 
   describe("updateServiceStatus", () => {
-    it("updates the status of an owned service via in-tx fresh authority（RB-03）", async () => {
-      serviceListingFindFirst.mockResolvedValue({ id: "service-1", campusId: "campus-1", status: "ACTIVE" });
-      serviceListingUpdate.mockResolvedValue({ id: "service-1" });
+    it("valid status → tx 内委派 updateServiceStatusTx（8F 行锁权威在 domain）", async () => {
+      updateServiceStatusTx.mockResolvedValue(true);
 
       const formData = new FormData();
       formData.set("serviceId", "service-1");
@@ -367,10 +395,12 @@ describe("service actions", () => {
 
       await updateServiceStatus(formData);
 
-      expect(serviceListingUpdate).toHaveBeenCalledWith({
-        where: { id: "service-1" },
-        data: { status: "PAUSED" },
-      });
+      expect(updateServiceStatusTx).toHaveBeenCalledWith(
+        expect.anything(),
+        "user-1",
+        "service-1",
+        "PAUSED",
+      );
       expect(revalidatePath).toHaveBeenCalledWith("/services/service-1");
     });
 

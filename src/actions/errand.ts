@@ -338,19 +338,29 @@ export async function deleteErrand(formData: FormData) {
 
   // AUDIT2-RB02：删除写权威 = USER 锁 → ErrandTask FOR UPDATE → fresh
   // ownership/deletedAt/status → active-order invariant → 软删除。事务外
-  // pre-read 与裸 update 的旧竞态窗口关闭；MISSING / NOT_DELETABLE /
-  // ANOMALOUS_ACTIVE_ORDER 与既有"静默回列表"安全语义同形。
+  // pre-read 与裸 update 的旧竞态窗口关闭。
+  // Phase 8F（§70/§72）：denial 返回稳定中文 outcome——MISSING 之外不得
+  // silent no-op。
+  let outcome: Awaited<ReturnType<typeof deleteErrandTx>>;
   try {
-    const outcome = await withTransaction(async (tx) =>
-      deleteErrandTx(tx, user.id, errandId),
-    );
-
-    if (outcome === "DELETED") {
-      revalidateErrandViews(errandId);
-    }
+    outcome = await withTransaction(async (tx) => deleteErrandTx(tx, user.id, errandId));
   } catch (error) {
-    actionErrorMessage(error, "deleteErrand");
+    return { success: false, message: actionErrorMessage(error, "deleteErrand") };
   }
 
+  if (outcome === "DELETED") {
+    revalidateErrandViews(errandId);
+    redirect("/my/errands");
+  }
+
+  if (outcome === "NOT_DELETABLE") {
+    return { success: false, message: "该任务已被接单，暂时无法删除" };
+  }
+
+  if (outcome === "ANOMALOUS_ACTIVE_ORDER") {
+    return { success: false, message: "该任务存在进行中的订单，暂时无法删除，请先完成或结束现有订单" };
+  }
+
+  // MISSING → 幂等安全结局：回列表
   redirect("/my/errands");
 }
