@@ -476,9 +476,15 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         },
         select: { id: true },
       });
-      await db.review.create({
-        data: { orderId: order.id, authorId: erased.id, targetUserId: survivor.id, rating: 5, content: "历史评价原文", tags: ["历史"], blindUntil: new Date(), publishedAt: new Date() },
-      });
+      // pre-8E 历史形状：种子库尚无 blindUntil/publishedAt 列（post-migration
+      // 重放 phase8e 迁移时会 backfill blindUntil = publishedAt = createdAt）。
+      // 当前 Prisma client 已要求 blindUntil，故用 raw INSERT 表达旧形状。
+      await db.$executeRaw`
+        INSERT INTO "Review" ("id", "orderId", "authorId", "targetUserId", "rating", "content", "tags", "createdAt")
+        VALUES (
+          ${`rb04rev-${randomUUID().slice(0, 8)}`},
+          ${order.id}, ${erased.id}, ${survivor.id}, 5, '历史评价原文', ARRAY['历史']::text[], NOW()
+        )`;
       await db.report.create({
         data: {
           targetType: "USER",

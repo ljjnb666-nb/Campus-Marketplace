@@ -39,7 +39,6 @@ const createdCampusIds: string[] = [];
 const createdMembershipIds: string[] = [];
 const createdOrderIds: string[] = [];
 const createdRentalOrderIds: string[] = [];
-const createdListingIds: string[] = [];
 const createdRentalListingIds: string[] = [];
 const createdCategoryIds: string[] = [];
 const createdReviewIds: string[] = [];
