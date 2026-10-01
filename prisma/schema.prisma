@@ -757,17 +757,25 @@ model Message {
 }
 
 model Review {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   orderId      String
   authorId     String
   targetUserId String
   rating       Int
   content      String?
   tags         String[]
-  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  author       User     @relation("ReviewAuthor", fields: [authorId], references: [id])
-  targetUser   User     @relation("ReviewTarget", fields: [targetUserId], references: [id])
-  createdAt    DateTime @default(now())
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  author       User      @relation("ReviewAuthor", fields: [authorId], references: [id])
+  targetUser   User      @relation("ReviewTarget", fields: [targetUserId], references: [id])
+  createdAt    DateTime  @default(now())
+  // Phase 8E Review Integrity：双盲发布 metadata（canonical visibility 见
+  // src/lib/reviews/review-integrity.ts——publishedAt != null OR blindUntil <= now
+  // 是 publication 条件，完整公开条件还包括 Order COMPLETED + 无 active dispute）。
+  // blindUntil = 本订单统一 reviewDeadline（completedAt + REVIEW_WINDOW）；
+  // publishedAt = 双方均提交时的提前公开时间。评价一经提交 immutable（§31），
+  // visibility 与存在性是两个概念——禁止删除/改写评价行。
+  blindUntil   DateTime
+  publishedAt  DateTime?
 
   @@unique([orderId, authorId])
   @@index([targetUserId, createdAt])
@@ -1609,6 +1617,9 @@ model RentalReview {
   content             String?     @db.Text
   tags                String[]
   createdAt           DateTime    @default(now())
+  // Phase 8E Review Integrity：与 Review 同款双盲发布 metadata（同一冻结语义）
+  blindUntil          DateTime
+  publishedAt         DateTime?
 
   @@unique([orderId, authorId])
   @@index([targetUserId, createdAt])
