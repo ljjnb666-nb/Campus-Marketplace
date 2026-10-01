@@ -14,6 +14,7 @@ import { updateOrderStatus } from "@/actions/order";
 import { createReview } from "@/actions/trust";
 import { initiateGeneralOrderDispute } from "@/actions/order-dispute";
 import { cancelRentalOrder, submitRentalReview, initiateDispute } from "@/actions/rental-order";
+import { isDisputableStatus } from "@/lib/rental-dispute-eligibility";
 
 /**
  * ERRAND 合法 dispute 发起源 canonical pair（Order.status ↔ ErrandTask.status）。
@@ -110,7 +111,9 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
   // Phase 8C-02：General（PRODUCT/SERVICE/ERRAND）dispute 入口重新开放。
   // 以下只是展示便利 predicate（与 initiateOrderDisputeTx 的 disputable
   // 冻结矩阵同形）；stale UI 错误显示时 canonical domain 仍 fail closed。
-  // RENTAL 保持 8C-01 收窄前的原行为不变。
+  // RB02：RENTAL 复用 domain SSOT isDisputableStatus（COMPLETED ∈ disputable
+  // ——提交评价 ≠ 放弃发起纠纷权利）；仅排除 dispute 已占用（IN_DISPUTE）与
+  // 未进入履约语义的终局（CANCELLED/REJECTED），最终由 canonical service 裁决。
   const generalDisputable =
     (order.type === "PRODUCT" &&
       (order.status === "ACCEPTED" || order.status === "COMPLETED")) ||
@@ -131,8 +134,8 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
     order.type === "RENTAL"
       ? order.status !== "IN_DISPUTE" &&
         order.status !== "CANCELLED" &&
-        order.status !== "COMPLETED" &&
-        order.status !== "REJECTED"
+        order.status !== "REJECTED" &&
+        isDisputableStatus(order.status as Parameters<typeof isDisputableStatus>[0])
       : generalDisputable;
 
   // Phase 8D-02：见面约定入口（PRODUCT / SERVICE 专属——ERRAND 是

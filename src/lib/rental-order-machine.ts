@@ -15,6 +15,7 @@ import {
   disputeCampusScopeKey,
 } from "@/lib/disputes/dispute-scope";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
+import { isDisputableStatus } from "@/lib/rental-dispute-eligibility";
 import { computeReviewDeadline, isReviewWindowOpen } from "@/lib/reviews/review-integrity";
 import { visibleRentalReviewCondition } from "@/lib/reviews/review-query";
 import {
@@ -73,18 +74,9 @@ export function canCancelRentalOrder(order: { status: RentalOrderStatus } & Rent
   return false;
 }
 
-/** 可发起纠纷的订单状态 */
-const DISPUTABLE_STATUSES: readonly RentalOrderStatus[] = [
-  "IN_RENTAL",
-  "PENDING_RETURN",
-  "PENDING_INSPECTION",
-  "COMPLETED",
-  "PICKED_UP",
-];
-
-export function isDisputableStatus(status: RentalOrderStatus): boolean {
-  return DISPUTABLE_STATUSES.includes(status);
-}
+// RB02：可发起纠纷状态唯一SSOT = src/lib/rental-dispute-eligibility.ts
+// （client-safe 纯模块；本 domain authority re-export 同一实现，禁止第二份黑名单）
+export { isDisputableStatus };
 
 /** 相对方：出租者对应租客、租客对应出租者 */
 export function counterpartyId(order: RentalOrderParty, userId: string): string {

@@ -195,3 +195,16 @@ describe("RentalOrderActions 损坏索赔处理（respondDamageClaim）", () => 
     });
   });
 });
+
+// RB02 UI-RD-03：COMPLETED RentalOrder 详情页同时提供撰写评价与发起纠纷入口
+//（提交评价 ≠ 放弃纠纷权利；hasReviewed 永远不是 dispute eligibility 输入）
+describe("RentalOrderActions COMPLETED 双入口（RB02）", () => {
+  it("UI-RD-03：COMPLETED → 撰写评价与发起纠纷两个入口同时存在", () => {
+    render(<RentalOrderActions orderId="order-1" status="COMPLETED" userRole="renter" />);
+
+    const reviewLink = screen.getByRole("link", { name: "撰写评价" });
+    expect(reviewLink.getAttribute("href")).toBe("/rental-orders/order-1/review");
+    const disputeLink = screen.getByRole("link", { name: "发起纠纷" });
+    expect(disputeLink.getAttribute("href")).toBe("/rental-orders/order-1/dispute");
+  });
+});

@@ -154,8 +154,52 @@ describe("OrderCardUnified：general dispute 可见性矩阵（§56）", () => {
     missing.unmount();
   });
 
-  it("RENTAL 原行为保持不变（8C-01 收窄前的 predicate）", () => {
-    for (const status of ["PENDING_APPROVAL", "PENDING_PICKUP", "ACCEPTED", "IN_PROGRESS"] as const) {
+  // RB02 UI-RD-01/02：COMPLETED RentalOrder 的评价与纠纷入口共存
+  //（review submission ≠ waiver of dispute rights）
+  it("UI-RD-01：RENTAL COMPLETED 未评价 → 发表评价与发起申诉同时可见", () => {
+    render(
+      <OrderCardUnified
+        order={buildOrder({
+          type: "RENTAL",
+          status: "COMPLETED",
+          userRole: "renter",
+          hasReviewed: false,
+          detailHref: "/rental-orders/r-1",
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "发表评价" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "发起申诉" })).toBeTruthy();
+    expect(screen.queryByText("已评价")).toBeNull();
+  });
+
+  it("UI-RD-02：RENTAL COMPLETED 已评价 → 已评价标记存在且纠纷入口仍在（review != waiver）", () => {
+    render(
+      <OrderCardUnified
+        order={buildOrder({
+          type: "RENTAL",
+          status: "COMPLETED",
+          userRole: "renter",
+          hasReviewed: true,
+          detailHref: "/rental-orders/r-1",
+        })}
+      />,
+    );
+    expect(screen.getByText("已评价")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "发表评价" })).toBeNull();
+    expect(screen.getByRole("button", { name: "发起申诉" })).toBeTruthy();
+  });
+
+  it("RENTAL disputable 矩阵与 domain SSOT isDisputableStatus 同源（RB02：COMPLETED 可发起）", () => {
+    // 与 initiateDisputeTx 的 DISPUTABLE_STATUSES 严格同源（含 COMPLETED——
+    // 提交评价 ≠ 放弃纠纷权利）→ 入口可见
+    for (const status of [
+      "PICKED_UP",
+      "IN_RENTAL",
+      "COMPLETED",
+      "PENDING_RETURN",
+      "PENDING_INSPECTION",
+    ] as const) {
       const { unmount } = render(
         <OrderCardUnified
           order={buildOrder({ type: "RENTAL", status, userRole: "renter", detailHref: "/rental-orders/r-1" })}
@@ -164,7 +208,15 @@ describe("OrderCardUnified：general dispute 可见性矩阵（§56）", () => {
       expect(screen.getByRole("button", { name: "发起申诉" })).toBeTruthy();
       unmount();
     }
-    for (const status of ["IN_DISPUTE", "CANCELLED", "COMPLETED", "REJECTED"] as const) {
+    // dispute 已占用 / 未进入履约语义（PENDING_APPROVAL/PENDING_PICKUP
+    // domain 恒 DENY，UI 同源隐藏）/ 已取消拒绝终局 → 隐藏
+    for (const status of [
+      "PENDING_APPROVAL",
+      "PENDING_PICKUP",
+      "IN_DISPUTE",
+      "CANCELLED",
+      "REJECTED",
+    ] as const) {
       const { unmount } = render(
         <OrderCardUnified
           order={buildOrder({ type: "RENTAL", status, userRole: "renter", detailHref: "/rental-orders/r-1" })}
@@ -226,7 +278,9 @@ describe("OrderCardUnified：dispute action 显式分发（§19）", () => {
       <OrderCardUnified
         order={buildOrder({
           type: "RENTAL",
-          status: "PENDING_PICKUP",
+          // RB02：disputable 矩阵与 domain SSOT 同源——用 IN_RENTAL（此前
+          // 夹具 PENDING_PICKUP 不在 domain disputable 集合，入口正确隐藏）
+          status: "IN_RENTAL",
           userRole: "renter",
           detailHref: "/rental-orders/r-1",
           depositAmount: "0",

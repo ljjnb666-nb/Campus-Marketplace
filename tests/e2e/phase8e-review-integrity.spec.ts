@@ -398,3 +398,58 @@ test("8E E2E-04：Rental blind review（renter → owner blind → 双评 publis
   await renterCtx.context.close();
   await ownerCtx.context.close();
 });
+
+test("8E E2E-05：Rental review → dispute（正常 UI 路径，review ≠ waiver）", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const tag = uniqueTag("p8e05");
+  const { db, seller, order } = await createCompletedRentalFixture(tag);
+
+  // ── renter：订单中心 → 提交评价 ────────────────────────────────────────
+  const renterCtx = await buyerPage(browser);
+  await submitReviewFromOrderCard(renterCtx.page, `E2E8E 租赁物品 ${tag}`, {
+    stars: 5,
+    content: `8E-E2E05 租客先评${tag}`,
+  });
+
+  const review = await db.rentalReview.findFirstOrThrow({ where: { orderId: order.id } });
+  expect(review.overallRating).toBe(5);
+
+  // ── renter：回订单中心 → 卡片显示"已评价"且 dispute 入口仍可见 ──────────
+  await renterCtx.page.goto("/my/orders");
+  const card = renterCtx.page.locator("article", { hasText: `E2E8E 租赁物品 ${tag}` }).first();
+  await expect(card.getByText("已评价")).toBeVisible({ timeout: 30_000 });
+  await expect(card.getByRole("button", { name: "发起申诉" })).toBeVisible();
+
+  // ── renter：正常 UI 点击 dispute 入口 → 填写 reason → 提交 ─────────────
+  await card.getByRole("button", { name: "发起申诉" }).click();
+  // DisputeDialog 容器无 role="dialog"（既有组件），按表单内容定位
+  const disputeForm = renterCtx.page.locator("form").filter({ hasText: "纠纷说明与具体事实" });
+  await expect(disputeForm).toBeVisible();
+  await disputeForm.getByRole("textbox").fill(`8E-E2E05 评价后纠纷事实说明${tag}`);
+  await disputeForm.getByRole("button", { name: "提交申诉" }).click();
+  await expect(disputeForm).not.toBeVisible({ timeout: 30_000 });
+
+  // ── DB final state ────────────────────────────────────────────────────
+  // RentalReview row retained（评价不删除/不改写）；单方首评仍 blind
+  expect(await db.rentalReview.count({ where: { orderId: order.id } })).toBe(1);
+  const retained = await db.rentalReview.findFirstOrThrow({ where: { orderId: order.id } });
+  expect(retained.overallRating).toBe(5);
+  expect(retained.publishedAt).toBeNull();
+
+  const dispute = await db.rentalDispute.findFirstOrThrow({ where: { orderId: order.id } });
+  expect(dispute.status).toBe("OPEN");
+  const finalOrder = await db.rentalOrder.findUniqueOrThrow({ where: { id: order.id } });
+  expect(finalOrder.status).toBe("IN_DISPUTE");
+
+  // canonical received/public review visibility = FALSE（dispute 隐藏）
+  const ownerCtx = await sellerPage(browser);
+  await ownerCtx.page.goto("/my/reviews");
+  await expect(
+    ownerCtx.page.getByText(`8E-E2E05 租客先评${tag}`, { exact: true }),
+  ).toHaveCount(0);
+
+  void seller;
+  await renterCtx.context.close();
+  await ownerCtx.context.close();
+});
+

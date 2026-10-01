@@ -85,6 +85,32 @@ describe("ReviewPage", () => {
     ).rejects.toThrow("notFound");
   });
 
+  // Phase 8E §43 RB01：business deny != infrastructure failure
+  it("ERR-REVIEW-01：DB exception 沿 server error path 传播，不伪装成 404/redirect", async () => {
+    requireUser.mockResolvedValue({ id: "renter-1" });
+    getRentalOrderDetail.mockRejectedValue(new Error("db down"));
+
+    await expect(
+      ReviewPage({ params: Promise.resolve({ id: "order-1" }) }),
+    ).rejects.toThrow("db down");
+    expect(notFound).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it("ERR-REVIEW-02：missing/unauthorized 仍保持 fail-closed notFound contract", async () => {
+    // repository 对 missing/unauthorized 调 notFound()（以 rejection 模拟
+    // notFound() throw 经由 page 直接传播——无 broad catch 吞噬）
+    requireUser.mockResolvedValue({ id: "renter-1" });
+    getRentalOrderDetail.mockRejectedValue(
+      Object.assign(new Error("notFound"), { digest: "NEXT_NOT_FOUND" }),
+    );
+
+    await expect(
+      ReviewPage({ params: Promise.resolve({ id: "order-1" }) }),
+    ).rejects.toMatchObject({ digest: "NEXT_NOT_FOUND" });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it("提交表单调用 submitRentalReview 并携带评分", async () => {
     requireUser.mockResolvedValue({ id: "renter-1" });
     getRentalOrderDetail.mockResolvedValue(buildOrder());
