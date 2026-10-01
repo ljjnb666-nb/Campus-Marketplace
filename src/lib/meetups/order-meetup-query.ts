@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import type { OrderMeetupStatusValue } from "@/lib/meetups/order-meetup-labels";
 
 /**
  * Phase 8D-02：Meetup 用户面 server-side read projection。
@@ -21,13 +22,6 @@ import { prisma } from "@/lib/prisma";
 
 /** 历史记录 UX 上限（明确有序截断，避免无界传输） */
 export const MEETUP_HISTORY_LIMIT = 10;
-
-export type OrderMeetupStatusValue =
-  | "PROPOSED"
-  | "CONFIRMED"
-  | "COMPLETED"
-  | "CANCELLED"
-  | "NO_SHOW_REPORTED";
 
 export type OrderMeetupHistoryItem = {
   id: string;

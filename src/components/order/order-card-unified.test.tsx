@@ -256,3 +256,71 @@ describe("OrderStatusBadgeUnified：IN_DISPUTE / CLOSED 展示（§82）", () =>
     unknown.unmount();
   });
 });
+
+describe("OrderCardUnified：见面约定入口（Phase 8D-02 §11）", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("PRODUCT/SERVICE ACCEPTED → 入口可见且指向 /my/orders/{id}/meetup", () => {
+    for (const type of ["PRODUCT", "SERVICE"] as const) {
+      const { unmount } = render(<OrderCardUnified order={buildOrder({ type, status: "ACCEPTED" })} />);
+      const entry = screen.getByRole("link", { name: "见面约定" });
+      expect(entry.getAttribute("href")).toBe("/my/orders/order-1/meetup");
+      unmount();
+    }
+  });
+
+  it("IN_DISPUTE 但有 meetup 历史 → 入口仍可见（no-show 后可回看历史结果）", () => {
+    const { unmount } = render(
+      <OrderCardUnified
+        order={buildOrder({ type: "PRODUCT", status: "IN_DISPUTE", hasMeetupHistory: true })}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "见面约定" })).toBeTruthy();
+    unmount();
+  });
+
+  it("IN_DISPUTE 无 meetup 历史（手动 dispute）→ 入口隐藏", () => {
+    const { unmount } = render(
+      <OrderCardUnified
+        order={buildOrder({ type: "PRODUCT", status: "IN_DISPUTE", hasMeetupHistory: false })}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: "见面约定" })).toBeNull();
+    unmount();
+  });
+
+  it("非 ACCEPTED 且无历史（PENDING / COMPLETED / CANCELLED）→ 入口隐藏", () => {
+    for (const status of ["PENDING", "COMPLETED", "CANCELLED", "IN_PROGRESS"] as const) {
+      const { unmount } = render(
+        <OrderCardUnified order={buildOrder({ type: "PRODUCT", status })} />,
+      );
+      expect(screen.queryByRole("link", { name: "见面约定" })).toBeNull();
+      unmount();
+    }
+  });
+
+  it("ERRAND / RENTAL → 入口恒隐藏（不进入 General Meetup 域）", () => {
+    const { unmount: unmountErrand } = render(
+      <OrderCardUnified
+        order={buildOrder({ type: "ERRAND", status: "ACCEPTED", userRole: "publisher" })}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: "见面约定" })).toBeNull();
+    unmountErrand();
+
+    const { unmount: unmountRental } = render(
+      <OrderCardUnified
+        order={buildOrder({
+          type: "RENTAL",
+          status: "ACCEPTED",
+          userRole: "renter",
+          detailHref: "/rental-orders/r-1",
+        })}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: "见面约定" })).toBeNull();
+    unmountRental();
+  });
+});
