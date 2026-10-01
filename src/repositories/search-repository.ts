@@ -1,5 +1,6 @@
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import { getPublishedGeneralReviewStatsBatch } from "@/lib/reviews/review-query";
 
 export async function getSearchResults(keyword: string) {
   const q = keyword.trim();
@@ -68,7 +69,7 @@ export async function getSearchResults(keyword: string) {
         name: true,
         bio: true,
         schoolName: true,
-        positiveReviewRate: true,
+        // Phase 8E：好评率由 getPublishedGeneralReviewStatsBatch canonical 覆写
         completedOrdersCount: true,
         campus: {
           select: {
@@ -136,17 +137,25 @@ export async function getSearchResults(keyword: string) {
     visibleServiceGroups.map((item) => [item.providerId, item._count.providerId]),
   );
 
+  // Phase 8E（§19/§20）：搜索结果的用户好评率 = canonical visible 聚合（批量）
+  const reviewStatsMap = await getPublishedGeneralReviewStatsBatch(users.map((user) => user.id));
+
   return {
     products,
     errands,
     services,
-    users: users.map((user) => ({
-      ...user,
-      visibleCounts: {
-        products: visibleProductMap.get(user.id) ?? 0,
-        createdErrandTasks: visibleErrandMap.get(user.id) ?? 0,
-        serviceListings: visibleServiceMap.get(user.id) ?? 0,
-      },
-    })),
+    users: users.map((user) => {
+      const stats = reviewStatsMap.get(user.id) ?? { count: 0, positiveRate: 0 };
+      return {
+        ...user,
+        positiveReviewRate: stats.positiveRate,
+        publishedReviewCount: stats.count,
+        visibleCounts: {
+          products: visibleProductMap.get(user.id) ?? 0,
+          createdErrandTasks: visibleErrandMap.get(user.id) ?? 0,
+          serviceListings: visibleServiceMap.get(user.id) ?? 0,
+        },
+      };
+    }),
   };
 }

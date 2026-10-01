@@ -20,7 +20,8 @@ import { waitForAdvisoryLockWaiter } from "./helpers/lock-barrier";
 //     RentalOrder FOR UPDATE → fresh 谓词（pre-read 非 authority）
 //   - dispute 先赢 → review DENY（零 review / 零好评率 mutation / 零通知）
 //   - review 先赢 → dispute 仍允许（合法串行历史；既有 review 保留，
-//     不回滚/不隐藏——retroactive 处理属 Phase 8E Review Integrity）
+//     不回滚/不删除——Phase 8E 起 review 先提交 + 后续 dispute = 保留但
+//     canonical 隐藏，见 phase8e 集成测试）
 //   - 提交评价 ≠ 放弃发起纠纷权利（review 存在不是 dispute eligibility 输入）
 //   - 纵深防御：COMPLETED + active RentalDispute 异常 → DENY 新评价
 //     （ordinary read，不取 RentalDispute 行锁，避免与 dispute
@@ -129,6 +130,8 @@ async function createCompletedOrderFixture(options: { ownerId: string; renterId:
       paymentStatus: "OFFLINE_PENDING",
       depositStatus: "PENDING_PAYMENT",
       status: "COMPLETED",
+      // Phase 8E：评价窗口起点 = authoritative completedAt（fail closed on null）
+      completedAt: now,
       pickupLocationSnapshot: "门口",
       returnLocationSnapshot: "门口",
     },
@@ -214,7 +217,7 @@ afterAll(async () => {
 });
 
 describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serialization（真实 PG）", () => {
-  it("RD-01 baseline normal review：COMPLETED 订单 renter 评价成功，好评率/通知/订单状态一致", async () => {
+  it("RD-01 baseline normal review：COMPLETED 订单 renter 评价成功，blind metadata/缓存/通知符合 8E 契约", async () => {
     const owner = await createFixtureUser("RD01owner");
     const renter = await createFixtureUser("RD01renter");
     await rawClient!.user.update({
@@ -240,12 +243,17 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     expect(review.authorId).toBe(renter.id);
     expect(review.targetUserId).toBe(owner.id);
     expect(review.overallRating).toBe(5);
+    // Phase 8E：blindUntil = completedAt + 7d；首评未公开
+    expect(review.blindUntil.getTime()).toBe(
+      order.completedAt!.getTime() + 7 * 24 * 60 * 60 * 1000,
+    );
+    expect(review.publishedAt).toBeNull();
 
-    // 好评率重算：1 条评价全部好评 → 1
+    // Phase 8E §23：FIRST_BLIND_REVIEW → counterparty 零评价通知
+    expect(await reviewNotificationCount(owner.id)).toBe(0);
+    // blind 评价不进入 stored 缓存（NON_AUTHORITATIVE_DERIVED_CACHE 保持原值）
     const target = await rawClient!.user.findUniqueOrThrow({ where: { id: owner.id } });
-    expect(Number(target.rentalPositiveRate)).toBe(1);
-
-    expect(await reviewNotificationCount(owner.id)).toBe(1);
+    expect(Number(target.rentalPositiveRate)).toBe(0.83);
 
     const finalOrder = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: order.id } });
     expect(finalOrder.status).toBe("COMPLETED");
@@ -349,7 +357,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     expect(logs).toHaveLength(1);
   });
 
-  it("RD-04 owner and renter both review：双向评价保留（@@unique(orderId, authorId) 而非 orderId）", async () => {
+  it("RD-04 owner and renter both review：双向评价保留，第二评触发双方 publication episode", async () => {
     const owner = await createFixtureUser("RD04owner");
     const renter = await createFixtureUser("RD04renter");
     const order = await createCompletedOrderFixture({ ownerId: owner.id, renterId: renter.id });
@@ -372,6 +380,8 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     expect(reviews).toHaveLength(2);
     expect([...reviews.map((r) => r.authorId)].sort()).toEqual([owner.id, renter.id].sort());
     expect([...reviews.map((r) => r.targetUserId)].sort()).toEqual([owner.id, renter.id].sort());
+    // Phase 8E §14：双方均提交 → 两份评价同一 episode 立即公开
+    expect(reviews.every((r) => r.publishedAt !== null)).toBe(true);
   });
 
   it("RD-ANOMALY-01 active dispute anomaly：COMPLETED 订单 + OPEN dispute → DENY 新评价（纵深防御）", async () => {
@@ -537,8 +547,9 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     const finalOrder = await rawClient!.rentalOrder.findUniqueOrThrow({ where: { id: order.id } });
     expect(finalOrder.status).toBe("IN_DISPUTE");
 
-    // review 侧副作用恰好一次；dispute 侧副作用正常
-    expect(await reviewNotificationCount(owner.id)).toBe(1);
+    // review 侧副作用恰好一次（Phase 8E：blind 首评 → counterparty 零评价通知）；
+    // dispute 侧副作用正常
+    expect(await reviewNotificationCount(owner.id)).toBe(0);
     const holds = await rawClient!.dataHold.findMany({
       where: { sourceType: "RENTAL_DISPUTE", sourceId: active[0]!.id, status: "ACTIVE" },
     });
@@ -583,6 +594,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 8A-04 review vs dispute serializ
     expect(reviews).toHaveLength(1);
     // 存活评价 = 实际赢家的输入评分（锁胜者，不预设 [0]/[1] 顺序）
     expect(reviews[0]!.overallRating).toBe(ratings[successIndexes[0]!.index]);
-    expect(await reviewNotificationCount(owner.id)).toBe(1);
+    // Phase 8E §23：胜出的 blind 首评 → counterparty 零评价通知
+    expect(await reviewNotificationCount(owner.id)).toBe(0);
   });
 });

@@ -7,6 +7,10 @@ import type {
 
 import { enforcementError } from "@/lib/enforcement/errors";
 import { prisma } from "@/lib/prisma";
+import {
+  getPublishedGeneralReviewStats,
+  getPublishedRentalReviewStats,
+} from "@/lib/reviews/review-query";
 import { rbacError } from "@/lib/rbac/errors";
 import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
 
@@ -120,17 +124,18 @@ const trustUserSelect = {
   },
   creditScore: true,
   completedOrdersCount: true,
-  positiveReviewRate: true,
+  // Phase 8E：User.positiveReviewRate / receivedReviews(_count) /
+  // User.rentalPositiveRate（stored aggregate = NON_AUTHORITATIVE_DERIVED_CACHE）
+  // 不进入本 select——reviewSignals / rentalSignals 全部来自 canonical
+  // visible 评价的 query-time 聚合（getPublished*ReviewStats）。
   rentalOwnerCount: true,
   rentalRenterCount: true,
   onTimeReturnRate: true,
-  rentalPositiveRate: true,
   rentalDisputeCount: true,
   memberships: {
     select: { campusId: true, status: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }] as const,
   },
-  _count: { select: { receivedReviews: true } },
 } satisfies Prisma.UserSelect;
 
 type UserTrustBase = {
@@ -184,13 +189,19 @@ async function loadUserTrustBase(
   userId: string,
   tx?: Prisma.TransactionClient,
 ): Promise<UserTrustBase | null> {
-  const user = tx
-    ? await tx.user.findUnique({ where: { id: userId }, select: trustUserSelect })
-    : await prisma.user.findUnique({ where: { id: userId }, select: trustUserSelect });
+  const client = (tx ?? prisma) as Prisma.TransactionClient;
+  const user = await client.user.findUnique({ where: { id: userId }, select: trustUserSelect });
 
   if (!user) {
     return null;
   }
+
+  // Phase 8E：review/rental 信号 = canonical visible 评价 query-time 聚合
+  //（blind / 纠纷隐藏 / 关闭订单的评价绝不进入 trust snapshot）
+  const [generalStats, rentalStats] = await Promise.all([
+    getPublishedGeneralReviewStats(userId, client),
+    getPublishedRentalReviewStats(userId, client),
+  ]);
 
   // EFFECTIVE_VERIFIED 推导复用 SSOT 纯函数 deriveEffectiveVerification
   //（7F Final Repair 1 FR01：单一信任定义，治理读面同源复用）。
@@ -204,14 +215,14 @@ async function loadUserTrustBase(
     effectiveVerificationBoundCampusId,
     creditScore: user.creditScore,
     completedOrdersCount: user.completedOrdersCount,
-    positiveReviewRate: user.positiveReviewRate,
+    positiveReviewRate: generalStats.positiveRate,
     rentalOwnerCount: user.rentalOwnerCount,
     rentalRenterCount: user.rentalRenterCount,
     onTimeReturnRate: user.onTimeReturnRate,
-    rentalPositiveRate: user.rentalPositiveRate,
+    rentalPositiveRate: rentalStats.positiveRate,
     rentalDisputeCount: user.rentalDisputeCount,
     memberships: user.memberships,
-    receivedReviewsCount: user._count.receivedReviews,
+    receivedReviewsCount: generalStats.count,
   };
 }
 

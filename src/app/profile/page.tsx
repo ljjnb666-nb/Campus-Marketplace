@@ -21,9 +21,13 @@ function formatDate(value: Date | null) {
 
 export default async function ProfilePage() {
   const currentUser = await requireUser();
-  const { user, unreadNotifications, unreadConversations } = await getProfileDashboard(
-    currentUser.id,
-  );
+  const {
+    user,
+    unreadNotifications,
+    unreadConversations,
+    publishedReviewCount,
+    publishedPositiveReviewRate,
+  } = await getProfileDashboard(currentUser.id);
 
   const statCards = [
     { label: "我的商品", value: user._count.products, href: "/my/products" },
@@ -81,7 +85,12 @@ export default async function ProfilePage() {
 
             <div className="mt-6 space-y-2 text-sm text-slate-600">
               <p>信用分：{user.creditScore}</p>
-              <p>好评率：{Math.round(user.positiveReviewRate * 100)}%</p>
+              <p>
+                好评率：
+                {publishedReviewCount > 0
+                  ? `${Math.round(publishedPositiveReviewRate * 100)}%`
+                  : "暂无评价"}
+              </p>
               <p>最近登录：{formatDate(user.lastLoginAt)}</p>
             </div>
           </section>

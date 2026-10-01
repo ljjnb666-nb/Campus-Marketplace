@@ -251,6 +251,7 @@ async function main() {
 
   for (let index = 0; index < 20; index += 1) {
     try {
+      const createdAt = new Date();
       await prisma.review.create({
         data: {
           orderId: orders[index % orders.length].id,
@@ -259,6 +260,10 @@ async function main() {
           rating: 4 + (index % 2),
           content: "沟通顺畅，交付效率高。",
           tags: ["回复及时", "交易顺利"],
+          // Phase 8E：种子数据 = 历史（迁移前）评价形状——提交即公开
+          blindUntil: createdAt,
+          publishedAt: createdAt,
+          createdAt,
         },
       });
     } catch {

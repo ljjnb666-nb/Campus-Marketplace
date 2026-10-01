@@ -84,6 +84,32 @@ describe("DisputePage", () => {
     ).rejects.toThrow("notFound");
   });
 
+  // Phase 8E §43 RB01：business deny != infrastructure failure
+  it("ERR-DISPUTE-01：DB exception 沿 server error path 传播，不伪装成 404/redirect", async () => {
+    requireUser.mockResolvedValue({ id: "owner-1" });
+    getRentalOrderDetail.mockRejectedValue(new Error("db down"));
+
+    await expect(
+      DisputePage({ params: Promise.resolve({ id: "order-1" }) }),
+    ).rejects.toThrow("db down");
+    expect(notFound).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
+  it("ERR-DISPUTE-02：missing/unauthorized 仍保持 fail-closed notFound contract", async () => {
+    // repository 对 missing/unauthorized 调 notFound()（以 NEXT_NOT_FOUND
+    // rejection 模拟——无 broad catch 吞噬，page 直接传播）
+    requireUser.mockResolvedValue({ id: "owner-1" });
+    getRentalOrderDetail.mockRejectedValue(
+      Object.assign(new Error("notFound"), { digest: "NEXT_NOT_FOUND" }),
+    );
+
+    await expect(
+      DisputePage({ params: Promise.resolve({ id: "order-1" }) }),
+    ).rejects.toMatchObject({ digest: "NEXT_NOT_FOUND" });
+    expect(redirect).not.toHaveBeenCalled();
+  });
+
   it("提交表单调用 initiateDispute 并携带 orderId 与 reason", async () => {
     requireUser.mockResolvedValue({ id: "renter-1" });
     getRentalOrderDetail.mockResolvedValue(buildOrder({ status: "COMPLETED" }));

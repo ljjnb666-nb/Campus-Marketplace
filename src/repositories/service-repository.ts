@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 
 export type ServiceListQuery = {
   q?: string;
@@ -203,7 +204,7 @@ export async function getServiceDetail(serviceId: string) {
           schoolName: true,
           verificationStatus: true,
           completedOrdersCount: true,
-          positiveReviewRate: true,
+          // Phase 8E：好评率由 getPublishedGeneralReviewStats canonical 覆写
           createdAt: true,
         },
       },
@@ -270,7 +271,19 @@ export async function getServiceDetail(serviceId: string) {
       }),
     }));
 
-  return { service, relatedServices };
+  // Phase 8E（§19/§20）：PUBLIC 服务者好评率 = canonical visible 评价聚合
+  const providerReviewStats = await getPublishedGeneralReviewStats(service.providerId);
+  return {
+    service: {
+      ...service,
+      provider: {
+        ...service.provider,
+        positiveReviewRate: providerReviewStats.positiveRate,
+        publishedReviewCount: providerReviewStats.count,
+      },
+    },
+    relatedServices,
+  };
 }
 
 export async function getServiceForEdit(serviceId: string, userId: string) {

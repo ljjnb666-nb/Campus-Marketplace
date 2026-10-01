@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
 import { getUnreadNotificationCount } from "@/repositories/notification-repository";
 
@@ -49,12 +50,20 @@ export async function getProfileDashboard(userId: string) {
     notFound();
   }
 
-  const [unreadNotifications, unreadConversations] = await Promise.all([
+  const [unreadNotifications, unreadConversations, publishedGeneralStats] = await Promise.all([
     getUnreadNotificationCount(userId),
     getUnreadConversationCount(userId),
+    // Phase 8E：好评率 = canonical visible 评价（blind/纠纷隐藏评价不进入）
+    getPublishedGeneralReviewStats(userId),
   ]);
 
-  return { user, unreadNotifications, unreadConversations };
+  return {
+    user,
+    unreadNotifications,
+    unreadConversations,
+    publishedReviewCount: publishedGeneralStats.count,
+    publishedPositiveReviewRate: publishedGeneralStats.positiveRate,
+  };
 }
 
 export async function getPublicUserProfile(userId: string) {
@@ -74,7 +83,8 @@ export async function getPublicUserProfile(userId: string) {
       grade: true,
       verificationStatus: true,
       completedOrdersCount: true,
-      positiveReviewRate: true,
+      // Phase 8E（§21）：好评率不再读 User.positiveReviewRate（stale
+      // denormalized cache）——返回 canonical visible 评价统计
       createdAt: true,
       campus: {
         select: {
@@ -130,7 +140,7 @@ export async function getPublicUserProfile(userId: string) {
     notFound();
   }
 
-  const [productCount, errandCount, serviceCount] = await Promise.all([
+  const [productCount, errandCount, serviceCount, publishedGeneralStats] = await Promise.all([
     prisma.product.count({
       where: {
         sellerId: userId,
@@ -155,10 +165,15 @@ export async function getPublicUserProfile(userId: string) {
         ...listingModerationPublicFilter(),
       },
     }),
+    getPublishedGeneralReviewStats(userId),
   ]);
 
   return {
     ...user,
+    // Phase 8E：公开评价信号 = published-only（§21：publishedReviewCount == 0
+    // → 暂无评价；禁止再用 completedOrdersCount 猜测"是否有评价"）
+    publishedReviewCount: publishedGeneralStats.count,
+    publishedPositiveReviewRate: publishedGeneralStats.positiveRate,
     visibleCounts: {
       products: productCount,
       createdErrandTasks: errandCount,

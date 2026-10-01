@@ -10,9 +10,11 @@ export const dynamic = "force-dynamic";
 export default async function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const user = await requireUser();
-  const order = await getRentalOrderDetail(id, user.id).catch(() => null);
+  // Phase 8E §43：missing/unauthorized → repository notFound contract；
+  // DB/Prisma/unknown error 必须沿 server error path 传播，禁止吞成 404
+  const order = await getRentalOrderDetail(id, user.id);
 
-  if (!order || (order.ownerId !== user.id && order.renterId !== user.id)) {
+  if (order.ownerId !== user.id && order.renterId !== user.id) {
     notFound();
   }
 

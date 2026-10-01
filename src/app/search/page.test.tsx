@@ -119,6 +119,7 @@ describe("SearchPage", () => {
           schoolName: "示例大学",
           campus: { name: "主校区" },
           positiveReviewRate: 0.96,
+          publishedReviewCount: 5,
           bio: null,
           visibleCounts: {
             products: 2,

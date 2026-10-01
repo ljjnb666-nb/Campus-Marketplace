@@ -351,10 +351,11 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
     orderIds.push(generalOrder.id);
 
     await rawClient!.review.create({
-      data: { orderId: generalOrder.id, authorId: target.id, targetUserId: other.id, rating: 5, content: "本人评价原文X", tags: [" tagA"] },
+      // Phase 8E 夹具 = 历史评价形状（提交即公开）
+      data: { orderId: generalOrder.id, authorId: target.id, targetUserId: other.id, rating: 5, content: "本人评价原文X", tags: [" tagA"], blindUntil: new Date(), publishedAt: new Date() },
     });
     await rawClient!.review.create({
-      data: { orderId: generalOrder.id, authorId: other.id, targetUserId: target.id, rating: 4, content: "对照评价原文", tags: ["tagB"] },
+      data: { orderId: generalOrder.id, authorId: other.id, targetUserId: target.id, rating: 4, content: "对照评价原文", tags: ["tagB"], blindUntil: new Date(), publishedAt: new Date() },
     });
 
     const rentalListing = await createRentalListing(other.id);
@@ -365,7 +366,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy erasure lifecycle (RB
       renterNote: "租客备注X",
     });
     await rawClient!.rentalReview.create({
-      data: { orderId: targetRental.id, authorId: target.id, targetUserId: other.id, overallRating: 5, content: "本人租赁评价X", tags: ["tagC"] },
+      data: { orderId: targetRental.id, authorId: target.id, targetUserId: other.id, overallRating: 5, content: "本人租赁评价X", tags: ["tagC"], blindUntil: new Date(), publishedAt: new Date() },
     });
 
     // 本人作为 operator 的 status log + 对照 log

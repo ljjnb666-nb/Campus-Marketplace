@@ -6,6 +6,7 @@ const {
   serviceListingCount,
   serviceListingFindFirst,
   serviceCategoryFindMany,
+  reviewAggregate,
 } = vi.hoisted(() => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
@@ -14,6 +15,8 @@ const {
   serviceListingCount: vi.fn(),
   serviceListingFindFirst: vi.fn(),
   serviceCategoryFindMany: vi.fn(),
+  // Phase 8E：服务者好评率 = canonical visible Review 聚合
+  reviewAggregate: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({ notFound }));
@@ -28,6 +31,8 @@ vi.mock("@/lib/prisma", () => ({
     serviceCategory: {
       findMany: serviceCategoryFindMany,
     },
+    // Phase 8E：服务者好评率 = canonical visible Review 聚合
+    review: { aggregate: reviewAggregate },
   },
 }));
 
@@ -45,6 +50,8 @@ describe("service repository", () => {
     serviceListingCount.mockReset();
     serviceListingFindFirst.mockReset();
     serviceCategoryFindMany.mockReset();
+    // Phase 8E：默认无 visible 评价（count 0）
+    reviewAggregate.mockReset().mockResolvedValue({ _avg: { rating: null }, _count: { rating: 0 } });
   });
 
   it("builds service list filters, category filter, verified-only condition and order sorting", async () => {

@@ -2,6 +2,10 @@ import { Prisma, RentalPricingUnit } from "@prisma/client";
 import { notFound } from "next/navigation";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
+import {
+  getPublishedRentalReviewStats,
+  visibleRentalReviewCondition,
+} from "@/lib/reviews/review-query";
 
 export type RentalListingQuery = {
   q?: string;
@@ -101,7 +105,8 @@ export async function getRentalListingDetail(
           name: true,
           verificationStatus: true,
           rentalOwnerCount: true,
-          rentalPositiveRate: true,
+          // Phase 8E：rentalPositiveRate 不再从 User 行读取（stale cache），
+          // 由 getPublishedRentalReviewStats 在返回前 canonical 覆写
           createdAt: true,
         },
       },
@@ -122,7 +127,12 @@ export async function getRentalListingDetail(
 
   const [reviews, isFavorited] = await Promise.all([
     prisma.rentalReview.findMany({
-      where: { order: { rentalListingId: id }, targetUserId: listing.ownerId },
+      // Phase 8E（§8）：公开租赁评价列表 = canonical visible only
+      where: visibleRentalReviewCondition({
+        now: new Date(),
+        targetUserId: listing.ownerId,
+        orderWhere: { rentalListingId: id },
+      }),
       orderBy: { createdAt: "desc" },
       take: 10,
       include: { author: { select: { id: true, name: true } } },
@@ -140,7 +150,21 @@ export async function getRentalListingDetail(
       : Promise.resolve(false),
   ]);
 
-  return { listing, reviews, isFavorited };
+  // Phase 8E（§19/§20）：PUBLIC 出租者好评率 = canonical visible 评价聚合
+  //（原口径冻结：overallRating >= 4 计数 / visible 总数）
+  const ownerReviewStats = await getPublishedRentalReviewStats(listing.ownerId);
+  return {
+    listing: {
+      ...listing,
+      owner: {
+        ...listing.owner,
+        rentalPositiveRate: ownerReviewStats.positiveRate,
+        publishedReviewCount: ownerReviewStats.count,
+      },
+    },
+    reviews,
+    isFavorited,
+  };
 }
 
 

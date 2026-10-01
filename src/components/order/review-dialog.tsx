@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { Star, X, Loader2, Award } from "lucide-react";
 
 interface ActionResponse {
@@ -13,7 +14,6 @@ interface ReviewDialogProps {
   onOpenChange: (open: boolean) => void;
   action: (formData: FormData) => Promise<ActionResponse | void>;
   orderId: string;
-  targetUserId: string;
   orderType?: "PRODUCT" | "ERRAND" | "SERVICE" | "RENTAL";
 }
 
@@ -24,8 +24,8 @@ export function ReviewDialog({
   onOpenChange,
   action,
   orderId,
-  targetUserId,
 }: ReviewDialogProps) {
+  const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [rating, setRating] = useState(5);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
@@ -54,7 +54,9 @@ export function ReviewDialog({
           setErrorMsg(res.message || "提交评价失败");
         } else {
           onOpenChange(false);
-          window.location.reload();
+          // Phase 8E §51：consistency authority 是服务端事务 + revalidate，
+          // 不让整页 reload 兜底
+          router.refresh();
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "网络异常，请稍后重试";
@@ -70,7 +72,12 @@ export function ReviewDialog({
         onClick={() => onOpenChange(false)}
       />
 
-      <div className="relative w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl animate-scale-in dark:border-slate-800 dark:bg-slate-900">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="发表交易评价"
+        className="relative w-full max-w-md overflow-hidden rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl animate-scale-in dark:border-slate-800 dark:bg-slate-900"
+      >
         <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
           <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-400 font-bold text-base">
             <Award className="size-5" />
@@ -78,6 +85,7 @@ export function ReviewDialog({
           </div>
           <button
             type="button"
+            aria-label="关闭评价窗口"
             onClick={() => onOpenChange(false)}
             className="rounded-xl p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
           >
@@ -86,18 +94,23 @@ export function ReviewDialog({
         </div>
 
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {/* Phase 8E：评价对象由服务端从锁内订单推导，客户端不再提交 targetUserId */}
           <input type="hidden" name="orderId" value={orderId} />
-          <input type="hidden" name="targetUserId" value={targetUserId} />
           <input type="hidden" name="rating" value={rating} />
 
           {/* 打星选择 */}
           <div className="space-y-1.5 text-center">
-            <p className="text-xs font-semibold text-slate-500">总体服务满意度打分</p>
-            <div className="flex justify-center gap-2">
+            <p className="text-xs font-semibold text-slate-500" id="review-rating-label">
+              总体服务满意度打分
+            </p>
+            <div className="flex justify-center gap-2" role="radiogroup" aria-labelledby="review-rating-label">
               {[1, 2, 3, 4, 5].map((star) => (
                 <button
                   key={star}
                   type="button"
+                  role="radio"
+                  aria-checked={star === rating}
+                  aria-label={`${star} 星`}
                   onClick={() => setRating(star)}
                   className="p-1 transition transform hover:scale-110"
                 >
@@ -123,6 +136,7 @@ export function ReviewDialog({
                   <button
                     key={tag}
                     type="button"
+                    aria-pressed={isSelected}
                     onClick={() => toggleTag(tag)}
                     className={`rounded-xl px-3 py-1 text-xs font-semibold transition ${
                       isSelected
@@ -139,10 +153,14 @@ export function ReviewDialog({
 
           {/* 文字评价 */}
           <div className="space-y-1">
-            <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+            <label
+              htmlFor="review-content"
+              className="text-xs font-semibold text-slate-700 dark:text-slate-300"
+            >
               详细评价内容 (选填)
             </label>
             <textarea
+              id="review-content"
               name="content"
               rows={3}
               value={content}
@@ -152,7 +170,11 @@ export function ReviewDialog({
             />
           </div>
 
-          {errorMsg && <p className="text-xs text-rose-600 font-medium">{errorMsg}</p>}
+          {errorMsg && (
+            <p role="alert" className="text-xs text-rose-600 font-medium">
+              {errorMsg}
+            </p>
+          )}
 
           <div className="flex items-center justify-end gap-3 pt-2">
             <button
@@ -168,7 +190,7 @@ export function ReviewDialog({
               className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 to-indigo-700 px-5 py-2 text-xs font-bold text-white shadow-md hover:from-indigo-700 hover:to-indigo-800 disabled:opacity-50"
             >
               {isPending && <Loader2 className="size-3.5 animate-spin" />}
-              <span>提交评价</span>
+              <span>{isPending ? "提交中..." : "提交评价"}</span>
             </button>
           </div>
         </form>

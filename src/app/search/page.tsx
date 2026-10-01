@@ -161,7 +161,10 @@ export default async function SearchPage({
                     </p>
                   </div>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
-                    {Math.round(user.positiveReviewRate * 100)}% 好评
+                    {/* Phase 8E：published-only——无 visible 评价时不再展示 0% 误导 */}
+                    {user.publishedReviewCount > 0
+                      ? `${Math.round(user.positiveReviewRate * 100)}% 好评`
+                      : "暂无评价"}
                   </span>
                 </div>
                 <p className="mt-3 line-clamp-2 text-sm text-slate-600">

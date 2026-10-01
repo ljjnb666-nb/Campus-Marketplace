@@ -204,13 +204,24 @@ export function RentalOrderActions({
     }
 
     if (status === "COMPLETED") {
+      // RB02：提交评价 ≠ 放弃发起纠纷权利（8A-04/8E 冻结合同）——COMPLETED
+      // 同时提供撰写评价与发起纠纷入口；hasReviewed 永远不是 dispute
+      // eligibility 输入。最终由 initiateDisputeTx 锁内 fresh check 裁决。
       return (
-        <Link
-          href={`/rental-orders/${orderId}/review`}
-          className="rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
-        >
-          撰写评价
-        </Link>
+        <div className="flex gap-3">
+          <Link
+            href={`/rental-orders/${orderId}/review`}
+            className="rounded-2xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+          >
+            撰写评价
+          </Link>
+          <Link
+            href={`/rental-orders/${orderId}/dispute`}
+            className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100"
+          >
+            发起纠纷
+          </Link>
+        </div>
       );
     }
 

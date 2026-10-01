@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { userFindUnique, riskStateFindMany, riskFlagCount, reportFindMany } = vi.hoisted(() => ({
-  userFindUnique: vi.fn(),
-  riskStateFindMany: vi.fn(),
-  riskFlagCount: vi.fn(),
-  reportFindMany: vi.fn(),
-}));
+const { userFindUnique, riskStateFindMany, riskFlagCount, reportFindMany, reviewAggregate, rentalReviewCount } =
+  vi.hoisted(() => ({
+    userFindUnique: vi.fn(),
+    riskStateFindMany: vi.fn(),
+    riskFlagCount: vi.fn(),
+    reportFindMany: vi.fn(),
+    // Phase 8E：review/rental 信号 = canonical visible query-time 聚合
+    reviewAggregate: vi.fn(),
+    rentalReviewCount: vi.fn(),
+  }));
 
 const { campusMembershipFindUnique } = vi.hoisted(() => ({
   campusMembershipFindUnique: vi.fn(),
@@ -18,6 +22,8 @@ vi.mock("@/lib/prisma", () => ({
     riskFlag: { count: riskFlagCount },
     report: { findMany: reportFindMany },
     campusMembership: { findUnique: campusMembershipFindUnique },
+    review: { aggregate: reviewAggregate },
+    rentalReview: { count: rentalReviewCount },
   },
 }));
 
@@ -60,17 +66,14 @@ const USER_ROW = {
   verificationStatus: "VERIFIED",
   creditScore: 100,
   completedOrdersCount: 12,
-  positiveReviewRate: 0.95,
   rentalOwnerCount: 3,
   rentalRenterCount: 2,
   onTimeReturnRate: 0.9,
-  rentalPositiveRate: 0.93,
   rentalDisputeCount: 1,
   memberships: [
     { campusId: "campus-a", status: "ACTIVE" },
     { campusId: "campus-b", status: "LEFT" },
   ],
-  _count: { receivedReviews: 7 },
 };
 
 const AUDITED_ACTOR: AuthorizationContext = {
@@ -93,6 +96,16 @@ beforeEach(() => {
   riskFlagCount.mockReset().mockResolvedValue(0);
   campusMembershipFindUnique.mockReset().mockResolvedValue({ status: "ACTIVE" });
   loadAuthorizationContextMock.mockReset().mockResolvedValue(AUDITED_ACTOR);
+  // Phase 8E：general aggregate → avg 4.75/5 = 0.95、count 7；
+  // rental：2 条 visible 中 1 条好评 → 0.5/2 = 口径 0.93 换算同前（此处直取计数比）
+  reviewAggregate
+    .mockReset()
+    .mockResolvedValue({ _avg: { rating: 4.75 }, _count: { rating: 7 } });
+  rentalReviewCount
+    .mockReset()
+    .mockImplementation(async ({ where }: { where?: { overallRating?: unknown } }) =>
+      where?.overallRating ? 93 : 100,
+    );
 });
 
 describe("getPublicTrustSnapshot（public 安全信号）", () => {
