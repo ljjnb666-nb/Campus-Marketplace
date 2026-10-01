@@ -148,25 +148,33 @@ export type ListingConversationSnapshot = {
  * 新会话拒绝；既有 conversationKey 命中路径不经过本函数，永不断开）。
  * 必须在 participant governance 锁取得之后调用（全局锁序 USER → ROW）。
  * 四域硬编码 typed 分支；ID 参数化。
+ *
+ * Phase 8F（§21）：新增 marketplace listing contact 线程 = 新市场活动——
+ * 仅 public exposure 状态可新建（锁内 fresh status 判定）：PRODUCT/SERVICE
+ * ACTIVE、RENTAL AVAILABLE、ERRAND OPEN。唯一豁免：ERRAND publisher ↔
+ * accepter 属既有履约义务沟通（CLAIMED 之后的履约上下文不断开），通过
+ * viewerId 判定。既有会话不经本函数，永不受影响。
  */
 export async function rereadListingForConversation(
   tx: Prisma.TransactionClient,
   targetType: ListingModerationTargetType,
   listingId: string,
+  options?: { viewerId?: string | null },
 ): Promise<ListingConversationSnapshot | null> {
   type SnapshotRow = {
     id: string;
     campusId: string;
     ownerId: string;
+    status: string;
     deletedAt: Date | null;
     counterpartId?: string | null;
   };
   const readers: Record<ListingModerationTargetType, () => Promise<SnapshotRow | null>> = {
     PRODUCT: async () => {
       const rows = await tx.$queryRaw<
-        Array<{ id: string; campusId: string; ownerId: string; deletedAt: Date | null }>
+        Array<{ id: string; campusId: string; ownerId: string; status: string; deletedAt: Date | null }>
       >`
-        SELECT id, "campusId", "sellerId" AS "ownerId", "deletedAt"
+        SELECT id, "campusId", "sellerId" AS "ownerId", status, "deletedAt"
         FROM "Product"
         WHERE id = ${listingId}
         FOR UPDATE
@@ -175,9 +183,9 @@ export async function rereadListingForConversation(
     },
     SERVICE: async () => {
       const rows = await tx.$queryRaw<
-        Array<{ id: string; campusId: string; ownerId: string; deletedAt: Date | null }>
+        Array<{ id: string; campusId: string; ownerId: string; status: string; deletedAt: Date | null }>
       >`
-        SELECT id, "campusId", "providerId" AS "ownerId", "deletedAt"
+        SELECT id, "campusId", "providerId" AS "ownerId", status, "deletedAt"
         FROM "ServiceListing"
         WHERE id = ${listingId}
         FOR UPDATE
@@ -186,9 +194,9 @@ export async function rereadListingForConversation(
     },
     ERRAND: async () => {
       const rows = await tx.$queryRaw<
-        Array<{ id: string; campusId: string; ownerId: string; counterpartId: string | null; deletedAt: Date | null }>
+        Array<{ id: string; campusId: string; ownerId: string; counterpartId: string | null; status: string; deletedAt: Date | null }>
       >`
-        SELECT id, "campusId", "publisherId" AS "ownerId", "accepterId" AS "counterpartId", "deletedAt"
+        SELECT id, "campusId", "publisherId" AS "ownerId", "accepterId" AS "counterpartId", status, "deletedAt"
         FROM "ErrandTask"
         WHERE id = ${listingId}
         FOR UPDATE
@@ -197,9 +205,9 @@ export async function rereadListingForConversation(
     },
     RENTAL: async () => {
       const rows = await tx.$queryRaw<
-        Array<{ id: string; campusId: string; ownerId: string; deletedAt: Date | null }>
+        Array<{ id: string; campusId: string; ownerId: string; status: string; deletedAt: Date | null }>
       >`
-        SELECT id, "campusId", "ownerId", "deletedAt"
+        SELECT id, "campusId", "ownerId", status, "deletedAt"
         FROM "RentalListing"
         WHERE id = ${listingId}
         FOR UPDATE
@@ -211,6 +219,26 @@ export async function rereadListingForConversation(
   const snapshot = await readers[targetType]();
   if (!snapshot || snapshot.deletedAt !== null) {
     return null;
+  }
+  // Phase 8F（§21）：新 contact 线程只对公开曝光状态开放（ERRAND 履约双方豁免）
+  if (targetType === "ERRAND") {
+    const viewerId = options?.viewerId ?? null;
+    const isWorkflowParticipant =
+      viewerId !== null &&
+      (viewerId === snapshot.ownerId || viewerId === snapshot.counterpartId);
+    if (snapshot.status !== "OPEN" && !isWorkflowParticipant) {
+      return null;
+    }
+  } else {
+    const exposureByTarget: Record<ListingModerationTargetType, string> = {
+      PRODUCT: "ACTIVE",
+      SERVICE: "ACTIVE",
+      ERRAND: "OPEN",
+      RENTAL: "AVAILABLE",
+    };
+    if (snapshot.status !== exposureByTarget[targetType]) {
+      return null;
+    }
   }
   if (await hasActiveListingModeration(tx, targetType, listingId)) {
     return null;

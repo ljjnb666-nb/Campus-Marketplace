@@ -61,7 +61,6 @@ describe("service repository", () => {
 
     const result = await getServiceList({
       q: "辅导",
-      status: "ACTIVE",
       pricingUnit: "PER_HOUR",
       categorySlug: "coding",
       verifiedOnly: true,
@@ -137,19 +136,24 @@ describe("service repository", () => {
     await getServiceList();
 
     const args = serviceListingFindMany.mock.calls[0][0];
-    expect(args.where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
+    // Phase 8F：无筛选默认 = exposure state only（ACTIVE）
+    expect(args.where).toEqual({ deletedAt: null, status: "ACTIVE", moderations: { none: { resolvedAt: null } } });
     expect(args.orderBy).toEqual([{ createdAt: "desc" }]);
     expect(args.skip).toBe(0);
   });
 
-  it("ignores ALL shorthands for status and pricing unit", async () => {
+  it("Phase 8F：公开 list = exposure state only（AVAILABLE/ACTIVE/OPEN SSOT，无 ALL 短路）", async () => {
     serviceListingFindMany.mockResolvedValue([]);
     serviceListingCount.mockResolvedValue(0);
     serviceCategoryFindMany.mockResolvedValue([]);
 
-    await getServiceList({ status: "ALL", pricingUnit: "ALL" });
+    await getServiceList({ pricingUnit: "ALL" });
 
-    expect(serviceListingFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
+    expect(serviceListingFindMany.mock.calls[0][0].where).toEqual({
+      deletedAt: null,
+      status: "ACTIVE",
+      moderations: { none: { resolvedAt: null } },
+    });
   });
 
   it("loads form meta with active categories", async () => {

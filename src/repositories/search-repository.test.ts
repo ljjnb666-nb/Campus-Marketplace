@@ -140,7 +140,8 @@ describe("getSearchResults", () => {
     expect(errandFindMany).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
-        status: { in: ["OPEN", "CLAIMED", "IN_PROGRESS", "PENDING_CONFIRMATION"] },
+        // Phase 8F（§56）：search 只暴露 OPEN（exposure state only）
+        status: "OPEN",
         moderations: { none: { resolvedAt: null } },
         OR: [
           { title: contains },

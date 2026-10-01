@@ -84,6 +84,8 @@ const {
       const sql = Array.isArray(strings) ? strings.join("|") : String(strings);
       const withDeleted = (row: Record<string, unknown> | null) =>
         row ? [{ ...row, deletedAt: row.deletedAt ?? null }] : [];
+      // Phase 8F：rereadListingForConversation 的 SELECT 含 status 列
+      // （新 contact 线程的 exposure fresh 判定）
       if (sql.includes("ErrandTask")) {
         const row = (await transactionClient.errandTask.findFirst({} as never)) as Record<
           string,
@@ -96,6 +98,7 @@ const {
                 campusId: row.campusId,
                 ownerId: row.publisherId,
                 counterpartId: row.accepterId ?? null,
+                status: row.status ?? "OPEN",
               }
             : null,
         );
@@ -106,7 +109,9 @@ const {
           unknown
         > | null;
         return withDeleted(
-          row ? { id: "service-1", campusId: row.campusId, ownerId: row.providerId } : null,
+          row
+            ? { id: "service-1", campusId: row.campusId, ownerId: row.providerId, status: row.status ?? "ACTIVE" }
+            : null,
         );
       }
       if (sql.includes("RentalListing")) {
@@ -115,7 +120,9 @@ const {
           unknown
         > | null;
         return withDeleted(
-          row ? { id: "rental-1", campusId: row.campusId, ownerId: row.ownerId } : null,
+          row
+            ? { id: "rental-1", campusId: row.campusId, ownerId: row.ownerId, status: row.status ?? "AVAILABLE" }
+            : null,
         );
       }
       const row = (await transactionClient.product.findFirst({} as never)) as Record<
@@ -123,7 +130,9 @@ const {
         unknown
       > | null;
       return withDeleted(
-        row ? { id: "product-1", campusId: row.campusId, ownerId: row.sellerId } : null,
+        row
+          ? { id: "product-1", campusId: row.campusId, ownerId: row.sellerId, status: row.status ?? "ACTIVE" }
+          : null,
       );
     }),
     listingModeration: {

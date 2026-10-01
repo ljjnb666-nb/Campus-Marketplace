@@ -12,6 +12,10 @@ import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ServiceStatusActions } from "@/components/service/service-status-actions";
 import { SERVICE_PRICING_UNIT_LABELS, SERVICE_STATUS_LABELS } from "@/constants/service";
 import { ListingContactForm } from "@/components/conversation/listing-contact-form";
+import {
+  isServicePubliclyExposed,
+  SERVICE_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 import { createOrOpenServiceConversation } from "@/actions/conversation";
 import { createServiceOrder } from "@/actions/order";
 import { deleteService } from "@/actions/service";
@@ -61,7 +65,12 @@ export function ServiceDetailConsole({
   const [bookingOpen, setBookingOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const isStatusActive = service.status === "ACTIVE";
+  // Phase 8F（§21/§45）：私聊 = new marketplace activity，仅公开曝光状态开放；
+  // 服务端 rereadListingForConversation 同样 DENY（UI 不是 authority）
+  const isStatusActive = isServicePubliclyExposed(service.status);
+  const windDownText =
+    SERVICE_WIND_DOWN_MESSAGES[service.status as "ACTIVE" | "PAUSED" | "OFFLINE"] ??
+    `当前服务为“${(SERVICE_STATUS_LABELS as Record<string, string>)[service.status] || service.status}”状态，暂无法预约`;
 
   return (
     <>
@@ -159,8 +168,8 @@ export function ServiceDetailConsole({
             /* 买家预约控制区 */
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2.5">
-                {/* 私聊联系 */}
-                {isLoggedIn && (
+                {/* 私聊联系：仅公开曝光状态开放新联系线程（§21） */}
+                {isLoggedIn && isStatusActive && (
                   <ListingContactForm
                     action={createOrOpenServiceConversation}
                     fieldName="serviceId"
@@ -207,7 +216,7 @@ export function ServiceDetailConsole({
                 )
               ) : (
                 <div className="rounded-2xl bg-slate-100 p-3.5 text-center text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  当前服务为“{(SERVICE_STATUS_LABELS as Record<string, string>)[service.status] || service.status}”状态，暂无法预约
+                  {windDownText}
                 </div>
               )}
             </div>

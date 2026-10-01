@@ -29,29 +29,12 @@ const deadlineLabels = {
   "7days": "7 天内截止",
 } as const;
 
-const statusLabels = {
-  OPEN: "待接单",
-  CLAIMED: "已接单",
-  IN_PROGRESS: "进行中",
-  PENDING_CONFIRMATION: "待确认",
-  COMPLETED: "已完成",
-  CANCELLED: "已取消",
-} as const;
-
 export default async function ErrandsPage({
   searchParams,
 }: {
   searchParams: Promise<{
     q?: string;
     category?: string;
-    status?:
-      | "OPEN"
-      | "CLAIMED"
-      | "IN_PROGRESS"
-      | "PENDING_CONFIRMATION"
-      | "COMPLETED"
-      | "CANCELLED"
-      | "ALL";
     deadline?: "today" | "3days" | "7days" | "all";
     sort?: "latest" | "reward_desc" | "reward_asc" | "deadline_asc";
     page?: string;
@@ -62,19 +45,19 @@ export default async function ErrandsPage({
   // SUSPENDED 会话 → null → 匿名语义，公开跑腿列表照常渲染
   const viewerId = await getActiveViewerId();
   const page = parsePageParam(params.page);
+  // Phase 8F（§12/§39）：公开 marketplace list = exposure state only
+  // （OPEN）；主列表 query 不再吞基础设施错误
   const result = await getErrandList({
     q: params.q?.trim(),
     category: params.category,
-    status: params.status ?? "ALL",
     deadline: params.deadline ?? "all",
     sort: params.sort ?? "latest",
     page,
-  }).catch(() => ({ items: [], total: 0, categories: [], page: 1, pageSize: 12, totalPages: 1 }));
+  });
 
   const search = buildListingSearchParams([
     { key: "q", value: params.q },
     { key: "category", value: params.category },
-    { key: "status", value: params.status, omitWhen: "ALL" },
     { key: "deadline", value: params.deadline, omitWhen: "all" },
     { key: "sort", value: params.sort, omitWhen: "latest" },
   ]);
@@ -86,7 +69,6 @@ export default async function ErrandsPage({
   const activeFilters = [
     params.q ? `关键词：${params.q}` : null,
     selectedCategoryName ? `分类：${selectedCategoryName}` : null,
-    params.status && params.status !== "ALL" ? `状态：${statusLabels[params.status]}` : null,
     params.deadline && params.deadline !== "all" ? `截止时间：${deadlineLabels[params.deadline]}` : null,
   ].filter(Boolean) as string[];
 
@@ -183,18 +165,6 @@ export default async function ErrandsPage({
                 {category.name}
               </option>
             ))}
-          </select>
-
-          <select
-            name="status"
-            defaultValue={params.status ?? "ALL"}
-            className="rounded-2xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs font-medium text-slate-900 outline-none transition focus:border-indigo-500 focus:bg-white dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
-          >
-            <option value="ALL">全部状态</option>
-            <option value="OPEN">待接单</option>
-            <option value="CLAIMED">已接单</option>
-            <option value="IN_PROGRESS">进行中</option>
-            <option value="COMPLETED">已完成</option>
           </select>
 
           <select

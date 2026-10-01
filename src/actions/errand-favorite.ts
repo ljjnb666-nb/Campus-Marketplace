@@ -7,25 +7,43 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { requireUser, getVerifiedSession } from "@/lib/server-auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
+import { ERRAND_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 
 export async function toggleErrandFavorite(errandTaskId: string) {
   // 身份只能来自会话，绝不信任客户端传入的 userId
   const user = await requireUser();
 
   try {
-    // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-    const result = await withTransaction((tx) =>
-      applyFavoriteToggle({
+    // 同一事务内的删除/新建 + 计数增减，并发下保持一致。
+    // Phase 8F（§21）：new favorite 仅对 public exposure（OPEN）任务开放——
+    // 锁内 fresh 判定（补上此前缺失的 listing 存在性/软删/治理检查）；
+    // 移除既有收藏属 allowed wind-down，不受限
+    const result = await withTransaction(async (tx) => {
+      const exposed = await tx.errandTask.findFirst({
+        where: {
+          id: errandTaskId,
+          deletedAt: null,
+          status: ERRAND_PUBLIC_EXPOSURE_STATUS,
+          ...listingModerationPublicFilter(),
+        },
+        select: { id: true },
+      });
+
+      return applyFavoriteToggle({
         // RB-03：active-account 序列化（durable 用户所有态）
         beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
         deleteFavorite: () =>
           tx.errandFavorite.deleteMany({
             where: { userId: user.id, errandTaskId },
           }),
-        createFavorite: () =>
-          tx.errandFavorite.create({
+        createFavorite: () => {
+          if (!exposed) {
+            throw new Error("FAVORITE_LISTING_NOT_PUBLIC");
+          }
+          return tx.errandFavorite.create({
             data: { userId: user.id, errandTaskId },
-          }),
+          });
+        },
         decrementCount: () =>
           tx.errandTask.update({
             where: { id: errandTaskId },
@@ -36,13 +54,16 @@ export async function toggleErrandFavorite(errandTaskId: string) {
             where: { id: errandTaskId },
             data: { favoriteCount: { increment: 1 } },
           }),
-      }),
-    );
+      });
+    });
 
     revalidatePath("/errands");
     revalidatePath("/my/favorites");
     return result;
   } catch (error) {
+    if (error instanceof Error && error.message === "FAVORITE_LISTING_NOT_PUBLIC") {
+      return { success: false as const, error: "该任务当前不可收藏" };
+    }
     logger.error("切换跑腿收藏失败", "toggleErrandFavorite", { error });
     return { success: false as const, error: "操作失败" };
   }

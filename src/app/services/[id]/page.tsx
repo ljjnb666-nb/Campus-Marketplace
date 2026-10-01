@@ -7,8 +7,14 @@ import { ImageGallery } from "@/components/ui/image-gallery";
 import { ServiceCard } from "@/components/service/service-card";
 import { ServiceDetailConsole } from "@/components/service/service-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { SERVICE_WIND_DOWN_MESSAGES } from "@/lib/listings/listing-lifecycle";
+import {
+  isListingTransactionParticipant,
+  resolveListingLifecycleAccess,
+} from "@/lib/listings/listing-visibility";
 import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { WindDownBanner } from "@/components/listing/wind-down-banner";
 import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
 import { getServiceDetail } from "@/repositories/service-repository";
 import { CheckCircle2 } from "lucide-react";
@@ -38,13 +44,29 @@ export async function generateMetadata({
     if (await hasActiveModerationForPublicSurface("SERVICE", service.id)) {
       return SERVICE_DETAIL_FALLBACK_METADATA;
     }
+    // Phase 8F（§19）：metadata 是 PUBLIC surface——只有 public exposed
+    // （ACTIVE）才生成 listing title/description；wind-down 返回 generic fallback
+    if (service.status !== "ACTIVE") {
+      return SERVICE_DETAIL_FALLBACK_METADATA;
+    }
     const title = `${service.title} - 校园集市`;
     const description = truncateForMetadata(
       service.description || `查看校园集市技能服务「${service.title}」的服务内容与价格。`,
     );
 
     return { title, description, openGraph: { title, description } };
-  } catch {
+  } catch (error) {
+    // notFound() 等 Next.js 控制流错误必须原样抛出（此前裸 catch 会把
+    // 缺失 listing 的 metadata 吞成 200 语义兜底）
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "digest" in error &&
+      typeof error.digest === "string" &&
+      error.digest.startsWith("NEXT_")
+    ) {
+      throw error;
+    }
     return SERVICE_DETAIL_FALLBACK_METADATA;
   }
 }
@@ -59,7 +81,19 @@ export default async function ServiceDetailPage({
   // SUSPENDED 会话 → null → 匿名语义（isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
   const { service, relatedServices } = await getServiceDetail(id);
-  // Phase 7C PUBLIC detail 治理特例（同 product 页）
+  // Phase 8F（§14-§17）Detail Access Policy：PUBLIC 仅 ACTIVE；provider 查看自己
+  // wind-down listing；既有 SERVICE Order 买卖双方保留履约上下文
+  const isParticipant = await isListingTransactionParticipant("SERVICE", service.id, viewerId);
+  const lifecycleRole = resolveListingLifecycleAccess({
+    status: service.status,
+    viewerId,
+    ownerId: service.providerId,
+    isParticipant,
+  });
+  if (lifecycleRole === null) {
+    notFound();
+  }
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）；参与方特权不绕过治理保密
   const moderationGate = await resolvePublicDetailModerationGate({
     viewerId,
     ownerId: service.providerId,
@@ -70,12 +104,17 @@ export default async function ServiceDetailPage({
     notFound();
   }
   const isOwner = viewerId === service.providerId;
+  const windDownMessage =
+    lifecycleRole !== "PUBLIC"
+      ? SERVICE_WIND_DOWN_MESSAGES[service.status as "ACTIVE" | "PAUSED" | "OFFLINE"]
+      : "";
 
   const images = service.coverImageUrl ? [service.coverImageUrl] : [];
 
   return (
     <PageContainer maxWidth="standard">
       {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
+      {windDownMessage && <WindDownBanner message={windDownMessage} />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

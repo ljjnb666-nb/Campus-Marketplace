@@ -16,6 +16,10 @@ import { createRentalOrder } from "@/actions/rental-order";
 import { deleteRentalListing } from "@/actions/rental-listing";
 import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
+import {
+  isRentalPubliclyExposed,
+  RENTAL_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 import type { RentalListingStatus } from "@prisma/client";
 
 interface RentalUserSummary {
@@ -77,7 +81,12 @@ export function RentalDetailConsole({
   const [bookingOpen, setBookingOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const isStatusAvailable = listing.status === "AVAILABLE";
+  // Phase 8F（§21/§45）：收藏 / 私聊 = new marketplace activity，仅公开曝光
+  // 状态开放；服务端 favorite/conversation gate 同样 DENY（UI 不是 authority）
+  const isStatusAvailable = isRentalPubliclyExposed(listing.status);
+  const windDownText =
+    RENTAL_WIND_DOWN_MESSAGES[listing.status as "AVAILABLE" | "PAUSED" | "OFFLINE"] ??
+    "当前物品不可租";
   const isFreeDeposit = Number(listing.depositAmount) === 0;
 
   return (
@@ -173,16 +182,18 @@ export function RentalDetailConsole({
             /* 租客买家控制阵列 */
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2.5">
-                {/* 收藏 */}
-                <RentalFavoriteButton
-                  rentalListingId={listing.id}
-                  isFavorited={isFavorited}
-                  count={listing.favoriteCount}
-                  isLoggedIn={isLoggedIn}
-                />
+                {/* 收藏：仅公开曝光状态开放新收藏（§21） */}
+                {isStatusAvailable && (
+                  <RentalFavoriteButton
+                    rentalListingId={listing.id}
+                    isFavorited={isFavorited}
+                    count={listing.favoriteCount}
+                    isLoggedIn={isLoggedIn}
+                  />
+                )}
 
-                {/* 私聊 */}
-                {isLoggedIn && (
+                {/* 私聊：仅公开曝光状态开放新联系线程（§21） */}
+                {isLoggedIn && isStatusAvailable && (
                   <ListingContactForm
                     action={createOrOpenRentalConversation}
                     fieldName="rentalListingId"
@@ -229,7 +240,7 @@ export function RentalDetailConsole({
                 )
               ) : (
                 <div className="rounded-2xl bg-slate-100 p-3.5 text-center text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  当前物品不可租
+                  {windDownText}
                 </div>
               )}
             </div>

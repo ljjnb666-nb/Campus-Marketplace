@@ -1,5 +1,6 @@
 import { Prisma, RentalPricingUnit } from "@prisma/client";
 import { notFound } from "next/navigation";
+import { RENTAL_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import {
@@ -35,7 +36,11 @@ export async function getRentalListings(query: RentalListingQuery = {}) {
 
   const where: Prisma.RentalListingWhereInput = {
     deletedAt: null,
-    status: "AVAILABLE",
+    // Phase 8F（§9/§12）：公开 marketplace list = exposure state only
+    // （AVAILABLE，SSOT 口径）。AVAILABLE 只代表 owner 允许新的租赁申请，
+    // 时间段库存权威在 createRentalOrderTx（FOR UPDATE + 不可租期 +
+    // checkTimeConflict + totalQuantity）。
+    status: RENTAL_PUBLIC_EXPOSURE_STATUS,
     // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
     ...listingModerationPublicFilter(),
   };

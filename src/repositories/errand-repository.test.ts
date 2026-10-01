@@ -63,7 +63,6 @@ describe("errand repository", () => {
     const result = await getErrandList({
       q: "快递",
       category: "category-1",
-      status: "OPEN",
       deadline: "3days",
       sort: "reward_desc",
       page: 2,
@@ -133,20 +132,25 @@ describe("errand repository", () => {
     const result = await getErrandList();
 
     const findArgs = errandTaskFindMany.mock.calls[0][0];
-    expect(findArgs.where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
+    // Phase 8F：无筛选默认 = exposure state only（OPEN）
+    expect(findArgs.where).toEqual({ deletedAt: null, status: "OPEN", moderations: { none: { resolvedAt: null } } });
     expect(findArgs.orderBy).toEqual([{ createdAt: "desc" }]);
     expect(findArgs.skip).toBe(0);
     expect(result.totalPages).toBe(1);
   });
 
-  it("ignores ALL status shorthand so every status is included", async () => {
+  it("Phase 8F：公开 list = exposure state only（OPEN SSOT，无 ALL 短路）", async () => {
     errandTaskFindMany.mockResolvedValue([]);
     errandTaskCount.mockResolvedValue(0);
     errandCategoryFindMany.mockResolvedValue([]);
 
-    await getErrandList({ status: "ALL" });
+    await getErrandList({});
 
-    expect(errandTaskFindMany.mock.calls[0][0].where).toEqual({ deletedAt: null, moderations: { none: { resolvedAt: null } } });
+    expect(errandTaskFindMany.mock.calls[0][0].where).toEqual({
+      deletedAt: null,
+      status: "OPEN",
+      moderations: { none: { resolvedAt: null } },
+    });
   });
 
   it("loads form meta with active categories only", async () => {

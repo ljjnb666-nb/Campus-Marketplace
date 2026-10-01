@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { requireUser, getVerifiedSession } from "@/lib/server-auth";
+import { RENTAL_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
 
 export async function toggleRentalFavorite(formData: FormData) {
@@ -13,37 +14,56 @@ export async function toggleRentalFavorite(formData: FormData) {
 
   if (!rentalListingId) return;
 
-  const listing = await prisma.rentalListing.findFirst({
-    where: { id: rentalListingId, deletedAt: null },
-    select: { id: true },
-  });
-  if (!listing) return;
+  // 同一事务内的删除/新建 + 计数增减，并发下保持一致。
+  // Phase 8F（§21）：new favorite 仅对 public exposure（AVAILABLE）listing
+  // 开放——锁内 fresh 判定；移除既有收藏属 allowed wind-down，不受限。
+  // exposure 判定失败走哨兵错误整体回滚（零计数漂移），与"listing 缺失"
+  // 同形静默安全结局
+  try {
+    await withTransaction(async (tx) => {
+      const exposed = await tx.rentalListing.findFirst({
+        where: {
+          id: rentalListingId,
+          deletedAt: null,
+          status: RENTAL_PUBLIC_EXPOSURE_STATUS,
+          ...listingModerationPublicFilter(),
+        },
+        select: { id: true },
+      });
 
-  // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-  await withTransaction((tx) =>
-    applyFavoriteToggle({
-      // RB-03：active-account 序列化（durable 用户所有态）
-      beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
-      deleteFavorite: () =>
-        tx.rentalFavorite.deleteMany({
-          where: { userId: user.id, rentalListingId },
-        }),
-      createFavorite: () =>
-        tx.rentalFavorite.create({
-          data: { userId: user.id, rentalListingId },
-        }),
-      decrementCount: () =>
-        tx.rentalListing.update({
-          where: { id: rentalListingId },
-          data: { favoriteCount: { decrement: 1 } },
-        }),
-      incrementCount: () =>
-        tx.rentalListing.update({
-          where: { id: rentalListingId },
-          data: { favoriteCount: { increment: 1 } },
-        }),
-    }),
-  );
+      await applyFavoriteToggle({
+        // RB-03：active-account 序列化（durable 用户所有态）
+        beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
+        deleteFavorite: () =>
+          tx.rentalFavorite.deleteMany({
+            where: { userId: user.id, rentalListingId },
+          }),
+        createFavorite: () => {
+          if (!exposed) {
+            throw new Error("FAVORITE_LISTING_NOT_PUBLIC");
+          }
+          return tx.rentalFavorite.create({
+            data: { userId: user.id, rentalListingId },
+          });
+        },
+        decrementCount: () =>
+          tx.rentalListing.update({
+            where: { id: rentalListingId },
+            data: { favoriteCount: { decrement: 1 } },
+          }),
+        incrementCount: () =>
+          tx.rentalListing.update({
+            where: { id: rentalListingId },
+            data: { favoriteCount: { increment: 1 } },
+          }),
+      });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "FAVORITE_LISTING_NOT_PUBLIC") {
+      return;
+    }
+    throw error;
+  }
 
   revalidatePath(`/rentals/${rentalListingId}`);
   revalidatePath("/rentals");

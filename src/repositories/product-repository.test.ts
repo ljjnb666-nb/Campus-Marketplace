@@ -42,7 +42,6 @@ describe("product repository", () => {
     const result = await getProductList({
       q: "教材",
       category: "category-1",
-      status: "ACTIVE",
       minPrice: "10",
       maxPrice: "30",
       sort: "popular",

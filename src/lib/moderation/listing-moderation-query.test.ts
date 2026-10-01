@@ -88,7 +88,7 @@ describe("rereadListingForConversation（四域行锁分支 + moderation gate）
     prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
       const sql = Array.isArray(strings) ? strings.join("|") : "";
       if (sql.includes("ServiceListing")) {
-        return [{ id: "s1", campusId: "c1", ownerId: "p1", deletedAt: null }];
+        return [{ id: "s1", campusId: "c1", ownerId: "p1", status: "ACTIVE", deletedAt: null }];
       }
       return [];
     });
@@ -102,14 +102,66 @@ describe("rereadListingForConversation（四域行锁分支 + moderation gate）
     prismaMock.listingModeration.findFirst.mockResolvedValue(null);
   });
 
+  it("Phase 8F（§21）：新 contact 线程 exposure gate——非曝光态拒绝；ERRAND 履约双方豁免", async () => {
+    prismaMock.listingModeration.findFirst.mockResolvedValue(null);
+
+    // SERVICE PAUSED（wind-down）→ 新线程拒绝（owner 也不例外——既有会话走
+    // conversationKey 命中路径，不经本函数）
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : "";
+      if (sql.includes("ServiceListing")) {
+        return [{ id: "s1", campusId: "c1", ownerId: "p1", status: "PAUSED", deletedAt: null }];
+      }
+      return [];
+    });
+    await expect(rereadListingForConversation(tx, "SERVICE", "s1")).resolves.toBeNull();
+
+    // RENTAL PAUSED → 拒绝；AVAILABLE → 放行
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : "";
+      if (sql.includes("RentalListing")) {
+        return [{ id: "r1", campusId: "c1", ownerId: "own", status: "PAUSED", deletedAt: null }];
+      }
+      return [];
+    });
+    await expect(rereadListingForConversation(tx, "RENTAL", "r1")).resolves.toBeNull();
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : "";
+      if (sql.includes("RentalListing")) {
+        return [{ id: "r1", campusId: "c1", ownerId: "own", status: "AVAILABLE", deletedAt: null }];
+      }
+      return [];
+    });
+    await expect(rereadListingForConversation(tx, "RENTAL", "r1", { viewerId: "renter" })).resolves.toEqual({
+      campusId: "c1", ownerId: "own", counterpartId: null,
+    });
+
+    // ERRAND CLAIMED：陌生人（null viewer / 第三方）拒绝；publisher / accepter 豁免
+    prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
+      const sql = Array.isArray(strings) ? strings.join("|") : "";
+      if (sql.includes("ErrandTask")) {
+        return [{ id: "e1", campusId: "c1", ownerId: "pub", counterpartId: "acc", status: "CLAIMED", deletedAt: null }];
+      }
+      return [];
+    });
+    await expect(rereadListingForConversation(tx, "ERRAND", "e1")).resolves.toBeNull();
+    await expect(rereadListingForConversation(tx, "ERRAND", "e1", { viewerId: "stranger" })).resolves.toBeNull();
+    await expect(rereadListingForConversation(tx, "ERRAND", "e1", { viewerId: "pub" })).resolves.toEqual({
+      campusId: "c1", ownerId: "pub", counterpartId: "acc",
+    });
+    await expect(rereadListingForConversation(tx, "ERRAND", "e1", { viewerId: "acc" })).resolves.toEqual({
+      campusId: "c1", ownerId: "pub", counterpartId: "acc",
+    });
+  });
+
   it("ERRAND：快照携带 counterpartId；RENTAL：无 counterpart 字段 → null", async () => {
     prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
       const sql = Array.isArray(strings) ? strings.join("|") : "";
       if (sql.includes("ErrandTask")) {
-        return [{ id: "e1", campusId: "c1", ownerId: "pub", counterpartId: "acc", deletedAt: null }];
+        return [{ id: "e1", campusId: "c1", ownerId: "pub", counterpartId: "acc", status: "OPEN", deletedAt: null }];
       }
       if (sql.includes("RentalListing")) {
-        return [{ id: "r1", campusId: "c1", ownerId: "own", deletedAt: null }];
+        return [{ id: "r1", campusId: "c1", ownerId: "own", status: "AVAILABLE", deletedAt: null }];
       }
       return [];
     });

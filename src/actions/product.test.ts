@@ -186,7 +186,12 @@ describe("product actions", () => {
       if (typeof arg === "function") {
         return arg({
           favorite: { deleteMany: favoriteDeleteMany, create: favoriteCreate },
-          product: { update: productUpdate, create: productCreate },
+          product: {
+            update: productUpdate,
+            create: productCreate,
+            // Phase 8F（§21）：toggleFavorite create 分支的 exposure fresh 判定
+            findFirst: productFindFirst,
+          },
           productImage: {
             deleteMany: productImageDeleteMany,
             createMany: productImageCreateMany,
@@ -385,13 +390,15 @@ describe("product actions", () => {
       expect(productUpdate).not.toHaveBeenCalled();
     });
 
-    it("does nothing when the product does not exist", async () => {
+    it("Phase 8F：listing 不存在/非公开曝光 → 哨兵回滚，零收藏零计数漂移", async () => {
       productFindFirst.mockResolvedValue(null);
 
       await toggleFavorite(buildFavoriteFormData());
 
-      expect(favoriteDeleteMany).not.toHaveBeenCalled();
-      expect(transactionMock).not.toHaveBeenCalled();
+      // exposure 判定在事务内先行：不可曝光时 create 分支抛哨兵整体回滚，
+      // favorite 行与计数器零写入
+      expect(favoriteCreate).not.toHaveBeenCalled();
+      expect(productUpdate).not.toHaveBeenCalled();
     });
 
     it("does nothing when the product id is missing", async () => {

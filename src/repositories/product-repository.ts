@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { notFound } from "next/navigation";
+import { PRODUCT_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { cachedPublicRead, PUBLIC_META_TTL_MS } from "@/lib/public-cache";
@@ -8,7 +9,6 @@ import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 export type ProductListQuery = {
   q?: string;
   category?: string;
-  status?: "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE" | "ALL";
   minPrice?: string;
   maxPrice?: string;
   sort?: "latest" | "price_asc" | "price_desc" | "popular";
@@ -133,6 +133,10 @@ export async function getProductList(query: ProductListQuery = {}) {
   const priceFilter = getPriceFilter(query.minPrice, query.maxPrice);
   const where = {
     deletedAt: null,
+    // Phase 8F（§9/§12）：公开 marketplace list = exposure state only
+    // （ACTIVE）。wind-down（RESERVED/SOLD/OFFLINE）不得进入公共发现面；
+    // 状态历史管理属于 /my/products（OWNER 面）。
+    status: PRODUCT_PUBLIC_EXPOSURE_STATUS,
     // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
     ...listingModerationPublicFilter(),
     ...(query.q
@@ -145,7 +149,6 @@ export async function getProductList(query: ProductListQuery = {}) {
         }
       : {}),
     ...(query.category ? { categoryId: query.category } : {}),
-    ...(query.status && query.status !== "ALL" ? { status: query.status } : {}),
     ...(priceFilter ? { price: priceFilter } : {}),
   };
 

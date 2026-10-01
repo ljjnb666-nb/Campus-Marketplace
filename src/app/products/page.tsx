@@ -23,21 +23,12 @@ const quickSorts = [
   { label: "高价优先", sort: "price_desc" },
 ];
 
-const statusLabels = {
-  ALL: "全部状态",
-  ACTIVE: "在售",
-  RESERVED: "已预订",
-  SOLD: "已售出",
-  OFFLINE: "已下架",
-} as const;
-
 export default async function ProductsPage({
   searchParams,
 }: {
   searchParams: Promise<{
     q?: string;
     category?: string;
-    status?: "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE" | "ALL";
     minPrice?: string;
     maxPrice?: string;
     sort?: "latest" | "price_asc" | "price_desc" | "popular";
@@ -49,24 +40,26 @@ export default async function ProductsPage({
   // ACTIVE 账号解析；SUSPENDED 会话 → null → 匿名语义，公开列表照常渲染
   const viewerId = await getActiveViewerId();
   const page = parsePageParam(params.page);
+  // Phase 8F（§12/§39）：公开 marketplace list = exposure state only
+  // （repository 强制 ACTIVE）；主列表 query 不再吞基础设施错误——
+  // DB / Prisma / programming error 必须传播为 server error，
+  // 不能伪装成“暂无商品”空状态
   const [result, meta] = await Promise.all([
     getProductList({
       q: params.q?.trim(),
       category: params.category,
-      status: params.status ?? "ALL",
       minPrice: params.minPrice,
       maxPrice: params.maxPrice,
       sort: params.sort ?? "latest",
       page,
       currentUserId: viewerId ?? undefined,
-    }).catch(() => ({ items: [], total: 0, page: 1, pageSize: 12, totalPages: 1 })),
+    }),
     getProductFormMeta(),
   ]);
 
   const search = buildListingSearchParams([
     { key: "q", value: params.q },
     { key: "category", value: params.category },
-    { key: "status", value: params.status, omitWhen: "ALL" },
     { key: "minPrice", value: params.minPrice },
     { key: "maxPrice", value: params.maxPrice },
     { key: "sort", value: params.sort, omitWhen: "latest" },
@@ -79,7 +72,6 @@ export default async function ProductsPage({
   const activeFilters = [
     params.q ? `关键词：${params.q}` : null,
     selectedCategoryName ? `分类：${selectedCategoryName}` : null,
-    params.status && params.status !== "ALL" ? `状态：${statusLabels[params.status]}` : null,
     params.minPrice ? `最低价：¥${params.minPrice}` : null,
     params.maxPrice ? `最高价：¥${params.maxPrice}` : null,
   ].filter(Boolean) as string[];
@@ -166,17 +158,6 @@ export default async function ProductsPage({
                 {category.name}
               </option>
             ))}
-          </select>
-
-          <select
-            name="status"
-            defaultValue={params.status ?? "ALL"}
-            className="rounded-2xl border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs font-medium text-slate-900 outline-none transition focus:border-indigo-500 focus:bg-white dark:border-slate-800 dark:bg-slate-950 dark:text-slate-100"
-          >
-            <option value="ALL">全部状态</option>
-            <option value="ACTIVE">在售</option>
-            <option value="RESERVED">已预订</option>
-            <option value="SOLD">已售出</option>
           </select>
 
           <input

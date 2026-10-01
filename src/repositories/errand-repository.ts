@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { ERRAND_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
@@ -6,14 +7,6 @@ import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 export type ErrandListQuery = {
   q?: string;
   category?: string;
-  status?:
-    | "OPEN"
-    | "CLAIMED"
-    | "IN_PROGRESS"
-    | "PENDING_CONFIRMATION"
-    | "COMPLETED"
-    | "CANCELLED"
-    | "ALL";
   deadline?: "today" | "3days" | "7days" | "all";
   sort?: "latest" | "reward_desc" | "reward_asc" | "deadline_asc";
   page?: number;
@@ -177,6 +170,10 @@ export async function getErrandList(query: ErrandListQuery = {}) {
   const deadlineFilter = getDeadlineFilter(query.deadline);
   const where = {
     deletedAt: null,
+    // Phase 8F（§9/§12）：公开 marketplace list = exposure state only
+    // （OPEN）。Errand 是 workflow entity——CLAIMED 及之后的全部 workflow
+    // 态都不得进入公共发现面；状态历史管理属于 /my/errands。
+    status: ERRAND_PUBLIC_EXPOSURE_STATUS,
     // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
     ...listingModerationPublicFilter(),
     ...(query.q
@@ -190,7 +187,6 @@ export async function getErrandList(query: ErrandListQuery = {}) {
         }
       : {}),
     ...(query.category ? { categoryId: query.category } : {}),
-    ...(query.status && query.status !== "ALL" ? { status: query.status } : {}),
     ...(deadlineFilter ? { deadline: deadlineFilter } : {}),
   };
 

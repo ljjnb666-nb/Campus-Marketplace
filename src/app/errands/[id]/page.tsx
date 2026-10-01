@@ -6,8 +6,14 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ErrandCard } from "@/components/errand/errand-card";
 import { ErrandDetailConsole } from "@/components/errand/errand-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { ERRAND_WIND_DOWN_MESSAGES } from "@/lib/listings/listing-lifecycle";
+import {
+  isErrandParticipant,
+  resolveListingLifecycleAccess,
+} from "@/lib/listings/listing-visibility";
 import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { WindDownBanner } from "@/components/listing/wind-down-banner";
 import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
 import { getErrandDetail } from "@/repositories/errand-repository";
 import { MapPin, Navigation, Info, ShieldAlert } from "lucide-react";
@@ -37,13 +43,28 @@ export async function generateMetadata({
     if (await hasActiveModerationForPublicSurface("ERRAND", errand.id)) {
       return ERRAND_DETAIL_FALLBACK_METADATA;
     }
+    // Phase 8F（§19）：metadata 是 PUBLIC surface——只有 OPEN（exposure
+    // state）才生成 listing title/description
+    if (errand.status !== "OPEN") {
+      return ERRAND_DETAIL_FALLBACK_METADATA;
+    }
     const title = `${errand.title} - 校园集市`;
     const description = truncateForMetadata(
       errand.description || `查看校园集市跑腿任务「${errand.title}」的取送路线与跑腿报酬。`,
     );
 
     return { title, description, openGraph: { title, description } };
-  } catch {
+  } catch (error) {
+    // notFound() 等 Next.js 控制流错误必须原样抛出（此前裸 catch 吞 404 语义）
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "digest" in error &&
+      typeof error.digest === "string" &&
+      error.digest.startsWith("NEXT_")
+    ) {
+      throw error;
+    }
     return ERRAND_DETAIL_FALLBACK_METADATA;
   }
 }
@@ -58,6 +79,18 @@ export default async function ErrandDetailPage({
   // SUSPENDED 会话 → null → 匿名语义（操作入口抑制），公开详情照常
   const viewerId = await getActiveViewerId();
   const { errand, relatedErrands } = await getErrandDetail(id);
+  // Phase 8F（§14-§17）Detail Access Policy：PUBLIC 仅 OPEN；publisher /
+  // accepter 作为既有履约参与方放行（private obligation continuity——
+  // 非 OPEN workflow 态不对陌生人暴露）
+  const lifecycleRole = resolveListingLifecycleAccess({
+    status: errand.status,
+    viewerId,
+    ownerId: errand.publisherId,
+    isParticipant: isErrandParticipant(errand, viewerId),
+  });
+  if (lifecycleRole === null) {
+    notFound();
+  }
   // Phase 7C PUBLIC detail 治理特例（同 product 页）；EXISTING_OBLIGATION
   // 语义：publisher/accepter 作为履约参与方放行（履约上下文保留）
   const moderationGate = await resolvePublicDetailModerationGate({
@@ -72,6 +105,8 @@ export default async function ErrandDetailPage({
   }
   const isPublisher = viewerId === errand.publisherId;
   const isAccepter = viewerId === errand.accepterId;
+  const windDownMessage =
+    lifecycleRole !== "PUBLIC" ? ERRAND_WIND_DOWN_MESSAGES[errand.status] : "";
 
   const availableActions = isPublisher
     ? [
@@ -97,6 +132,7 @@ export default async function ErrandDetailPage({
   return (
     <PageContainer maxWidth="standard">
       {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
+      {windDownMessage && <WindDownBanner message={windDownMessage} />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

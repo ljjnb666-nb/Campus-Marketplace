@@ -150,24 +150,32 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(notifications).toBe(2);
     });
 
-    it("PRODUCT-CANCEL-RACE-01 / counterexample A：卖家显式 OFFLINE 先提交 → 取消不得复活 ACTIVE", async () => {
+    it("PRODUCT-CANCEL-RACE-01（Phase 8F 收紧）：RESERVED + active order → seller OFFLINE DENY；取消后 CASE A 重投影 ACTIVE", async () => {
       const { seller, buyer, product, order } = await createReservedProductWithPendingOrder();
       const { updateProductStatusTx } = await import("@/lib/listing-status-service");
       const { withTransaction } = await import("@/lib/prisma");
 
-      // seller 经 production 路径先提交 OFFLINE（wind-down：无 capability 要求）
+      // Phase 8F（§4/§48）：RESERVED 是 system-owned projection——active
+      // order 存续期间 seller 的 OFFLINE（与 ACTIVE 一样）一律 DENY；原
+      // "OFFLINE 先提交 → 取消不得复活" 的构造在 8F 下不再是合法前置
+      // （显式 OFFLINE 只能出现在无 active order 或 capability-FAIL 投影，
+      //  分别由 stale-recovery 路径与 PRODUCT-CANCEL-04 覆盖）
       const offline = await withTransaction((tx: Prisma.TransactionClient) =>
         updateProductStatusTx(tx, seller.id, product.id, "OFFLINE"),
       );
-      expect(offline).toBe(true);
+      expect(offline).toBe(false);
+      expect(
+        (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
+      ).toBe("RESERVED");
 
       const result = await cancelOrder(buyer.id, order.id);
 
       expect(result).not.toBeNull();
       const finalOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(finalOrder.status).toBe("CANCELLED");
+      // cancellation projection：无其它 active order + capability PASS → ACTIVE
       const finalProduct = await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } });
-      expect(finalProduct.status).toBe("OFFLINE");
+      expect(finalProduct.status).toBe("ACTIVE");
     });
 
     it("PRODUCT-CANCEL-RACE-03 / counterexample B：软删除（deletedAt + OFFLINE）→ 取消后不得形成 deleted+ACTIVE 矛盾态", async () => {
