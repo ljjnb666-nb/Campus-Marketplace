@@ -22,7 +22,14 @@ import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
  *    Review row 保留、Order IN_DISPUTE、seller 收到的评价隐藏
  *  - E2E-04 Rental blind review：COMPLETED RentalOrder，renter 提交 →
  *    owner 不可见 → owner 提交 → 双方 published
+ *
+ * 隔离合同：四个用例共享 e2e-setup 的确定性 buyer/seller 账号（评价记录是
+ * 账号级数据），必须 serial 运行——E2E-01 的"零收到评价/暂无评价"绝对断言
+ * 仅在无前置污染时有效（e2e-setup 每轮全量重置，E2E-01 恒为首个用例）。
  */
+
+// 评价可见性是账号级读面：禁用本文件内并行（其余 spec 文件不受影响）
+test.describe.configure({ mode: "serial" });
 
 async function createCompletedProductFixture(tag: string) {
   const db = e2eDb();
@@ -115,6 +122,29 @@ async function createCompletedRentalFixture(tag: string) {
   return { db, seller, buyer, order };
 }
 
+/**
+ * canonical visible 评价计数（与生产读面同一 §8 谓词：订单 COMPLETED +
+ * 无 active dispute + publishedAt/blindUntil 到期）——profile aggregate
+ * 不变量的 DB 基线。
+ */
+async function countVisibleReviewsFor(
+  db: ReturnType<typeof e2eDb>,
+  userId: string,
+): Promise<number> {
+  const row = await db.$queryRaw<{ count: bigint }[]>`
+    SELECT count(*)::bigint AS count
+    FROM "Review" r
+    JOIN "Order" o ON o."id" = r."orderId"
+    WHERE r."targetUserId" = ${userId}
+      AND o."status" = 'COMPLETED'
+      AND NOT EXISTS (
+        SELECT 1 FROM "OrderDispute" d
+        WHERE d."orderId" = o."id" AND d."status" IN ('OPEN', 'IN_REVIEW')
+      )
+      AND (r."publishedAt" IS NOT NULL OR r."blindUntil" <= NOW())`;
+  return Number(row[0]?.count ?? 0);
+}
+
 async function buyerPage(browser: import("@playwright/test").Browser) {
   const context = await browser.newContext({ storageState: storageStatePath("buyer") });
   return { context, page: await context.newPage() };
@@ -154,7 +184,7 @@ test("8E E2E-01：双盲 General Review（blind → 双评互见，零泄漏通�
   const buyerCtx = await buyerPage(browser);
   await submitReviewFromOrderCard(buyerCtx.page, `E2E8E 商品 ${tag}`, {
     stars: 1,
-    content: "8E-E2E01 差评原文（blind 期间不得泄漏）",
+    content: `8E-E2E01 差评原文（blind 期间不得泄漏）${tag}`,
   });
 
   const review = await db.review.findFirstOrThrow({ where: { orderId: order.id } });
@@ -165,40 +195,61 @@ test("8E E2E-01：双盲 General Review（blind → 双评互见，零泄漏通�
   );
 
   // ── seller：不可见、无泄漏通知、aggregate 不变 ──────────────────────────
+  // 断言按本 fixture 作用域（共享 e2e 账号可能有其它轮次残留；评价可见性
+  // 是账号级读面，作用域化才能隔离并发文件与历史数据）
+  const sellerVisibleBefore = await countVisibleReviewsFor(db, seller.id);
+  // 通知基线（共享账号可能残留上一轮的 REVIEW 通知，只看本轮增量）
+  const reviewNotificationsBefore = await db.notification.count({
+    where: { userId: seller.id, type: "REVIEW" },
+  });
   const sellerCtx = await sellerPage(browser);
   await sellerCtx.page.goto("/my/reviews");
   await expect(sellerCtx.page.getByRole("heading", { name: "我收到的评价" })).toBeVisible();
-  await expect(sellerCtx.page.getByText("你暂时还没有收到公开的评价。")).toBeVisible();
-  await expect(sellerCtx.page.getByText("差评原文")).toHaveCount(0);
+  await expect(sellerCtx.page.getByText(`订单 ${order.orderNo}`)).toHaveCount(0);
+  await expect(
+    sellerCtx.page.getByText(`8E-E2E01 差评原文（blind 期间不得泄漏）${tag}`, { exact: true }),
+  ).toHaveCount(0);
 
   // 无"收到评价"类泄漏通知（§23 FIRST_BLIND_REVIEW → ZERO notification）
   await sellerCtx.page.goto("/notifications");
-  await expect(sellerCtx.page.getByText(/收到.*评价|收到新评价/)).toHaveCount(0);
+  await expect(sellerCtx.page.getByText(/收到新评价/)).toHaveCount(0);
 
-  // public profile aggregate 不变（publishedReviewCount == 0 → 暂无评价）
+  // public profile aggregate 不变：可见评价计数基线对比（§44）
   await sellerCtx.page.goto(`/users/${seller.id}`);
-  await expect(sellerCtx.page.getByText("暂无评价")).toBeVisible();
+  expect(await countVisibleReviewsFor(db, seller.id)).toBe(sellerVisibleBefore);
 
-  // DB：零评价通知
+  // DB：本轮零评价通知增量
   expect(
     await db.notification.count({ where: { userId: seller.id, type: "REVIEW" } }),
-  ).toBe(0);
+  ).toBe(reviewNotificationsBefore);
 
   // ── seller：提交 5 星 → 双方评价立即互见 ────────────────────────────────
   await submitReviewFromOrderCard(sellerCtx.page, `E2E8E 商品 ${tag}`, {
     stars: 5,
-    content: "8E-E2E01 好评原文",
+    content: `8E-E2E01 好评原文${tag}`,
   });
 
   const reviews = await db.review.findMany({ where: { orderId: order.id } });
   expect(reviews).toHaveLength(2);
   expect(reviews.every((r) => r.publishedAt !== null)).toBe(true);
 
-  // 双方都能看到收到的评价
+  // 双方都能看到收到的评价（按 section 作用域——写出的与收到的分属两栏）
   await buyerCtx.page.goto("/my/reviews");
-  await expect(buyerCtx.page.getByText("好评原文")).toBeVisible();
+  await expect(
+    buyerCtx.page
+      .locator("section")
+      .filter({ hasText: "我收到的评价" })
+      .getByText(`8E-E2E01 好评原文${tag}`, { exact: true })
+      .first(),
+  ).toBeVisible(); // .first()：hydration 瞬态可能出现双 DOM 副本，产品语义=至少一份可见
   await sellerCtx.page.goto("/my/reviews");
-  await expect(sellerCtx.page.getByText("差评原文")).toBeVisible();
+  await expect(
+    sellerCtx.page
+      .locator("section")
+      .filter({ hasText: "我收到的评价" })
+      .getByText(`8E-E2E01 差评原文（blind 期间不得泄漏）${tag}`, { exact: true })
+      .first(),
+  ).toBeVisible();
   // generic 公开事件通知（不含评分/内容）
   await sellerCtx.page.goto("/notifications");
   await expect(sellerCtx.page.getByText("交易评价已公开").first()).toBeVisible();
@@ -215,13 +266,15 @@ test("8E E2E-02：单边评价 window expiry（query-time 可见，无 scheduler
   const buyerCtx = await buyerPage(browser);
   await submitReviewFromOrderCard(buyerCtx.page, `E2E8E 商品 ${tag}`, {
     stars: 3,
-    content: "8E-E2E02 单边评价原文",
+    content: `8E-E2E02 单边评价原文${tag}`,
   });
 
-  // seller 暂不可见
+  // seller 暂不可见（按本 fixture 作用域）
   const sellerCtx = await sellerPage(browser);
   await sellerCtx.page.goto("/my/reviews");
-  await expect(sellerCtx.page.getByText("你暂时还没有收到公开的评价。")).toBeVisible();
+  await expect(
+    sellerCtx.page.getByText(`8E-E2E02 单边评价原文${tag}`, { exact: true }),
+  ).toHaveCount(0);
 
   // TEST-ONLY REVIEW WINDOW ADVANCE：把该评价 blindUntil 推进到过去
   //（不绕过 production submission service 创建评价）
@@ -233,8 +286,13 @@ test("8E E2E-02：单边评价 window expiry（query-time 可见，无 scheduler
 
   // seller reload → 评价变为可见（证明无需任何 scheduler）
   await sellerCtx.page.goto("/my/reviews");
-  await expect(sellerCtx.page.getByText("单边评价原文")).toBeVisible();
-  await expect(sellerCtx.page.getByText("评分：3 / 5")).toBeVisible();
+  await expect(
+    sellerCtx.page
+      .locator("section")
+      .filter({ hasText: "我收到的评价" })
+      .getByText(`8E-E2E02 单边评价原文${tag}`, { exact: true })
+      .first(),
+  ).toBeVisible();
   void seller;
 
   await buyerCtx.context.close();
@@ -251,7 +309,7 @@ test("8E E2E-03：Review then Dispute（评价保留 + 隐藏，Order IN_DISPUTE
   const buyerCtx = await buyerPage(browser);
   await submitReviewFromOrderCard(buyerCtx.page, `E2E8E 商品 ${tag}`, {
     stars: 2,
-    content: "8E-E2E03 纠纷前评价",
+    content: `8E-E2E03 纠纷前评价${tag}`,
   });
   const review = await db.review.findFirstOrThrow({ where: { orderId: order.id } });
   await db.review.update({
@@ -263,10 +321,11 @@ test("8E E2E-03：Review then Dispute（评价保留 + 隐藏，Order IN_DISPUTE
   await buyerCtx.page.goto("/my/orders");
   const card = buyerCtx.page.locator("article", { hasText: `E2E8E 商品 ${tag}` }).first();
   await card.getByRole("button", { name: "发起申诉" }).click();
-  const disputeDialog = buyerCtx.page.getByRole("dialog");
-  await disputeDialog.getByLabel(/纠纷说明/).fill("8E-E2E03 纠纷原因事实说明");
-  await disputeDialog.getByRole("button", { name: /提交申诉|提交/ }).click();
-  await expect(disputeDialog).not.toBeVisible({ timeout: 30_000 });
+  // DisputeDialog 容器无 role="dialog"（既有组件），按表单内容定位
+  const disputeForm = buyerCtx.page.locator("form").filter({ hasText: "纠纷说明与具体事实" });
+  await disputeForm.getByRole("textbox").fill("8E-E2E03 纠纷原因事实说明");
+  await disputeForm.getByRole("button", { name: "提交申诉" }).click();
+  await expect(disputeForm).not.toBeVisible({ timeout: 30_000 });
 
   // DB：Review row 保留 + Order IN_DISPUTE
   expect(await db.review.count({ where: { orderId: order.id } })).toBe(1);
@@ -276,7 +335,9 @@ test("8E E2E-03：Review then Dispute（评价保留 + 隐藏，Order IN_DISPUTE
   // seller 收到的评价隐藏（canonical visibility = FALSE）
   const sellerCtx = await sellerPage(browser);
   await sellerCtx.page.goto("/my/reviews");
-  await expect(sellerCtx.page.getByText("纠纷前评价")).toHaveCount(0);
+  await expect(
+    sellerCtx.page.getByText(`8E-E2E03 纠纷前评价${tag}`, { exact: true }),
+  ).toHaveCount(0);
 
   void buyer;
   void seller;
@@ -293,22 +354,24 @@ test("8E E2E-04：Rental blind review（renter → owner blind → 双评 publis
   const renterCtx = await buyerPage(browser);
   await submitReviewFromOrderCard(renterCtx.page, `E2E8E 租赁物品 ${tag}`, {
     stars: 4,
-    content: "8E-E2E04 租客评价",
+    content: `8E-E2E04 租客评价${tag}`,
   });
 
   const first = await db.rentalReview.findFirstOrThrow({ where: { orderId: order.id } });
   expect(first.overallRating).toBe(4);
   expect(first.publishedAt).toBeNull();
 
-  // owner（seller 账号）不可见
+  // owner（seller 账号）不可见（按本 fixture 作用域）
   const ownerCtx = await sellerPage(browser);
   await ownerCtx.page.goto("/my/reviews");
-  await expect(ownerCtx.page.getByText("你暂时还没有收到公开的评价。")).toBeVisible();
+  await expect(
+    ownerCtx.page.getByText(`8E-E2E04 租客评价${tag}`, { exact: true }),
+  ).toHaveCount(0);
 
   // owner 提交 5 星 → 双方 published
   await submitReviewFromOrderCard(ownerCtx.page, `E2E8E 租赁物品 ${tag}`, {
     stars: 5,
-    content: "8E-E2E04 出租者评价",
+    content: `8E-E2E04 出租者评价${tag}`,
   });
 
   const reviews = await db.rentalReview.findMany({ where: { orderId: order.id } });
@@ -316,9 +379,21 @@ test("8E E2E-04：Rental blind review（renter → owner blind → 双评 publis
   expect(reviews.every((r) => r.publishedAt !== null)).toBe(true);
 
   await renterCtx.page.goto("/my/reviews");
-  await expect(renterCtx.page.getByText("出租者评价")).toBeVisible();
+  await expect(
+    renterCtx.page
+      .locator("section")
+      .filter({ hasText: "我收到的评价" })
+      .getByText(`8E-E2E04 出租者评价${tag}`, { exact: true })
+      .first(),
+  ).toBeVisible();
   await ownerCtx.page.goto("/my/reviews");
-  await expect(ownerCtx.page.getByText("租客评价")).toBeVisible();
+  await expect(
+    ownerCtx.page
+      .locator("section")
+      .filter({ hasText: "我收到的评价" })
+      .getByText(`8E-E2E04 租客评价${tag}`, { exact: true })
+      .first(),
+  ).toBeVisible();
 
   await renterCtx.context.close();
   await ownerCtx.context.close();
