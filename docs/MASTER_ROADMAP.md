@@ -1,9 +1,10 @@
-# Master Roadmap v1.0（产品工程路线唯一权威来源）
+# Master Roadmap v1.1（产品工程路线唯一权威来源）
 
-> **MASTER_ROADMAP_VERSION = 1.0**
+> **MASTER_ROADMAP_VERSION = 1.1**
 > **CANONICAL_ROADMAP = YES**
 > 冻结基线：master @ `be0fd94c92a751c0dd6acd1f417abdd42b6f5751`（2026-09-02，Production Phase 4 合并后）
-> 决策记录：[ADR 0001 — Freeze Master Roadmap v1.0](adr/0001-master-roadmap-v1.md)
+> 初始冻结：[ADR 0001 — Freeze Master Roadmap v1.0](adr/0001-master-roadmap-v1.md)
+> 当前 amendment：[ADR 0002 — Non-Payment Production Completion](adr/0002-non-payment-production-completion.md)（2026-10-01）
 
 ---
 
@@ -13,7 +14,7 @@
 
 | 属性 | 值 |
 | --- | --- |
-| MASTER_ROADMAP_VERSION | `1.0` |
+| MASTER_ROADMAP_VERSION | `1.1` |
 | CANONICAL_ROADMAP | `YES` |
 | 冻结日期 | 2026-09-02 |
 | 冻结基线 SHA | `be0fd94c92a751c0dd6acd1f417abdd42b6f5751` |
@@ -54,6 +55,7 @@ ROADMAP STRUCTURE FREEZE != PHASE STATUS FREEZE）：
 | Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，Phase 6A/6B/6C 全部关闭） |
 | Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
+| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 Meetup / No-show Domain Foundation 已于 PR #52 合并并经 post-merge master CI run 36755621679 双绿关闭；NEXT = 8D-02 Meetup User Surface & End-to-End Closure） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
@@ -175,10 +177,10 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
-| Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
+| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 CLOSED / MASTER-GREEN；NEXT = 8D-02） |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
-| Phase 11 | Pilot Readiness | NOT_STARTED |
+| Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
 | **GATE B** | Pilot Ready | NOT_REACHED（通过后才重开 Phase 3B） |
 | Phase 3B（重开） | Real Production Deployment | DEFERRED |
 | Phase 12 | Controlled Single-Campus Alpha | NOT_STARTED |
@@ -499,6 +501,10 @@ retention cleanup、risk scans、statistics jobs。
 
 统一通知域：`Domain Event → Notification → In-App / Email / Web Push / 未来外部渠道`。
 
+其中 **Email 必须作为正式 transactional delivery channel**，至少能够承载后续
+Phase 11A 的邮箱所有权验证、密码重置、安全事件提醒等账号安全邮件；不得为找回密码
+临时旁路出第二套不可审计的邮件发送路径。营销邮件不属于该硬前置范围。
+
 **架构约束：不引入 Kafka，不引入不必要的微服务。**
 
 ### 5.6 Phase 10 — Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags
@@ -511,17 +517,64 @@ RiskSignal、simple rule-based Risk Engine、Feature Flags、Campus Config、
 kill switches、maintenance modes、read-only mode、
 disable new orders / listings / messages 等开关。
 
+Feature Flags / Config Center 的生产合同至少要求：
+
+- **server-authoritative**：前端 flag 只影响体验，不得成为授权或业务不变量边界；
+- **audited**：修改人、时间、scope、旧值/新值可审计；
+- **scoped**：至少支持 GLOBAL / CAMPUS，未来 cohort/percentage rollout 可扩展；
+- **fail-safe**：读取异常时必须有明确安全默认值，不允许隐式 fail-open；
+- **kill switches**：至少能控制注册、新 listing、新订单、新会话/消息、Meetup、
+  dispute initiation、maintenance mode、read-only mode 及 campus-scoped disable；
+- flag 不能绕过 RBAC、ownership、account lifecycle、marketplace capability gate、
+  order/listing state machine 等 canonical authority。
+
 **架构约束：Analytics 与 Audit 必须保持为分离的概念。**
 
 ### 5.7 Phase 11 — Pilot Readiness
 
+Phase 11 保持一个 canonical top-level Phase，不改变冻结编号；按实施职责拆为
+**11A / 11B / 11C 三个 implementation slices**。
+
+#### Phase 11A — Account Lifecycle & Session Security
+
+目标：补齐普通用户账号恢复与会话安全，使身份系统不仅“能登录/能停用”，还具备
+生产级 credential recovery、session revocation 与 privileged-account protection。
+
+至少包括：
+
+- 邮箱所有权验证：发送/重发、TTL、单次使用、反枚举、rate limit；
+- forgot-password / reset-password：opaque random token、服务端仅保存 hash、
+  TTL、单次消费、统一安全响应，不暴露账号是否存在；
+- authenticated change-password：必须验证当前密码，新旧凭据不得等价；
+- session/device management：当前/近期会话可见，支持 revoke-one、
+  revoke-others、revoke-all；
+- **session revocation authority**：不得只依赖等待 JWT `maxAge` 到期；
+- reset/change password 后按明确策略失效旧会话，其中 reset 必须使 reset 前会话失效；
+- login / credential change / reset / session revoke 的 security-event records，
+  严禁记录明文密码、raw reset token、JWT；
+- recovery abuse controls：至少覆盖 account/email/IP 维度的限流与防邮件轰炸；
+- privileged governance accounts 必须在 Pilot 前具备更强认证策略，
+  优先 MFA / second factor，不得仅依赖普通用户同等级密码保护；
+- 用户可见安全状态、会话状态、错误提示统一使用中文产品文案，
+  不直接暴露 raw enum / machine error code。
+
+实现必须复用 Phase 6 身份/RBAC/治理 authority、Phase 9 notification/email delivery；
+不得另建割裂的第二套 auth、audit 或 account lifecycle 系统。
+
+#### Phase 11B — Pilot UX / Onboarding / Mobile Critical Paths
+
 范围包括：mobile-first UX、~390x844 移动视口下的关键流程、onboarding、
 first listing、first contact、first order、empty states、search usability、
 seed content、cold-start plan、help/support entry、safety messaging、
-campus announcement/configuration、invite-only capability、
-pilot operational readiness。
+campus announcement/configuration、invite-only capability。
 
-**本阶段不要求在线支付。**
+#### Phase 11C — Pilot Operations Closure
+
+范围包括：pilot operational readiness、账号安全运维入口、关键安全/支持升级路径、
+feature-flag / kill-switch 操作演练、support / incident escalation、试点前 smoke
+与 operator runbook 收口。
+
+**本阶段不要求在线支付。Phase 11 完成不代表 Payment Ready。**
 
 ### 5.8 GATE B — Pilot Ready
 
@@ -532,15 +585,46 @@ pilot operational readiness。
 - moderation / report handling（Phase 6–7）
 - operations admin（Phase 7）
 - dispute / support flow（Phase 7–8）
-- notification foundation（Phase 9）
+- notification foundation（Phase 9），并具备 account-security transactional email delivery
 - analytics（Phase 10）
 - risk controls（Phase 10）
 - feature flags / kill switches（Phase 10）
-- mobile critical-path usability（Phase 11）
-- cold-start plan（Phase 11）
+- password recovery / password change（Phase 11A）
+- explicit session revocation / revoke-all（Phase 11A）
+- recovery anti-enumeration / abuse controls（Phase 11A）
+- privileged governance strong-auth policy（Phase 11A）
+- account security-event visibility（Phase 11A）
+- mobile critical-path usability（Phase 11B）
+- cold-start plan（Phase 11B）
+- pilot operational / kill-switch drill readiness（Phase 11C）
 
 **只有 GATE B 通过之后，才允许重开 Phase 3B（真实部署）。重开必须显式进行；
 重开后必须实际完成 §4 的全部 external gates 并通过验收，之后才允许进入 Phase 12。**
+
+#### 5.8.1 Non-Payment Production Completion Target
+
+GATE B 前的产品工程目标正式定义为：
+
+`NON_PAYMENT_PRODUCTION_READY`
+
+含义是：在**不包含平台在线支付**的前提下，Marketplace lifecycle、账号生命周期、
+通知、隐私/治理、RBAC/Admin、风控、Feature Flags、备份/恢复、可观测性、
+incident readiness 与 Pilot 关键体验全部达到受控上线要求。
+
+它明确 **不包含**：
+
+- online payment
+- platform fee collection
+- refund
+- split settlement
+- withdrawal
+- payment reconciliation
+
+因此：
+
+`NON_PAYMENT_PRODUCTION_READY != PAYMENT_READY != COMMERCIAL_READY`
+
+Phase 15–19 仍只在 GATE C PASS 后解锁，不得为了“补齐正式上线能力”提前建设。
 
 ### 5.9 Phase 12–14 — 受控分阶段上线
 
@@ -820,7 +904,7 @@ Master Roadmap v1.0 冻结后，这是新增想法的默认去处。
 
 ## 12. Roadmap Change Policy（路线变更政策）
 
-Master Roadmap v1.0 一旦被接受即视为冻结。
+Master Roadmap v1.1（经 ADR 0002 amendment）一旦被接受即视为当前冻结版本。
 修改 Phase 顺序或重大范围必须显式执行 **ROADMAP_AMENDMENT**：
 
 1. 新增一份 ADR（`docs/adr/`，沿用现有编号递增）
