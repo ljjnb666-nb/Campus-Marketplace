@@ -15,6 +15,8 @@ import {
   disputeCampusScopeKey,
 } from "@/lib/disputes/dispute-scope";
 import { calculateRentalAmount, calculateRentalDuration, createRentalOrderNo } from "@/lib/rental-price";
+import { computeReviewDeadline, isReviewWindowOpen } from "@/lib/reviews/review-integrity";
+import { visibleRentalReviewCondition } from "@/lib/reviews/review-query";
 import {
   assertActiveAccountMutationAllowed,
   prepareActiveAccountMutation,
@@ -103,11 +105,18 @@ export async function incrementRentalCompletionCounters(tx: Prisma.TransactionCl
   await tx.user.update({ where: { id: order.renterId }, data: { rentalRenterCount: { increment: 1 } } });
 }
 
-/** 重算目标用户的租借好评率（0..1 的比率，好评 = overallRating >= 4） */
+/** 重算目标用户的租借好评率缓存（0..1 的比率，好评 = overallRating >= 4）。
+ * Phase 8E：只统计 canonical visible 评价（RentalOrder COMPLETED + 无 active
+ * RentalDispute + publishedAt/blindUntil 到期，见 src/lib/reviews/review-query.ts）
+ * ——blind / 纠纷隐藏 / 关闭订单的评价绝不进入。
+ * NON_AUTHORITATIVE_DERIVED_CACHE（§19/§20）：User.rentalPositiveRate 不再被
+ * PUBLIC/USER_VISIBLE 读面信任，canonical truth 是 visible 评价 query-time 聚合。 */
 export async function recomputeRentalPositiveRate(tx: Prisma.TransactionClient, targetUserId: string) {
+  const now = new Date();
+  const visibilityWhere = visibleRentalReviewCondition({ now, targetUserId });
   const [totalReviews, positiveReviews] = await Promise.all([
-    tx.rentalReview.count({ where: { targetUserId } }),
-    tx.rentalReview.count({ where: { targetUserId, overallRating: { gte: 4 } } }),
+    tx.rentalReview.count({ where: visibilityWhere }),
+    tx.rentalReview.count({ where: { ...visibilityWhere, overallRating: { gte: 4 } } }),
   ]);
   await tx.user.update({
     where: { id: targetUserId },
@@ -1347,17 +1356,26 @@ export async function initiateDisputeTx(
  *      dispute 发起在本事务前已持有同一行锁；禁止 RentalDispute FOR
  *      UPDATE，避免与 dispute resolution 的 RentalDispute→RentalOrder
  *      锁序成 row-lock cycle）
- *   7. duplicate review check（@@unique([orderId, authorId]) 仍为 DB 兜底）
- *   8. target 从 locked order 计算（actor==owner → renter；actor==renter →
+ *   7. 评价窗口（Phase 8E §4）：completedAt != null fail closed；
+ *      now < completedAt + REVIEW_WINDOW（now == deadline 即 DENY）；
+ *      blindUntil = completedAt + REVIEW_WINDOW（与 General 同一 SSOT 常量）
+ *   8. duplicate review check（@@unique([orderId, authorId]) 仍为 DB 兜底）
+ *   9. target 从 locked order 计算（actor==owner → renter；actor==renter →
  *      owner），绝不使用 candidate 快照
- *   9. RentalReview.create → recomputeRentalPositiveRate → notification
- *      （全部 fresh authority 确认后才执行；任何 DENY 三类写入均为零，
- *      同事务原子回滚）
+ *   10. RentalReview.create(blindUntil = deadline, publishedAt = null)。
+ *       Phase 8E 双盲发布：第一方提交 → counterparty 零通知（§23）、缓存
+ *       零 mutation；第二方提交 → 同一事务 update 双方 publishedAt = now
+ *       （Order 行锁线性化并发），双方 generic event 通知（零评分/内容/
+ *       作者复制，§24）+ 双方 visible-only 好评率缓存重算。
+ *       （任何 DENY 全部写入均为零，同事务原子回滚）
  *
  * 冻结产品语义：评价需要 fresh COMPLETED + 无 active dispute；提交评价
  * ≠ 放弃发起纠纷权利——review 存在不是 dispute 的 eligibility 输入，
- * review 先赢后 dispute 仍允许（合法串行历史，不回滚/隐藏既有 review，
- * retroactive 处理属 Phase 8E Review Integrity）。
+ * review 先赢后 dispute 仍允许（合法串行历史，不回滚/删除既有 review）。
+ * Phase 8E 关闭遗留：review 先提交 + 后续 dispute → Order IN_DISPUTE 期间
+ * 既有 review 对 counterparty/public/trust 隐藏（canonical visibility，
+ * 见 src/lib/reviews/review-integrity.ts；RESTORE_PREVIOUS → COMPLETED
+ * 恢复可见，CLOSE_ORDER → CLOSED 不再进入公开信号）。
  *
  * seams（仅测试注入；生产不传）：
  * - activeAccountSeams.beforeLock：BEFORE sorted pair USER locks（RB-03 冻结语义）
@@ -1405,9 +1423,9 @@ export async function submitRentalReviewTx(
 
   // ---- 步骤 3：RentalOrder FOR UPDATE（与 dispute 共享 serialization point）----
   const orderRows = await tx.$queryRaw<
-    Array<{ id: string; ownerId: string; renterId: string; status: string }>
+    Array<{ id: string; ownerId: string; renterId: string; status: string; completedAt: Date | null }>
   >`
-    SELECT id, "ownerId", "renterId", status
+    SELECT id, "ownerId", "renterId", status, "completedAt"
     FROM "RentalOrder"
     WHERE id = ${candidate.id}
     FOR UPDATE
@@ -1426,6 +1444,12 @@ export async function submitRentalReviewTx(
     return { error: "订单状态错误" };
   }
 
+  // ---- 步骤 3.5（Phase 8E）：评价窗口（权威 completedAt，fail closed）----
+  if (!order.completedAt) return { error: "订单状态错误" };
+  if (!isReviewWindowOpen(new Date(), order.completedAt)) {
+    return { error: "评价期已结束（订单完成后 7 天内可评价）" };
+  }
+
   // ---- 步骤 5：active dispute defense（ordinary read，见函数头 §6 说明）----
   const activeDispute = await tx.rentalDispute.findFirst({
     where: { orderId: order.id, status: { in: [...DISPUTE_ACTIVE_STATUSES] } },
@@ -1441,8 +1465,9 @@ export async function submitRentalReviewTx(
   const exist = await tx.rentalReview.findFirst({ where: { orderId: input.orderId, authorId: input.userId } });
   if (exist) return { error: "已经评价过" };
 
-  // ---- 步骤 7-9：target 以 locked 行为准 + review + 好评率 + 通知 ----
+  // ---- 步骤 7-9：target 以 locked 行为准 + 双盲发布 + 通知 ----
   const targetUserId = counterpartyId(order, input.userId);
+  const now = new Date();
 
   await tx.rentalReview.create({
     data: {
@@ -1452,16 +1477,46 @@ export async function submitRentalReviewTx(
       overallRating: input.overallRating,
       content: input.content || null,
       tags: [],
+      // Phase 8E 双盲发布 metadata（§6/§14）
+      blindUntil: computeReviewDeadline(order.completedAt),
+      publishedAt: null,
     },
   });
 
-  await recomputeRentalPositiveRate(tx, targetUserId);
+  // 第一方提交 → blind（counterparty 零通知 §23、缓存零 mutation）；
+  // 双方均提交 → 同一 publication episode 提前公开（§14）
+  const counterpartyReview = await tx.rentalReview.findFirst({
+    where: { orderId: input.orderId, authorId: targetUserId },
+    select: { id: true },
+  });
 
-  await createNotifications(tx, [{
-    userId: targetUserId,
-    type: 'RENTAL',
-    title: '收到新评价',
-    content: `对方已对订单进行了评价。`,
-  }]);
+  if (!counterpartyReview) {
+    return { success: true };
+  }
+
+  await tx.rentalReview.updateMany({
+    where: { orderId: input.orderId, authorId: { in: [input.userId, targetUserId] } },
+    data: { publishedAt: now },
+  });
+
+  // visible-only 缓存重算（双方都成为他人评价的 target）
+  await recomputeRentalPositiveRate(tx, targetUserId);
+  await recomputeRentalPositiveRate(tx, input.userId);
+
+  // generic event 通知（§24：零评分/内容/tags/作者名复制）
+  await createNotifications(tx, [
+    {
+      userId: order.ownerId,
+      type: 'RENTAL',
+      title: '交易评价已公开',
+      content: '本次租赁交易的双方评价已公开，可前往评价记录查看。',
+    },
+    {
+      userId: order.renterId,
+      type: 'RENTAL',
+      title: '交易评价已公开',
+      content: '本次租赁交易的双方评价已公开，可前往评价记录查看。',
+    },
+  ]);
   return { success: true };
 }

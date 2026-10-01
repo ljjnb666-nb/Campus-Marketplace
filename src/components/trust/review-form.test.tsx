@@ -36,17 +36,13 @@ afterEach(() => {
 });
 
 describe("ReviewForm", () => {
-  it("renders hidden ids, default rating, and placeholders", () => {
+  it("renders hidden orderId only（Phase 8E：targetUserId 不再是客户端 authority）", () => {
     render(
-      <ReviewForm
-        action={async () => ({ success: false, message: "" })}
-        orderId="order-1"
-        targetUserId="user-2"
-      />,
+      <ReviewForm action={async () => ({ success: false, message: "" })} orderId="order-1" />,
     );
 
     expect(screen.getByDisplayValue("order-1")).toHaveAttribute("type", "hidden");
-    expect(screen.getByDisplayValue("user-2")).toHaveAttribute("type", "hidden");
+    expect(screen.queryByDisplayValue("user-2")).toBeNull();
     expect(screen.getByLabelText("评分")).toHaveValue("5");
     expect(screen.getByPlaceholderText("例如：回复及时, 守时, 沟通顺畅")).toBeTruthy();
     expect(screen.getByPlaceholderText("补充评价内容")).toBeTruthy();
@@ -56,11 +52,7 @@ describe("ReviewForm", () => {
     mockUseActionState.mockReturnValue([{ success: false, message: "该订单已评价过" }, vi.fn()]);
 
     render(
-      <ReviewForm
-        action={async () => ({ success: false, message: "" })}
-        orderId="order-1"
-        targetUserId="user-2"
-      />,
+      <ReviewForm action={async () => ({ success: false, message: "" })} orderId="order-1" />,
     );
 
     expect(screen.getByText("该订单已评价过")).toBeTruthy();
@@ -73,11 +65,7 @@ describe("ReviewForm", () => {
     ]);
 
     render(
-      <ReviewForm
-        action={async () => ({ success: false, message: "" })}
-        orderId="order-1"
-        targetUserId="user-2"
-      />,
+      <ReviewForm action={async () => ({ success: false, message: "" })} orderId="order-1" />,
     );
 
     expect(mockPush).toHaveBeenCalledWith("/my/reviews");

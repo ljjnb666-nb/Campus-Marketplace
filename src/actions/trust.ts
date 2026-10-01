@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { blockUserTx, unblockUserTx } from "@/lib/trust/block-service";
-import { prisma, withTransaction } from "@/lib/prisma";
+import { submitOrderReviewTx } from "@/lib/reviews/order-review-service";
+import { withTransaction } from "@/lib/prisma";
 import { requireUser } from "@/lib/server-auth";
 import {
   assertReportTargetAccessibleToReporter,
@@ -27,24 +28,12 @@ const initialState: TrustActionState = {
   message: "",
 };
 
-async function refreshUserRating(targetUserId: string) {
-  const aggregate = await prisma.review.aggregate({
-    where: { targetUserId },
-    _avg: { rating: true },
-    _count: { rating: true },
-  });
-
-  const averageRating = aggregate._avg.rating ?? 0;
-  const count = aggregate._count.rating ?? 0;
-
-  await prisma.user.update({
-    where: { id: targetUserId },
-    data: {
-      positiveReviewRate: count === 0 ? 0 : averageRating / 5,
-    },
-  });
-}
-
+/**
+ * Phase 8E：createReview 收敛为 canonical submitOrderReviewTx 的薄适配层
+ * （§28）——订单/参与者/评价对象/状态/窗口/纠纷/duplicate 全部由领域服务在
+ * 锁内 fresh check 权威裁决，本 action 零域判断复制；targetUserId 不再从
+ * FormData 读取（§13，服务端从锁内 Order 推导）。
+ */
 export async function createReview(
   _prevState: TrustActionState,
   formData: FormData,
@@ -54,7 +43,6 @@ export async function createReview(
 
     const parsed = reviewFormSchema.safeParse({
       orderId: formData.get("orderId"),
-      targetUserId: formData.get("targetUserId"),
       rating: formData.get("rating"),
       content: formData.get("content"),
       tags: formData.get("tags"),
@@ -67,79 +55,25 @@ export async function createReview(
       };
     }
 
-    const order = await prisma.order.findUnique({
-      where: { id: parsed.data.orderId },
-      select: {
-        id: true,
-        status: true,
-        buyerId: true,
-        sellerId: true,
-        reviews: {
-          where: { authorId: user.id },
-          select: { id: true },
-        },
-      },
-    });
+    const result = await withTransaction((tx) =>
+      submitOrderReviewTx(tx, {
+        orderId: parsed.data.orderId,
+        userId: user.id,
+        rating: Number(parsed.data.rating),
+        content: parsed.data.content || undefined,
+        tags: parsed.data.tags,
+      }),
+    );
 
-    if (!order || order.status !== "COMPLETED") {
-      return { ...initialState, message: "只有已完成订单可以评价" };
+    if ("error" in result) {
+      return { ...initialState, message: result.error };
     }
-
-    const isBuyer = order.buyerId === user.id;
-    const isSeller = order.sellerId === user.id;
-
-    if (!isBuyer && !isSeller) {
-      return { ...initialState, message: "你无权评价该订单" };
-    }
-
-    const expectedTargetUserId = isBuyer ? order.sellerId : order.buyerId;
-
-    if (parsed.data.targetUserId !== expectedTargetUserId) {
-      return { ...initialState, message: "评价对象不正确" };
-    }
-
-    if (order.reviews.length > 0) {
-      return { ...initialState, message: "你已经评价过该订单" };
-    }
-
-    await withTransaction(async (tx) => {
-      // RB-03：已注销/停用账号不得再产生新的 durable 评价内容
-      await prepareActiveAccountMutation(tx, user.id);
-
-      await tx.review.create({
-        data: {
-          orderId: order.id,
-          authorId: user.id,
-          targetUserId: parsed.data.targetUserId,
-          rating: Number(parsed.data.rating),
-          content: parsed.data.content || null,
-          tags: parsed.data.tags
-            ? parsed.data.tags
-                .split(/[，,]/)
-                .map((item) => item.trim())
-                .filter(Boolean)
-            : [],
-        },
-      });
-
-      // Repair 4 / RB-04 secondary-copy rule：评价者的展示名是
-      // DIRECT_IDENTITY（secondaryCopyAllowed=NO）——通知只做事件信号，
-      // 不携带评价者身份或评价内容原文，评价详情由评价读面按需展示。
-      await createNotification(tx, {
-        userId: parsed.data.targetUserId,
-        orderId: order.id,
-        type: "REVIEW",
-        title: "收到新的订单评价",
-        content: "你收到一条新的订单评价，快去个人中心查看最新口碑表现。",
-      });
-    });
-
-    await refreshUserRating(parsed.data.targetUserId);
 
     revalidatePath("/my/orders");
     revalidatePath("/my/reviews");
     revalidatePath("/profile");
     revalidatePath("/notifications");
+    revalidatePath(`/users/${result.targetUserId}`);
 
     return {
       success: true,

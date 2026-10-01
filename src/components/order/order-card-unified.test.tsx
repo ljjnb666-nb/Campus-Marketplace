@@ -16,6 +16,12 @@ const {
 vi.mock("@/actions/conversation", () => ({
   createOrOpenOrderConversation: vi.fn(),
 }));
+// Phase 8E §51：ReviewDialog 成功后走 router.refresh（一致性权威仍是服务端事务）
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+  }),
+}));
 vi.mock("@/actions/order", () => ({
   updateOrderStatus: vi.fn(),
 }));

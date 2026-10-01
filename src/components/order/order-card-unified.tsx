@@ -411,7 +411,6 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
         onOpenChange={setReviewOpen}
         action={reviewAction}
         orderId={order.id}
-        targetUserId={order.counterparty.id}
         orderType={order.type}
       />
 

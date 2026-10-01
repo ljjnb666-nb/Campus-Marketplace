@@ -477,7 +477,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         select: { id: true },
       });
       await db.review.create({
-        data: { orderId: order.id, authorId: erased.id, targetUserId: survivor.id, rating: 5, content: "历史评价原文", tags: ["历史"] },
+        data: { orderId: order.id, authorId: erased.id, targetUserId: survivor.id, rating: 5, content: "历史评价原文", tags: ["历史"], blindUntil: new Date(), publishedAt: new Date() },
       });
       await db.report.create({
         data: {

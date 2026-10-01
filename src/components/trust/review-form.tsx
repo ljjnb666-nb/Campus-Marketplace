@@ -27,14 +27,12 @@ function SubmitButton() {
 export function ReviewForm({
   action,
   orderId,
-  targetUserId,
 }: {
   action: (
     state: TrustActionState,
     formData: FormData,
   ) => Promise<TrustActionState>;
   orderId: string;
-  targetUserId: string;
 }) {
   const router = useRouter();
   const [state, formAction] = useActionState(action, initialState);
@@ -48,10 +46,11 @@ export function ReviewForm({
 
   return (
     <form action={formAction} className="space-y-3 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+      {/* Phase 8E：评价对象由服务端从锁内订单推导，客户端不再提交 targetUserId */}
       <input type="hidden" name="orderId" value={orderId} />
-      <input type="hidden" name="targetUserId" value={targetUserId} />
 
       <p className="text-sm font-medium text-slate-950">提交评价</p>
+      <p className="text-xs text-slate-500">双方都提交评价后立即互相公开；若对方未提交，评价期结束后自动公开。</p>
 
       <label className="flex flex-col gap-2 text-sm">
         评分

@@ -50,6 +50,7 @@ const {
   const txRentalReviewFindFirst = vi.fn();
   const txRentalReviewCreate = vi.fn();
   const txRentalReviewCount = vi.fn();
+  const txRentalReviewUpdateMany = vi.fn();
   const txUserUpdate = vi.fn();
   const txExtensionRequestFindFirst = vi.fn();
   const txExtensionRequestCreate = vi.fn();
@@ -101,6 +102,7 @@ const {
       findFirst: txRentalReviewFindFirst,
       create: txRentalReviewCreate,
       count: txRentalReviewCount,
+      updateMany: txRentalReviewUpdateMany,
     },
   };
 
@@ -128,6 +130,7 @@ const {
     txRentalReviewFindFirst,
     txRentalReviewCreate,
     txRentalReviewCount,
+    txRentalReviewUpdateMany,
     txUserUpdate,
     txExtensionRequestFindFirst,
     txExtensionRequestCreate,
@@ -752,20 +755,29 @@ describe("rental-order actions", () => {
     );
   });
 
-  it("recomputes rentalPositiveRate as a ratio when a review is submitted", async () => {
+  it("recomputes rentalPositiveRate as a visible-only ratio when both reviews are submitted", async () => {
     requireUser.mockResolvedValue({ id: "user-renter" });
     // Phase 8A-04：review 走 candidate pre-read + FOR UPDATE 两条 raw SQL
+    // Phase 8E：锁行携带权威 completedAt（评价窗口起点）
     txQueryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
       const sql = strings.join("");
       if (sql.includes('"RentalOrder"')) {
         if (sql.includes("FOR UPDATE")) {
-          return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter", status: "COMPLETED" }];
+          return [{
+            id: "order-1",
+            ownerId: "user-owner",
+            renterId: "user-renter",
+            status: "COMPLETED",
+            completedAt: new Date(),
+          }];
         }
         return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }];
       }
       return [];
     });
-    txRentalReviewFindFirst.mockResolvedValue(null);
+    // findFirst 调用序列：#1 duplicate（无）→ #2 counterparty review（有）
+    // → 第二评触发双方 publication episode + visible-only 缓存重算
+    txRentalReviewFindFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: "review-owner" });
     txRentalReviewCreate.mockResolvedValue({});
     // 2 条评价中 1 条好评（overallRating >= 4） => 比率 0.5
     txRentalReviewCount.mockImplementation(
@@ -798,7 +810,13 @@ describe("rental-order actions", () => {
       const sql = strings.join("");
       if (sql.includes('"RentalOrder"')) {
         if (sql.includes("FOR UPDATE")) {
-          return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter", status: "COMPLETED" }];
+          return [{
+            id: "order-1",
+            ownerId: "user-owner",
+            renterId: "user-renter",
+            status: "COMPLETED",
+            completedAt: new Date(),
+          }];
         }
         return [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }];
       }

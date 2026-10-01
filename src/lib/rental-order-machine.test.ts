@@ -1044,12 +1044,16 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
 // tests/integration/phase8a-04-rental-review-dispute-serialization.test.ts
 // ============================================================
 
+/** Phase 8E：评价窗口起点 = 权威 completedAt（夹具用近期时刻，保证在 7 天窗口内） */
+const REVIEW_ORDER_COMPLETED_AT = new Date(Date.now() - 60 * 1000);
+
 function reviewOrderRow(overrides: Record<string, unknown> = {}) {
   return {
     id: "order-1",
     ownerId: "user-owner",
     renterId: "user-renter",
     status: "COMPLETED",
+    completedAt: REVIEW_ORDER_COMPLETED_AT,
     ...overrides,
   };
 }
@@ -1064,9 +1068,12 @@ function buildReviewTx(config: {
   orderRow?: unknown[] | null;
   activeDispute?: unknown;
   existingReview?: unknown;
+  /** Phase 8E：counterparty 既有评价（第二次 findFirst；双方公开路径） */
+  counterpartyReview?: unknown;
 }) {
   const calls: string[] = [];
   const lockKeys: string[] = [];
+  let findFirstCalls = 0;
   const tx = {
     calls,
     lockKeys,
@@ -1093,13 +1100,23 @@ function buildReviewTx(config: {
       }),
     },
     rentalReview: {
+      // Phase 8E 调用序列：#1 duplicate check，#2 counterparty review check
       findFirst: vi.fn(async () => {
-        calls.push("dup-check");
-        return config.existingReview ?? null;
+        findFirstCalls += 1;
+        if (findFirstCalls === 1) {
+          calls.push("dup-check");
+          return config.existingReview ?? null;
+        }
+        calls.push("counterparty-check");
+        return config.counterpartyReview ?? null;
       }),
       create: vi.fn(async () => {
         calls.push("review-create");
         return {};
+      }),
+      updateMany: vi.fn(async () => {
+        calls.push("publish-update");
+        return { count: 2 };
       }),
       count: vi.fn(async () => 0),
     },
@@ -1160,10 +1177,12 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
       "active-dispute-check",
       "dup-check",
       "review-create",
+      // Phase 8E：首评 blind——counterparty check 后零通知零缓存写入
+      "counterparty-check",
     ]);
   });
 
-  it("REVIEW-SER-UNIT-03 锁后 fresh COMPLETED：allow，target 从 locked 行计算", async () => {
+  it("REVIEW-SER-UNIT-03 锁后 fresh COMPLETED：allow，target 从 locked 行计算，blindUntil = deadline", async () => {
     const tx = buildReviewTx({
       orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
       orderRow: [reviewOrderRow()],
@@ -1181,9 +1200,68 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
         orderId: "order-1",
         authorId: "user-renter",
         targetUserId: "user-owner",
+        blindUntil: new Date(REVIEW_ORDER_COMPLETED_AT.getTime() + 7 * 24 * 60 * 60 * 1000),
+        publishedAt: null,
       }),
     });
+    // Phase 8E §23：FIRST_BLIND_REVIEW → counterparty 零通知
+    expect(createNotifications).not.toHaveBeenCalled();
+    // blind 评价不进入 stored 缓存
+    expect(tx.user.update).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-03b 窗口：completedAt 超过 7 天 → DENY；completedAt null → fail closed", async () => {
+    const expiredTx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow({ completedAt: new Date("2026-09-01T00:00:00.000Z") })],
+    });
+    expect(
+      await submitRentalReviewTx(asReviewTx(expiredTx), {
+        orderId: "order-1",
+        userId: "user-renter",
+        overallRating: 5,
+      }),
+    ).toEqual({ error: "评价期已结束（订单完成后 7 天内可评价）" });
+    expect(expiredTx.rentalReview.create).not.toHaveBeenCalled();
+
+    const nullCompletedTx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow({ completedAt: null })],
+    });
+    expect(
+      await submitRentalReviewTx(asReviewTx(nullCompletedTx), {
+        orderId: "order-1",
+        userId: "user-renter",
+        overallRating: 5,
+      }),
+    ).toEqual({ error: "订单状态错误" });
+    expect(nullCompletedTx.rentalReview.create).not.toHaveBeenCalled();
+  });
+
+  it("REVIEW-SER-UNIT-03c 双方公开：counterparty 已有评价 → 双方 publishedAt + generic 通知", async () => {
+    const tx = buildReviewTx({
+      orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
+      orderRow: [reviewOrderRow()],
+      counterpartyReview: { id: "review-owner" },
+    });
+
+    const result = await submitRentalReviewTx(asReviewTx(tx), {
+      orderId: "order-1",
+      userId: "user-renter",
+      overallRating: 4,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(tx.rentalReview.updateMany).toHaveBeenCalledWith({
+      where: { orderId: "order-1", authorId: { in: ["user-renter", "user-owner"] } },
+      data: { publishedAt: expect.any(Date) },
+    });
+    // §24：generic event，双方各一条，不携带评分/内容/作者
     expect(createNotifications).toHaveBeenCalledTimes(1);
+    expect(createNotifications).toHaveBeenCalledWith(tx, [
+      { userId: "user-owner", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") },
+      { userId: "user-renter", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") },
+    ]);
   });
 
   it("REVIEW-SER-UNIT-04 锁后 fresh IN_DISPUTE：DENY，review/reputation/notification 全零", async () => {

@@ -28,6 +28,13 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+// Phase 8E：订单卡内 ReviewDialog 成功后 router.refresh（jsdom 需 mock 路由）
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    refresh: vi.fn(),
+  }),
+}));
+
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
 }));
