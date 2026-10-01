@@ -72,6 +72,12 @@ export function revalidateRentalOrderViews(orderId: string) {
   revalidatePath(`/rental-orders/${orderId}`);
 }
 
+// Phase 8D-02：meetup mutation 成功后的缓存刷新（订单中心 + 见面约定页面）
+export function revalidateOrderMeetupViews(orderId: string) {
+  revalidatePath("/my/orders");
+  revalidatePath(`/my/orders/${orderId}/meetup`);
+}
+
 // 租赁订单列表页（不携带订单号时使用）
 export function revalidateRentalOrderListViews() {
   revalidatePath("/rental-orders");
