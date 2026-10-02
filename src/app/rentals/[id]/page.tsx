@@ -6,8 +6,14 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { RentalDetailConsole } from "@/components/rental/rental-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { RENTAL_WIND_DOWN_MESSAGES } from "@/lib/listings/listing-lifecycle";
+import {
+  isListingTransactionParticipant,
+  resolveListingLifecycleAccess,
+} from "@/lib/listings/listing-visibility";
 import { resolvePublicDetailModerationGate } from "@/lib/moderation/listing-moderation-query";
 import { ModerationHiddenBanner } from "@/components/listing/moderation-state";
+import { WindDownBanner } from "@/components/listing/wind-down-banner";
 import { hasActiveModerationForPublicSurface } from "@/lib/moderation/listing-moderation-query";
 import {
   getRentalListingDetail,
@@ -41,23 +47,41 @@ export async function generateMetadata({
   params: Promise<{ id: string }>;
 }): Promise<Metadata> {
   const { id } = await params;
-  const result = await getRentalListingDetail(id, undefined, { countView: false }).catch(() => null);
 
-  if (!result) {
+  // Phase 8F（§40）：metadata fallback != 主页面错误处理——repository 内
+  // notFound()（NEXT_NOT_FOUND）必须原样抛出保持 404 语义；主查询的
+  // DB / Prisma 基础设施错误不再被 .catch 吞成 generic fallback
+  try {
+    const result = await getRentalListingDetail(id, undefined, { countView: false });
+    const { listing } = result;
+    // Phase 7C FR-03：metadata 属 PUBLIC surface（owner exception 不适用）
+    if (await hasActiveModerationForPublicSurface("RENTAL", listing.id)) {
+      return RENTAL_DETAIL_FALLBACK_METADATA;
+    }
+    // Phase 8F（§19）：metadata 是 PUBLIC surface——只有 AVAILABLE（exposure
+    // state）才生成 listing title/description；wind-down 返回 generic fallback
+    if (listing.status !== "AVAILABLE") {
+      return RENTAL_DETAIL_FALLBACK_METADATA;
+    }
+    const title = `${listing.title} - 校园集市`;
+    const description = truncateForMetadata(
+      listing.description || `查看校园集市闲置租赁「${listing.title}」的租金、押金与租借规则。`,
+    );
+
+    return { title, description, openGraph: { title, description } };
+  } catch (error) {
+    // notFound() 等 Next.js 控制流错误必须原样抛出
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "digest" in error &&
+      typeof error.digest === "string" &&
+      error.digest.startsWith("NEXT_")
+    ) {
+      throw error;
+    }
     return RENTAL_DETAIL_FALLBACK_METADATA;
   }
-
-  const { listing } = result;
-  // Phase 7C FR-03：metadata 属 PUBLIC surface（owner exception 不适用）
-  if (await hasActiveModerationForPublicSurface("RENTAL", listing.id)) {
-    return RENTAL_DETAIL_FALLBACK_METADATA;
-  }
-  const title = `${listing.title} - 校园集市`;
-  const description = truncateForMetadata(
-    listing.description || `查看校园集市闲置租赁「${listing.title}」的租金、押金与租借规则。`,
-  );
-
-  return { title, description, openGraph: { title, description } };
 }
 
 export default async function RentalDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -65,17 +89,27 @@ export default async function RentalDetailPage({ params }: { params: Promise<{ i
   // Phase 6C-2 raw-auth hardening：收藏状态/owner 个性化按 ACTIVE 账号解析；
   // SUSPENDED 会话 → null → 匿名语义（isFavorited/isOwner 抑制），公开详情照常
   const viewerId = await getActiveViewerId();
-  // Phase 7C FR-03B：浏览计数移到治理门之后（hidden 请求零 RentalListing 写入）
+  // Phase 7C FR-03B：浏览计数移到治理门之后（hidden 请求零 RentalListing 写入）。
+  // Phase 8F（§40）：repository 内 notFound() 直接传播——不再 .catch(() => null)
+  // 把 DB / Prisma 基础设施错误伪装成 404
   const result = await getRentalListingDetail(id, viewerId ?? undefined, {
     countView: false,
-  }).catch(() => null);
-
-  if (!result) {
-    notFound();
-  }
+  });
 
   const { listing, reviews, isFavorited } = result;
-  // Phase 7C PUBLIC detail 治理特例（同 product 页）
+  // Phase 8F（§14-§17）Detail Access Policy：PUBLIC 仅 AVAILABLE；owner 查看
+  // 自己 wind-down listing；既有 RentalOrder owner/renter 保留履约上下文
+  const isParticipant = await isListingTransactionParticipant("RENTAL", listing.id, viewerId);
+  const lifecycleRole = resolveListingLifecycleAccess({
+    status: listing.status,
+    viewerId,
+    ownerId: listing.ownerId,
+    isParticipant,
+  });
+  if (lifecycleRole === null) {
+    notFound();
+  }
+  // Phase 7C PUBLIC detail 治理特例（同 product 页）；参与方特权不绕过治理保密
   const moderationGate = await resolvePublicDetailModerationGate({
     viewerId,
     ownerId: listing.ownerId,
@@ -85,14 +119,20 @@ export default async function RentalDetailPage({ params }: { params: Promise<{ i
   if (moderationGate === "HIDDEN") {
     notFound();
   }
-  if (moderationGate === "OPEN") {
+  // Phase 8F（§20）：viewCount 只计 true PUBLIC exposure
+  if (lifecycleRole === "PUBLIC" && moderationGate === "OPEN") {
     await incrementRentalListingView(listing.id);
   }
   const isOwner = viewerId === listing.ownerId;
+  const windDownMessage =
+    lifecycleRole !== "PUBLIC"
+      ? RENTAL_WIND_DOWN_MESSAGES[listing.status as "AVAILABLE" | "PAUSED" | "OFFLINE"]
+      : "";
 
   return (
     <PageContainer maxWidth="standard">
       {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
+      {windDownMessage && <WindDownBanner message={windDownMessage} />}
       {/* 面包屑 */}
       <Breadcrumbs
         items={[

@@ -931,9 +931,27 @@ describe.skipIf(!integrationDatabaseUrl)(
 
     it("CAP-22/25/39 listing 会话：受限 actor/对手方 deny、既有会话放行（真实 action）", async () => {
       const { createOrOpenProductConversation } = await import("@/actions/conversation");
+      // Phase 8F：新 MARKETPLACE_LISTING contact 线程只对 public exposure
+      // （ACTIVE）listing 开放——CAP-23/41 遗留的 RESERVED productA 不再是
+      // 合法前置，本用例改用独立 ACTIVE 商品 fixture（契约测试点不变：
+      // capability 403/409 文案与既有会话放行）
+      const conversationProduct = await rawClient!.product.create({
+        data: {
+          title: `IT 会话商品 ${randomUUID().slice(0, 6)}`,
+          description: "6C-3 listing 会话 gate 专用（ACTIVE 基线）",
+          price: "10.00",
+          condition: "NORMAL_USED",
+          locationText: "北门",
+          categoryId: productCategoryA.id,
+          campusId: campusA.id,
+          sellerId: sellerA.id,
+          status: "ACTIVE",
+        },
+      });
+      trackedProductIds.push(conversationProduct.id);
       const productForm = () => {
         const fd = new FormData();
-        fd.set("productId", productA.id);
+        fd.set("productId", conversationProduct.id);
         return fd;
       };
 
@@ -962,7 +980,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         "NEXT_REDIRECT",
       );
       const conversationRow = await rawClient!.conversation.findFirstOrThrow({
-        where: { productId: productA.id },
+        where: { productId: conversationProduct.id },
       });
 
       // CAP-25/41：限制落地后再进入既有会话 → 放行（不做 new-activity 拒绝）

@@ -86,8 +86,11 @@ test("商品订单：买家下单 → 卖家接受 → 买家确认完成 → �
   expect(sellerUser?.completedOrdersCount).toBeGreaterThanOrEqual(1);
 
   // ---------- 负例 1：商品完成后不可再购买 ----------
+  // Phase 8F（§15/§45/§17）：SOLD 非公开曝光——买家作为交易参与方保留
+  // 详情上下文，CTA 收敛为 SOLD wind-down 提示（陌生第三方则 404）
   await buyer.goto(`/products/${productId}`);
-  await expect(buyer.getByText("不可购买").first()).toBeVisible();
+  await expect(buyer.getByText("该商品已售出，交易已完成").first()).toBeVisible();
+  await expect(buyer.getByRole("button", { name: "立即购买" })).toHaveCount(0);
   await expect(buyer.getByRole("button", { name: "立即购买" })).toHaveCount(0);
 
   await buyerContext.close();

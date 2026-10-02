@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Calendar, Flag, Edit3, Trash2, MapPin, Star, CheckSquare } from "lucide-react";
+import { MessageSquare, Calendar, Flag, Edit3, MapPin, Star, CheckSquare } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -12,9 +12,14 @@ import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ServiceStatusActions } from "@/components/service/service-status-actions";
 import { SERVICE_PRICING_UNIT_LABELS, SERVICE_STATUS_LABELS } from "@/constants/service";
 import { ListingContactForm } from "@/components/conversation/listing-contact-form";
+import {
+  isServicePubliclyExposed,
+  SERVICE_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 import { createOrOpenServiceConversation } from "@/actions/conversation";
 import { createServiceOrder } from "@/actions/order";
 import { deleteService } from "@/actions/service";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 type ServiceListingStatus = "ACTIVE" | "PAUSED" | "OFFLINE" | string;
 
@@ -60,7 +65,12 @@ export function ServiceDetailConsole({
   const [bookingOpen, setBookingOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const isStatusActive = service.status === "ACTIVE";
+  // Phase 8F（§21/§45）：私聊 = new marketplace activity，仅公开曝光状态开放；
+  // 服务端 rereadListingForConversation 同样 DENY（UI 不是 authority）
+  const isStatusActive = isServicePubliclyExposed(service.status);
+  const windDownText =
+    SERVICE_WIND_DOWN_MESSAGES[service.status as "ACTIVE" | "PAUSED" | "OFFLINE"] ??
+    `当前服务为“${(SERVICE_STATUS_LABELS as Record<string, string>)[service.status] || service.status}”状态，暂无法预约`;
 
   return (
     <>
@@ -141,16 +151,13 @@ export function ServiceDetailConsole({
                   <Edit3 className="size-4" />
                   <span>编辑服务</span>
                 </Link>
-                <form action={deleteService}>
-                  <input type="hidden" name="serviceId" value={service.id} />
-                  <button
-                    type="submit"
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                  >
-                    <Trash2 className="size-4" />
-                    <span>删除服务</span>
-                  </button>
-                </form>
+                <DeleteListingForm
+                  action={deleteService}
+                  hiddenFieldName="serviceId"
+                  hiddenValue={service.id}
+                  label="删除服务"
+                  buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                />
               </div>
               <ServiceStatusActions
                 serviceId={service.id}
@@ -161,8 +168,8 @@ export function ServiceDetailConsole({
             /* 买家预约控制区 */
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2.5">
-                {/* 私聊联系 */}
-                {isLoggedIn && (
+                {/* 私聊联系：仅公开曝光状态开放新联系线程（§21） */}
+                {isLoggedIn && isStatusActive && (
                   <ListingContactForm
                     action={createOrOpenServiceConversation}
                     fieldName="serviceId"
@@ -209,7 +216,7 @@ export function ServiceDetailConsole({
                 )
               ) : (
                 <div className="rounded-2xl bg-slate-100 p-3.5 text-center text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  当前服务为“{(SERVICE_STATUS_LABELS as Record<string, string>)[service.status] || service.status}”状态，暂无法预约
+                  {windDownText}
                 </div>
               )}
             </div>

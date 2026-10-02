@@ -167,7 +167,11 @@ describe("RentalDetailPage 渲染", () => {
 
   it("renders notFound when the listing is missing", async () => {
     getActiveViewerId.mockResolvedValue(null);
-    getRentalListingDetail.mockResolvedValue(null);
+    // Phase 8F（§40）：repository 的 notFound()（NEXT_NOT_FOUND digest）直接
+    // 传播——主 loader 不再 .catch(() => null) 吞错
+    getRentalListingDetail.mockRejectedValue(
+      Object.assign(new Error("NEXT_NOT_FOUND"), { digest: "NEXT_NOT_FOUND" }),
+    );
 
     await expect(
       RentalDetailPage({ params: Promise.resolve({ id: "missing" }) }),

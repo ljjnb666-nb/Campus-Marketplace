@@ -24,13 +24,6 @@ const pricingUnits = [
   { value: "NEGOTIABLE", label: "面议" },
 ] as const;
 
-const statusLabels = {
-  ALL: "全部状态",
-  ACTIVE: "接单中",
-  PAUSED: "暂停接单",
-  OFFLINE: "已下架",
-} as const;
-
 const quickSorts = [
   { label: "最新发布", sort: "latest" },
   { label: "成交优先", sort: "orders_desc" },
@@ -43,7 +36,6 @@ export default async function ServicesPage({
 }: {
   searchParams: Promise<{
     q?: string;
-    status?: "ACTIVE" | "PAUSED" | "OFFLINE" | "ALL";
     pricingUnit?: "PER_SESSION" | "PER_HOUR" | "PER_ORDER" | "NEGOTIABLE" | "ALL";
     category?: string;
     verifiedOnly?: string;
@@ -57,19 +49,19 @@ export default async function ServicesPage({
   const viewerId = await getActiveViewerId();
   const page = parsePageParam(params.page);
   const verifiedOnly = params.verifiedOnly === "true";
+  // Phase 8F（§12/§39）：公开 marketplace list = exposure state only
+  // （repository 强制 ACTIVE）；主列表 query 不再吞基础设施错误
   const result = await getServiceList({
     q: params.q?.trim(),
-    status: params.status ?? "ALL",
     pricingUnit: params.pricingUnit ?? "ALL",
     categorySlug: params.category?.trim() || undefined,
     verifiedOnly,
     sort: params.sort ?? "latest",
     page,
-  }).catch(() => ({ items: [], total: 0, page: 1, pageSize: 12, totalPages: 1, categories: [] }));
+  });
 
   const search = buildListingSearchParams([
     { key: "q", value: params.q },
-    { key: "status", value: params.status, omitWhen: "ALL" },
     { key: "pricingUnit", value: params.pricingUnit, omitWhen: "ALL" },
     { key: "category", value: params.category },
     { key: "verifiedOnly", value: verifiedOnly ? "true" : undefined },
@@ -84,7 +76,6 @@ export default async function ServicesPage({
 
   const activeFilters = [
     params.q ? `关键词：${params.q}` : null,
-    params.status && params.status !== "ALL" ? `状态：${statusLabels[params.status]}` : null,
     selectedPricingUnit ? `计费：${selectedPricingUnit}` : null,
     selectedCategory ? `分类：${selectedCategory.name}` : null,
     verifiedOnly ? "仅看已认证服务者" : null,

@@ -159,7 +159,9 @@ test("8C-02 买家发起普通订单纠纷 → reviewer 统一队列处理（真
   await resolveForm.locator('textarea[name="adminNote"]').fill(adminNoteText);
   await resolveForm.getByRole("button", { name: "标记已解决" }).click();
   await expect(reviewerPage.getByText("处理结果")).toBeVisible({ timeout: 20_000 });
-  await expect(reviewerPage.getByText(/双方协商一致/)).toBeVisible();
+  // resolve 表单卸载是异步的：负载下旧表单（含 hidden option 文本）可能仍
+  // 挂载——与相邻步骤同一 20s 约定，等待结果面板成为唯一可见匹配
+  await expect(reviewerPage.getByText(/双方协商一致/)).toBeVisible({ timeout: 20_000 });
 
   // DB 不变量：dispute RESOLVED + Order 恢复 ACCEPTED + 双方 holds RELEASED
   await expect

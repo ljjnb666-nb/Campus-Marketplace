@@ -132,14 +132,11 @@ describe("RentalsPage", () => {
     expect(RentalCard).not.toHaveBeenCalled();
   });
 
-  it("falls back to an empty result when the repository query fails", async () => {
+  it("Phase 8F（§39）：repository 查询失败 → 传播 server error，不伪装成空状态", async () => {
     getActiveViewerId.mockResolvedValue(null);
     getRentalListings.mockRejectedValue(new Error("db down"));
     getRentalFormMeta.mockResolvedValue({ categories: [], campuses: [] });
 
-    const page = await RentalsPage({ searchParams: Promise.resolve({}) });
-    render(page);
-
-    expect(screen.getByText("没有找到符合条件的租赁物品")).toBeInTheDocument();
+    await expect(RentalsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow("db down");
   });
 });

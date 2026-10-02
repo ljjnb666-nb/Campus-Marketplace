@@ -191,7 +191,8 @@ test("7E-E2E02 reopen RESOLVED → IN_REVIEW → dueAt 重置 → case ACTIVE", 
   // 详情：CLOSED 徽标 → 重新标记处理中（reopen）
   await admin.goto(`/governance/reports/${report.id}`);
   await expect(admin.getByRole("heading", { name: "举报详情" })).toBeVisible();
-  await expect(admin.getByText("CLOSED")).toBeVisible();
+  // CLOSED 徽标在页面双处渲染（桌面/移动），套件 .first() 约定
+  await expect(admin.getByText("CLOSED").first()).toBeVisible();
   await admin.getByRole("button", { name: "标记处理中" }).click();
 
   // DB 权威：status 回 IN_REVIEW；case 回 ACTIVE；openedAt/dueAt 以 reopen 时刻重置

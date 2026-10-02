@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, ShoppingBag, Flag, Edit3, Trash2, MapPin, Eye } from "lucide-react";
+import { MessageSquare, ShoppingBag, Flag, Edit3, MapPin, Eye } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -16,7 +16,12 @@ import { ListingContactForm } from "@/components/conversation/listing-contact-fo
 import { createOrOpenProductConversation } from "@/actions/conversation";
 import { createProductOrder } from "@/actions/order";
 import { deleteProduct } from "@/actions/product";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
+import {
+  isProductPubliclyExposed,
+  PRODUCT_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 type ProductStatus = "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE" | "PAUSED" | string;
 type ProductCondition = "NEW" | "LIKE_NEW" | "LIGHTLY_USED" | "NORMAL_USED" | "HEAVILY_USED" | string;
 
@@ -63,7 +68,12 @@ export function ProductDetailConsole({
   const [purchaseOpen, setPurchaseOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const isStatusActive = product.status === "ACTIVE";
+  // Phase 8F（§21/§45）：收藏 / 私聊 = new marketplace activity，只对
+  // public exposure listing 开放；wind-down 下服务端同样 DENY（UI 不是 authority）
+  const isStatusActive = isProductPubliclyExposed(product.status);
+  const windDownText =
+    PRODUCT_WIND_DOWN_MESSAGES[product.status as "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE"] ??
+    `当前商品为“${(PRODUCT_STATUS_LABELS as Record<string, string>)[product.status] || product.status}”状态，不可购买`;
 
   return (
     <>
@@ -133,16 +143,13 @@ export function ProductDetailConsole({
                   <Edit3 className="size-4" />
                   <span>编辑商品</span>
                 </Link>
-                <form action={deleteProduct}>
-                  <input type="hidden" name="productId" value={product.id} />
-                  <button
-                    type="submit"
-                    className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                  >
-                    <Trash2 className="size-4" />
-                    <span>删除商品</span>
-                  </button>
-                </form>
+                <DeleteListingForm
+                  action={deleteProduct}
+                  hiddenFieldName="productId"
+                  hiddenValue={product.id}
+                  label="删除商品"
+                  buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                />
               </div>
 
               <ProductStatusActions productId={product.id} currentStatus={product.status as "ACTIVE" | "PAUSED" | "SOLD" | "RESERVED" | "OFFLINE"} />
@@ -151,15 +158,17 @@ export function ProductDetailConsole({
             /* 普通买家控制阵列 */
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2.5">
-                {/* 收藏按钮 */}
-                <FavoriteButton
-                  productId={product.id}
-                  isFavorited={isFavorited}
-                  count={product.favoriteCount}
-                />
+                {/* 收藏按钮：仅公开曝光状态开放新收藏（§21） */}
+                {isStatusActive && (
+                  <FavoriteButton
+                    productId={product.id}
+                    isFavorited={isFavorited}
+                    count={product.favoriteCount}
+                  />
+                )}
 
-                {/* 私聊卖家 */}
-                {isLoggedIn && (
+                {/* 私聊卖家：仅公开曝光状态开放新联系线程（§21） */}
+                {isLoggedIn && isStatusActive && (
                   <ListingContactForm
                     action={createOrOpenProductConversation}
                     fieldName="productId"
@@ -206,7 +215,7 @@ export function ProductDetailConsole({
                 )
               ) : (
                 <div className="rounded-2xl bg-slate-100 p-3.5 text-center text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  当前商品为“{(PRODUCT_STATUS_LABELS as Record<string, string>)[product.status] || product.status}”状态，不可购买
+                  {windDownText}
                 </div>
               )}
             </div>
@@ -218,12 +227,14 @@ export function ProductDetailConsole({
       {!isSeller && isStatusActive && (
         <MobileActionBar>
           <div className="flex items-center gap-2">
-            <FavoriteButton
-              productId={product.id}
-              isFavorited={isFavorited}
-              count={product.favoriteCount}
-            />
-            {isLoggedIn && (
+            {isStatusActive && (
+              <FavoriteButton
+                productId={product.id}
+                isFavorited={isFavorited}
+                count={product.favoriteCount}
+              />
+            )}
+            {isLoggedIn && isStatusActive && (
               <ListingContactForm
                 action={createOrOpenProductConversation}
                 fieldName="productId"

@@ -1,3 +1,4 @@
+import { ERRAND_PUBLIC_EXPOSURE_STATUS, PRODUCT_PUBLIC_EXPOSURE_STATUS, SERVICE_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { getPublishedGeneralReviewStatsBatch } from "@/lib/reviews/review-query";
@@ -20,7 +21,8 @@ export async function getSearchResults(keyword: string) {
     prisma.product.findMany({
       where: {
         deletedAt: null,
-        status: "ACTIVE",
+        // Phase 8F：search = public discovery surface，exposure state only
+        status: PRODUCT_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
@@ -35,7 +37,9 @@ export async function getSearchResults(keyword: string) {
     prisma.errandTask.findMany({
       where: {
         deletedAt: null,
-        status: { in: ["OPEN", "CLAIMED", "IN_PROGRESS", "PENDING_CONFIRMATION"] },
+        // Phase 8F（§56）：search 只暴露 OPEN（此前的 CLAIMED/IN_PROGRESS/
+        // PENDING_CONFIRMATION 属履约中 workflow 态，不是公开发现面）
+        status: ERRAND_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { pickupLocation: contains }, { deliveryLocation: contains }],
       },
@@ -48,7 +52,7 @@ export async function getSearchResults(keyword: string) {
     prisma.serviceListing.findMany({
       where: {
         deletedAt: null,
-        status: "ACTIVE",
+        status: SERVICE_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
         OR: [{ title: contains }, { description: contains }, { locationText: contains }],
       },
@@ -93,7 +97,7 @@ export async function getSearchResults(keyword: string) {
             where: {
               sellerId: { in: userIds },
               deletedAt: null,
-              status: "ACTIVE",
+              status: PRODUCT_PUBLIC_EXPOSURE_STATUS,
               ...listingModerationPublicFilter(),
             },
             _count: {
@@ -105,7 +109,7 @@ export async function getSearchResults(keyword: string) {
             where: {
               publisherId: { in: userIds },
               deletedAt: null,
-              status: "OPEN",
+              status: ERRAND_PUBLIC_EXPOSURE_STATUS,
               ...listingModerationPublicFilter(),
             },
             _count: {
@@ -117,7 +121,7 @@ export async function getSearchResults(keyword: string) {
             where: {
               providerId: { in: userIds },
               deletedAt: null,
-              status: "ACTIVE",
+              status: SERVICE_PUBLIC_EXPOSURE_STATUS,
               ...listingModerationPublicFilter(),
             },
             _count: {

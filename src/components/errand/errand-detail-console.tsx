@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Flag, Edit3, Trash2, MapPin, Navigation, Clock, CreditCard, ShieldCheck } from "lucide-react";
+import { MessageSquare, Flag, Edit3, MapPin, Navigation, Clock, CreditCard, ShieldCheck } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
 import { StatusBadge, StatusBadgeVariant } from "@/components/ui/status-badge";
 import { UserSummaryCard } from "@/components/ui/user-summary-card";
@@ -12,8 +12,13 @@ import { MobileActionBar } from "@/components/ui/mobile-action-bar";
 import { ErrandStatusActions } from "@/components/errand/errand-status-actions";
 import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { ListingContactForm } from "@/components/conversation/listing-contact-form";
+import {
+  isErrandPubliclyExposed,
+  ERRAND_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 import { createOrOpenErrandConversation } from "@/actions/conversation";
 import { claimErrand, deleteErrand } from "@/actions/errand";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { createReport } from "@/actions/trust";
 import type { ErrandTaskStatus } from "@prisma/client";
 
@@ -57,13 +62,19 @@ interface ErrandDetailConsoleProps {
 export function ErrandDetailConsole({
   errand,
   isPublisher,
+  isAccepter,
   isLoggedIn,
   availableActions,
 }: ErrandDetailConsoleProps) {
   const [claimOpen, setClaimOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
 
-  const isOpen = errand.status === "OPEN";
+  // Phase 8F（§21/§45）：非发布者的私聊 = new marketplace activity，
+  // 仅 OPEN（public exposure）开放；claim/服务端 authority 保持不变
+  const isOpen = isErrandPubliclyExposed(errand.status);
+  const windDownText =
+    ERRAND_WIND_DOWN_MESSAGES[errand.status] ??
+    `当前任务为“${(ERRAND_STATUS_LABELS as Record<string, string>)[errand.status] || errand.status}”状态，不可抢单`;
 
   function formatDate(value: Date | string) {
     return new Intl.DateTimeFormat("zh-CN", {
@@ -180,16 +191,13 @@ export function ErrandDetailConsole({
                   </Link>
                 )}
                 {(isOpen || errand.status === "CANCELLED") && (
-                  <form action={deleteErrand}>
-                    <input type="hidden" name="errandId" value={errand.id} />
-                    <button
-                      type="submit"
-                      className="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
-                    >
-                      <Trash2 className="size-4" />
-                      <span>删除任务</span>
-                    </button>
-                  </form>
+                  <DeleteListingForm
+                    action={deleteErrand}
+                    hiddenFieldName="errandId"
+                    hiddenValue={errand.id}
+                    label="删除任务"
+                    buttonClassName="w-full inline-flex items-center justify-center gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300"
+                  />
                 )}
               </div>
 
@@ -201,8 +209,9 @@ export function ErrandDetailConsole({
             /* 其它普通用户/接单者控制区 */
             <div className="space-y-3 pt-2">
               <div className="flex items-center gap-2.5">
-                {/* 私聊联系 */}
-                {isLoggedIn && (
+                {/* 私聊联系：陌生第三方仅 OPEN（公开曝光）可开新线程；
+                    accepter 与 publisher 的履约沟通保持（§17/§21 豁免） */}
+                {isLoggedIn && (isOpen || isAccepter) && (
                   <ListingContactForm
                     action={createOrOpenErrandConversation}
                     fieldName="errandId"
@@ -251,7 +260,7 @@ export function ErrandDetailConsole({
                 <ErrandStatusActions errandId={errand.id} actions={availableActions} />
               ) : (
                 <div className="rounded-2xl bg-slate-100 p-3.5 text-center text-xs font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                  当前任务为“{(ERRAND_STATUS_LABELS as Record<string, string>)[errand.status] || errand.status}”状态，不可抢单
+                  {windDownText}
                 </div>
               )}
             </div>

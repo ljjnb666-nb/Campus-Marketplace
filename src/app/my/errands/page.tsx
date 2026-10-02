@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { deleteErrand } from "@/actions/errand";
 import { ModerationPendingBadge } from "@/components/listing/moderation-state";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { ERRAND_STATUS_LABELS } from "@/constants/errand";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -79,15 +80,7 @@ export default async function MyErrandsPage() {
                         </Link>
                       ) : null}
                       {errand.status === "OPEN" || errand.status === "CANCELLED" ? (
-                        <form action={deleteErrand}>
-                          <input type="hidden" name="errandId" value={errand.id} />
-                          <button
-                            type="submit"
-                            className="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-300 hover:text-rose-800"
-                          >
-                            删除
-                          </button>
-                        </form>
+                        <DeleteListingForm action={deleteErrand} hiddenFieldName="errandId" hiddenValue={errand.id} />
                       ) : null}
                     </div>
                   </div>

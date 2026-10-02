@@ -73,7 +73,7 @@ describe("MyRentalListingsPage", () => {
     expect(screen.getByText("佳能相机")).toBeInTheDocument();
     expect(screen.getByText("库存: 1/2")).toBeInTheDocument();
     expect(screen.getByText("¥50.00")).toBeInTheDocument();
-    expect(screen.getByText("暂停")).toBeInTheDocument();
+    expect(screen.getByText("暂停出租")).toBeInTheDocument();
     expect(screen.getByText("下架")).toBeInTheDocument();
     expect(screen.getByText("编辑")).toBeInTheDocument();
   });
@@ -84,8 +84,9 @@ describe("MyRentalListingsPage", () => {
 
     render(await MyRentalListingsPage());
 
-    expect(screen.getByText("恢复")).toBeInTheDocument();
-    expect(screen.queryByText("暂停")).not.toBeInTheDocument();
+    expect(screen.getByText("恢复出租")).toBeInTheDocument();
+    expect(screen.getByText("下架")).toBeInTheDocument();
+    expect(screen.queryByText("暂停出租")).not.toBeInTheDocument();
   });
 
   it("shows the relist action for offline listings", async () => {

@@ -42,7 +42,6 @@ describe("product repository", () => {
     const result = await getProductList({
       q: "教材",
       category: "category-1",
-      status: "ACTIVE",
       minPrice: "10",
       maxPrice: "30",
       sort: "popular",
@@ -155,8 +154,10 @@ describe("product repository", () => {
     expect(favoriteFindMany).toHaveBeenCalledWith({
       where: {
         userId: "user-1",
+        // RB01 review repair（Phase 8F §9）：read projection = exposure state only
         product: {
           deletedAt: null,
+          status: "ACTIVE",
           moderations: { none: { resolvedAt: null } },
         },
       },

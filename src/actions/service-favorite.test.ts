@@ -9,6 +9,7 @@ const {
   serviceFavoriteCreate,
   serviceFavoriteDeleteMany,
   serviceListingUpdate,
+  serviceListingFindFirst,
   transactionMock,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
@@ -19,6 +20,7 @@ const {
   serviceFavoriteCreate: vi.fn(),
   serviceFavoriteDeleteMany: vi.fn(),
   serviceListingUpdate: vi.fn(),
+  serviceListingFindFirst: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -83,6 +85,8 @@ describe("service favorite actions", () => {
     serviceFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     serviceFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
     serviceListingUpdate.mockResolvedValue({});
+    // Phase 8F（§21）：exposure fresh 判定默认可收藏
+    serviceListingFindFirst.mockReset().mockResolvedValue({ id: "service-1" });
     // 事务回调与顶层 prisma 委托共享同一组 mock
     transactionMock.mockImplementation(
       async (run: (tx: unknown) => unknown) =>
@@ -91,7 +95,12 @@ describe("service favorite actions", () => {
             deleteMany: serviceFavoriteDeleteMany,
             create: serviceFavoriteCreate,
           },
-          serviceListing: { update: serviceListingUpdate },
+          serviceListing: {
+            update: serviceListingUpdate,
+            // Phase 8F（§21）：create 分支的 exposure fresh 判定（共享顶层
+            // mock；默认可收藏，missing/not-exposed 场景由用例覆写）
+            findFirst: serviceListingFindFirst,
+          },
         }),
     );
   });
@@ -191,6 +200,20 @@ describe("service favorite actions", () => {
       expect(result).toBe(favorites);
       expect(serviceFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
+      );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （deletedAt + status ACTIVE + moderation filter）——防止 repository
+      // filter 被误删导致 wind-down listing 重新进入收藏发现面
+      expect(serviceFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            serviceListing: {
+              deletedAt: null,
+              status: "ACTIVE",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
       );
     });
 

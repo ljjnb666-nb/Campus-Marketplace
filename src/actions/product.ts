@@ -6,6 +6,7 @@ import { actionErrorMessage } from "@/lib/error-handler";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { enforceMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { updateProductStatusTx } from "@/lib/listing-status-service";
+import { deleteProductListingTx } from "@/lib/listings/listing-lifecycle-service";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateProductViews } from "@/lib/revalidate";
@@ -17,6 +18,8 @@ import {
   buildAssetReference,
 } from "@/lib/upload";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
+import { PRODUCT_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
+import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { productFormSchema, productStatusSchema } from "@/validators/product";
 
 export type ProductActionState = {
@@ -343,28 +346,18 @@ export async function deleteProduct(formData: FormData) {
     redirect("/my/products");
   }
 
-  const product = await prisma.product.findFirst({
-    where: {
-      id: productId,
-      sellerId: user.id,
-      deletedAt: null,
-    },
-    select: { id: true },
-  });
-
-  if (!product) {
-    redirect("/my/products");
+  // Phase 8F（§28/§30）：删除写权威 = USER 锁 → Product FOR UPDATE →
+  // fresh ownership/deletedAt → SOLD terminal / active PRODUCT order 检查 →
+  // canonical 软删除（OFFLINE + deletedAt）。事务外 pre-read 与裸 update
+  // 的旧竞态窗口关闭；denial 返回稳定中文 outcome（§70/§72 禁止 silent no-op）
+  let outcome: Awaited<ReturnType<typeof deleteProductListingTx>>;
+  try {
+    outcome = await withTransaction((tx) => deleteProductListingTx(tx, user.id, productId));
+  } catch (error) {
+    return { success: false, message: actionErrorMessage(error, "deleteProduct") };
   }
 
-  try {
-    await prisma.product.update({
-      where: { id: productId },
-      data: {
-        status: "OFFLINE",
-        deletedAt: new Date(),
-      },
-    });
-
+  if (outcome === "DELETED") {
     // 软删除商品时标记其图片资源待删除（对象由 cleanup 异步物理清理）
     const images = await prisma.productImage.findMany({
       where: { productId },
@@ -378,10 +371,18 @@ export async function deleteProduct(formData: FormData) {
     }
 
     revalidateProductViews(productId);
-  } catch (error) {
-    actionErrorMessage(error, "deleteProduct");
+    redirect("/my/products");
   }
 
+  if (outcome === "ACTIVE_OBLIGATION") {
+    return { success: false, message: "该商品存在进行中的交易，暂时无法删除，请先完成或结束现有订单" };
+  }
+
+  if (outcome === "SOLD_TERMINAL") {
+    return { success: false, message: "已售出的商品会保留成交记录，无法删除" };
+  }
+
+  // MISSING_OR_FORBIDDEN / ALREADY_DELETED → 幂等安全结局：回列表
   redirect("/my/products");
 }
 
@@ -394,31 +395,37 @@ export async function toggleFavorite(formData: FormData) {
       return;
     }
 
-    const product = await prisma.product.findFirst({
-      where: {
-        id: productId,
-        deletedAt: null,
-      },
-      select: { id: true },
-    });
+    // 同一事务内的删除/新建 + 计数增减，并发下保持一致。
+    // Phase 8F（§21）：new favorite 仅对 public exposure（ACTIVE）listing
+    // 开放——锁内 fresh 判定；移除既有收藏属 allowed wind-down，不受限。
+    // exposure 判定失败走哨兵错误整体回滚（零计数漂移），action 层与
+    // "listing 缺失"同形静默安全结局
+    await withTransaction(async (tx) => {
+      const exposed = await tx.product.findFirst({
+        where: {
+          id: productId,
+          deletedAt: null,
+          status: PRODUCT_PUBLIC_EXPOSURE_STATUS,
+          ...listingModerationPublicFilter(),
+        },
+        select: { id: true },
+      });
 
-    if (!product) {
-      return;
-    }
-
-    // 同一事务内的删除/新建 + 计数增减，并发下保持一致
-    await withTransaction(async (tx) =>
-      applyFavoriteToggle({
+      await applyFavoriteToggle({
         // RB-03：active-account 序列化（durable 用户所有态）
         beforeToggle: () => prepareActiveAccountMutation(tx, user.id),
         deleteFavorite: () =>
           tx.favorite.deleteMany({
             where: { userId: user.id, productId },
           }),
-        createFavorite: () =>
-          tx.favorite.create({
+        createFavorite: () => {
+          if (!exposed) {
+            throw new Error("FAVORITE_LISTING_NOT_PUBLIC");
+          }
+          return tx.favorite.create({
             data: { userId: user.id, productId },
-          }),
+          });
+        },
         decrementCount: () =>
           tx.product.update({
             where: { id: productId },
@@ -429,11 +436,17 @@ export async function toggleFavorite(formData: FormData) {
             where: { id: productId },
             data: { favoriteCount: { increment: 1 } },
           }),
-      }),
-    );
+      });
+    });
 
     revalidateProductViews(productId);
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "FAVORITE_LISTING_NOT_PUBLIC"
+    ) {
+      return;
+    }
     actionErrorMessage(error, "toggleFavorite");
   }
 }

@@ -28,18 +28,20 @@ describe("ProductStatusActions", () => {
     expect(container.querySelector('input[name="status"][value="OFFLINE"]')).toBeTruthy();
   });
 
-  it("RESERVED（system projection）只提供 wind-down，无 RESERVED/SOLD 主动操作", () => {
+  it("RESERVED（system projection，Phase 8F §42）不渲染任何 lifecycle mutation 操作", () => {
+    // Phase 8F：RESERVED + active order 时 ACTIVE/OFFLINE 服务端一律 DENY
+    // ——UI 不渲染必然失败的按钮；stale RESERVED 的唯一恢复路径（→ACTIVE）
+    // 由 server fresh authority 判定，不依赖 UI 快照
     const { container } = render(
       <ProductStatusActions productId="product-1" currentStatus="RESERVED" />,
     );
 
-    expect(screen.getByRole("button", { name: "重新上架" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "下架" })).toBeTruthy();
+    expect(container.querySelector("form")).toBeNull();
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+    expect(screen.queryByRole("button", { name: "重新上架" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "下架" })).toBeNull();
     expect(screen.queryByRole("button", { name: "标记预订" })).toBeNull();
     expect(screen.queryByRole("button", { name: "标记售出" })).toBeNull();
-    // 服务端仍以 active order 为权威拒绝（不依赖按钮隐藏保证 correctness）
-    expect(container.querySelector('input[name="status"][value="ACTIVE"]')).toBeTruthy();
-    expect(container.querySelectorAll("form")).toHaveLength(2);
   });
 
   it("SOLD（seller-terminal）不渲染任何 lifecycle mutation 操作", () => {

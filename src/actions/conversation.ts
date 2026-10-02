@@ -91,7 +91,7 @@ export async function createOrOpenProductConversation(
         rereadResource: async (tx) => {
           // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper；
           // 活跃治理中 → null → 既有"资源不可用"回退，新会话拒绝）
-          const fresh = await rereadListingForConversation(tx, "PRODUCT", product.id);
+          const fresh = await rereadListingForConversation(tx, "PRODUCT", product.id, { viewerId: user.id });
           if (!fresh) return null;
           return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },
@@ -165,7 +165,7 @@ export async function createOrOpenErrandConversation(
           // ERRAND 参与关系是动态的（publisher/accepter），锁后必须从权威行
           // 重新推导 counterpart，禁止沿用事务外 snapshot。
           // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）。
-          const fresh = await rereadListingForConversation(tx, "ERRAND", errand.id);
+          const fresh = await rereadListingForConversation(tx, "ERRAND", errand.id, { viewerId: user.id });
           if (!fresh) return null;
           const freshCounterpart =
             fresh.ownerId === user.id ? fresh.counterpartId : fresh.ownerId;
@@ -235,7 +235,7 @@ export async function createOrOpenServiceConversation(
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
           // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）
-          const fresh = await rereadListingForConversation(tx, "SERVICE", service.id);
+          const fresh = await rereadListingForConversation(tx, "SERVICE", service.id, { viewerId: user.id });
           if (!fresh) return null;
           return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },
@@ -302,7 +302,7 @@ export async function createOrOpenRentalConversation(
         kind: "MARKETPLACE_LISTING",
         rereadResource: async (tx) => {
           // Phase 7C：行锁 + 现势读取 + 活跃 moderation 复查（共享 helper）
-          const fresh = await rereadListingForConversation(tx, "RENTAL", rental.id);
+          const fresh = await rereadListingForConversation(tx, "RENTAL", rental.id, { viewerId: user.id });
           if (!fresh) return null;
           return { campusId: fresh.campusId, participantIds: [user.id, fresh.ownerId] };
         },

@@ -44,6 +44,8 @@ export default async function RentalsPage({
   const page = parsePageParam(params.page);
 
   const [result, meta] = await Promise.all([
+    // Phase 8F（§39）：主列表 query 不再吞基础设施错误——DB / Prisma /
+    // programming error 传播为 server error，不伪装成空状态
     getRentalListings({
       q: params.q?.trim(),
       categoryId: params.categoryId,
@@ -53,7 +55,7 @@ export default async function RentalsPage({
       noDeposit: params.noDeposit === "true",
       sort: params.sort ?? "latest",
       page,
-    }).catch(() => ({ items: [], total: 0, page: 1, pageSize: 12, totalPages: 1 })),
+    }),
     getRentalFormMeta(),
   ]);
 

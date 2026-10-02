@@ -9,6 +9,7 @@ const {
   errandFavoriteCreate,
   errandFavoriteDeleteMany,
   errandTaskUpdate,
+  errandTaskFindFirst,
   transactionMock,
 } = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
@@ -19,6 +20,7 @@ const {
   errandFavoriteCreate: vi.fn(),
   errandFavoriteDeleteMany: vi.fn(),
   errandTaskUpdate: vi.fn(),
+  errandTaskFindFirst: vi.fn(),
   transactionMock: vi.fn(),
 }));
 
@@ -81,6 +83,8 @@ describe("errand favorite actions", () => {
     errandFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     errandFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
     errandTaskUpdate.mockResolvedValue({});
+    // Phase 8F（§21）：exposure fresh 判定默认可收藏
+    errandTaskFindFirst.mockReset().mockResolvedValue({ id: "errand-1" });
     // 事务回调与顶层 prisma 委托共享同一组 mock
     transactionMock.mockImplementation(
       async (run: (tx: unknown) => unknown) =>
@@ -89,7 +93,12 @@ describe("errand favorite actions", () => {
             deleteMany: errandFavoriteDeleteMany,
             create: errandFavoriteCreate,
           },
-          errandTask: { update: errandTaskUpdate },
+          errandTask: {
+            update: errandTaskUpdate,
+            // Phase 8F（§21）：create 分支的 exposure fresh 判定（共享顶层
+            // mock；默认可收藏，missing/not-exposed 场景由用例覆写）
+            findFirst: errandTaskFindFirst,
+          },
         }),
     );
   });
@@ -189,6 +198,19 @@ describe("errand favorite actions", () => {
       expect(result).toBe(favorites);
       expect(errandFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
+      );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （OPEN）——wind-down workflow 态不进入收藏发现面
+      expect(errandFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            errandTask: {
+              deletedAt: null,
+              status: "OPEN",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
       );
     });
 

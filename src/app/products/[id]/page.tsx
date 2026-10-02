@@ -6,7 +6,13 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ImageGallery } from "@/components/ui/image-gallery";
 import { ProductCard } from "@/components/product/product-card";
 import { ProductDetailConsole } from "@/components/product/product-detail-console";
+import { WindDownBanner } from "@/components/listing/wind-down-banner";
 import { getActiveViewerId } from "@/lib/server-auth";
+import { PRODUCT_WIND_DOWN_MESSAGES } from "@/lib/listings/listing-lifecycle";
+import {
+  isListingTransactionParticipant,
+  resolveListingLifecycleAccess,
+} from "@/lib/listings/listing-visibility";
 import {
   hasActiveModerationForPublicSurface,
   resolvePublicDetailModerationGate,
@@ -38,6 +44,13 @@ export async function generateMetadata({
     // Phase 7C FR-03：metadata 属 PUBLIC surface——active moderation 时
     // 返回 generic fallback（owner exception 不适用于 metadata）。
     if (await hasActiveModerationForPublicSurface("PRODUCT", product.id)) {
+      return PRODUCT_DETAIL_FALLBACK_METADATA;
+    }
+    // Phase 8F（§19）：generateMetadata 是 PUBLIC surface——只有 public
+    // exposed（ACTIVE）才允许生成 listing title/description OpenGraph
+    // metadata；wind-down listing 返回 generic fallback，且不因 owner
+    // 登录改变 crawler metadata。
+    if (product.status !== "ACTIVE") {
       return PRODUCT_DETAIL_FALLBACK_METADATA;
     }
     const title = `${product.title} - 校园集市`;
@@ -76,8 +89,28 @@ export default async function ProductDetailPage({
   const { product, relatedProducts } = await getProductDetail(id, viewerId ?? undefined, {
     countView: false,
   });
+
+  // Phase 8F（§14-§17）Detail Access Policy（lifecycle 维度）：
+  //   PUBLIC    匿名 / 无关第三方：仅 ACTIVE 可见，否则 notFound（§15，
+  //             不泄漏 title/description/location/seller/status/price）
+  //   OWNER     seller 查看自己 wind-down listing（§16）
+  //   PARTICIPANT 该商品既有 Order 买卖双方保留履约上下文（§17，
+  //             private obligation continuity，非 public exposure）
+  const isParticipant = await isListingTransactionParticipant("PRODUCT", product.id, viewerId);
+  const lifecycleRole = resolveListingLifecycleAccess({
+    status: product.status,
+    viewerId,
+    ownerId: product.sellerId,
+    isParticipant,
+  });
+  if (lifecycleRole === null) {
+    notFound();
+  }
+
   // Phase 7C PUBLIC detail 治理特例：活跃 moderation ∧ 非 owner → notFound()；
-  // owner → 渲染 + 安全横幅（OWNER_EDIT_WHILE_HIDDEN = ALLOWED_V1）
+  // owner → 渲染 + 安全横幅（OWNER_EDIT_WHILE_HIDDEN = ALLOWED_V1）。
+  // Phase 8F 参与方特权不得绕过治理保密——HIDDEN 对 participant 仍 notFound，
+  // 既有义务继续走 Order private surfaces（§18）。
   const moderationGate = await resolvePublicDetailModerationGate({
     viewerId,
     ownerId: product.sellerId,
@@ -87,15 +120,22 @@ export default async function ProductDetailPage({
   if (moderationGate === "HIDDEN") {
     notFound();
   }
-  if (moderationGate === "OPEN") {
+  // Phase 8F（§20）：viewCount 只计 true PUBLIC exposure——owner 查看
+  // wind-down listing / participant 查看历史 listing / metadata 请求 /
+  // hidden probe 一律不计数
+  if (lifecycleRole === "PUBLIC" && moderationGate === "OPEN") {
     await incrementProductView(product.id);
   }
   const isOwner = viewerId === product.sellerId;
   const isFavorited = Array.isArray(product.favorites) && product.favorites.length > 0;
+  const windDownMessage =
+    lifecycleRole !== "PUBLIC" ? PRODUCT_WIND_DOWN_MESSAGES[product.status as "ACTIVE" | "RESERVED" | "SOLD" | "OFFLINE"] : "";
 
   return (
     <PageContainer maxWidth="standard">
       {moderationGate === "OWNER_VIEW" && <ModerationHiddenBanner />}
+      {/* Phase 8F（§45）：owner / 参与方查看 wind-down listing 的明确中文状态 */}
+      {windDownMessage && <WindDownBanner message={windDownMessage} />}
       {/* 1. 面包屑导航 */}
       <Breadcrumbs
         items={[

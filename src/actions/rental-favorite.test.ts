@@ -93,6 +93,8 @@ describe("rental favorite actions", () => {
     rentalFavoriteDeleteMany.mockResolvedValue({ count: 0 });
     rentalFavoriteCreate.mockResolvedValue({ id: "favorite-1" });
     rentalListingUpdate.mockResolvedValue({});
+    // Phase 8F（§21）：exposure fresh 判定默认可收藏
+    rentalListingFindFirst.mockReset().mockResolvedValue({ id: "rental-1" });
     // 事务回调与顶层 prisma 委托共享同一组 mock
     transactionMock.mockImplementation(
       async (run: (tx: unknown) => unknown) =>
@@ -101,7 +103,12 @@ describe("rental favorite actions", () => {
             deleteMany: rentalFavoriteDeleteMany,
             create: rentalFavoriteCreate,
           },
-          rentalListing: { update: rentalListingUpdate },
+          rentalListing: {
+            update: rentalListingUpdate,
+            // Phase 8F（§21）：create 分支的 exposure fresh 判定（共享顶层
+            // mock；默认可收藏，missing/not-exposed 场景由用例覆写）
+            findFirst: rentalListingFindFirst,
+          },
         }),
     );
   });
@@ -183,13 +190,15 @@ describe("rental favorite actions", () => {
       expect(transactionMock).not.toHaveBeenCalled();
     });
 
-    it("does nothing when the listing does not exist", async () => {
+    it("Phase 8F：listing 不存在/非公开曝光 → 哨兵回滚，零收藏零计数漂移", async () => {
       rentalListingFindFirst.mockResolvedValue(null);
 
       await toggleRentalFavorite(buildFormData("rental-1"));
 
-      expect(rentalFavoriteDeleteMany).not.toHaveBeenCalled();
-      expect(transactionMock).not.toHaveBeenCalled();
+      // exposure 判定 null → create 分支哨兵抛出整体回滚；计数器零写入
+      //（deleteMany 先行属于 toggle 语义内尝试，事务已回滚）
+      expect(rentalFavoriteCreate).not.toHaveBeenCalled();
+      expect(rentalListingUpdate).not.toHaveBeenCalled();
     });
 
     it("does nothing when the listing id is missing", async () => {
@@ -210,6 +219,19 @@ describe("rental favorite actions", () => {
       expect(result).toBe(favorites);
       expect(rentalFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
+      );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （AVAILABLE）——wind-down listing 不进入收藏发现面
+      expect(rentalFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            rentalListing: {
+              deletedAt: null,
+              status: "AVAILABLE",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
       );
     });
 

@@ -365,7 +365,8 @@ test("8D-02 Mobile 390x844：核心表单可操作、无横向溢出", async ({ 
   await expect(customBox).toBeVisible();
   await customBox.fill("E2E 移动端地点");
   // 状态信息不依赖 hover：直接可见
-  await expect(page.getByText(/请选择一个未来的时间/)).toBeVisible();
+  //（桌面/移动双表单各渲染一份校验提示，套件 .first() 约定）
+  await expect(page.getByText(/请选择一个未来的时间/).first()).toBeVisible();
 
   const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(scrollWidth).toBeLessThanOrEqual(390);
@@ -419,7 +420,8 @@ test("8D-02 E2E-TIME-01：America/Los_Angeles 浏览器提交 campus-local 14:30
 
   // 重新打开页面：仍显示用户选择的 campus-local 14:30
   await page.reload();
-  await expect(page.getByText(/约定时间：.*14:30/)).toBeVisible();
+  // 桌面+移动各渲染一份（与套件其它 spec 同一 .first() 双渲染约定）
+  await expect(page.getByText(/约定时间：.*14:30/).first()).toBeVisible();
 
   await context.close();
 });

@@ -447,8 +447,10 @@ describe("errand actions", () => {
     const formData = new FormData();
     formData.set("errandId", "errand-1");
 
-    await expect(deleteErrand(formData)).rejects.toThrow("REDIRECT:/my/errands");
-
+    // Phase 8F（§70）：NOT_DELETABLE → 中文 denial outcome，不再 silent redirect
+    const blocked = await deleteErrand(formData);
+    expect(blocked).toMatchObject({ success: false });
+    expect((blocked as { message: string }).message).toContain("已被接单");
     expect(txErrandTaskUpdate).not.toHaveBeenCalled();
     expect(revalidatePath).not.toHaveBeenCalled();
 

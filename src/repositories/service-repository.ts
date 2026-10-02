@@ -1,11 +1,11 @@
 import { notFound } from "next/navigation";
+import { SERVICE_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 
 export type ServiceListQuery = {
   q?: string;
-  status?: "ACTIVE" | "PAUSED" | "OFFLINE" | "ALL";
   pricingUnit?: "PER_SESSION" | "PER_HOUR" | "PER_ORDER" | "NEGOTIABLE" | "ALL";
   categorySlug?: string;
   verifiedOnly?: boolean;
@@ -127,6 +127,9 @@ export async function getServiceFormMeta() {
 export async function getServiceList(query: ServiceListQuery = {}) {
   const where = {
     deletedAt: null,
+    // Phase 8F（§9/§12）：公开 marketplace list = exposure state only
+    // （ACTIVE）。PAUSED / OFFLINE 不得进入公共发现面。
+    status: SERVICE_PUBLIC_EXPOSURE_STATUS,
     // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
     ...listingModerationPublicFilter(),
     ...(query.q
@@ -138,7 +141,6 @@ export async function getServiceList(query: ServiceListQuery = {}) {
           ],
         }
       : {}),
-    ...(query.status && query.status !== "ALL" ? { status: query.status } : {}),
     ...(query.pricingUnit && query.pricingUnit !== "ALL" ? { pricingUnit: query.pricingUnit } : {}),
     ...(query.categorySlug ? { category: { slug: query.categorySlug } } : {}),
     ...(query.verifiedOnly ? { provider: { verificationStatus: "VERIFIED" as const } } : {}),

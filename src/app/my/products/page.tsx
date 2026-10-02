@@ -3,6 +3,7 @@ import Link from "next/link";
 import { deleteProduct } from "@/actions/product";
 import { ProductStatusActions } from "@/components/product/product-status-actions";
 import { ModerationPendingBadge } from "@/components/listing/moderation-state";
+import { DeleteListingForm } from "@/components/listing/delete-listing-form";
 import { PRODUCT_STATUS_LABELS } from "@/constants/product";
 import { requireUser } from "@/lib/server-auth";
 import { getMyProducts } from "@/repositories/product-repository";
@@ -73,15 +74,7 @@ export default async function MyProductsPage() {
                   >
                     编辑
                   </Link>
-                  <form action={deleteProduct}>
-                    <input type="hidden" name="productId" value={product.id} />
-                    <button
-                      type="submit"
-                      className="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-300 hover:text-rose-800"
-                    >
-                      删除
-                    </button>
-                  </form>
+                  <DeleteListingForm action={deleteProduct} hiddenFieldName="productId" hiddenValue={product.id} />
                 </div>
               </div>
               <div className="flex flex-col gap-2 lg:items-end">
