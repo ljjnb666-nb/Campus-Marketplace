@@ -250,6 +250,28 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("Appeal", "decisionNote", OPERATOR_ONLY_FIELD),
   // ---- Notification：derived ephemeral，绝不做 free text 第二权威副本 ----
   field("Notification", "content", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, false)),
+  // ---- Phase 9B：canonical notification identity（kind/version registry）----
+  // kind / schemaVersion / payload 三列是 registry 契约的持久化投影：
+  // payload 只允许 IDs + 机器状态（zod strict 契约在 canonical emit 写边界
+  // 强制，非法即事务回滚零落库）；kind/version 允许进入结构化日志（§80 观测
+  // 白名单），payload 本身不进日志。erasure 随 Notification 整行 DELETE。
+  field("Notification", "kind", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, true)),
+  field("Notification", "schemaVersion", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, true)),
+  field("Notification", "payload", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, false)),
+  // ---- Phase 9B：NotificationDelivery——channel delivery provenance ----
+  // destination 是 CONTACT_INFO（收件邮箱）：DIRECT_IDENTITY，绝不误标
+  // machine-only；绝不进入结构化日志（logSafe=false）、绝不 self-export
+  // （本人邮箱已经由 User 面导出，delivery 快照属投递 provenance）；
+  // 注销时运行时以 RECIPIENT_ERASED / retention 收敛为 redacted sentinel
+  // （与行保留配套的 REDACT，执行在 account-erasure）。
+  field("NotificationDelivery", "destination", entry("DIRECT_IDENTITY", "EXCLUDE", "REDACT", false, false)),
+  // provider / providerMessageId / providerIdempotencyKey / suppressionCode
+  // 是机器 provenance（渠道实现名、外部 message id、deterministic 幂等键
+  // notification/<id>/email/v1、受控机器码）：非 personal，行保留。
+  field("NotificationDelivery", "provider", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
+  field("NotificationDelivery", "providerMessageId", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
+  field("NotificationDelivery", "providerIdempotencyKey", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
+  field("NotificationDelivery", "suppressionCode", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
   // ---- Phase 9A：async 基础设施错误诊断元数据 ----
   // 声明与代码事实一致（RB02/RB04/RB05 修复后）：
   // - payload：只允许 IDs + 机器状态，由 zod strict schema 在【生产写边界】

@@ -8,6 +8,10 @@ import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
 import { assertNoActiveHold } from "@/lib/privacy/data-hold-service";
 import { ERASED_USER_CONTENT_MARKER } from "@/lib/privacy/privacy-data-registry";
+import {
+  NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
+  REDACTED_EMAIL_DESTINATION,
+} from "@/lib/notifications/notification-delivery";
 
 /**
  * 账号注销 / 匿名化服务（fail closed）。
@@ -250,6 +254,46 @@ export async function eraseAccount(
 
     // Repair 4 / RB-23：Notification 是 derived ephemeral inbox——注销后无
     // 保留必要，整表删除（在 erasure 事务内）。
+    //
+    // Phase 9B（§35/§71）：删除前先收敛 EMAIL delivery provenance——
+    // unsent EMAIL delivery 置 suppressedAt = RECIPIENT_ERASED 并清空
+    // destination（对应 NOTIFICATION_DELIVERY AsyncJob 重放见到 suppressed
+    // → 0 次 provider call 幂等完成）；已 provider-accepted 的 delivery
+    // 同样清空 destination（不永久保留真实邮箱；时间型 retention 属 9C）。
+    // delivery 行刻意无 FK 级联（见 schema NotificationDelivery 注释），
+    // 随后的 notification.deleteMany 不触碰它们。同一事务内先收敛、后删除，
+    // 不存在"未抑制 delivery 失去父通知"的中间态。
+    const erasedNotificationIds = (
+      await client.notification.findMany({
+        where: { userId },
+        select: { id: true },
+      })
+    ).map((row) => row.id);
+
+    if (erasedNotificationIds.length > 0) {
+      const erasedEmailAt = new Date();
+      await client.notificationDelivery.updateMany({
+        where: {
+          channel: "EMAIL",
+          notificationId: { in: erasedNotificationIds },
+          suppressedAt: null,
+        },
+        data: {
+          suppressedAt: erasedEmailAt,
+          suppressionCode: NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
+          destination: REDACTED_EMAIL_DESTINATION,
+        },
+      });
+      await client.notificationDelivery.updateMany({
+        where: {
+          channel: "EMAIL",
+          notificationId: { in: erasedNotificationIds },
+          providerAcceptedAt: { not: null },
+        },
+        data: { destination: REDACTED_EMAIL_DESTINATION },
+      });
+    }
+
     await client.notification.deleteMany({ where: { userId } });
 
     // Repair 4 / RB-24：本人发送的消息保留行（conversation/report 关系历史
