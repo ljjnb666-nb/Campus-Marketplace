@@ -219,10 +219,30 @@ async function notificationCount(userId: string, title: string, orderId?: string
  * Phase 9A（§23/§27）：EXPIRED 事务提交时不再直写 Notification——原子落盘
  * OutboxEvent intent，通知行由真实 outbox dispatcher（与生产 async-worker
  * 同一派发路径）幂等派生。所有"过期后恰一对通知"断言先经本 helper 派发。
+ *
+ * orderId 给出时（expiry 已 materialize 的断言点）：有界轮询至本单事件
+ * PUBLISHED——全量并行跑中其它 vitest worker 的 dispatcher 可能正持有本
+ * 事件（行锁未提交窗口）或将其置入退避；轮询 + 重跑派发自愈，保证断言
+ * 读到确定收敛态。不传 orderId（期望零 expiry 事件的断言点）保持单次派发。
  */
-async function deliverOutboxNotifications(): Promise<void> {
+async function deliverOutboxNotifications(orderId?: string): Promise<void> {
   const { runOutboxBatchOnce } = await import("@/lib/async/outbox-dispatcher");
   await runOutboxBatchOnce();
+  if (!orderId) {
+    return;
+  }
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const event = await rawClient!.outboxEvent.findUnique({
+      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}` },
+      select: { status: true },
+    });
+    if (event?.status === "PUBLISHED") {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await runOutboxBatchOnce();
+  }
 }
 
 /** 断言 EXPIRED 事务已原子写入 outbox intent（dedupeKey 冻结形状，payload 仅 orderId）。 */
@@ -489,7 +509,7 @@ describe.skipIf(!integrationDatabaseUrl)(
 
         // Phase 9A：EXPIRED 事务已落 outbox intent；经真实 dispatcher 派生后恰一对通知
         await expectExpiryOutboxEvent(order!.id);
-        await deliverOutboxNotifications();
+        await deliverOutboxNotifications(order!.id);
         expect(await notificationCount(buyer.id, "商品预留已过期", order!.id)).toBe(1);
         expect(await notificationCount(seller.id, "商品预留已过期", order!.id)).toBe(1);
         expect(await notificationCount(buyer.id, "订单状态更新：已接单", order!.id)).toBe(0);
@@ -552,7 +572,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(finalOrder.cancelReason).not.toBe("用户主动取消");
       expect(await notificationCount(buyer.id, "订单状态更新：已取消", order.id)).toBe(0);
       await expectExpiryOutboxEvent(order.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
     });
@@ -606,7 +626,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
       ).toBe("ACTIVE");
       await expectExpiryOutboxEvent(order.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
 
@@ -614,7 +634,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       const replay = await expireReservation(order.id);
       expect(replay).toEqual({ kind: "NOT_PENDING" });
       // dispatcher 再跑一轮：dedupeKey 幂等，绝不重复派生（§25/§60）
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
       expect(
@@ -648,7 +668,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
       ).toBe("OFFLINE");
       await expectExpiryOutboxEvent(order.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
     });
@@ -833,7 +853,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(await notificationCount(buyer.id, "订单状态更新：已接单", order.id)).toBe(0);
       expect(await notificationCount(seller.id, "订单状态更新：已接单", order.id)).toBe(0);
       await expectExpiryOutboxEvent(order.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
     });
@@ -964,7 +984,7 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       // 恰一对 expiry 通知，零 accept 通知；真实下单另含 2 条创建通知
       await expectExpiryOutboxEvent(order!.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order!.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order!.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order!.id)).toBe(1);
       expect(await notificationCount(buyer.id, "订单状态更新：已接单", order!.id)).toBe(0);
@@ -1033,7 +1053,7 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       // 单一 expiry 通知对，零 cancel 通知
       await expectExpiryOutboxEvent(order.id);
-      await deliverOutboxNotifications();
+      await deliverOutboxNotifications(order.id);
       expect(await notificationCount(buyer.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(seller.id, "商品预留已过期", order.id)).toBe(1);
       expect(await notificationCount(buyer.id, "订单状态更新：已取消", order.id)).toBe(0);
