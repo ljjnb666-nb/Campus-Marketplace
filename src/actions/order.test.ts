@@ -20,6 +20,7 @@ const {
   txUserFindMany,
   txOrderFindFirst,
   txErrandTaskUpdateMany,
+  txAsyncJobCreateMany,
   setProductLockRow,
   errandLockRowHolder,
   orderLockRowHolder,
@@ -35,6 +36,8 @@ const {
   const txServiceListingUpdate = vi.fn();
   const txUserUpdate = vi.fn();
   const txErrandTaskUpdateMany = vi.fn();
+  // Phase 9A：createProductOrderTx 在同事务写入 expiry durable intent
+  const txAsyncJobCreateMany = vi.fn();
   const orderFindUnique = vi.fn();
   // Product 行锁返回行（默认 = 创建路径的 ACTIVE 行；取消路径测试
   // 通过 setProductLockRow 切换为 RESERVED 投影行）
@@ -89,6 +92,10 @@ const {
     user: {
       update: txUserUpdate,
       findMany: txUserFindMany,
+    },
+    // Phase 9A：reservation expiry durable intent（Order 同事务原子落盘）
+    asyncJob: {
+      createMany: txAsyncJobCreateMany,
     },
     campusMembership: {
       findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] }; campusId: string } }) =>
@@ -161,6 +168,7 @@ const {
     txExecuteRaw,
     txUserFindMany,
     txErrandTaskUpdateMany,
+    txAsyncJobCreateMany,
     setProductLockRow,
     errandLockRowHolder,
     orderLockRowHolder,
@@ -266,6 +274,7 @@ describe("order actions", () => {
     txServiceListingUpdate.mockReset();
     txUserUpdate.mockReset();
     txErrandTaskUpdateMany.mockReset().mockResolvedValue({ count: 1 });
+    txAsyncJobCreateMany.mockReset().mockResolvedValue({ count: 1 });
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     txProductUpdateMany.mockResolvedValue({ count: 1 });

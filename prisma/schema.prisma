@@ -871,7 +871,7 @@ model Notification {
   // dedupeKey = OUTBOX:<eventId>:IN_APP:<userId>（DB 级幂等唯一键；
   // PostgreSQL unique index 允许多行 NULL——历史同步通知 dedupeKey 为 NULL，
   // 行为完全兼容）。sourceEventId = 产生本通知的 OutboxEvent.id（溯源）。
-  dedupeKey     String?
+  dedupeKey     String? @unique
   sourceEventId String?
 
   @@index([userId, isRead, createdAt])

@@ -74,6 +74,7 @@ type TxMocks = {
   orderFindFirst: ReturnType<typeof vi.fn>;
   orderFindUnique: ReturnType<typeof vi.fn>;
   productUpdate: ReturnType<typeof vi.fn>;
+  outboxEventCreateMany: ReturnType<typeof vi.fn>;
 };
 
 function makeTx(input: {
@@ -117,6 +118,11 @@ function makeTx(input: {
     return { type, buyerId: b, sellerId: s, productId: p };
   });
   const productUpdate = vi.fn().mockResolvedValue({});
+  // Phase 9A：EXPIRED 事务改写 OutboxEvent intent（In-App 通知由 outbox
+  // materializer 幂等派生），不再直写 Notification
+  const outboxEventCreateMany = vi
+    .fn()
+    .mockResolvedValue({ count: 1 });
 
   const tx = {
     $executeRaw: executeRaw,
@@ -129,6 +135,9 @@ function makeTx(input: {
     product: {
       update: productUpdate,
     },
+    outboxEvent: {
+      createMany: outboxEventCreateMany,
+    },
   } as unknown as Prisma.TransactionClient;
 
   return {
@@ -139,6 +148,7 @@ function makeTx(input: {
     orderFindFirst,
     orderFindUnique,
     productUpdate,
+    outboxEventCreateMany,
   };
 }
 
@@ -153,6 +163,16 @@ const reservedProduct = {
 function expiredNotifications(createNotifications: ReturnType<typeof vi.fn>) {
   // createNotifications(tx, notifications)：第 2 参才是通知数组
   return createNotifications.mock.calls.flatMap((call) => call[1] ?? []);
+}
+
+/**
+ * Phase 9A：EXPIRED 事务的 outbox intent 断言（recordOutboxEventTx →
+ * tx.outboxEvent.createMany）。冻结形状：dedupeKey =
+ * PRODUCT_RESERVATION_EXPIRED:<orderId>、payload 仅 { orderId }（禁止
+ * user-authored 内容）、availableAt 在事务内。
+ */
+function expiryOutboxIntents(m: TxMocks) {
+  return m.outboxEventCreateMany.mock.calls.map((call) => call[0].data[0]);
 }
 
 beforeEach(() => {
@@ -452,11 +472,17 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
       where: { id: productId },
       data: { status: "ACTIVE" },
     });
-    // 超期取消不发"用户主动取消"文案，只发 expiry 通知对
-    expect(expiredNotifications(createNotifications)).toEqual([
-      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
-      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    // 超期取消不发"用户主动取消"文案；EXPIRED 走 outbox intent（Phase 9A），
+    // 不直写任何 Notification
+    expect(expiredNotifications(createNotifications)).toEqual([]);
+    expect(expiryOutboxIntents(m)).toEqual([
+      expect.objectContaining({
+        eventType: "PRODUCT_RESERVATION_EXPIRED",
+        dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}`,
+        payload: { orderId },
+      }),
     ]);
+    expect(createNotifications).not.toHaveBeenCalled();
   });
 });
 
@@ -523,10 +549,13 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
       where: { id: productId },
       data: { status: "ACTIVE" },
     });
-    // 绝不能发"已接单"通知；只有 expiry 通知对
-    expect(expiredNotifications(createNotifications)).toEqual([
-      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
-      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    // 绝不能发"已接单"通知；EXPIRED 走 outbox intent（Phase 9A）
+    expect(expiredNotifications(createNotifications)).toEqual([]);
+    expect(expiryOutboxIntents(m)).toEqual([
+      expect.objectContaining({
+        dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}`,
+        payload: { orderId },
+      }),
     ]);
   });
 
@@ -543,7 +572,7 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
     );
 
     expect(outcome).toEqual({ reservationResolution: "EXPIRED" });
-    expect(expiredNotifications(createNotifications)).toHaveLength(2);
+    expect(m.outboxEventCreateMany).toHaveBeenCalledTimes(1);
   });
 
   it("buyer 不是 accept actor → null（actor 必须 = seller）", async () => {
@@ -668,10 +697,15 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
       where: { id: productId },
       data: { status: "ACTIVE" },
     });
-    expect(expiredNotifications(createNotifications)).toEqual([
-      expect.objectContaining({ userId: buyerId, title: "商品预留已过期" }),
-      expect.objectContaining({ userId: sellerId, title: "商品预留已过期" }),
+    // Phase 9A：EXPIRED 落 outbox intent（通知由 materializer 恰好派生一对）
+    expect(expiryOutboxIntents(m)).toEqual([
+      expect.objectContaining({
+        eventType: "PRODUCT_RESERVATION_EXPIRED",
+        dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}`,
+        payload: { orderId },
+      }),
     ]);
+    expect(createNotifications).not.toHaveBeenCalled();
   });
 
   it("幂等：已非 PENDING（fresh 行）→ NOT_PENDING，零重复副作用", async () => {
@@ -763,7 +797,8 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
       where: { id: productId },
       data: { status: "OFFLINE" },
     });
-    expect(expiredNotifications(createNotifications)).toHaveLength(2);
+    // Phase 9A：outbox intent 照常落库（capability 失败绝不回滚 expiration）
+    expect(m.outboxEventCreateMany).toHaveBeenCalledTimes(1);
   });
 });
 
