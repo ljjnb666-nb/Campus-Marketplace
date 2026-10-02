@@ -10,21 +10,23 @@
 #           不是调用者标签。
 #   STEP 1  production env preflight（含 storage-cleanup worker interval 契约）
 #   STEP 2  构建 immutable release artifact set（tag = GIT_SHA）：
-#           app + migrate + storage-cleanup
+#           app + migrate + storage-cleanup + async-worker
 #   STEP 3  备份当前数据库
 #   STEP 4  migrate deploy（一次性容器，禁止 app 启动时并发迁移）+ 迁移验证
 #   STEP 5  app 滚动更新
-#   STEP 6  storage-cleanup worker 切换 + 运行时验证 + dry-run smoke
+#   STEP 6  storage-cleanup worker 切换 + 运行时验证 + dry-run smoke；
+#           async-worker 切换 + 运行时验证（Phase 9A）
 #           （worker 使用当前 schema：只在 migrate 完成后切换，绝不让新
 #           worker 在迁移完成前接入生产库）
 #   STEP 7  RELEASE READINESS GATE（scripts/ops/release-readiness-check.ts，
 #           deploy 与 rollback 共用的唯一权威 verifier：health + ready +
 #           release 身份 + 严格 ready + 全依赖 ok，fail closed）
 #   STEP 8  记录 release 日志（仅 verifier PASS 后；记录 release artifact
-#           pair：APP_IMAGE + CLEANUP_IMAGE + CLEANUP=running）
+#           集合：APP_IMAGE + CLEANUP_IMAGE + ASYNC_WORKER_IMAGE）
 #
-# FINAL REPAIR B：release 由两个不可变 runtime image 组成
+# FINAL REPAIR B / Phase 9A：release 由不可变 runtime image 集合组成
 #   campus-marketplace-app:<SHA> + campus-marketplace-cleanup:<SHA>
+#   + campus-marketplace-async-worker:<SHA>
 # （migrate 仍是一次性 migration artifact）。任何一步失败 → 不写 release log。
 #
 # 用法：./scripts/ops/deploy.sh [git_sha]   # 缺省 = 当前 HEAD；
@@ -118,8 +120,8 @@ echo "[deploy] step 1/7 生产 env 校验（含 storage-cleanup worker interval 
 npx --prefix "${PROJECT_DIR}" tsx scripts/production-env-check.ts --file "${ENV_FILE}"
 
 # 2) 构建不可变 release artifact set（GIT_SHA 进 build args，/api/health 可回报）
-echo "[deploy] step 2/7 构建 release artifact set（tag=${GIT_SHA}：app + migrate + storage-cleanup）"
-GIT_SHA="${GIT_SHA}" compose_run build app migrate storage-cleanup
+echo "[deploy] step 2/7 构建 release artifact set（tag=${GIT_SHA}：app + migrate + storage-cleanup + async-worker）"
+GIT_SHA="${GIT_SHA}" compose_run build app migrate storage-cleanup async-worker
 
 # 3) 迁移（先备份，后迁移）
 echo "[deploy] step 3/7 备份当前数据库"
@@ -193,6 +195,41 @@ if ! GIT_SHA="${GIT_SHA}" compose_run run --rm storage-cleanup --run-once --dry-
 fi
 echo "[deploy] storage-cleanup worker 切换并验证通过"
 
+# -----------------------------------------------------------------------------
+# 6') async-worker（Phase 9A）：release artifact set 的第三个 runtime image。
+# 同样只在 migrate 完成后切换。与 storage-cleanup 的不对称性：async-worker
+# 没有 --dry-run 模式，--run-once 会真实消费生产任务（domain transition /
+# 通知派生）——绝不作为发布 smoke；发布验证 = 镜像 assert + up + running +
+# exact image identity（fail closed），任务消费正确性由集成测试与
+# release readiness gate 承载。
+# -----------------------------------------------------------------------------
+echo "[deploy] step 6/7 切换 async-worker（tag=${GIT_SHA}）"
+
+ASYNC_WORKER_IMAGES="$(GIT_SHA="${GIT_SHA}" compose_run config --images)" || {
+  echo "[deploy][FAIL] compose config --images 解析失败，拒绝发布 async-worker" >&2
+  exit 1
+}
+if ! printf '%s\n' "${ASYNC_WORKER_IMAGES}" | grep -Fxq "campus-marketplace-async-worker:${GIT_SHA}"; then
+  echo "[deploy][FAIL] 解析后的 async-worker 镜像不是 campus-marketplace-async-worker:${GIT_SHA}（禁止 :local/:latest/异 SHA），拒绝发布" >&2
+  exit 1
+fi
+
+if ! GIT_SHA="${GIT_SHA}" compose_run up -d --no-deps async-worker; then
+  echo "[deploy][FAIL] async-worker 启动失败——不写 release log" >&2
+  exit 1
+fi
+
+RUNNING_SERVICES_ASYNC="$(compose_run ps --status running --services)"
+if ! printf '%s\n' "${RUNNING_SERVICES_ASYNC}" | grep -qx "async-worker"; then
+  echo "[deploy][FAIL] async-worker 未处于 running 状态，拒绝发布" >&2
+  exit 1
+fi
+if ! GIT_SHA="${GIT_SHA}" compose_run ps --format json async-worker | grep -Fq "campus-marketplace-async-worker:${GIT_SHA}"; then
+  echo "[deploy][FAIL] 运行中的 async-worker 容器镜像不是 campus-marketplace-async-worker:${GIT_SHA}，拒绝发布" >&2
+  exit 1
+fi
+echo "[deploy] async-worker 切换并验证通过"
+
 # 7) RELEASE READINESS GATE（RB-06）：/api/health 200 不再等于 DEPLOY SUCCESS。
 #    必须 health(ok + exact SHA) 且 ready(ready + exact SHA + DB/Redis/双 bucket 全 ok)。
 #    注意：HTTP READINESS ≠ FULL RELEASE ARTIFACT VERIFICATION —— worker 的
@@ -206,5 +243,5 @@ fi
 
 # release 日志（仅 verifier PASS 后才写；不记录 dependency URLs/credentials/bucket names）
 LOG_FILE="${PROJECT_DIR}/.releases.log"
-echo "$(date -Is) RELEASE_SHA=${GIT_SHA} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} CLEANUP=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
-echo "[deploy] SUCCESS ${GIT_SHA}（release artifact pair 记录于 ${LOG_FILE}）"
+echo "$(date -Is) RELEASE_SHA=${GIT_SHA} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${GIT_SHA} CLEANUP=running ASYNC_WORKER=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
+echo "[deploy] SUCCESS ${GIT_SHA}（release artifact 集合记录于 ${LOG_FILE}）"

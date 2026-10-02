@@ -153,3 +153,17 @@ FROM cleanup-runner AS ops-runner
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
 ENTRYPOINT ["npx", "tsx", "scripts/ops/ops-check.ts"]
+
+# ---------- async-runner（Phase 9A 统一 async worker，常驻单实例）----------
+# compose.production.yml 的 async-worker 服务消费（backend 网络、无端口、
+# restart: unless-stopped、依赖 PostgreSQL healthy）：SKIP LOCKED claim +
+# lease token fencing 消费 AsyncJob / OutboxEvent（PostgreSQL = durable
+# queue authority；不依赖 Redis 才能正确运行）。
+# 与 cleanup-runner 同模型且复用其全部产物层；release identity 同 LR-R2
+# provenance 模式（构建期 GIT_SHA → /app/.release-sha → ENTRYPOINT 显式
+# export，运行时 env 无法伪造日志身份；缺失 fail closed）。
+FROM cleanup-runner AS async-runner
+ARG GIT_SHA=unknown
+ENV RELEASE_SHA=${GIT_SHA}
+RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/async-worker.ts \"$@\"", "--"]

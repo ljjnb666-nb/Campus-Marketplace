@@ -109,6 +109,10 @@ GITIGNORE
   #   WORKER_NOT_RUNNING=1      → ps --status running 缺少 storage-cleanup
   #   WORKER_RUNNING_WRONG_IMAGE=1 → ps --format json 运行容器镜像非目标 SHA
   #   WORKER_STUB_MODE=invalid  → run --rm storage-cleanup（dry-run smoke）exit 1
+  # async-worker 相关模式（Phase 9A release artifact set）：
+  #   ASYNC_WORKER_UP_FAILURE=1 → up -d async-worker exit 1
+  #   ASYNC_WORKER_NOT_RUNNING=1 → ps --status running 缺少 async-worker
+  #   ASYNC_WORKER_RUNNING_WRONG_IMAGE=1 → ps --format json 镜像非目标 SHA
   cat > "${SANDBOX}/bin/docker" <<STUB
 #!/usr/bin/env bash
 ARGS="\$*"
@@ -135,14 +139,29 @@ case "\$ARGS" in
       echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
     fi
     exit 0 ;;
+  *"compose"*"ps --format json async-worker"*)
+    if [[ -n "\${ASYNC_WORKER_RUNNING_WRONG_IMAGE:-}" ]]; then
+      echo "{\"Service\":\"async-worker\",\"Image\":\"campus-marketplace-async-worker:local\",\"State\":\"running\"}"
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "{\"Service\":\"async-worker\",\"Image\":\"campus-marketplace-async-worker:\${GIT_SHA}\",\"State\":\"running\"}"
+    else
+      echo "{\"Service\":\"async-worker\",\"Image\":\"campus-marketplace-async-worker:local\",\"State\":\"running\"}"
+    fi
+    exit 0 ;;
   *"compose"*"ps --status running --services"*)
     echo "app"
     [[ -n "\${WORKER_NOT_RUNNING:-}" ]] || echo "storage-cleanup"
+    [[ -n "\${ASYNC_WORKER_NOT_RUNNING:-}" ]] || echo "async-worker"
     exit 0 ;;
   *"compose"*"up -d"*"storage-cleanup"*)
     echo "side_effect:cleanup_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     [[ -n "\${WORKER_UP_FAILURE:-}" ]] && exit 1
+    exit 0 ;;
+  *"compose"*"up -d"*"async-worker"*)
+    echo "side_effect:async_worker_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    echo "async_worker_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    [[ -n "\${ASYNC_WORKER_UP_FAILURE:-}" ]] && exit 1
     exit 0 ;;
   *"compose"*"up -d"*)
     echo "side_effect:app_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
@@ -151,14 +170,14 @@ case "\$ARGS" in
   *"compose"*"config --images"*)
     if [[ -n "\${WRONG_CLEANUP_IMAGE:-}" ]]; then
       if [[ -n "\${GIT_SHA:-}" ]]; then
-        echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:local"
+        echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:local"; echo "campus-marketplace-async-worker:\${GIT_SHA}"
       else
-        echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"
+        echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"; echo "campus-marketplace-async-worker:local"
       fi
     elif [[ -n "\${GIT_SHA:-}" ]]; then
-      echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"
+      echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"; echo "campus-marketplace-async-worker:\${GIT_SHA}"
     else
-      echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"
+      echo "campus-marketplace-app:local"; echo "campus-marketplace-cleanup:local"; echo "campus-marketplace-async-worker:local"
     fi
     exit 0 ;;
   *"exec -T postgres pg_dump"*)
@@ -293,8 +312,8 @@ assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.l
 assert_contains "RELEASE_SHA=${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 HEAD"
 assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "SOURCE-01 release log readiness"
 
-# FINAL REPAIR B：release artifact set（app + migrate + storage-cleanup）
-assert_contains "build app migrate storage-cleanup" "${SANDBOX}/calls.log" "SOURCE-01 构建 release artifact set"
+# FINAL REPAIR B / Phase 9A：release artifact set（app + migrate + storage-cleanup + async-worker）
+assert_contains "build app migrate storage-cleanup async-worker" "${SANDBOX}/calls.log" "SOURCE-01 构建 release artifact set"
 # 构建行携带 exact GIT_SHA（docker_called 行与 build side_effect 行都来自同一次调用）
 build_line="$(grep -n "side_effect:build ARGS=" "${SANDBOX}/calls.log" | head -1)"
 if [[ -n "$build_line" && "$(printf '%s' "$build_line" | grep -cF "GIT_SHA=${SANDBOX_HEAD}")" -ge 1 ]]; then
@@ -304,8 +323,11 @@ else
 fi
 assert_contains "cleanup_up_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 切换 cleanup worker"
 assert_contains "worker_smoke_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 worker dry-run smoke"
+assert_contains "async_worker_up_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 切换 async-worker"
 assert_contains "CLEANUP_IMAGE=campus-marketplace-cleanup:${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 cleanup image"
 assert_contains "CLEANUP=running" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 cleanup running"
+assert_contains "ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 async-worker image"
+assert_contains "ASYNC_WORKER=running" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 async-worker running"
 # 顺序硬门禁：migrate 必须先于 cleanup worker 切换（worker 绝不在 pre-migration schema 上运行）
 migrate_line="$(grep -n "side_effect:migrate" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
 cleanup_up_line="$(grep -n "cleanup_up_called" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
@@ -313,6 +335,13 @@ if [[ -n "$migrate_line" && -n "$cleanup_up_line" && "$migrate_line" -lt "$clean
   pass_test
 else
   fail_test "cleanup worker 切换必须发生在 migrate 之后"
+fi
+# 顺序硬门禁（Phase 9A）：migrate 必须先于 async-worker 切换
+async_worker_up_line="$(grep -n "async_worker_up_called" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+if [[ -n "$migrate_line" && -n "$async_worker_up_line" && "$migrate_line" -lt "$async_worker_up_line" ]]; then
+  pass_test
+else
+  fail_test "async-worker 切换必须发生在 migrate 之后"
 fi
 rm -f "${OUT}"
 
@@ -498,6 +527,49 @@ assert_exit 1 "$rc" "WORKER-CONFIG-INVALID deploy"
 assert_contains "runtime smoke 失败" "${OUT}" "WORKER-CONFIG-INVALID 失败原因"
 assert_contains "worker_smoke_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "WORKER-CONFIG-INVALID smoke 已执行"
 assert_file_absent "${SANDBOX}/.releases.log" "WORKER-CONFIG-INVALID 不写 release log"
+rm -f "${OUT}"
+
+echo "== ASYNC-WORKER-UP：async-worker 启动失败 → FAIL，不写 release log（Phase 9A）=="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" ASYNC_WORKER_UP_FAILURE=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "ASYNC-WORKER-UP deploy"
+assert_contains "async-worker 启动失败" "${OUT}" "ASYNC-WORKER-UP 失败原因"
+assert_contains "async_worker_up_called GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "ASYNC-WORKER-UP 切换尝试已发生"
+assert_file_absent "${SANDBOX}/.releases.log" "ASYNC-WORKER-UP 不写 release log"
+rm -f "${OUT}"
+
+echo "== ASYNC-WORKER-NOT-RUNNING：async-worker 未处于 running → FAIL（Phase 9A）=="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" ASYNC_WORKER_NOT_RUNNING=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "ASYNC-WORKER-NOT-RUNNING deploy"
+assert_contains "async-worker 未处于 running" "${OUT}" "ASYNC-WORKER-NOT-RUNNING 失败原因"
+assert_file_absent "${SANDBOX}/.releases.log" "ASYNC-WORKER-NOT-RUNNING 不写 release log"
+rm -f "${OUT}"
+
+echo "== ASYNC-WORKER-WRONG-IMAGE：运行容器镜像非目标 SHA → FAIL（Phase 9A）=="
+make_sandbox
+refresh_head
+PORTFILE="${SANDBOX}/fake-app.out"
+start_fake_app ready "${SANDBOX_HEAD}" "${PORTFILE}" || { fail_test "fake app 启动"; }
+EXTRA_ENV=(APP_URL="http://127.0.0.1:$(fake_port "${PORTFILE}")" ASYNC_WORKER_RUNNING_WRONG_IMAGE=1)
+OUT="$(mktemp)"
+OPS_HEALTH_TIMEOUT=8 run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "ASYNC-WORKER-WRONG-IMAGE deploy"
+assert_contains "运行中的 async-worker 容器镜像" "${OUT}" "ASYNC-WORKER-WRONG-IMAGE 失败原因"
+assert_file_absent "${SANDBOX}/.releases.log" "ASYNC-WORKER-WRONG-IMAGE 不写 release log"
 rm -f "${OUT}"
 
 echo "=============================="
