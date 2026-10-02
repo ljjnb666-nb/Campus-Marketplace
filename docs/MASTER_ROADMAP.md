@@ -177,8 +177,8 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05；PR #8 经多轮独立验收后合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
-| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 CLOSED / MASTER-GREEN；NEXT = 8D-02） |
-| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
+| Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A async core / outbox / reservation scheduler 实施中，9B notifications/email、9C retention 未开始；Phase 9 = CLOSED 需 9A/9B/9C 全部 reviewed + merged + exact-master CI green） |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
 | **GATE B** | Pilot Ready | NOT_REACHED（通过后才重开 Phase 3B） |
