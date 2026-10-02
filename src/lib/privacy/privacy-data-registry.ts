@@ -251,9 +251,16 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   // ---- Notification：derived ephemeral，绝不做 free text 第二权威副本 ----
   field("Notification", "content", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, false)),
   // ---- Phase 9A：async 基础设施错误诊断元数据 ----
-  // RB02 修复后 machine-only 声明才真正成立：lastErrorMessage 经
-  // DENY-BY-DEFAULT 安全合同（仅受控内部文案 / 固定 generic message 落库，
-  // raw exception text 默认拒绝），lastErrorCode 为安全机器码。
+  // 声明与代码事实一致（RB02/RB04/RB05 修复后）：
+  // - payload：只允许 IDs + 机器状态，由 zod strict schema 在【生产写边界】
+  //   强制（enqueueAsyncJobTx / recordOutboxEventTx 校验失败 → 事务回滚零
+  //   落库），并在【执行边界】再次校验（未知 kind/version/payload → 运行时
+  //   DEAD_LETTER）；双层 fail closed。
+  // - lastErrorCode：CONTROLLED MACHINE CODE ONLY（受控内部码 / Prisma
+  //   P#### 机器码 / Node 传输码显式 allowlist / 安全机器格式 Error.name；
+  //   arbitrary exception 附加字段默认拒绝）。
+  // - lastErrorMessage：DENY raw exception text BY DEFAULT（仅受控内部文案 /
+  //   固定 generic message 落库）。
   // 两者均为 operator 专用诊断面：绝不 self-export、绝不作为第二副本进入
   // 日志（结构化日志只写 errorName/errorCode）；行保留为执行 provenance。
   field("AsyncJob", "lastErrorCode", OPERATOR_ONLY_FIELD),
@@ -440,11 +447,14 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
   { model: "MeetupPoint", field: "locationText", because: "见面点公开位置描述（平台参考数据）" },
   // Phase 9A：async infra 的 lease fencing token（每次 claim 重新生成的机器
   // UUID，fencing authority）。两张表整体非 personal-bearing：
-  //   AsyncJob.payload / OutboxEvent.payload 只允许 IDs + 机器状态
-  //   （zod payload schema 逐 kind/eventType 冻结，如 { orderId }），
-  //   禁止 user-authored 自由文本 / secret / raw provider payload；
-  //   lastErrorCode/lastErrorMessage 只存安全 error code + 截断 sanitized
-  //   message（<=500），完整 stack 走结构化应用日志，绝不入库。
+  //   AsyncJob.payload / OutboxEvent.payload 只允许 IDs + 机器状态——由 zod
+  //   strict schema 在生产写边界强制（enqueueAsyncJobTx /
+  //   recordOutboxEventTx 校验失败即事务回滚零落库）并在执行边界二次校验
+  //   （运行时 unknown → DEAD_LETTER），禁止 user-authored 自由文本 /
+  //   secret / raw provider payload；
+  //   lastErrorCode/lastErrorMessage 只存受控机器码 / 固定 generic 或受控
+  //   内部文案（deny raw text by default），完整 stack 走结构化应用日志，
+  //   绝不入库。
   { model: "AsyncJob", field: "leaseToken", because: "worker lease fencing token（机器 UUID，非用户数据）" },
   { model: "OutboxEvent", field: "leaseToken", because: "dispatcher lease fencing token（机器 UUID，非用户数据）" },
 ];

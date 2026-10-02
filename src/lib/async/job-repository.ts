@@ -5,8 +5,8 @@ import os from "node:os";
 import { prisma } from "@/lib/prisma";
 import { computeBackoffDelayMs } from "@/lib/async/backoff";
 import {
-  jobErrorCode,
-  jobErrorMessage,
+  AsyncJobIntentContractError,
+  validateJobIntent,
   type ClaimedAsyncJob,
 } from "@/lib/async/job-types";
 
@@ -42,18 +42,30 @@ export type EnqueueAsyncJobInput = {
  * 幂等 enqueue（§45）：dedupeKey UNIQUE + createMany skipDuplicates——
  * 重复 schedule 同一业务意图（如同一个 orderId）恰好落一行，P2002 不外泄。
  * 必须在业务事务内调用（domain state + job intent 同事务原子落盘）。
+ *
+ * RB04 写边界（privacy contract）：先 resolve 已注册 kind/version 并对
+ * payload 做 strict 校验，只持久化 canonical parsed payload——未知
+ * kind/version / 非法形状（含未知键）→ 抛 AsyncJobIntentContractError，
+ * 事务回滚、零 AsyncJob 行。绝不"先落 raw payload、再靠 worker
+ * dead-letter 补救"（privacy violation 已发生）。执行边界的
+ * unknown → DEAD_LETTER 运行时合同保留（legacy corruption / 手工改库 /
+ * 未来漂移的 defense-in-depth 第二层）。
  */
 export async function enqueueAsyncJobTx(
   tx: Prisma.TransactionClient,
   input: EnqueueAsyncJobInput,
 ): Promise<{ recorded: boolean }> {
+  const validated = validateJobIntent(input.kind, input.schemaVersion, input.payload);
+  if (!validated.ok) {
+    throw new AsyncJobIntentContractError(validated.reason, input.kind, input.schemaVersion);
+  }
   const result = await tx.asyncJob.createMany({
     data: [
       {
         kind: input.kind,
         schemaVersion: input.schemaVersion,
         dedupeKey: input.dedupeKey,
-        payload: input.payload,
+        payload: validated.payload,
         runAt: input.runAt,
       },
     ],

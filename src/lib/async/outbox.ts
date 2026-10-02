@@ -2,6 +2,10 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { computeBackoffDelayMs } from "@/lib/async/backoff";
+import {
+  OutboxEventIntentContractError,
+  validateOutboxIntent,
+} from "@/lib/async/outbox-event-registry";
 import type { ClaimedOutboxEvent } from "@/lib/async/outbox-event-registry";
 
 /**
@@ -30,11 +34,29 @@ export type RecordOutboxEventInput = {
  * 幂等 event 落库（§23）：dedupeKey UNIQUE + createMany skipDuplicates。
  * 必须在产生该 event 的业务事务内调用（domain transition + outbox insert
  * 同事务原子落盘）；重复记录（dedupe 命中）返回 recorded = false。
+ *
+ * RB04 写边界（privacy contract）：先 resolve 已注册 eventType/version 并
+ * strict 校验 payload，只持久化 canonical parsed payload——未知
+ * eventType/version / 非法形状（含未知键）→ 抛 OutboxEventIntentContractError，
+ * 事务回滚、零 OutboxEvent 行。运行时 unknown → DEAD_LETTER 合同保留
+ * （第二层 defense-in-depth）。
  */
 export async function recordOutboxEventTx(
   tx: Prisma.TransactionClient,
   input: RecordOutboxEventInput,
 ): Promise<{ recorded: boolean }> {
+  const validated = validateOutboxIntent(
+    input.eventType,
+    input.schemaVersion,
+    input.payload,
+  );
+  if (!validated.ok) {
+    throw new OutboxEventIntentContractError(
+      validated.reason,
+      input.eventType,
+      input.schemaVersion,
+    );
+  }
   const result = await tx.outboxEvent.createMany({
     data: [
       {
@@ -43,7 +65,7 @@ export async function recordOutboxEventTx(
         aggregateType: input.aggregateType,
         aggregateId: input.aggregateId,
         dedupeKey: input.dedupeKey,
-        payload: input.payload,
+        payload: validated.payload,
         availableAt: input.availableAt ?? new Date(),
       },
     ],

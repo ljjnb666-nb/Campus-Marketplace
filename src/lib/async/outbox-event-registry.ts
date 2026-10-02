@@ -1,7 +1,10 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
-import { PermanentJobFailure } from "@/lib/async/job-types";
+import {
+  PermanentJobFailure,
+  safeAsyncErrorCode,
+} from "@/lib/async/job-types";
 
 /**
  * Phase 9A：OutboxEvent 契约类型与 runtime registry（§22 fail closed）。
@@ -20,10 +23,72 @@ export const PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE = "PRODUCT_RESERVATION_EXPIR
 export const PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION = 1;
 export const PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE = "ORDER";
 
-/** PRODUCT_RESERVATION_EXPIRED@1 payload 冻结形状：仅 orderId。 */
-export const productReservationExpiredEventPayloadSchema = z.object({
-  orderId: z.string().min(1),
-});
+/**
+ * PRODUCT_RESERVATION_EXPIRED@1 payload 冻结形状：仅 orderId。
+ * RB04：strict——未知键即 INVALID（strip 只保护 parse 结果，不阻止原始
+ * JSON 落库；写边界必须拒绝而非静默剥离）。
+ */
+export const productReservationExpiredEventPayloadSchema = z
+  .object({
+    orderId: z.string().min(1),
+  })
+  .strict();
+
+// ============================================================
+// RB04 纯契约层（writer 边界 + runtime 双层共用）：本文件只含
+// eventType / schemaVersion / Zod schema，绝不 import handler。
+// ============================================================
+
+const OUTBOX_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>([
+  [
+    PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE,
+    new Map([[PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION, productReservationExpiredEventPayloadSchema]]),
+  ],
+]);
+
+export type OutboxIntentValidation =
+  | { ok: true; payload: Prisma.InputJsonValue }
+  | { ok: false; reason: "UNKNOWN_CONTRACT" | "INVALID_PAYLOAD" };
+
+/** RB04 写边界契约校验（与 validateJobIntent 同一合同）。 */
+export function validateOutboxIntent(
+  eventType: string,
+  schemaVersion: number,
+  payload: unknown,
+): OutboxIntentValidation {
+  const versions = OUTBOX_PAYLOAD_CONTRACTS.get(eventType);
+  const schema = versions?.get(schemaVersion);
+  if (!schema) {
+    return { ok: false, reason: "UNKNOWN_CONTRACT" };
+  }
+  const parsed = schema.safeParse(payload);
+  if (!parsed.success) {
+    return { ok: false, reason: "INVALID_PAYLOAD" };
+  }
+  return { ok: true, payload: parsed.data as Prisma.InputJsonValue };
+}
+
+/**
+ * RB04 写边界受控契约错误：recordOutboxEventTx 校验失败时抛出——业务事务
+ * 回滚、零 OutboxEvent 行。code 属受控机器码格式（RB05 合同）。
+ */
+export class OutboxEventIntentContractError extends PermanentJobFailure {
+  constructor(
+    reason: "UNKNOWN_CONTRACT" | "INVALID_PAYLOAD",
+    eventType: string,
+    schemaVersion: number,
+  ) {
+    super(
+      reason === "UNKNOWN_CONTRACT"
+        ? "OUTBOX_EVENT_INTENT_CONTRACT_UNKNOWN"
+        : "OUTBOX_EVENT_INTENT_CONTRACT_INVALID",
+      reason === "UNKNOWN_CONTRACT"
+        ? `未注册的 outbox eventType/schemaVersion 拒绝写入：${eventType}@${schemaVersion}`
+        : `outbox payload 未通过 strict 契约校验（eventType=${eventType} version=${schemaVersion}）`,
+    );
+    this.name = "OutboxEventIntentContractError";
+  }
+}
 
 /** 9A materializer 产出固定两条 In-App 通知的标题/正文（§27，禁止
  * Product title / note / meetingLocation 等 user-authored 内容）。 */
@@ -71,18 +136,12 @@ export function parseOutboxEventPayload<T>(
   return parsed.data;
 }
 
+/**
+ * OutboxEvent.lastErrorCode 合同（RB05）：与 jobErrorCode 共用
+ * safeAsyncErrorCode 实现（CONTROLLED MACHINE CODE ONLY），禁止漂移。
+ */
 export function outboxEventErrorCode(error: unknown): string {
-  if (error instanceof PermanentJobFailure) {
-    return error.code;
-  }
-  const code = (error as { code?: unknown } | null)?.code;
-  if (typeof code === "string" && code.length > 0) {
-    return code.slice(0, 100);
-  }
-  if (error instanceof Error && error.name) {
-    return error.name.slice(0, 100);
-  }
-  return "UNKNOWN";
+  return safeAsyncErrorCode(error);
 }
 
 /**

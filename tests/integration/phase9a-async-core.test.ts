@@ -164,7 +164,11 @@ async function placeRealOrder(input: {
   return order;
 }
 
-/** 直接插入一条 AsyncJob（claim 层测试的受控 fixture）。 */
+/** 直接插入一条 AsyncJob（claim 层测试的受控 fixture）。
+ * TEST-ONLY CORRUPT/UNKNOWN ROW FIXTURE：绕过生产写边界（enqueueAsyncJobTx
+ * 的 strict 契约校验），专供 runtime fail-closed（unknown → DEAD_LETTER）
+ * 与 lease/fencing 合同构造 legacy/manual-corruption 形态行——
+ * 生产路径绝不产生本 helper 的非法 kind/version/payload 组合。 */
 async function insertJobFixture(input: {
   orderId: string;
   kind?: string;
@@ -192,7 +196,9 @@ async function insertJobFixture(input: {
   return job;
 }
 
-/** 直接插入一条 OutboxEvent（dispatcher 层测试的受控 fixture）。 */
+/** 直接插入一条 OutboxEvent（dispatcher 层测试的受控 fixture）。
+ * TEST-ONLY CORRUPT/UNKNOWN ROW FIXTURE：绕过生产写边界（recordOutboxEventTx
+ * 的 strict 契约校验），语义同 insertJobFixture。 */
 async function insertEventFixture(input: {
   orderId: string;
   eventType?: string;
@@ -940,7 +946,11 @@ describe.skipIf(!integrationDatabaseUrl)(
           await realHandler(tx, job);
           return { kind: "COMPLETED" };
         }
-        throw new Error("password=super-secret jwt=abc.def.ghi user note=私密内容");
+        // RB05：arbitrary exception 附加字段（可携带 secret / free text）
+        throw Object.assign(
+          new Error("boom"),
+          { code: "password=super-secret jwt=abc.def.ghi user@email.com" },
+        );
       });
       try {
         // 共享队列消费竞态防御：外来 worker 若抢先完成本 job，重置后重试
@@ -972,6 +982,10 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       const row = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: leakyJob.id } });
       expect(row.lastErrorCode).toBe("Error");
+      // RB05：lastErrorCode 同样不得携带 arbitrary code 字段内容
+      expect(row.lastErrorCode).not.toContain("super-secret");
+      expect(row.lastErrorCode).not.toContain("abc.def.ghi");
+      expect(row.lastErrorCode).not.toContain("user@email.com");
       expect(row.lastErrorMessage).toBe("异步任务执行失败");
       expect(row.lastErrorMessage).not.toContain("super-secret");
       expect(row.lastErrorMessage).not.toContain("abc.def.ghi");
@@ -997,7 +1011,11 @@ describe.skipIf(!integrationDatabaseUrl)(
           await original(tx, claimedEvent);
           return;
         }
-        throw new Error("smtp_password=hunter2 provider_response=account-suspended user note=内部备注");
+        // RB05：arbitrary exception 附加字段
+        throw Object.assign(
+          new Error("provider boom"),
+          { code: "smtp_password=hunter2 provider_response=account-suspended" },
+        );
       });
       try {
         // 共享队列消费竞态防御：外来 dispatcher 若抢先 PUBLISHED，重置后重试
@@ -1028,10 +1046,126 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       const row = await rawClient!.outboxEvent.findUniqueOrThrow({ where: { id: leakyEvent.id } });
       expect(row.lastErrorCode).toBe("Error");
+      // RB05：lastErrorCode 同样不得携带 arbitrary code 字段内容
+      expect(row.lastErrorCode).not.toContain("hunter2");
+      expect(row.lastErrorCode).not.toContain("account-suspended");
       expect(row.lastErrorMessage).toBe("异步事件处理失败");
       expect(row.lastErrorMessage).not.toContain("hunter2");
       expect(row.lastErrorMessage).not.toContain("account-suspended");
       expect(row.lastErrorMessage).not.toContain("内部备注");
+    });
+
+    it("PAYLOAD-WRITE-01（RB04）：job payload 携带额外键（note/password）→ 生产写入口拒绝、事务回滚、零 AsyncJob 行", async () => {
+      const { enqueueAsyncJobTx } = await import("@/lib/async/job-repository");
+      const { withTransaction } = await import("@/lib/prisma");
+      const dedupeKey = `${JOB_DEDUPE_PREFIX}:pw1:${randomUUID().slice(0, 8)}`;
+
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          enqueueAsyncJobTx(tx, {
+            kind: "PRODUCT_RESERVATION_EXPIRE",
+            schemaVersion: 1,
+            dedupeKey,
+            payload: { orderId: "order-1", note: "私密文本", password: "super-secret" },
+            runAt: new Date(Date.now() + 60_000),
+          }),
+        ),
+      ).rejects.toThrow();
+
+      expect(await rawClient!.asyncJob.count({ where: { dedupeKey } })).toBe(0);
+    });
+
+    it("PAYLOAD-WRITE-02（RB04）：outbox payload 携带额外 secret → 生产写入口拒绝、事务回滚、零 OutboxEvent 行", async () => {
+      const { recordOutboxEventTx } = await import("@/lib/async/outbox");
+      const { withTransaction } = await import("@/lib/prisma");
+      const dedupeKey = `${EVENT_DEDUPE_PREFIX}:pw2:${randomUUID().slice(0, 8)}`;
+
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          recordOutboxEventTx(tx, {
+            eventType: "PRODUCT_RESERVATION_EXPIRED",
+            schemaVersion: 1,
+            aggregateType: "ORDER",
+            aggregateId: "order-1",
+            dedupeKey,
+            payload: { orderId: "order-1", providerResponse: "super-secret" },
+          }),
+        ),
+      ).rejects.toThrow();
+
+      expect(await rawClient!.outboxEvent.count({ where: { dedupeKey } })).toBe(0);
+    });
+
+    it("PAYLOAD-WRITE-03（RB04）：unknown kind / eventType 经生产写 API → persistence 前拒绝（零行）", async () => {
+      const { enqueueAsyncJobTx } = await import("@/lib/async/job-repository");
+      const { recordOutboxEventTx } = await import("@/lib/async/outbox");
+      const { withTransaction } = await import("@/lib/prisma");
+      const jobDedupeKey = `${JOB_DEDUPE_PREFIX}:pw3:${randomUUID().slice(0, 8)}`;
+      const eventDedupeKey = `${EVENT_DEDUPE_PREFIX}:pw3:${randomUUID().slice(0, 8)}`;
+
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          enqueueAsyncJobTx(tx, {
+            kind: "UNKNOWN_JOB",
+            schemaVersion: 1,
+            dedupeKey: jobDedupeKey,
+            payload: { orderId: "order-1" },
+            runAt: new Date(Date.now() + 60_000),
+          }),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          recordOutboxEventTx(tx, {
+            eventType: "UNKNOWN_EVENT",
+            schemaVersion: 1,
+            aggregateType: "ORDER",
+            aggregateId: "order-1",
+            dedupeKey: eventDedupeKey,
+            payload: { orderId: "order-1" },
+          }),
+        ),
+      ).rejects.toThrow();
+
+      expect(await rawClient!.asyncJob.count({ where: { dedupeKey: jobDedupeKey } })).toBe(0);
+      expect(await rawClient!.outboxEvent.count({ where: { dedupeKey: eventDedupeKey } })).toBe(0);
+    });
+
+    it("PAYLOAD-WRITE-04（RB04）：合法 { orderId } → 持久化恰好 canonical 形状（无任何其它键）", async () => {
+      const { enqueueAsyncJobTx } = await import("@/lib/async/job-repository");
+      const { recordOutboxEventTx } = await import("@/lib/async/outbox");
+      const { withTransaction } = await import("@/lib/prisma");
+      const orderId = `pw4-${randomUUID().slice(0, 8)}`;
+      const jobDedupeKey = `${JOB_DEDUPE_PREFIX}:pw4:${randomUUID().slice(0, 8)}`;
+      const eventDedupeKey = `${EVENT_DEDUPE_PREFIX}:pw4:${randomUUID().slice(0, 8)}`;
+
+      await withTransaction(async (tx: Prisma.TransactionClient) => {
+        await enqueueAsyncJobTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRE",
+          schemaVersion: 1,
+          dedupeKey: jobDedupeKey,
+          payload: { orderId },
+          runAt: new Date(Date.now() + 60_000),
+        });
+        await recordOutboxEventTx(tx, {
+          eventType: "PRODUCT_RESERVATION_EXPIRED",
+          schemaVersion: 1,
+          aggregateType: "ORDER",
+          aggregateId: orderId,
+          dedupeKey: eventDedupeKey,
+          payload: { orderId },
+        });
+      });
+
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.payload).toEqual({ orderId });
+      expect(Object.keys(job.payload as Record<string, unknown>)).toEqual(["orderId"]);
+
+      const event = await rawClient!.outboxEvent.findUniqueOrThrow({
+        where: { dedupeKey: eventDedupeKey },
+      });
+      expect(event.payload).toEqual({ orderId });
+      expect(Object.keys(event.payload as Record<string, unknown>)).toEqual(["orderId"]);
     });
 
     it("WORKER-INT-01（§53/§54/§31）：真实生产 entrypoint --run-once → canonical expiry materialize + outbox PUBLISHED + 恰一对通知（buyer SUSPENDED 不阻断）", async () => {
