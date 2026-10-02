@@ -254,14 +254,19 @@ describe.skipIf(!integrationDatabaseUrl || process.platform === "win32")(
       const releaseGate = new Promise<void>((resolve) => {
         releaseLocks = resolve;
       });
-      const lockHolderTx = prisma.$transaction(async (tx) => {
-        await acquireGovernanceSubjectLocks(tx as unknown as Prisma.TransactionClient, [
-          { subjectType: "USER", subjectId: buyer.id },
-          { subjectType: "USER", subjectId: seller.id },
-        ]);
-        signalHeld();
-        await releaseGate;
-      });
+      const lockHolderTx = prisma.$transaction(
+        async (tx) => {
+          await acquireGovernanceSubjectLocks(tx as unknown as Prisma.TransactionClient, [
+            { subjectType: "USER", subjectId: buyer.id },
+            { subjectType: "USER", subjectId: seller.id },
+          ]);
+          signalHeld();
+          await releaseGate;
+        },
+        // Prisma 交互事务默认 5s 超时会提前杀掉持锁事务、放行 handler，
+        // 使 grace 超时路径不可达——持锁必须覆盖整个 shutdown 观测窗口
+        { timeout: 60_000, maxWait: 10_000 },
+      );
       await lockHeld;
 
       const graceMs = 2_000;

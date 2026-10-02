@@ -38,6 +38,8 @@
 
 import "dotenv/config";
 
+import { writeSync } from "node:fs";
+
 import { logger } from "@/lib/logger";
 import { runAsyncJobBatchOnce } from "@/lib/async/job-runner";
 import { runOutboxBatchOnce } from "@/lib/async/outbox-dispatcher";
@@ -137,6 +139,34 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * 退出路径专用同步日志（RB03）：console.log 对 pipe 是异步写，随后的
+ * process.exit() 会截断缓冲——shutdown_timeout / shutdown_forced 是
+ * bounded-shutdown 的权威观测事件，必须同步落 fd 后才允许退出。
+ * 字段与结构化 logger 同口径（不含任何 payload/secret）。
+ */
+function emitSyncShutdownLog(
+  level: "warn",
+  message: string,
+  extra: Record<string, unknown>,
+): void {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    service: process.env.APP_NAME ?? "campus-marketplace",
+    environment: process.env.NODE_ENV ?? "development",
+    release: process.env.RELEASE_SHA ?? "dev",
+    context: "async-worker",
+    ...extra,
+  };
+  try {
+    writeSync(1, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // stdout 不可写（如已关闭）：exit 语义不受日志影响
+  }
+}
+
 interface CycleSummary {
   jobsClaimed: number;
   jobsCompleted: number;
@@ -189,7 +219,7 @@ async function main() {
     if (shutdownPhase === 1) {
       // 第二次信号：立即强制退出。当前未完成 job 绝不标记成功——其 RUNNING
       // lease 过期后由 recovery 重放（durable，无需 JS 侧取消事务）
-      logger.warn("收到第二次退出信号，立即强制退出", "async-worker", {
+      emitSyncShutdownLog("warn", "收到第二次退出信号，立即强制退出", {
         event: "async_worker_shutdown_forced",
       });
       process.exit(1);
@@ -200,9 +230,11 @@ async function main() {
       shutdownGraceMs: config.shutdownGraceMs,
     });
     // bounded drain：deadline 到点即退出（进程退出 → 连接断开 → DB tx 回滚
-    // → lease 过期 recovery），绝不无限等待当前周期
+    // → lease 过期 recovery），绝不无限等待当前周期。
+    // 退出事件走同步写（emitSyncShutdownLog）：async pipe 写会被
+    // process.exit() 截断。
     shutdownTimer = setTimeout(() => {
-      logger.warn("shutdown grace 超时，退出（未完成 job 由 lease recovery 接管）", "async-worker", {
+      emitSyncShutdownLog("warn", "shutdown grace 超时，退出（未完成 job 由 lease recovery 接管）", {
         event: "async_worker_shutdown_timeout",
         shutdownGraceMs: config.shutdownGraceMs,
       });
