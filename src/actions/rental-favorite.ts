@@ -84,9 +84,13 @@ export async function getMyRentalFavorites(userId: string) {
     where: {
       userId,
       // Phase 7C：PUBLIC 面——被治理隐藏的租赁物品不再出现在收藏列表；
-      // 同时收口既有缺陷（nested include 不受软删扩展拦截）
+      // 同时收口既有缺陷（nested include 不受软删扩展拦截）。
+      // RB01 review repair（Phase 8F §9）：read = discovery projection，
+      // 只投影 exposure state（AVAILABLE）；favorite 行保留（visibility !=
+      // existence）
       rentalListing: {
         deletedAt: null,
+        status: RENTAL_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
       },
     },

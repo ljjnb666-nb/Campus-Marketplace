@@ -84,8 +84,12 @@ export async function getMyServiceFavorites(userId: string) {
       userId,
       // Phase 7C：PUBLIC 面——被治理隐藏的服务不再出现在收藏列表；
       // 同时收口既有缺陷（nested include 不受软删扩展拦截）
+      // RB01 review repair（Phase 8F §9）：read = discovery projection，
+      // 只投影 exposure state（ACTIVE）；favorite 行保留（visibility !=
+      // existence）
       serviceListing: {
         deletedAt: null,
+        status: SERVICE_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
       },
     },

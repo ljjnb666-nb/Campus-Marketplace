@@ -374,6 +374,199 @@ describe.skipIf(!integrationDatabaseUrl)(
       sessionSeam.actionUser.current = null;
     });
 
+    it("EXP-05B（RB01 review repair）：favorite read projection 四域 exposure 口径——visibility != existence", async () => {
+      const fan = await createFixtureUser("EXP05B收藏者");
+      sessionSeam.actionUser.current = { id: fan.id, email: "", name: "" };
+
+      const seller = await createFixtureUser("EXP05B卖家");
+      const provider = await createFixtureUser("EXP05B服务者");
+      const owner = await createFixtureUser("EXP05B出租者");
+      const publisher = await createFixtureUser("EXP05B发布者");
+
+      // ---------- PRODUCT：ACTIVE 可见 → OFFLINE 隐藏（行保留/计数不动）→ ACTIVE 重现 ----------
+      const { updateProductStatusTx } = await import("@/lib/listing-status-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      const { getMyFavoriteProducts } = await import("@/repositories/product-repository");
+
+      const product = await createProductFixture(seller.id, `8F收藏投影商品-${randomUUID().slice(0, 6)}`, "ACTIVE");
+      const productToggle = () => {
+        const fd = new FormData();
+        fd.set("productId", product.id);
+        return fd;
+      };
+      await (await import("@/actions/product")).toggleFavorite(productToggle());
+      expect(
+        await rawClient!.favorite.findUnique({ where: { userId_productId: { userId: fan.id, productId: product.id } } }),
+      ).not.toBeNull();
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).toContain(product.id);
+
+      // canonical wind-down：ACTIVE → OFFLINE（production status authority）
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateProductStatusTx(tx, seller.id, product.id, "OFFLINE"),
+      );
+      // favorite DB row 保留 + favoriteCount 不变（visibility != existence）
+      expect(
+        await rawClient!.favorite.findUnique({ where: { userId_productId: { userId: fan.id, productId: product.id } } }),
+      ).not.toBeNull();
+      expect((await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).favoriteCount).toBe(1);
+      // read projection 隐藏
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).not.toContain(product.id);
+
+      // canonical 重曝光：OFFLINE → ACTIVE（capability PASS）→ 同一 favorite 行自然重现
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateProductStatusTx(tx, seller.id, product.id, "ACTIVE"),
+      );
+      expect(
+        await rawClient!.favorite.findUnique({ where: { userId_productId: { userId: fan.id, productId: product.id } } }),
+      ).not.toBeNull();
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).toContain(product.id);
+
+      // ---------- SERVICE：ACTIVE 可见 → PAUSED 隐藏 → ACTIVE 重现 → OFFLINE 隐藏 ----------
+      const { updateServiceStatusTx } = await import("@/lib/listing-status-service");
+      const { getMyServiceFavorites } = await import("@/actions/service-favorite");
+
+      const service = await createServiceFixture(provider.id, `8F收藏投影服务-${randomUUID().slice(0, 6)}`, "ACTIVE");
+      await (await import("@/actions/service-favorite")).toggleServiceFavorite(service.id);
+      expect(
+        await rawClient!.serviceFavorite.findUnique({
+          where: { userId_serviceListingId: { userId: fan.id, serviceListingId: service.id } },
+        }),
+      ).not.toBeNull();
+      const serviceFavoriteCountBefore = (
+        await rawClient!.serviceListing.findUniqueOrThrow({ where: { id: service.id } })
+      ).favoriteCount;
+      expect((await getMyServiceFavorites(fan.id)).map((row) => row.serviceListing.id)).toContain(service.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateServiceStatusTx(tx, provider.id, service.id, "PAUSED"),
+      );
+      expect(
+        await rawClient!.serviceFavorite.findUnique({
+          where: { userId_serviceListingId: { userId: fan.id, serviceListingId: service.id } },
+        }),
+      ).not.toBeNull();
+      expect((await getMyServiceFavorites(fan.id)).map((row) => row.serviceListing.id)).not.toContain(service.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateServiceStatusTx(tx, provider.id, service.id, "ACTIVE"),
+      );
+      expect((await getMyServiceFavorites(fan.id)).map((row) => row.serviceListing.id)).toContain(service.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateServiceStatusTx(tx, provider.id, service.id, "OFFLINE"),
+      );
+      expect((await getMyServiceFavorites(fan.id)).map((row) => row.serviceListing.id)).not.toContain(service.id);
+      // visibility 变化零计数漂移
+      expect(
+        (await rawClient!.serviceListing.findUniqueOrThrow({ where: { id: service.id } })).favoriteCount,
+      ).toBe(serviceFavoriteCountBefore);
+
+      // ---------- RENTAL：AVAILABLE 可见 → PAUSED 隐藏 → AVAILABLE 重现 → OFFLINE 隐藏 ----------
+      const { updateRentalListingStatusTx } = await import("@/lib/listing-status-service");
+      const { getMyRentalFavorites } = await import("@/actions/rental-favorite");
+
+      const rental = await createRentalFixture(owner.id, `8F收藏投影租赁-${randomUUID().slice(0, 6)}`, "AVAILABLE");
+      const rentalToggle = () => {
+        const fd = new FormData();
+        fd.set("rentalListingId", rental.id);
+        return fd;
+      };
+      await (await import("@/actions/rental-favorite")).toggleRentalFavorite(rentalToggle());
+      expect(
+        await rawClient!.rentalFavorite.findUnique({
+          where: { userId_rentalListingId: { userId: fan.id, rentalListingId: rental.id } },
+        }),
+      ).not.toBeNull();
+      const rentalFavoriteCountBefore = (
+        await rawClient!.rentalListing.findUniqueOrThrow({ where: { id: rental.id } })
+      ).favoriteCount;
+      expect((await getMyRentalFavorites(fan.id)).map((row) => row.rentalListing.id)).toContain(rental.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateRentalListingStatusTx(tx, owner.id, rental.id, "PAUSED"),
+      );
+      expect(
+        await rawClient!.rentalFavorite.findUnique({
+          where: { userId_rentalListingId: { userId: fan.id, rentalListingId: rental.id } },
+        }),
+      ).not.toBeNull();
+      expect((await getMyRentalFavorites(fan.id)).map((row) => row.rentalListing.id)).not.toContain(rental.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateRentalListingStatusTx(tx, owner.id, rental.id, "AVAILABLE"),
+      );
+      expect((await getMyRentalFavorites(fan.id)).map((row) => row.rentalListing.id)).toContain(rental.id);
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        updateRentalListingStatusTx(tx, owner.id, rental.id, "OFFLINE"),
+      );
+      expect((await getMyRentalFavorites(fan.id)).map((row) => row.rentalListing.id)).not.toContain(rental.id);
+      expect(
+        (await rawClient!.rentalListing.findUniqueOrThrow({ where: { id: rental.id } })).favoriteCount,
+      ).toBe(rentalFavoriteCountBefore);
+
+      // ---------- ERRAND：OPEN 可见 → CLAIMED 隐藏（行保留；workflow 不倒退） ----------
+      const { getMyErrandFavorites } = await import("@/actions/errand-favorite");
+
+      const errand = await createErrandFixture(publisher.id, `8F收藏投影任务-${randomUUID().slice(0, 6)}`, "OPEN");
+      await (await import("@/actions/errand-favorite")).toggleErrandFavorite(errand.id);
+      expect(
+        await rawClient!.errandFavorite.findUnique({
+          where: { userId_errandTaskId: { userId: fan.id, errandTaskId: errand.id } },
+        }),
+      ).not.toBeNull();
+      const errandFavoriteCountBefore = (
+        await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } })
+      ).favoriteCount;
+      expect((await getMyErrandFavorites(fan.id)).map((row) => row.errandTask.id)).toContain(errand.id);
+
+      // TEST FIXTURE（read-policy fixture，非 mutation authority 证明）：
+      // CLAIMED 的 canonical 权威 = claimErrandTx（义务创建域）；此处直接置
+      // workflow 态只为驱动 read projection 断言，不倒退回 OPEN
+      await rawClient!.errandTask.update({ where: { id: errand.id }, data: { status: "CLAIMED" } });
+      expect(
+        await rawClient!.errandFavorite.findUnique({
+          where: { userId_errandTaskId: { userId: fan.id, errandTaskId: errand.id } },
+        }),
+      ).not.toBeNull();
+      expect((await getMyErrandFavorites(fan.id)).map((row) => row.errandTask.id)).not.toContain(errand.id);
+      expect(
+        (await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } })).favoriteCount,
+      ).toBe(errandFavoriteCountBefore);
+
+      // ---------- §8 moderation 回归：exposed + active moderation → read hidden；resolved → visible ----------
+      const moderator = await createFixtureUser("EXP05B治理员");
+      const moderatedProduct = await createProductFixture(seller.id, `8F收藏治理商品-${randomUUID().slice(0, 6)}`, "ACTIVE");
+      const moderatedToggle = () => {
+        const fd = new FormData();
+        fd.set("productId", moderatedProduct.id);
+        return fd;
+      };
+      await (await import("@/actions/product")).toggleFavorite(moderatedToggle());
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).toContain(moderatedProduct.id);
+
+      const moderation = await rawClient!.listingModeration.create({
+        data: {
+          targetType: "PRODUCT",
+          productId: moderatedProduct.id,
+          campusId,
+          observedStatus: "ACTIVE",
+          reasonCode: "OTHER",
+          moderatorId: moderator.id,
+        },
+      });
+      moderationIds.push(moderation.id);
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).not.toContain(moderatedProduct.id);
+
+      await rawClient!.listingModeration.update({
+        where: { id: moderation.id },
+        data: { resolvedAt: new Date(), resolvedById: moderator.id },
+      });
+      expect((await getMyFavoriteProducts(fan.id)).map((row) => row.product.id)).toContain(moderatedProduct.id);
+
+      sessionSeam.actionUser.current = null;
+    });
+
     it("EXP-06（§17/§57）：participant 判定 + lifecycle access（真实订单参与方可见非公开 listing）", async () => {
       const seller = await createFixtureUser("EXP06卖家");
       const buyer = await createFixtureUser("EXP06买家");

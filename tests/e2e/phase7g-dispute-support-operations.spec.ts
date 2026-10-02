@@ -545,7 +545,8 @@ test("7G-E2E04 CAMPUS 工单全链：创建 → agent 领用/解决 → requeste
 
   // requester：见 resolutionMessage，永不见 internalNote
   await userPage.goto(`/support/${ticket.id}`);
-  await expect(userPage.getByText("请按指引完成退货流程")).toBeVisible();
+  // 结果说明文本在页面双处渲染（桌面/移动），与套件 .first() 约定一致
+  await expect(userPage.getByText("请按指引完成退货流程").first()).toBeVisible();
   expect(await userPage.content()).not.toContain(`E2E7G 内部备注机密内容 ${tag}`);
 
   // 审计合同

@@ -220,6 +220,19 @@ describe("rental favorite actions", () => {
       expect(rentalFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （AVAILABLE）——wind-down listing 不进入收藏发现面
+      expect(rentalFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            rentalListing: {
+              deletedAt: null,
+              status: "AVAILABLE",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
+      );
     });
 
     it("returns an empty list for guests", async () => {

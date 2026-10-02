@@ -199,6 +199,19 @@ describe("errand favorite actions", () => {
       expect(errandFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （OPEN）——wind-down workflow 态不进入收藏发现面
+      expect(errandFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            errandTask: {
+              deletedAt: null,
+              status: "OPEN",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
+      );
     });
 
     it("returns an empty list for guests", async () => {

@@ -395,8 +395,13 @@ export async function getMyFavoriteProducts(userId: string) {
       // Phase 7C：PUBLIC 面——被治理隐藏的商品不再出现在收藏列表；
       // 同时收口既有缺陷（nested include 不受软删扩展拦截）：
       // 已软删商品同样不再出现。
+      // RB01 review repair（Phase 8F §9）：favorite read = discovery
+      // projection——只投影 exposure state（ACTIVE）。visibility !=
+      // existence：favorite 行保留、计数不动，listing 复 ACTIVE 后
+      // 同一行自然重新可见。
       product: {
         deletedAt: null,
+        status: PRODUCT_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
       },
     },

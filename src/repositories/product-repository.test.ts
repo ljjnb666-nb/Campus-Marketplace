@@ -154,8 +154,10 @@ describe("product repository", () => {
     expect(favoriteFindMany).toHaveBeenCalledWith({
       where: {
         userId: "user-1",
+        // RB01 review repair（Phase 8F §9）：read projection = exposure state only
         product: {
           deletedAt: null,
+          status: "ACTIVE",
           moderations: { none: { resolvedAt: null } },
         },
       },

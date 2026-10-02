@@ -201,6 +201,20 @@ describe("service favorite actions", () => {
       expect(serviceFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
+      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
+      // （deletedAt + status ACTIVE + moderation filter）——防止 repository
+      // filter 被误删导致 wind-down listing 重新进入收藏发现面
+      expect(serviceFavoriteFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            serviceListing: {
+              deletedAt: null,
+              status: "ACTIVE",
+              moderations: { none: { resolvedAt: null } },
+            },
+          }),
+        }),
+      );
     });
 
     it("returns an empty list for guests", async () => {

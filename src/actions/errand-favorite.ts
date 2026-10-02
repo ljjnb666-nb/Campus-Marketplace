@@ -84,8 +84,12 @@ export async function getMyErrandFavorites(userId: string) {
       userId,
       // Phase 7C：PUBLIC 面——被治理隐藏的跑腿任务不再出现在收藏列表；
       // 同时收口既有缺陷（nested include 不受软删扩展拦截）
+      // RB01 review repair（Phase 8F §9）：read = discovery projection，
+      // 只投影 exposure state（OPEN）；favorite 行保留（visibility !=
+      // existence）
       errandTask: {
         deletedAt: null,
+        status: ERRAND_PUBLIC_EXPOSURE_STATUS,
         ...listingModerationPublicFilter(),
       },
     },

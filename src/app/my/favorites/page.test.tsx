@@ -143,6 +143,61 @@ describe("MyFavoritesPage Unified Component Suite", () => {
     });
   });
 
+  // RB01 review repair（Phase 8F §9/§10/§11）：API projection = exposure
+  // state only。/my/favorites 只渲染 server read query 返回的收藏——
+  // wind-down listing（OFFLINE/PAUSED/CLAIMED/COMPLETED）不进入 API payload，
+  // 因此其 title 不得出现在 DOM；同时 UI 层不产生 raw enum 兜底渲染
+  //（authority 在 server read query，不在客户端 filter）。
+  it("does not render wind-down listing titles or raw status enums (favorite read projection contract)", async () => {
+    global.fetch = vi.fn((url: string | URL | Request) => {
+      const urlStr = url.toString();
+      if (urlStr.includes("/api/favorites/products")) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              favorites: [
+                {
+                  id: "favorite-active",
+                  product: {
+                    id: "product-active",
+                    title: "在售高数教材",
+                    description: "九成新教材",
+                    price: "35.00",
+                    status: "ACTIVE",
+                    category: { name: "教材资料" },
+                    seller: { name: "张同学" },
+                    images: [{ url: "/uploads/products/book.jpg" }],
+                    favoriteCount: 8,
+                  },
+                },
+              ],
+            }),
+        } as Response);
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ favorites: [] }),
+      } as Response);
+    });
+
+    render(<MyFavoritesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("在售高数教材")).toBeTruthy();
+    });
+
+    // wind-down title 不渲染（server projection 不返回即不可见）
+    expect(screen.queryByText("已下架的教材")).toBeNull();
+    expect(screen.queryByText("已暂停的服务")).toBeNull();
+    // §11：UI 层无 raw enum 泄漏（不因 hidden favorite fallback 渲染状态）
+    const bodyText = document.body.textContent ?? "";
+    expect(bodyText).not.toContain("OFFLINE");
+    expect(bodyText).not.toContain("PAUSED");
+    expect(bodyText).not.toContain("CLAIMED");
+    expect(bodyText).not.toContain("COMPLETED");
+  });
+
   it("renders errand and service favorites through shared cards after switching tabs", async () => {
     global.fetch = vi.fn((url: string | URL | Request) => {
       const urlStr = url.toString();
