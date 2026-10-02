@@ -12,7 +12,12 @@ import {
 } from "./email-config";
 import { isEmailIdempotencyWindowExpired } from "./email-provider";
 import { ResendEmailProvider } from "./providers/resend";
-import { escapeHtml, renderNotificationEmail, renderReservationExpiredEmail } from "./email-renderer";
+import { escapeHtml } from "./email-escape";
+import {
+  PRODUCT_RESERVATION_EXPIRED_KIND,
+  resolveNotificationDefinition,
+} from "./notification-registry";
+import { renderNotificationEmail } from "./email-renderer";
 
 /**
  * Phase 9B email slice unit contracts（§23-§45）：
@@ -235,9 +240,23 @@ describe("ResendEmailProvider（§24/§25/§29/§30）", () => {
 describe("email renderer（§38/§39/§40/§41）", () => {
   const PAYLOAD = { orderId: "o1", buyerId: "buyer-1", sellerId: "seller-1" };
 
+  function renderFor(recipient: string, baseUrl: string) {
+    return renderNotificationEmail(
+      { kind: PRODUCT_RESERVATION_EXPIRED_KIND, schemaVersion: 1, payload: PAYLOAD },
+      recipient,
+      baseUrl,
+    );
+  }
+
+  it("PRODUCT_RESERVATION_EXPIRED@1 开通 EMAIL 渠道且 renderEmail 已注册", () => {
+    const definition = resolveNotificationDefinition(PRODUCT_RESERVATION_EXPIRED_KIND, 1);
+    expect(definition?.channels).toContain("EMAIL");
+    expect(definition?.renderEmail).toBeTypeOf("function");
+  });
+
   it("渲染包含 subject/plain text/HTML 三件套，双角色固定中文文案", () => {
     for (const recipient of ["buyer-1", "seller-1"]) {
-      const rendered = renderReservationExpiredEmail(PAYLOAD, recipient, "https://campus.example");
+      const rendered = renderFor(recipient, "https://campus.example");
       expect(rendered.subject.length).toBeGreaterThan(0);
       expect(rendered.text).toContain("https://campus.example/my/orders");
       expect(rendered.html).toContain("https://campus.example/my/orders");
@@ -251,12 +270,12 @@ describe("email renderer（§38/§39/§40/§41）", () => {
       "&lt;img src=x onerror=&quot;alert(&#39;1&#39;)&quot;&gt;&amp;",
     );
     const hostileBase = 'https://campus.example"><script>alert(1)</script>';
-    const rendered = renderReservationExpiredEmail(PAYLOAD, "buyer-1", hostileBase);
+    const rendered = renderFor("buyer-1", hostileBase);
     expect(rendered.html).not.toContain('"><script>');
     expect(rendered.html).toContain("&quot;&gt;&lt;script&gt;");
   });
 
-  it("registry 入口：未注册 EMAIL 渲染器的 kind → 结构性拒绝", () => {
+  it("registry 入口：未开通 EMAIL 渠道的 kind → 结构性拒绝", () => {
     expect(() =>
       renderNotificationEmail(
         { kind: "ORDER_STATUS_CHANGED", schemaVersion: 1, payload: { orderId: "o", status: "ACCEPTED", actorRole: "BUYER" } },

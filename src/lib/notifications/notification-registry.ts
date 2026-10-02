@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { NotificationType } from "@prisma/client";
 
 import { PermanentJobFailure } from "@/lib/async/job-types";
+import { escapeHtml } from "@/lib/notifications/email-escape";
 
 /**
  * Phase 9B：canonical notification definition registry（§5/§6/§7）。
@@ -790,8 +791,10 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
   }),
 
   // 9B 唯一双渠道事件（§9）：PRODUCT 预留过期 = time-sensitive transactional
-  // event。 buyer/seller ID 进 payload 供角色化渲染（IDs 属机器状态）；
-  // EMAIL 渲染器随 email slice 注册（Phase 9B commit 4）。
+  // event。 buyer/seller ID 进 payload 供角色化渲染（IDs 属机器状态）。
+  // EMAIL 模板（§38/§39）：template version 随本 definition 冻结；固定中文
+  // 文案 + safe application URL（绝不携带 listing title / 留言 / note）；
+  // 链接 origin 由 renderEmail context 显式传入（canonical NEXTAUTH_URL）。
   defineNotification({
     kind: PRODUCT_RESERVATION_EXPIRED_KIND,
     schemaVersion: NOTIFICATION_SCHEMA_VERSION,
@@ -802,7 +805,7 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
         sellerId: idField(),
       })
       .strict(),
-    channels: [NOTIFICATION_CHANNEL_IN_APP],
+    channels: [NOTIFICATION_CHANNEL_IN_APP, NOTIFICATION_CHANNEL_EMAIL],
     renderInApp: (payload, recipientUserId) => ({
       type: "ORDER",
       title: "商品预留已过期",
@@ -812,6 +815,39 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
           ? "卖家未在确认期限内接受订单，商品预留已自动释放。"
           : "该商品订单已超过确认期限，预留已自动释放。",
     }),
+    renderEmail: (payload, recipientUserId, context) => {
+      const isBuyer = recipientUserId === payload.buyerId;
+      const roleSentence = isBuyer
+        ? "卖家未在确认期限内接受订单，商品预留已自动释放。"
+        : "该商品订单已超过确认期限，预留已自动释放。";
+      const subject = "商品预留已过期";
+      const ordersUrl = `${context.appBaseUrl}/my/orders`;
+      const footer = "本邮件为校园集市系统事务邮件，请勿直接回复。";
+
+      const text = [
+        "您有一条交易通知：商品预留已过期。",
+        "",
+        roleSentence,
+        "",
+        `请登录平台查看详情：${ordersUrl}`,
+        "",
+        footer,
+      ].join("\n");
+
+      const html = [
+        "<!doctype html>",
+        '<html lang="zh-CN">',
+        "<body>",
+        "  <p>您有一条交易通知：<strong>商品预留已过期</strong>。</p>",
+        `  <p>${escapeHtml(roleSentence)}</p>`,
+        `  <p><a href="${escapeHtml(ordersUrl)}">请登录平台查看详情</a></p>`,
+        `  <p>${escapeHtml(footer)}</p>`,
+        "</body>",
+        "</html>",
+      ].join("\n");
+
+      return { subject, text, html };
+    },
   }),
 ];
 

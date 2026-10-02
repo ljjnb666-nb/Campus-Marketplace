@@ -1,9 +1,12 @@
 import {
+  NOTIFICATION_DELIVERY_JOB_KIND,
+  NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION,
   PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
   PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION,
   type JobHandler,
 } from "@/lib/async/job-types";
 import { productReservationExpireHandler } from "@/lib/async/handlers/product-reservation-expire";
+import { notificationDeliveryHandler } from "@/lib/async/handlers/notification-delivery";
 
 /**
  * Phase 9A：AsyncJob runtime registry（§6 fail closed）。
@@ -13,9 +16,10 @@ import { productReservationExpireHandler } from "@/lib/async/handlers/product-re
  * schemaVersion）→ runner 以 PERMANENT failure → DEAD_LETTER 落库，
  * 禁止任何猜测执行。
  *
- * 9A 只注册 PRODUCT_RESERVATION_EXPIRE@1（§7）；EMAIL_DELIVERY /
- * RETENTION_CLEANUP / STATISTICS_REFRESH 等 9B/9C handler 在各自阶段
- * 注册，不需改 PostgreSQL enum。
+ * 9A 注册 PRODUCT_RESERVATION_EXPIRE@1（§7）；Phase 9B 新增
+ * NOTIFICATION_DELIVERY@1（§13：EMAIL 渠道投递，payload 仅 deliveryId）。
+ * RETENTION_CLEANUP / STATISTICS_REFRESH 等 9C handler 在各自阶段注册，
+ * 不需改 PostgreSQL enum。
  */
 
 type JobHandlerRegistry = Map<string, Map<number, JobHandler>>;
@@ -24,6 +28,10 @@ const jobHandlers: JobHandlerRegistry = new Map([
   [
     PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
     new Map([[PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION, productReservationExpireHandler]]),
+  ],
+  [
+    NOTIFICATION_DELIVERY_JOB_KIND,
+    new Map([[NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION, notificationDeliveryHandler]]),
   ],
 ]);
 

@@ -28,8 +28,20 @@ function txStub() {
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
       findUnique: vi.fn().mockResolvedValue({ id: "notification-1" }),
     },
+    user: {
+      findUnique: vi.fn().mockResolvedValue({ email: "rcpt@campus.test", erasedAt: null }),
+    },
+    notificationDelivery: {
+      createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUnique: vi.fn().mockResolvedValue({ id: "delivery-1", suppressedAt: new Date() }),
+    },
   } as unknown as Prisma.TransactionClient & {
     notification: {
+      createMany: ReturnType<typeof vi.fn>;
+      findUnique: ReturnType<typeof vi.fn>;
+    };
+    user: { findUnique: ReturnType<typeof vi.fn> };
+    notificationDelivery: {
       createMany: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
     };
@@ -58,6 +70,16 @@ describe("notification registry（contract layer）", () => {
   it("未知 kind / version 解析返回 null（fail closed）", () => {
     expect(resolveNotificationDefinition("NO_SUCH_KIND", 1)).toBeNull();
     expect(resolveNotificationDefinition(PRODUCT_RESERVATION_EXPIRED_KIND, 99)).toBeNull();
+  });
+
+  it("EMAIL 渠道 kind 必须注册 renderEmail（registry 完整性，§38）", () => {
+    for (const definition of listRegisteredNotificationDefinitions()) {
+      if (definition.channels.includes("EMAIL")) {
+        expect(definition.renderEmail, `${definition.kind} 缺少 renderEmail`).toBeTypeOf(
+          "function",
+        );
+      }
+    }
   });
 
   it("write-time validation：payload 未知键即 INVALID（strict，绝不 silently strip）", () => {

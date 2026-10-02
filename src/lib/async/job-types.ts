@@ -31,18 +31,40 @@ export const productReservationExpirePayloadSchema = z
 
 export type ProductReservationExpirePayload = z.infer<typeof productReservationExpirePayloadSchema>;
 
+/**
+ * Phase 9B（§13）：EMAIL 投递 job 意图。payload 只允许 deliveryId——
+ * AsyncJob 永不携带邮件地址/主题/正文/token（§7 红线）；投递的一切
+ * deterministic 输入（destination/sender/replyTo 快照、幂等键、模板）都
+ * 以 NotificationDelivery + canonical Notification 行为权威，由 handler
+ * 在执行边界 fresh 读取。
+ */
+export const NOTIFICATION_DELIVERY_JOB_KIND = "NOTIFICATION_DELIVERY";
+export const NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION = 1;
+
+export const notificationDeliveryPayloadSchema = z
+  .object({
+    deliveryId: z.string().min(1),
+  })
+  .strict();
+
+export type NotificationDeliveryPayload = z.infer<typeof notificationDeliveryPayloadSchema>;
+
 // ============================================================
 // RB04 纯契约层（writer 边界 + runtime 双层共用的单一事实源）：
 // 本文件只含 kind / schemaVersion / Zod schema，绝不 import handler——
 // repository（写边界）与 job-registry/handler（执行边界）均可安全消费。
 // ============================================================
 
-const JOB_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>(
-  [[
+const JOB_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>([
+  [
     PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
     new Map([[PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION, productReservationExpirePayloadSchema]]),
-  ]],
-);
+  ],
+  [
+    NOTIFICATION_DELIVERY_JOB_KIND,
+    new Map([[NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION, notificationDeliveryPayloadSchema]]),
+  ],
+]);
 
 export type AsyncIntentValidation =
   | { ok: true; payload: Prisma.InputJsonValue }

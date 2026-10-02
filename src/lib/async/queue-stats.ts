@@ -91,3 +91,46 @@ export async function getQueueStatsSnapshot(now = new Date()): Promise<QueueStat
     outbox: await getOutboxQueueStats(now),
   };
 }
+
+// ============================================================
+// Phase 9B（§81）：NOTIFICATION_DELIVERY 队列观测——无需独立 metrics
+// backend，直接基于 AsyncJob（kind = NOTIFICATION_DELIVERY）分组。
+// ============================================================
+
+export type NotificationDeliveryQueueStats = {
+  pending: number;
+  retry: number;
+  running: number;
+  deadLetter: number;
+  completed: number;
+  /** 最老 runnable（PENDING/RETRY）email job 的 age（毫秒；无 runnable = null） */
+  oldestRunnableAgeMs: number | null;
+};
+
+export async function getNotificationDeliveryQueueStats(
+  now = new Date(),
+): Promise<NotificationDeliveryQueueStats> {
+  const grouped = await prisma.asyncJob.groupBy({
+    by: ["status"],
+    where: { kind: "NOTIFICATION_DELIVERY" },
+    _count: { _all: true },
+  });
+  const countByStatus = new Map<string, number>(
+    grouped.map((row: { status: string } & CountOnly) => [row.status, row._count._all]),
+  );
+
+  const oldest = await prisma.asyncJob.findFirst({
+    where: { kind: "NOTIFICATION_DELIVERY", status: { in: ["PENDING", "RETRY"] } },
+    orderBy: { runAt: "asc" },
+    select: { runAt: true },
+  });
+
+  return {
+    pending: countByStatus.get("PENDING") ?? 0,
+    retry: countByStatus.get("RETRY") ?? 0,
+    running: countByStatus.get("RUNNING") ?? 0,
+    deadLetter: countByStatus.get("DEAD_LETTER") ?? 0,
+    completed: countByStatus.get("COMPLETED") ?? 0,
+    oldestRunnableAgeMs: ageMsFrom(oldest?.runAt ?? null, now),
+  };
+}

@@ -53,6 +53,17 @@ function extractServiceBlock(lines: string[], serviceName: string): string[] {
 }
 
 describe("Phase 9A async-worker 生产拓扑 gate", () => {
+  // Phase 9B（§48）：EMAIL 投递复用 async-worker——禁止新增 email-worker
+  // 容器（不允许出现无 release provenance 的第二 runner）。
+  it("Phase 9B：compose 不存在 email-worker / mail-worker 服务（EMAIL 复用 async-worker）", () => {
+    const serviceNames = stripComments(composeContent)
+      .map((line) => line.match(/^  ([a-z0-9-]+):$/)?.[1])
+      .filter((name): name is string => Boolean(name));
+    expect(serviceNames).toContain("async-worker");
+    expect(serviceNames).not.toContain("email-worker");
+    expect(serviceNames).not.toContain("mail-worker");
+  });
+
   it("compose.production.yml 恰好声明一个 async-worker 服务", () => {
     const serviceDeclarations = stripComments(composeContent).filter(
       (line) => line === "  async-worker:",
