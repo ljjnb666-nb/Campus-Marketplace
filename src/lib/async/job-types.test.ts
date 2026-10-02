@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { getFieldPrivacyPolicy } from "@/lib/privacy/privacy-data-registry";
 import {
   classifyJobFailure,
   jobErrorCode,
@@ -26,15 +27,48 @@ describe("Phase 9A job failure 分类与错误消毒（§17/§18）", () => {
     expect(jobErrorCode("no error object")).toBe("UNKNOWN");
   });
 
-  it("sanitized message：只取首行、去控制字符、截断 <= 500（full stack 绝不入库）", () => {
-    const multiline = "first line\nsecond line\r\npwd=hunter2";
-    expect(jobErrorMessage(multiline)).toBe("first line");
+  it("RB02 ERR-SAFE：raw exception message 默认拒绝落库（固定 generic message）", () => {
+    // 秘密格式无限 → 不做正则黑名单，DENY raw message BY DEFAULT
+    const leaky = new Error("password=super-secret jwt=abc.def.ghi user note=私密内容");
+    expect(jobErrorMessage(leaky)).toBe("异步任务执行失败");
+    expect(jobErrorMessage(leaky)).not.toContain("super-secret");
+    expect(jobErrorMessage(leaky)).not.toContain("abc.def.ghi");
+    expect(jobErrorMessage(leaky)).not.toContain("私密内容");
+    expect(jobErrorMessage("plain string failure")).toBe("异步任务执行失败");
+    expect(jobErrorMessage(undefined)).toBe("异步任务执行失败");
+  });
 
-    const withControlChars = "bad\u0000\u001fmessage";
-    expect(jobErrorMessage(withControlChars)).toBe("bad  message");
+  it("RB02 ERR-SAFE：PermanentJobFailure 受控内部文案允许（仍消毒：首行 / 控制字符 / <=500）", () => {
+    const controlled = new PermanentJobFailure(
+      "PRODUCT_RESERVATION_STRUCTURAL_INVALID",
+      "PRODUCT reservation target invalid: order-1",
+    );
+    expect(jobErrorMessage(controlled)).toBe("PRODUCT reservation target invalid: order-1");
 
-    const long = "x".repeat(800);
-    expect(jobErrorMessage(long)).toHaveLength(500);
+    const multilineControlled = new PermanentJobFailure(
+      "X",
+      "first line\nstack-ish line",
+    );
+    expect(jobErrorMessage(multilineControlled)).toBe("first line");
+
+    const longControlled = new PermanentJobFailure("X", "y".repeat(800));
+    expect(jobErrorMessage(longControlled)).toHaveLength(500);
+  });
+
+  it("RB02 privacy registry：async error 元数据 = OPERATOR_ONLY / EXCLUDE（machine-only 声明成立）", () => {
+    for (const [model, field] of [
+      ["AsyncJob", "lastErrorCode"],
+      ["AsyncJob", "lastErrorMessage"],
+      ["OutboxEvent", "lastErrorCode"],
+      ["OutboxEvent", "lastErrorMessage"],
+    ] as const) {
+      const policy = getFieldPrivacyPolicy(model, field);
+      expect(policy, `${model}.${field} 必须有显式分类`).not.toBeNull();
+      expect(policy!.classification).toBe("OPERATOR_ONLY");
+      expect(policy!.selfExport).toBe("EXCLUDE");
+      expect(policy!.secondaryCopyAllowed).toBe(false);
+      expect(policy!.logSafe).toBe(false);
+    }
   });
 
   it("PRODUCT_RESERVATION_EXPIRE payload 冻结形状：仅 { orderId: string }", () => {

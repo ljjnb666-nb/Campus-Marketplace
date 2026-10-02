@@ -97,18 +97,37 @@ export function jobErrorCode(error: unknown): string {
 }
 
 /**
- * sanitized error message（§18）：仅首行、去控制字符、截断到 500。
- * 完整 stack 走结构化应用日志，绝不写入 job DB 行（严禁 JWT / password /
- * SMTP password / raw provider payload / user free text 入库）。
+ * RB02 安全合同（DENY RAW EXCEPTION MESSAGE BY DEFAULT）：
+ *
+ * `lastErrorMessage` 必须是 SAFE MACHINE DIAGNOSTIC ONLY——绝不允许任意
+ * exception text 落库。秘密格式无限（JWT/password/SMTP secret/provider
+ * response/user free text），secret regex 黑名单不可能穷尽，因此唯一防线是：
+ *
+ *   DENY raw error.message by default
+ *   ALLOW controlled internal message only
+ *
+ * - PermanentJobFailure：message 由内部代码自行生成的受控文案（可含 orderId
+ *   等机器 ID）→ 允许，但仍经消毒（首行 / 去控制字符 / <=500）；
+ * - 其余一切（unknown / retryable exception）→ 固定 generic message；
+ *   机器诊断依赖 lastErrorCode，完整技术细节走结构化应用日志（且日志同样
+ *   只写 errorName/errorCode，不写 message/stack/payload）。
  */
-export function jobErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
+export const GENERIC_JOB_FAILURE_MESSAGE = "异步任务执行失败";
+
+function sanitizeControlledMessage(raw: string): string {
   const firstLine = raw.split("\n", 1)[0] ?? "";
   return firstLine
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .trim()
     .slice(0, MAX_LAST_ERROR_MESSAGE_LENGTH);
+}
+
+export function jobErrorMessage(error: unknown): string {
+  if (error instanceof PermanentJobFailure) {
+    return sanitizeControlledMessage(error.message);
+  }
+  return GENERIC_JOB_FAILURE_MESSAGE;
 }
 
 /** 分类入口：PermanentJobFailure → PERMANENT；未知异常 → RETRYABLE（§17）。 */

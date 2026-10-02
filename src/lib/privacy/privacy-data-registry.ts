@@ -250,6 +250,16 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("Appeal", "decisionNote", OPERATOR_ONLY_FIELD),
   // ---- Notification：derived ephemeral，绝不做 free text 第二权威副本 ----
   field("Notification", "content", entry("DERIVED_EPHEMERAL", "INCLUDE", "DELETE", false, false)),
+  // ---- Phase 9A：async 基础设施错误诊断元数据 ----
+  // RB02 修复后 machine-only 声明才真正成立：lastErrorMessage 经
+  // DENY-BY-DEFAULT 安全合同（仅受控内部文案 / 固定 generic message 落库，
+  // raw exception text 默认拒绝），lastErrorCode 为安全机器码。
+  // 两者均为 operator 专用诊断面：绝不 self-export、绝不作为第二副本进入
+  // 日志（结构化日志只写 errorName/errorCode）；行保留为执行 provenance。
+  field("AsyncJob", "lastErrorCode", OPERATOR_ONLY_FIELD),
+  field("AsyncJob", "lastErrorMessage", OPERATOR_ONLY_FIELD),
+  field("OutboxEvent", "lastErrorCode", OPERATOR_ONLY_FIELD),
+  field("OutboxEvent", "lastErrorMessage", OPERATOR_ONLY_FIELD),
   // ---- Order ----
   field("Order", "note", USER_CONTENT_FIELD),
   field("Order", "cancelReason", USER_CONTENT_FIELD),

@@ -85,12 +85,19 @@ export function outboxEventErrorCode(error: unknown): string {
   return "UNKNOWN";
 }
 
+/**
+ * RB02 安全合同（与 jobErrorMessage 同一原则）：raw exception message 默认
+ * 拒绝落库；仅 PermanentJobFailure 的受控内部文案允许（仍消毒 <=500）。
+ * 机器诊断依赖 lastErrorCode；完整细节只进结构化应用日志（errorName/code）。
+ */
 export function outboxEventErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  const firstLine = raw.split("\n", 1)[0] ?? "";
-  return firstLine
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .trim()
-    .slice(0, 500);
+  if (error instanceof PermanentJobFailure) {
+    const firstLine = error.message.split("\n", 1)[0] ?? "";
+    return firstLine
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .trim()
+      .slice(0, 500);
+  }
+  return "异步事件处理失败";
 }
