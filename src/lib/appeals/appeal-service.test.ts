@@ -9,7 +9,8 @@ const {
   txAppealUpdate,
   txQueryRaw,
   acquireGovernanceSubjectLock,
-  createNotification,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loggerWarn,
 } = vi.hoisted(() => ({
   withTransactionMock: vi.fn(),
@@ -20,7 +21,9 @@ const {
   txAppealUpdate: vi.fn(),
   txQueryRaw: vi.fn(),
   acquireGovernanceSubjectLock: vi.fn(),
-  createNotification: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loggerWarn: vi.fn(),
 }));
 
@@ -31,10 +34,6 @@ vi.mock("@/lib/prisma", () => ({
 
 vi.mock("@/lib/governance/governance-lock", () => ({
   acquireGovernanceSubjectLock,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -56,6 +55,11 @@ const txStub = {
   user: { findUnique: txUserFindUnique },
   appeal: { findUnique: txAppealFindUnique, create: txAppealCreate, update: txAppealUpdate },
   $queryRaw: txQueryRaw,
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
+  },
 };
 
 beforeEach(() => {
@@ -68,7 +72,8 @@ beforeEach(() => {
     txAppealUpdate,
     txQueryRaw,
     acquireGovernanceSubjectLock,
-    createNotification,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     loggerWarn,
   ]) {
     fn.mockReset();
@@ -85,7 +90,9 @@ beforeEach(() => {
     enforcementActionId: EA_ID,
     status: "WITHDRAWN",
   });
-  createNotification.mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   withTransactionMock.mockImplementation(
     async (cb: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
       cb(txStub as unknown as Prisma.TransactionClient),
@@ -124,10 +131,18 @@ describe("submitAppeal（USER target 锁先于最终资格读；唯一约束为�
         reviewDueAt: expect.any(Date),
       },
     });
-    expect(createNotification).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    // Phase 9B：canonical APPEAL_SUBMITTED 通知（post-commit best-effort）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
       userId: TARGET_ID,
+      orderId: null,
       type: "SYSTEM",
-    }));
+      title: "已收到你的申诉",
+      content: "你提交的申诉已进入平台审核流程，审核结果将通过站内消息通知你。",
+      dedupeKey: `APPEAL_SUBMITTED:ap-new:${TARGET_ID}`,
+      kind: "APPEAL_SUBMITTED",
+      payload: { appealId: "ap-new" },
+    });
   });
 
   it("statement trim 后为空或超过 2000 字 → APPEAL_NOT_ALLOWED（不进入事务写路径）", async () => {
@@ -244,7 +259,7 @@ describe("submitAppeal（USER target 锁先于最终资格读；唯一约束为�
       .mockResolvedValueOnce({ targetId: TARGET_ID })
       .mockResolvedValue({ id: EA_ID, type: "ACCOUNT_SUSPEND", targetId: TARGET_ID });
     txUserFindUnique.mockResolvedValue({ deletedAt: null, erasedAt: null });
-    createNotification.mockRejectedValue(new Error("notification-down"));
+    txNotificationCreateMany.mockRejectedValue(new Error("notification-down"));
 
     const { appeal } = await submitAppeal({
       callerUserId: TARGET_ID,

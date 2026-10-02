@@ -1,29 +1,33 @@
 import type { Prisma } from "@prisma/client";
 
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { PRODUCT_RESERVATION_EXPIRED_KIND } from "@/lib/notifications/notification-registry";
 import {
   parseOutboxEventPayload,
-  PRODUCT_RESERVATION_EXPIRED_BUYER_CONTENT,
   PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION,
   PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE,
-  PRODUCT_RESERVATION_EXPIRED_NOTIFICATION_TITLE,
-  PRODUCT_RESERVATION_EXPIRED_SELLER_CONTENT,
   productReservationExpiredEventPayloadSchema,
   type ClaimedOutboxEvent,
 } from "@/lib/async/outbox-event-registry";
 import { PermanentJobFailure } from "@/lib/async/job-types";
 
 /**
- * Phase 9A：PRODUCT_RESERVATION_EXPIRED@1 materializer（§27/§28/§60）。
+ * PRODUCT_RESERVATION_EXPIRED@1 materializer。
  *
- * 在 dispatcher 的单事务内执行（副作用与 PUBLISHED 同一 COMMIT）：
- * 订单聚合 → 恰好两条 In-App 通知（buyer / seller 固定中文文案；继续
- * 禁止 Product title / note / meetingLocation 等 user-authored 内容）。
+ * Phase 9A（§27/§28/§60）：OutboxEvent → 幂等派生面（In-App 通知）。
+ * Phase 9B（§21）：派生面收敛到 canonical notification domain——
+ * emitNotificationsTx 在 dispatcher 的单事务内执行（副作用与 PUBLISHED
+ * 同一 COMMIT），并按 registry 渠道策略物化渠道投递意图（9B：EMAIL
+ * NotificationDelivery + NOTIFICATION_DELIVERY AsyncJob，与 IN_APP 投影
+ * 同事务原子落盘）。OutboxEvent PUBLISHED = notification intents 已
+ * durably materialized，不表示 email 已投递（后者由 EMAIL job 的
+ * providerAcceptedAt 表达）。
  *
  * 幂等由 DB 级保证（§28）：Notification.dedupeKey =
- *   OUTBOX:<eventId>:IN_APP:<userId>（UNIQUE）+ createMany skipDuplicates——
- * 并发 materialize / 重放（crash after commit 后的重试路径等）绝不产生
- * 重复行；绝不允许只靠 findFirst-then-create。
+ *   OUTBOX:<eventId>:IN_APP:<userId>（UNIQUE，9A 键不变）+ createMany
+ *   skipDuplicates——并发 materialize / 重放（crash after commit 后的重试
+ *   路径等）绝不产生重复行/重复 delivery/重复 job（§67）；绝不允许只靠
+ *   findFirst-then-create。
  */
 export const productReservationExpiredEventHandler = async (
   tx: Prisma.TransactionClient,
@@ -47,24 +51,22 @@ export const productReservationExpiredEventHandler = async (
     throw new PermanentReservationEventAggregateMissingError(payload.orderId);
   }
 
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: PRODUCT_RESERVATION_EXPIRED_KIND,
+      recipientUserId: order.buyerId,
       orderId: payload.orderId,
-      type: "ORDER",
-      title: PRODUCT_RESERVATION_EXPIRED_NOTIFICATION_TITLE,
-      content: PRODUCT_RESERVATION_EXPIRED_BUYER_CONTENT,
       dedupeKey: `OUTBOX:${event.id}:IN_APP:${order.buyerId}`,
       sourceEventId: event.id,
+      payload: { orderId: payload.orderId, buyerId: order.buyerId, sellerId: order.sellerId },
     },
     {
-      userId: order.sellerId,
+      kind: PRODUCT_RESERVATION_EXPIRED_KIND,
+      recipientUserId: order.sellerId,
       orderId: payload.orderId,
-      type: "ORDER",
-      title: PRODUCT_RESERVATION_EXPIRED_NOTIFICATION_TITLE,
-      content: PRODUCT_RESERVATION_EXPIRED_SELLER_CONTENT,
       dedupeKey: `OUTBOX:${event.id}:IN_APP:${order.sellerId}`,
       sourceEventId: event.id,
+      payload: { orderId: payload.orderId, buyerId: order.buyerId, sellerId: order.sellerId },
     },
   ]);
 };

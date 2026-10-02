@@ -4,7 +4,6 @@ import { Prisma } from "@prisma/client";
 const {
   revalidatePath,
   requireUser,
-  createNotifications,
   checkTimeConflict,
   transactionMock,
   txRentalListingFindFirst,
@@ -33,6 +32,8 @@ const {
   txDisputeCreate,
   txDisputeFindFirst,
   txDataHoldCreate,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => {
   const txExecuteRaw = vi.fn();
   const txUserFindMany = vi.fn();
@@ -61,6 +62,9 @@ const {
   const txDisputeCreate = vi.fn();
   const txDisputeFindFirst = vi.fn();
   const txDataHoldCreate = vi.fn();
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  const txNotificationCreateMany = vi.fn();
+  const txNotificationFindUnique = vi.fn();
 
   const transactionClient = {
     $queryRaw: txQueryRaw,
@@ -104,12 +108,16 @@ const {
       count: txRentalReviewCount,
       updateMany: txRentalReviewUpdateMany,
     },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
 
   return {
     revalidatePath: vi.fn(),
     requireUser: vi.fn(),
-    createNotifications: vi.fn(),
     checkTimeConflict: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
@@ -141,6 +149,8 @@ const {
     txDisputeCreate,
     txDisputeFindFirst,
     txDataHoldCreate,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
   };
 });
 
@@ -170,10 +180,6 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 vi.mock("@/repositories/rental-order-repository", () => ({
@@ -307,7 +313,6 @@ describe("rental-order actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    createNotifications.mockReset();
     checkTimeConflict.mockReset();
     transactionMock.mockClear();
     txRentalListingFindFirst.mockReset();
@@ -348,16 +353,20 @@ describe("rental-order actions", () => {
     prismaReturnFindUnique.mockReset().mockResolvedValue(null);
 
     requireUser.mockResolvedValue({ id: "user-renter" });
-    createNotifications.mockResolvedValue(undefined);
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
     checkTimeConflict.mockResolvedValue({ available: true });
     txRentalOrderUpdate.mockResolvedValue({});
     txRentalOrderStatusLogCreate.mockResolvedValue({});
     txUserUpdate.mockResolvedValue({});
     txRentalDamageClaimUpdate.mockResolvedValue({});
-    txExtensionRequestCreate.mockResolvedValue({});
+    txExtensionRequestCreate.mockResolvedValue({ id: "ext-new" });
     txExtensionRequestUpdate.mockResolvedValue({});
-    txDamageClaimCreate.mockResolvedValue({});
-    txDisputeCreate.mockResolvedValue({});
+    // Phase 9B：emitNotificationTx payload 需要真实 id（claimId/disputeId 进
+    // strict schema + dedupeKey），stub 必须返回 id
+    txDamageClaimCreate.mockResolvedValue({ id: "claim-new" });
+    txDisputeCreate.mockResolvedValue({ id: "dispute-1" });
     // Phase 7G：默认无 active dispute、hold 创建成功
     txDisputeFindFirst.mockResolvedValue(null);
     txDataHoldCreate.mockResolvedValue({ id: "hold-1" });
@@ -493,7 +502,18 @@ describe("rental-order actions", () => {
     expect(result.success).toBe(true);
     expect(result.redirectTo).toBe("/rental-orders/order-1");
     expect(txRentalOrderCreate).toHaveBeenCalled();
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical RENTAL_ORDER_REQUESTED 通知发给 owner
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-owner",
+      orderId: null,
+      type: "RENTAL",
+      title: "收到新的租赁申请",
+      content: "你的出租物品收到新的租赁申请，请前往出租订单中心处理。",
+      dedupeKey: "RENTAL_ORDER_REQUESTED:order-1:user-owner",
+      kind: "RENTAL_ORDER_REQUESTED",
+      payload: { orderId: "order-1" },
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/my/rental-orders");
   });
 
@@ -730,10 +750,18 @@ describe("rental-order actions", () => {
         }),
       }),
     );
-    expect(createNotifications).toHaveBeenCalledWith(
-      expect.anything(),
-      [expect.objectContaining({ title: "索赔被拒绝" })],
-    );
+    // Phase 9B：canonical RENTAL_DAMAGE_CLAIM_RESPONDED 通知发给 owner（固定文案，无自由文本）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-owner",
+      orderId: null,
+      type: "RENTAL",
+      title: "索赔被拒绝",
+      content: "租客拒绝了损坏索赔。",
+      dedupeKey: "RENTAL_DAMAGE_CLAIM_RESPONDED:claim-1:user-owner",
+      kind: "RENTAL_DAMAGE_CLAIM_RESPONDED",
+      payload: { orderId: "order-1", claimId: "claim-1", agreed: false },
+    });
     expect(txUserUpdate).toHaveBeenCalledTimes(2);
   });
 
@@ -858,7 +886,18 @@ describe("rental-order actions", () => {
         cancellationNote: "物品已损坏",
       }),
     });
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical RENTAL_ORDER_REJECTED 通知发给 renter
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-renter",
+      orderId: null,
+      type: "RENTAL",
+      title: "租赁申请被拒绝",
+      content: "你的租赁申请未通过，请前往订单详情查看。",
+      dedupeKey: "RENTAL_ORDER_REJECTED:order-1:user-renter",
+      kind: "RENTAL_ORDER_REJECTED",
+      payload: { orderId: "order-1" },
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/rental-orders/order-1");
   });
 
@@ -893,10 +932,18 @@ describe("rental-order actions", () => {
       where: { id: "order-1" },
       data: { status: "PENDING_RETURN" },
     });
-    expect(createNotifications).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.arrayContaining([expect.objectContaining({ userId: "user-owner" })]),
-    );
+    // Phase 9B：canonical RENTAL_RETURN_REQUESTED 通知发给 owner
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-owner",
+      orderId: null,
+      type: "RENTAL",
+      title: "租客请求归还",
+      content: "租客已请求归还物品，请确认。",
+      dedupeKey: "RENTAL_RETURN_REQUESTED:order-1:user-owner",
+      kind: "RENTAL_RETURN_REQUESTED",
+      payload: { orderId: "order-1" },
+    });
   });
 
   it("rejects return requests from users outside the order", async () => {
@@ -1145,7 +1192,18 @@ describe("rental-order actions", () => {
       where: { id: "ext-1", status: "PENDING" },
       data: { status: "REJECTED" },
     });
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical RENTAL_EXTENSION_REJECTED 通知发给 renter
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-renter",
+      orderId: null,
+      type: "RENTAL",
+      title: "续租请求被拒绝",
+      content: "你的续租请求被拒绝。",
+      dedupeKey: "RENTAL_EXTENSION_REJECTED:ext-1:user-renter",
+      kind: "RENTAL_EXTENSION_REJECTED",
+      payload: { orderId: "order-1", extensionRequestId: "ext-1" },
+    });
   });
 
   it("submits a damage claim for a pending-inspection order", async () => {
@@ -1173,7 +1231,18 @@ describe("rental-order actions", () => {
         requestedDeduction: new Prisma.Decimal("80"),
       }),
     });
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical RENTAL_DAMAGE_CLAIM_FILED 通知发给 renter
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-renter",
+      orderId: null,
+      type: "RENTAL",
+      title: "收到损坏索赔",
+      content: "出租者提交了损坏索赔请求，请尽快处理。",
+      dedupeKey: "RENTAL_DAMAGE_CLAIM_FILED:claim-new:user-renter",
+      kind: "RENTAL_DAMAGE_CLAIM_FILED",
+      payload: { orderId: "order-1", claimId: "claim-new" },
+    });
   });
 
   it("rejects damage claims larger than the deposit", async () => {

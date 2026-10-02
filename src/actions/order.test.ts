@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   revalidatePath,
   requireUser,
-  createNotifications,
   productFindFirst,
   serviceListingFindFirst,
   orderFindFirst,
@@ -21,6 +20,8 @@ const {
   txOrderFindFirst,
   txErrandTaskUpdateMany,
   txAsyncJobCreateMany,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   setProductLockRow,
   errandLockRowHolder,
   orderLockRowHolder,
@@ -38,6 +39,9 @@ const {
   const txErrandTaskUpdateMany = vi.fn();
   // Phase 9A：createProductOrderTx 在同事务写入 expiry durable intent
   const txAsyncJobCreateMany = vi.fn();
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  const txNotificationCreateMany = vi.fn();
+  const txNotificationFindUnique = vi.fn();
   const orderFindUnique = vi.fn();
   // Product 行锁返回行（默认 = 创建路径的 ACTIVE 行；取消路径测试
   // 通过 setProductLockRow 切换为 RESERVED 投影行）
@@ -144,12 +148,16 @@ const {
     listingModeration: {
       findFirst: vi.fn(async () => null),
     },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
 
   return {
     revalidatePath: vi.fn(),
     requireUser: vi.fn(),
-    createNotifications: vi.fn(),
     productFindFirst: vi.fn(),
     serviceListingFindFirst: vi.fn(),
     orderFindFirst: vi.fn(),
@@ -169,6 +177,8 @@ const {
     txUserFindMany,
     txErrandTaskUpdateMany,
     txAsyncJobCreateMany,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     setProductLockRow,
     errandLockRowHolder,
     orderLockRowHolder,
@@ -181,10 +191,6 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 const { completeErrandOrderTxMock } = vi.hoisted(() => ({
@@ -240,7 +246,6 @@ describe("order actions", () => {
   beforeEach(() => {
     revalidatePath.mockReset();
     requireUser.mockReset();
-    createNotifications.mockReset();
     productFindFirst.mockReset();
     serviceListingFindFirst.mockReset();
     orderFindFirst.mockReset();
@@ -275,6 +280,9 @@ describe("order actions", () => {
     txUserUpdate.mockReset();
     txErrandTaskUpdateMany.mockReset().mockResolvedValue({ count: 1 });
     txAsyncJobCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
     txProductUpdateMany.mockResolvedValue({ count: 1 });
@@ -363,7 +371,7 @@ describe("order actions", () => {
       data: { status: "RESERVED" },
     });
     expect(txOrderCreate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("cancels a pending product order and restores the product status", async () => {
@@ -408,7 +416,21 @@ describe("order actions", () => {
       where: { id: "product-1" },
       data: { status: "ACTIVE" },
     });
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical CANCELLED 通知 = buyer + seller 各一条 ORDER_STATUS_CHANGED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: "order-1",
+      type: "ORDER",
+      title: "订单状态更新：已取消",
+      dedupeKey: "ORDER_STATUS_CHANGED:order-1:CANCELLED:user-1",
+      kind: "ORDER_STATUS_CHANGED",
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "seller-1",
+      orderId: "order-1",
+      dedupeKey: "ORDER_STATUS_CHANGED:order-1:CANCELLED:seller-1",
+    });
     // canonical 参与方锁路径：buyer + seller 两把 sorted advisory 锁
     expect(txExecuteRaw).toHaveBeenCalledTimes(2);
     expect(revalidatePath).toHaveBeenCalledWith("/my/orders");
@@ -444,13 +466,27 @@ describe("order actions", () => {
         paymentStatus: "OFFLINE_PENDING",
       }),
     });
-    expect(createNotifications).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.arrayContaining([
-        expect.objectContaining({ userId: "user-1" }),
-        expect.objectContaining({ userId: "seller-1" }),
-      ]),
-    );
+    // Phase 9B：canonical 通知 = buyer + seller 各一条 PRODUCT_ORDER_CREATED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: "order-new",
+      type: "ORDER",
+      title: "购买申请已提交",
+      content: "你的商品购买申请已提交，等待卖家确认。",
+      dedupeKey: "PRODUCT_ORDER_CREATED:order-new:user-1",
+      kind: "PRODUCT_ORDER_CREATED",
+      payload: { orderId: "order-new", buyerId: "user-1", sellerId: "seller-1" },
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "seller-1",
+      orderId: "order-new",
+      type: "ORDER",
+      title: "收到新的商品订单",
+      content: "有同学提交了你的商品购买申请，请尽快确认订单状态。",
+      dedupeKey: "PRODUCT_ORDER_CREATED:order-new:seller-1",
+      kind: "PRODUCT_ORDER_CREATED",
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/products/product-1");
   });
 
@@ -526,7 +562,23 @@ describe("order actions", () => {
         serviceListingId: "service-1",
       }),
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    // Phase 9B：canonical 通知 = buyer + provider 各一条 SERVICE_ORDER_CREATED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: "order-new",
+      type: "ORDER",
+      title: "服务预约已提交",
+      dedupeKey: "SERVICE_ORDER_CREATED:order-new:user-1",
+      kind: "SERVICE_ORDER_CREATED",
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "provider-1",
+      orderId: "order-new",
+      title: "收到新的服务预约",
+      dedupeKey: "SERVICE_ORDER_CREATED:order-new:provider-1",
+      kind: "SERVICE_ORDER_CREATED",
+    });
   });
 
   it("rejects service orders for missing services or own services", async () => {
@@ -598,7 +650,21 @@ describe("order actions", () => {
           }),
         }),
       );
-      expect(createNotifications).toHaveBeenCalled();
+      // Phase 9B：canonical ACCEPTED 通知 = buyer + seller 各一条 ORDER_STATUS_CHANGED
+      expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+      expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+        userId: "buyer-1",
+        orderId: "order-1",
+        type: "ORDER",
+        title: "订单状态更新：已接单",
+        dedupeKey: "ORDER_STATUS_CHANGED:order-1:ACCEPTED:buyer-1",
+        kind: "ORDER_STATUS_CHANGED",
+      });
+      expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+        userId: "user-1",
+        orderId: "order-1",
+        dedupeKey: "ORDER_STATUS_CHANGED:order-1:ACCEPTED:user-1",
+      });
       // pair 锁 + Order 行锁 + deadline 内 accept（无 Product 写）
       expect(txExecuteRaw).toHaveBeenCalledTimes(2);
       expect(txProductUpdate).not.toHaveBeenCalled();
@@ -722,7 +788,21 @@ describe("order actions", () => {
         data: { status: "IN_PROGRESS" },
       });
       // canonical 通知（与详情页同集合，禁止入口路径依赖）
-      expect(createNotifications).toHaveBeenCalledTimes(1);
+      // Phase 9B：canonical = publisher + accepter 各一条 ERRAND_TASK_STATUS_CHANGED
+      expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+      expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+        userId: "buyer-1",
+        orderId: "order-1",
+        type: "ORDER",
+        title: "跑腿任务状态更新：进行中",
+        dedupeKey: "ERRAND_TASK_STATUS_CHANGED:order-1:IN_PROGRESS:buyer-1",
+        kind: "ERRAND_TASK_STATUS_CHANGED",
+      });
+      expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+        userId: "user-1",
+        orderId: "order-1",
+        dedupeKey: "ERRAND_TASK_STATUS_CHANGED:order-1:IN_PROGRESS:user-1",
+      });
       expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
     });
 
@@ -774,7 +854,7 @@ describe("order actions", () => {
       await updateOrderStatus(statusFormData("ACCEPTED"));
 
       expect(txProductUpdate).not.toHaveBeenCalled();
-      expect(createNotifications).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
     });
 
     it("ignores illegal transitions", async () => {

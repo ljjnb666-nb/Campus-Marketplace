@@ -1,5 +1,7 @@
 import type { Prisma } from "@prisma/client";
-import { createNotifications } from "@/repositories/notification-repository";
+
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ERRAND_ORDER_COMPLETED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * ERRAND 订单完成的唯一权威实现（exactly-once）。
@@ -64,20 +66,20 @@ export async function completeErrandOrderTx(
     data: { completedOrdersCount: { increment: 1 } },
   });
 
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: input.buyerId,
+      kind: ERRAND_ORDER_COMPLETED_KIND,
+      recipientUserId: input.buyerId,
       orderId: input.orderId,
-      type: "ORDER",
-      title: "跑腿订单已完成",
-      content: "跑腿任务已确认完成，订单正式结算归档。",
+      dedupeKey: `${ERRAND_ORDER_COMPLETED_KIND}:${input.orderId}:${input.buyerId}`,
+      payload: { orderId: input.orderId },
     },
     {
-      userId: input.sellerId,
+      kind: ERRAND_ORDER_COMPLETED_KIND,
+      recipientUserId: input.sellerId,
       orderId: input.orderId,
-      type: "ORDER",
-      title: "跑腿订单已完成",
-      content: "跑腿任务已确认完成，订单正式结算归档。",
+      dedupeKey: `${ERRAND_ORDER_COMPLETED_KIND}:${input.orderId}:${input.sellerId}`,
+      payload: { orderId: input.orderId },
     },
   ]);
 

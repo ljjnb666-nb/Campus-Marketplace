@@ -5,7 +5,6 @@ const {
   revalidatePath,
   requireUser,
   containsBannedKeyword,
-  createNotifications,
   userFindUnique,
   errandCategoryFindUnique,
   errandTaskCreate,
@@ -21,6 +20,8 @@ const {
   txUserUpdate,
   txExecuteRaw,
   txUserFindMany,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   errandRowHolder,
   activeOrderRowsHolder,
 } = vi.hoisted(() => {
@@ -35,6 +36,9 @@ const {
   const txUserUpdate = vi.fn();
   const txErrandTaskCreate = vi.fn();
   const errandTaskFindFirst = vi.fn();
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  const txNotificationCreateMany = vi.fn();
+  const txNotificationFindUnique = vi.fn();
 
   // AUDIT2-RB02：状态/编辑/删除走 canonical lifecycle 的 $queryRaw 行权威——
   // ErrandTask candidate discovery + FOR UPDATE 与 active Order FOR UPDATE
@@ -95,6 +99,11 @@ const {
     listingModeration: {
       findFirst: vi.fn(async () => null),
     },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
     $executeRaw: txExecuteRaw,
   };
 
@@ -105,7 +114,6 @@ const {
     revalidatePath: vi.fn(),
     requireUser: vi.fn(),
     containsBannedKeyword: vi.fn(),
-    createNotifications: vi.fn(),
     userFindUnique: vi.fn(),
     errandCategoryFindUnique: vi.fn(),
     errandTaskCreate: txErrandTaskCreate,
@@ -123,6 +131,8 @@ const {
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     errandRowHolder,
     activeOrderRowsHolder,
   };
@@ -155,10 +165,6 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/lib/moderation", () => ({
   containsBannedKeyword,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -221,7 +227,6 @@ describe("errand actions", () => {
     revalidatePath.mockReset();
     requireUser.mockReset();
     containsBannedKeyword.mockReset();
-    createNotifications.mockReset();
     userFindUnique.mockReset();
     errandCategoryFindUnique.mockReset();
     errandTaskCreate.mockReset();
@@ -241,6 +246,10 @@ describe("errand actions", () => {
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     txErrandTaskUpdateMany.mockResolvedValue({ count: 1 });
     txOrderUpdateMany.mockResolvedValue({ count: 1 });
+
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
 
     // canonical lifecycle 行权威默认行（claim 路径契约不变）
     errandRowHolder.row = {
@@ -316,7 +325,7 @@ describe("errand actions", () => {
     expect(transactionMock).not.toHaveBeenCalled();
     expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
     expect(txOrderCreate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("does not create an order when the claim loses the race inside the transaction", async () => {
@@ -348,7 +357,7 @@ describe("errand actions", () => {
       },
     });
     expect(txOrderCreate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
     expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
   });
 
@@ -368,7 +377,7 @@ describe("errand actions", () => {
     expect(transactionMock).toHaveBeenCalled();
     expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
     expect(txOrderUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("allows the publisher to reopen a newly claimed errand and cancel the accepted order", async () => {
@@ -401,7 +410,22 @@ describe("errand actions", () => {
         cancelReason: "发布者撤销接单",
       },
     });
-    expect(createNotifications).toHaveBeenCalled();
+    // Phase 9B：canonical 通知 = 每个接收者一条 ERRAND_TASK_STATUS_CHANGED（OPEN）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: "order-1",
+      type: "ORDER",
+      title: "跑腿任务状态更新：待接单",
+      content: "当前跑腿任务状态已更新为“待接单”，请前往订单中心查看。",
+      dedupeKey: "ERRAND_TASK_STATUS_CHANGED:order-1:OPEN:user-1",
+      kind: "ERRAND_TASK_STATUS_CHANGED",
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "runner-1",
+      orderId: "order-1",
+      dedupeKey: "ERRAND_TASK_STATUS_CHANGED:order-1:OPEN:runner-1",
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
     expect(revalidatePath).toHaveBeenCalledWith("/my/orders");
   });
@@ -541,13 +565,27 @@ describe("errand actions", () => {
         errandTaskId: "errand-1",
       }),
     });
-    expect(createNotifications).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.arrayContaining([
-        expect.objectContaining({ userId: "publisher-1" }),
-        expect.objectContaining({ userId: "user-1" }),
-      ]),
-    );
+    // Phase 9B：canonical claim 通知 = publisher + claimer 各一条 ERRAND_ORDER_CLAIMED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "publisher-1",
+      orderId: "order-1",
+      type: "ORDER",
+      title: "跑腿任务已被接单",
+      content: "你的跑腿任务已有同学接单，可以前往订单中心继续跟进。",
+      dedupeKey: "ERRAND_ORDER_CLAIMED:order-1:publisher-1",
+      kind: "ERRAND_ORDER_CLAIMED",
+      payload: { orderId: "order-1", publisherId: "publisher-1", claimerId: "user-1" },
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: "order-1",
+      type: "ORDER",
+      title: "你已接下跑腿任务",
+      content: "接单成功，请尽快与发布者沟通并推进任务。",
+      dedupeKey: "ERRAND_ORDER_CLAIMED:order-1:user-1",
+      kind: "ERRAND_ORDER_CLAIMED",
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/errands/errand-1");
   });
 
@@ -651,14 +689,12 @@ describe("errand actions", () => {
       where: { id: "runner-1" },
       data: { completedOrdersCount: { increment: 1 } },
     });
-    // canonical 完成通知：每个接收者恰好一条，无重复
-    const completionCalls = createNotifications.mock.calls.filter((call) =>
-      (call[1] as Array<{ title?: string }>).some((p) => p.title === "跑腿订单已完成"),
-    );
-    expect(completionCalls).toHaveLength(1);
-    const payloads = completionCalls[0][1] as Array<{ userId: string }>;
-    expect(payloads).toHaveLength(2);
-    expect(payloads.map((p) => p.userId).sort()).toEqual(["runner-1", "user-1"]);
+    // canonical 完成通知：每个接收者恰好一条，无重复（Phase 9B：ERRAND_ORDER_COMPLETED）
+    const completionRows = txNotificationCreateMany.mock.calls
+      .map((call) => call[0].data[0] as { userId: string; title: string })
+      .filter((row) => row.title === "跑腿订单已完成");
+    expect(completionRows).toHaveLength(2);
+    expect(completionRows.map((row) => row.userId).sort()).toEqual(["runner-1", "user-1"]);
   });
 
   it("rejects premature completion when ErrandTask is still IN_PROGRESS (forged request)", async () => {
@@ -682,7 +718,7 @@ describe("errand actions", () => {
     expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
     expect(txOrderUpdateMany).not.toHaveBeenCalled();
     expect(txUserUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("is idempotent: re-submitting COMPLETED produces no duplicate side effects", async () => {
@@ -701,7 +737,7 @@ describe("errand actions", () => {
     expect(txErrandTaskUpdateMany).not.toHaveBeenCalled();
     expect(txOrderUpdateMany).not.toHaveBeenCalled();
     expect(txUserUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("ignores status changes that violate the state machine", async () => {

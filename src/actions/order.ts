@@ -11,7 +11,6 @@ import {
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateOrderViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
-import { createNotifications } from "@/repositories/notification-repository";
 import { orderStatusSchema, productOrderFormSchema, serviceOrderFormSchema } from "@/validators/order";
 
 export type OrderActionState = {

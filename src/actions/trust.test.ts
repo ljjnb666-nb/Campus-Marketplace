@@ -14,17 +14,21 @@ const {
   userUpdate,
   blockedUserUpsert,
   blockedUserDeleteMany,
-  createNotification,
   transactionMock,
   txReviewCreate,
   txReportCreate,
   txReportFindFirst,
   txCaseCreate,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => {
   const txReviewCreate = vi.fn();
   const txReportCreate = vi.fn();
   const txReportFindFirst = vi.fn();
   const txCaseCreate = vi.fn();
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  const txNotificationCreateMany = vi.fn();
+  const txNotificationFindUnique = vi.fn();
   const transactionClient = {
     review: {
       create: txReviewCreate,
@@ -35,6 +39,11 @@ const {
     },
     moderationCase: {
       create: txCaseCreate,
+    },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
     },
   };
 
@@ -52,7 +61,6 @@ const {
     userUpdate: vi.fn(),
     blockedUserUpsert: vi.fn(),
     blockedUserDeleteMany: vi.fn(),
-    createNotification: vi.fn(),
     transactionMock: vi.fn(async (callback: (tx: typeof transactionClient) => Promise<unknown>) =>
       callback(transactionClient),
     ),
@@ -60,6 +68,8 @@ const {
     txReportCreate,
     txReportFindFirst,
     txCaseCreate,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
   };
 });
 
@@ -90,10 +100,6 @@ vi.mock("next/cache", () => ({
 
 vi.mock("@/lib/server-auth", () => ({
   requireUser,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 const reportProjection = vi.hoisted(() => ({
@@ -161,7 +167,6 @@ describe("trust actions", () => {
     userUpdate.mockReset();
     blockedUserUpsert.mockReset();
     blockedUserDeleteMany.mockReset();
-    createNotification.mockReset();
     transactionMock.mockClear();
     txReviewCreate.mockReset();
     txReportCreate.mockReset();
@@ -173,6 +178,9 @@ describe("trust actions", () => {
     reportFindFirst.mockResolvedValue(null);
     txReportFindFirst.mockResolvedValue(null);
     txCaseCreate.mockResolvedValue({ id: "case-1" });
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
 
     // Repair 2：createReport 走 resolveReportTargetContext 单源解析；
     // mock 与生产 resolver 同一归属语义，数据来自各 fixture find mocks
@@ -468,10 +476,18 @@ describe("trust actions", () => {
         }),
       }),
     );
-    expect(createNotification).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ userId: "user-1", type: "REPORT" }),
-    );
+    // Phase 9B：canonical REPORT_SUBMITTED 通知发给举报人（编号 = reportId 后 8 位）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: null,
+      type: "REPORT",
+      title: "举报已提交",
+      content: "你的举报已受理，编号 12345678，平台会尽快核查并在处理后通知你。",
+      dedupeKey: "REPORT_SUBMITTED:report-abcdef12345678:user-1",
+      kind: "REPORT_SUBMITTED",
+      payload: { reportId: "report-abcdef12345678" },
+    });
     expect(revalidatePath).toHaveBeenCalledWith("/reports");
   });
 
@@ -556,7 +572,7 @@ describe("trust actions", () => {
     expect(txReportFindFirst).not.toHaveBeenCalled();
     expect(txReportCreate).not.toHaveBeenCalled();
     expect(txCaseCreate).not.toHaveBeenCalled();
-    expect(createNotification).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
@@ -587,6 +603,11 @@ describe("trust actions", () => {
         // 保持后续 report 测试依赖的泄漏链兼容（tx.report / tx.moderationCase）
         report: { findFirst: txReportFindFirst, create: txReportCreate },
         moderationCase: { create: txCaseCreate },
+        // Phase 9B：emitNotificationTx 写边界（block 路径零通知，防御性补齐）
+        notification: {
+          createMany: txNotificationCreateMany,
+          findUnique: txNotificationFindUnique,
+        },
       } as never)) as never);
     blockedUserUpsert.mockResolvedValue({ id: "block-1" });
 
@@ -626,6 +647,11 @@ describe("trust actions", () => {
         // 保持后续 report 测试依赖的泄漏链兼容（tx.report / tx.moderationCase）
         report: { findFirst: txReportFindFirst, create: txReportCreate },
         moderationCase: { create: txCaseCreate },
+        // Phase 9B：emitNotificationTx 写边界（unblock 路径零通知，防御性补齐）
+        notification: {
+          createMany: txNotificationCreateMany,
+          findUnique: txNotificationFindUnique,
+        },
       } as never)) as never);
     blockedUserDeleteMany.mockResolvedValue({ count: 1 });
 

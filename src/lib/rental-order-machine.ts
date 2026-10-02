@@ -8,7 +8,23 @@ import {
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import {
+  RENTAL_DAMAGE_CLAIM_FILED_KIND,
+  RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
+  RENTAL_DISPUTE_OPENED_KIND,
+  RENTAL_EXTENSION_APPROVED_KIND,
+  RENTAL_EXTENSION_REJECTED_KIND,
+  RENTAL_EXTENSION_REQUESTED_KIND,
+  RENTAL_ORDER_APPROVED_KIND,
+  RENTAL_ORDER_CANCELLED_KIND,
+  RENTAL_ORDER_REJECTED_KIND,
+  RENTAL_ORDER_REQUESTED_KIND,
+  RENTAL_PICKUP_CONFIRMED_KIND,
+  RENTAL_RETURN_CONFIRMED_KIND,
+  RENTAL_RETURN_REQUESTED_KIND,
+  RENTAL_REVIEW_PUBLISHED_KIND,
+} from "@/lib/notifications/notification-registry";
 import { computeDisputeDueAt } from "@/lib/disputes/dispute-sla";
 import {
   DISPUTE_ACTIVE_STATUSES,
@@ -283,11 +299,12 @@ export async function createRentalOrderTx(
     // USER_AUTHORED_CONTENT（secondaryCopyAllowed=NO）——通知只做事件信号，
     // 绝不复制 listing 标题/描述/地点/renterNote（SECONDARY_COPY_FIELD_
     // EXPECTATIONS: RentalListing.title → Notification.content = FORBIDDEN）。
-    await createNotifications(tx, [{
-      userId: listing.ownerId,
-      type: 'RENTAL',
-      title: '收到新的租赁申请',
-      content: '你的出租物品收到新的租赁申请，请前往出租订单中心处理。',
+    // Phase 9B：canonical notification domain（文案由 registry 渲染）
+    await emitNotificationsTx(tx, [{
+      kind: RENTAL_ORDER_REQUESTED_KIND,
+      recipientUserId: listing.ownerId,
+      dedupeKey: `${RENTAL_ORDER_REQUESTED_KIND}:${order.id}:${listing.ownerId}`,
+      payload: { orderId: order.id },
     }]);
 
     return { orderId: order.id };
@@ -318,11 +335,11 @@ export async function approveRentalOrderTx(
     note: '出租者同意租赁',
   });
 
-  await createNotifications(tx, [{
-    userId: order.renterId,
-    type: 'RENTAL',
-    title: '租赁申请已通过',
-    content: `你的租赁申请已被通过，请留意取货信息。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_ORDER_APPROVED_KIND,
+    recipientUserId: order.renterId,
+    dedupeKey: `${RENTAL_ORDER_APPROVED_KIND}:${order.id}:${order.renterId}`,
+    payload: { orderId: order.id },
   }]);
   return { success: true };
 }
@@ -361,11 +378,11 @@ export async function rejectRentalOrderTx(
     note: '出租者拒绝了租赁申请',
   });
 
-  await createNotifications(tx, [{
-    userId: order.renterId,
-    type: 'RENTAL',
-    title: '租赁申请被拒绝',
-    content: '你的租赁申请未通过，请前往订单详情查看。',
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_ORDER_REJECTED_KIND,
+    recipientUserId: order.renterId,
+    dedupeKey: `${RENTAL_ORDER_REJECTED_KIND}:${order.id}:${order.renterId}`,
+    payload: { orderId: order.id },
   }]);
   return { success: true };
 }
@@ -423,9 +440,19 @@ export async function confirmPickupTx(
       operatorId: userId,
       note: '双方均已确认取货',
     });
-    await createNotifications(tx, [
-      { userId: order.ownerId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
-      { userId: order.renterId, type: 'RENTAL', title: '取货已完成', content: '物品已开始租赁。' },
+    await emitNotificationsTx(tx, [
+      {
+        kind: RENTAL_PICKUP_CONFIRMED_KIND,
+        recipientUserId: order.ownerId,
+        dedupeKey: `${RENTAL_PICKUP_CONFIRMED_KIND}:${orderId}:${order.ownerId}`,
+        payload: { orderId },
+      },
+      {
+        kind: RENTAL_PICKUP_CONFIRMED_KIND,
+        recipientUserId: order.renterId,
+        dedupeKey: `${RENTAL_PICKUP_CONFIRMED_KIND}:${orderId}:${order.renterId}`,
+        payload: { orderId },
+      },
     ]);
   }
   return { success: true };
@@ -456,11 +483,11 @@ export async function requestReturnTx(
     note: '租客发起归还请求',
   });
 
-  await createNotifications(tx, [{
-    userId: order.ownerId,
-    type: 'RENTAL',
-    title: '租客请求归还',
-    content: `租客已请求归还物品，请确认。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_RETURN_REQUESTED_KIND,
+    recipientUserId: order.ownerId,
+    dedupeKey: `${RENTAL_RETURN_REQUESTED_KIND}:${order.id}:${order.ownerId}`,
+    payload: { orderId: order.id },
   }]);
   return { success: true };
 }
@@ -543,11 +570,11 @@ export async function confirmReturnTx(
       await incrementRentalCompletionCounters(tx, order);
     }
 
-    await createNotifications(tx, [{
-      userId: order.renterId,
-      type: 'RENTAL',
-      title: '归还已确认',
-      content: `出租者已确认物品归还。${hasDamage ? '请注意检查损坏索赔。' : ''}`,
+    await emitNotificationsTx(tx, [{
+      kind: RENTAL_RETURN_CONFIRMED_KIND,
+      recipientUserId: order.renterId,
+      dedupeKey: `${RENTAL_RETURN_CONFIRMED_KIND}:${order.id}:${order.renterId}`,
+      payload: { orderId: order.id, hasDamage },
     }]);
   }
   return { success: true };
@@ -587,11 +614,11 @@ export async function cancelRentalOrderTx(
     note: `取消原因: ${input.cancellationReason}`,
   });
 
-  await createNotifications(tx, [{
-    userId: counterpartyId(order, input.userId),
-    type: 'RENTAL',
-    title: '订单已取消',
-    content: `对方已取消订单。原因：${input.cancellationReason}`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_ORDER_CANCELLED_KIND,
+    recipientUserId: counterpartyId(order, input.userId),
+    dedupeKey: `${RENTAL_ORDER_CANCELLED_KIND}:${order.id}:${counterpartyId(order, input.userId)}`,
+    payload: { orderId: order.id, cancellationReason: input.cancellationReason },
   }]);
 
   return { success: true };
@@ -750,7 +777,7 @@ export async function requestExtensionTx(
   // ---- 步骤 9：fee 基于订单 price snapshot（§20）----
   const additionalFee = calculateRentalAmount(order.unitPriceSnapshot, order.pricingUnitSnapshot, order.endTime, input.newEndTime);
 
-  await tx.rentalExtensionRequest.create({
+  const ext = await tx.rentalExtensionRequest.create({
     data: {
       orderId: order.id,
       requesterId: input.userId,
@@ -760,11 +787,12 @@ export async function requestExtensionTx(
     },
   });
 
-  await createNotifications(tx, [{
-    userId: order.ownerId,
-    type: 'RENTAL',
-    title: '收到续租请求',
-    content: `租客请求续租物品至 ${input.newEndTime.toLocaleDateString()}。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_EXTENSION_REQUESTED_KIND,
+    recipientUserId: order.ownerId,
+    // dedupe 以 extensionRequestId 为聚合（拒绝后可再次发起续租）
+    dedupeKey: `${RENTAL_EXTENSION_REQUESTED_KIND}:${ext.id}:${order.ownerId}`,
+    payload: { orderId: order.id, extensionRequestId: ext.id, newEndTime: input.newEndTime.toISOString() },
   }]);
   return { success: true };
 }
@@ -955,11 +983,11 @@ export async function approveExtensionTx(
   });
 
   // ---- 步骤 14：renter 通知（§39 仅 winner 一条）----
-  await createNotifications(tx, [{
-    userId: order.renterId,
-    type: 'RENTAL',
-    title: '续租请求已通过',
-    content: `你的续租请求已通过。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_EXTENSION_APPROVED_KIND,
+    recipientUserId: order.renterId,
+    dedupeKey: `${RENTAL_EXTENSION_APPROVED_KIND}:${ext.id}:${order.renterId}`,
+    payload: { orderId: order.id, extensionRequestId: ext.id },
   }]);
   return { success: true };
 }
@@ -1048,11 +1076,11 @@ export async function rejectExtensionTx(
   });
   if (gate.count !== 1) return { error: "无效请求" };
 
-  await createNotifications(tx, [{
-    userId: rawOrder.renterId,
-    type: 'RENTAL',
-    title: '续租请求被拒绝',
-    content: `你的续租请求被拒绝。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_EXTENSION_REJECTED_KIND,
+    recipientUserId: rawOrder.renterId,
+    dedupeKey: `${RENTAL_EXTENSION_REJECTED_KIND}:${rawExt.id}:${rawOrder.renterId}`,
+    payload: { orderId: rawExt.orderId, extensionRequestId: rawExt.id },
   }]);
   return { success: true };
 }
@@ -1075,7 +1103,7 @@ export async function submitDamageClaimTx(
   if (!order) return { error: "状态错误" };
   if (new Prisma.Decimal(input.requestedDeduction).gt(order.depositAmount)) return { error: "索赔金额不能大于押金" };
 
-  await tx.rentalDamageClaim.create({
+  const claim = await tx.rentalDamageClaim.create({
     data: {
       orderId: input.orderId,
       submittedById: input.userId,
@@ -1085,11 +1113,11 @@ export async function submitDamageClaimTx(
     },
   });
 
-  await createNotifications(tx, [{
-    userId: order.renterId,
-    type: 'RENTAL',
-    title: '收到损坏索赔',
-    content: `出租者提交了损坏索赔请求，请尽快处理。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_DAMAGE_CLAIM_FILED_KIND,
+    recipientUserId: order.renterId,
+    dedupeKey: `${RENTAL_DAMAGE_CLAIM_FILED_KIND}:${claim.id}:${order.renterId}`,
+    payload: { orderId: input.orderId, claimId: claim.id },
   }]);
   return { success: true };
 }
@@ -1146,11 +1174,11 @@ export async function respondDamageClaimTx(
     await incrementRentalCompletionCounters(tx, claim.order);
   }
 
-  await createNotifications(tx, [{
-    userId: claim.order.ownerId,
-    type: 'RENTAL',
-    title: input.agreed ? '索赔已同意' : '索赔被拒绝',
-    content: `租客${input.agreed ? '同意' : '拒绝'}了损坏索赔。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
+    recipientUserId: claim.order.ownerId,
+    dedupeKey: `${RENTAL_DAMAGE_CLAIM_RESPONDED_KIND}:${input.claimId}:${claim.order.ownerId}`,
+    payload: { orderId: claim.orderId, claimId: input.claimId, agreed: input.agreed },
   }]);
   return { success: true };
 }
@@ -1313,11 +1341,12 @@ export async function initiateDisputeTx(
     note: "订单进入纠纷流程",
   });
 
-  await createNotifications(tx, [{
-    userId: counterpartyId(order, input.userId),
-    type: 'RENTAL',
-    title: '发生订单纠纷',
-    content: `对方对订单发起了纠纷。`,
+  await emitNotificationsTx(tx, [{
+    kind: RENTAL_DISPUTE_OPENED_KIND,
+    recipientUserId: counterpartyId(order, input.userId),
+    // dedupe 以 disputeId 为聚合（纠纷关闭后可再次发起）
+    dedupeKey: `${RENTAL_DISPUTE_OPENED_KIND}:${dispute.id}:${counterpartyId(order, input.userId)}`,
+    payload: { orderId: input.orderId, disputeId: dispute.id },
   }]);
   return { success: true };
 }
@@ -1496,18 +1525,18 @@ export async function submitRentalReviewTx(
   await recomputeRentalPositiveRate(tx, input.userId);
 
   // generic event 通知（§24：零评分/内容/tags/作者名复制）
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: order.ownerId,
-      type: 'RENTAL',
-      title: '交易评价已公开',
-      content: '本次租赁交易的双方评价已公开，可前往评价记录查看。',
+      kind: RENTAL_REVIEW_PUBLISHED_KIND,
+      recipientUserId: order.ownerId,
+      dedupeKey: `${RENTAL_REVIEW_PUBLISHED_KIND}:${input.orderId}:${order.ownerId}`,
+      payload: { orderId: input.orderId },
     },
     {
-      userId: order.renterId,
-      type: 'RENTAL',
-      title: '交易评价已公开',
-      content: '本次租赁交易的双方评价已公开，可前往评价记录查看。',
+      kind: RENTAL_REVIEW_PUBLISHED_KIND,
+      recipientUserId: order.renterId,
+      dedupeKey: `${RENTAL_REVIEW_PUBLISHED_KIND}:${input.orderId}:${order.renterId}`,
+      payload: { orderId: input.orderId },
     },
   ]);
   return { success: true };

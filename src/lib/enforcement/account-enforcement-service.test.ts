@@ -9,6 +9,8 @@ const {
   recordAdminAudit,
   loadAuthorizationContextMock,
   isPrivilegedTargetMock,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => ({
   withTransactionMock: vi.fn(),
   txUserFindUnique: vi.fn(),
@@ -18,6 +20,9 @@ const {
   recordAdminAudit: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   isPrivilegedTargetMock: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -31,14 +36,6 @@ vi.mock("@/lib/governance/governance-lock", () => ({
 
 vi.mock("@/lib/governance/admin-audit", () => ({
   recordAdminAudit,
-}));
-
-const { createNotification } = vi.hoisted(() => ({
-  createNotification: vi.fn(),
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 // isPrivilegedTarget / hasPermission 用真实实现，仅替换 context 加载
@@ -63,6 +60,11 @@ import {
 const txStub = {
   user: { findUnique: txUserFindUnique, update: txUserUpdate },
   enforcementAction: { create: txEnforcementActionCreate },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
+  },
 };
 
 // seam 直调用 tx stub（测试桩不需要完整 TransactionClient 形状）
@@ -101,7 +103,9 @@ beforeEach(() => {
   txEnforcementActionCreate.mockReset().mockResolvedValue({});
   acquireGovernanceSubjectLocks.mockReset().mockResolvedValue(undefined);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
-  createNotification.mockReset().mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
   loadAuthorizationContextMock.mockReset().mockImplementation(async (userId: string) => {
     if (userId === "actor-1") {
       return actorWithSuspend();
@@ -130,8 +134,19 @@ describe("suspendAccount（中央账号停用服务）", () => {
       where: { id: "target-1" },
       data: { status: "SUSPENDED" },
     });
-    // 通知不再位于 authoritative transaction 内（Repair 2 Blocker C）
-    expect(createNotification).toHaveBeenCalledTimes(1);
+    // 通知不再位于 authoritative transaction 内（Repair 2 Blocker C）；
+    // Phase 9B：canonical ACCOUNT_SUSPENDED emit（dedupeKey 带 per-invocation epoch）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "target-1",
+      orderId: null,
+      type: "SYSTEM",
+      title: "账号已被停用",
+      content: "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。",
+      dedupeKey: expect.stringMatching(/^ACCOUNT_SUSPENDED:target-1:/),
+      kind: "ACCOUNT_SUSPENDED",
+      payload: {},
+    });
     expect(txEnforcementActionCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         type: "ACCOUNT_SUSPEND",
@@ -157,7 +172,7 @@ describe("suspendAccount（中央账号停用服务）", () => {
     expect(txUserUpdate).not.toHaveBeenCalled();
     expect(txEnforcementActionCreate).not.toHaveBeenCalled();
     // 幂等 no-op 不发送通知
-    expect(createNotification).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("denies self suspension", async () => {
@@ -240,7 +255,7 @@ describe("suspendAccount（中央账号停用服务）", () => {
 
 describe("notification failure（Repair 2 Blocker C：post-commit best effort）", () => {
   it("notification failure does not fail the suspension（status/action/audit committed）", async () => {
-    createNotification.mockRejectedValue(new Error("notification subsystem down"));
+    txNotificationCreateMany.mockRejectedValue(new Error("notification subsystem down"));
 
     const result = await suspendAccount(BASE_INPUT);
 
@@ -260,7 +275,7 @@ describe("notification failure（Repair 2 Blocker C：post-commit best effort）
 
   it("notification failure does not fail the reinstatement", async () => {
     txUserFindUnique.mockResolvedValue({ ...ACTIVE_TARGET, status: "SUSPENDED" });
-    createNotification.mockRejectedValue(new Error("notification subsystem down"));
+    txNotificationCreateMany.mockRejectedValue(new Error("notification subsystem down"));
 
     const result = await reinstateAccount(BASE_INPUT);
 

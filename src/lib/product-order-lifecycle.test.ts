@@ -6,11 +6,14 @@ import type { Prisma } from "@prisma/client";
 const {
   assertActiveAccountMutationAllowed,
   evaluateMarketplaceCapability,
-  createNotifications,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => ({
   assertActiveAccountMutationAllowed: vi.fn(),
   evaluateMarketplaceCapability: vi.fn(),
-  createNotifications: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
 }));
 
 vi.mock("@/lib/governance/active-account-mutation", () => ({
@@ -19,10 +22,6 @@ vi.mock("@/lib/governance/active-account-mutation", () => ({
 
 vi.mock("@/lib/enforcement/capability-gate", () => ({
   evaluateMarketplaceCapability,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 import {
@@ -75,6 +74,8 @@ type TxMocks = {
   orderFindUnique: ReturnType<typeof vi.fn>;
   productUpdate: ReturnType<typeof vi.fn>;
   outboxEventCreateMany: ReturnType<typeof vi.fn>;
+  notificationCreateMany: ReturnType<typeof vi.fn>;
+  notificationFindUnique: ReturnType<typeof vi.fn>;
 };
 
 function makeTx(input: {
@@ -123,6 +124,9 @@ function makeTx(input: {
   const outboxEventCreateMany = vi
     .fn()
     .mockResolvedValue({ count: 1 });
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  const notificationCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+  const notificationFindUnique = vi.fn().mockResolvedValue({ id: "notification-1" });
 
   const tx = {
     $executeRaw: executeRaw,
@@ -138,6 +142,10 @@ function makeTx(input: {
     outboxEvent: {
       createMany: outboxEventCreateMany,
     },
+    notification: {
+      createMany: notificationCreateMany,
+      findUnique: notificationFindUnique,
+    },
   } as unknown as Prisma.TransactionClient;
 
   return {
@@ -149,6 +157,8 @@ function makeTx(input: {
     orderFindUnique,
     productUpdate,
     outboxEventCreateMany,
+    notificationCreateMany,
+    notificationFindUnique,
   };
 }
 
@@ -160,9 +170,9 @@ const reservedProduct = {
   deletedAt: null,
 };
 
-function expiredNotifications(createNotifications: ReturnType<typeof vi.fn>) {
-  // createNotifications(tx, notifications)：第 2 参才是通知数组
-  return createNotifications.mock.calls.flatMap((call) => call[1] ?? []);
+function emittedNotificationRows(m: TxMocks) {
+  // Phase 9B：emitNotificationTx 逐条 emit——每次 createMany 调用携带单行 data[0]
+  return m.notificationCreateMany.mock.calls.map((call) => call[0].data[0]);
 }
 
 /**
@@ -178,7 +188,7 @@ function expiryOutboxIntents(m: TxMocks) {
 beforeEach(() => {
   assertActiveAccountMutationAllowed.mockReset().mockResolvedValue(undefined);
   evaluateMarketplaceCapability.mockReset().mockResolvedValue({ allowed: true });
-  createNotifications.mockReset().mockResolvedValue(undefined);
+  // Phase 9B：stub 由 makeTx 实例创建并默认 resolve，无需共享复位
 });
 
 describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
@@ -209,7 +219,12 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
       where: { id: productId },
       data: { status: "ACTIVE" },
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    // Phase 9B：canonical CANCELLED 通知 = buyer + seller 各一条 ORDER_STATUS_CHANGED
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(emittedNotificationRows(m).map((row) => (row as { dedupeKey: string }).dedupeKey)).toEqual([
+      `ORDER_STATUS_CHANGED:${orderId}:CANCELLED:${buyerId}`,
+      `ORDER_STATUS_CHANGED:${orderId}:CANCELLED:${sellerId}`,
+    ]);
   });
 
   it("CASE B：seller risk RESTRICTED → OFFLINE（订单取消仍执行）", async () => {
@@ -226,7 +241,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
       where: { id: productId },
       data: { status: "OFFLINE" },
     });
-    expect(createNotifications).toHaveBeenCalled();
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
   });
 
   it("CASE B：seller membership 非ACTIVE → OFFLINE", async () => {
@@ -332,7 +347,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
       ).toBeNull();
       expect(m.orderUpdateMany).not.toHaveBeenCalled();
       expect(m.productUpdate).not.toHaveBeenCalled();
-      expect(createNotifications).not.toHaveBeenCalled();
+      expect(m.notificationCreateMany).not.toHaveBeenCalled();
     }
   });
 
@@ -374,7 +389,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
       await cancelProductOrderTx(m.tx, buyerId, orderId, candidate),
     ).toBeNull();
     expect(m.productUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("actor lifecycle 非 ACTIVE → 抛 AUTH_ACCOUNT_INACTIVE，零订单写", async () => {
@@ -474,7 +489,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
     });
     // 超期取消不发"用户主动取消"文案；EXPIRED 走 outbox intent（Phase 9A），
     // 不直写任何 Notification
-    expect(expiredNotifications(createNotifications)).toEqual([]);
+    expect(emittedNotificationRows(m)).toEqual([]);
     expect(expiryOutboxIntents(m)).toEqual([
       expect.objectContaining({
         eventType: "PRODUCT_RESERVATION_EXPIRED",
@@ -482,7 +497,7 @@ describe("cancelProductOrderTx（PRODUCT-CANCEL 状态机）", () => {
         payload: { orderId },
       }),
     ]);
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -516,9 +531,27 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
     expect(m.productUpdate).not.toHaveBeenCalled();
     expect(m.queryRaw).toHaveBeenCalledTimes(1); // 只锁 Order 行，不触 Product 行
     // 既有 accept 通知语义逐字保留（general path 同款文案）
-    expect(expiredNotifications(createNotifications)).toEqual([
-      expect.objectContaining({ userId: buyerId, title: "订单状态更新：已接单" }),
-      expect.objectContaining({ userId: sellerId, title: "订单状态更新：已接单" }),
+    // Phase 9B：canonical = buyer + seller 各一条 ORDER_STATUS_CHANGED（ACCEPTED）
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    const acceptRows = emittedNotificationRows(m) as Array<{
+      userId: string;
+      title: string;
+      dedupeKey: string;
+    }>;
+    expect(acceptRows.map((row) => row.userId)).toEqual([buyerId, sellerId]);
+    for (const row of acceptRows) {
+      expect(row).toMatchObject({
+        orderId,
+        type: "ORDER",
+        title: "订单状态更新：已接单",
+        content: "卖家已将订单状态更新为“已接单”，请前往订单中心查看。",
+        kind: "ORDER_STATUS_CHANGED",
+        payload: { orderId, status: "ACCEPTED", actorRole: "SELLER" },
+      });
+    }
+    expect(acceptRows.map((row) => row.dedupeKey)).toEqual([
+      `ORDER_STATUS_CHANGED:${orderId}:ACCEPTED:${buyerId}`,
+      `ORDER_STATUS_CHANGED:${orderId}:ACCEPTED:${sellerId}`,
     ]);
   });
 
@@ -550,7 +583,7 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
       data: { status: "ACTIVE" },
     });
     // 绝不能发"已接单"通知；EXPIRED 走 outbox intent（Phase 9A）
-    expect(expiredNotifications(createNotifications)).toEqual([]);
+    expect(emittedNotificationRows(m)).toEqual([]);
     expect(expiryOutboxIntents(m)).toEqual([
       expect.objectContaining({
         dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}`,
@@ -584,7 +617,7 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
       }),
     ).toBeNull();
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("无 deadline 的 PENDING PRODUCT 异常行 → fail closed null", async () => {
@@ -624,7 +657,7 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
         }),
       ).toBeNull();
       expect(m.orderUpdateMany).not.toHaveBeenCalled();
-      expect(createNotifications).not.toHaveBeenCalled();
+      expect(m.notificationCreateMany).not.toHaveBeenCalled();
     }
   });
 
@@ -637,7 +670,7 @@ describe("acceptProductOrderTx（PHASE 8B-01 PRODUCT-ACCEPT 状态机）", () =>
       }),
     ).toBeNull();
     expect(m.productUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("锁序：sorted pair locks → Order 行锁（禁止 actor-only 先锁）", async () => {
@@ -668,7 +701,7 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
     expect(outcome).toEqual({ kind: "NOT_DUE" });
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
     expect(m.productUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("DUE：PENDING → CANCELLED/EXPIRED + Product release + 恰一对通知", async () => {
@@ -705,7 +738,7 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
         payload: { orderId },
       }),
     ]);
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("幂等：已非 PENDING（fresh 行）→ NOT_PENDING，零重复副作用", async () => {
@@ -732,7 +765,7 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
     expect(outcome).toEqual({ kind: "NOT_PENDING" });
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
     expect(m.productUpdate).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("无 user actor：不做任何账号 ACTIVE 检查（suspended 参与方不阻止过期）", async () => {
@@ -760,7 +793,7 @@ describe("expireProductReservationTx（PHASE 8B-01 系统过期）", () => {
     for (const m of [missing, serviceOrder]) {
       expect(m.orderUpdateMany).not.toHaveBeenCalled();
       expect(m.productUpdate).not.toHaveBeenCalled();
-      expect(createNotifications).not.toHaveBeenCalled();
+      expect(m.notificationCreateMany).not.toHaveBeenCalled();
     }
   });
 

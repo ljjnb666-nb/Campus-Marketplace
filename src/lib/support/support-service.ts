@@ -16,7 +16,8 @@ import {
 import { supportTicketError } from "@/lib/support/errors";
 import { SUPPORT_MANAGE_PERMISSION } from "@/lib/support/support-access";
 import { computeSupportTicketDueAt } from "@/lib/support/support-sla";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { SUPPORT_TICKET_RESOLVED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 7G：支持工单 canonical 服务（create / claim / release / resolve /
@@ -387,11 +388,12 @@ export async function resolveSupportTicket(
     // Notification.content（唯一权威用户可见 resolution 文本 =
     // SupportTicket.resolutionMessage，由 requester 读面按需返回；
     // erasure scrub 只需收敛该权威列，通知侧从不存在自由文本）。
-    await createNotification(tx, {
-      userId: locked.requesterId,
-      type: "SYSTEM",
-      title: "支持工单已处理",
-      content: "你的支持工单已处理完成，请进入工单详情查看处理结果。",
+    // Phase 9B：canonical notification domain（文案由 registry 渲染）。
+    await emitNotificationTx(tx, {
+      kind: SUPPORT_TICKET_RESOLVED_KIND,
+      recipientUserId: locked.requesterId,
+      dedupeKey: `${SUPPORT_TICKET_RESOLVED_KIND}:${locked.id}:${locked.requesterId}`,
+      payload: { ticketId: locked.id },
     });
 
     return { ticketId: locked.id, status: "RESOLVED" };

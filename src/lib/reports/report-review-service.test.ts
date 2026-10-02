@@ -3,14 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   acquireGovernanceSubjectLocksMock,
   applyReportReviewTxMock,
-  createNotificationMock,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   transactionMock,
   loadAuthorizationContextMock,
   requirePermissionInContextMock,
 } = vi.hoisted(() => ({
   acquireGovernanceSubjectLocksMock: vi.fn(),
   applyReportReviewTxMock: vi.fn(),
-  createNotificationMock: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   transactionMock: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   requirePermissionInContextMock: vi.fn(),
@@ -38,24 +41,29 @@ vi.mock("@/lib/rbac/errors", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/rbac/errors")>()),
 }));
 
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification: createNotificationMock,
-}));
-
 import { reviewReportInGovernance } from "@/lib/reports/report-review-service";
 import { RbacError } from "@/lib/rbac/errors";
 
 /**
  * Phase 7E canonical review 服务合同（FR01 修复后的冻结链）：
  *   USER:actor subject lock（事务内最先）→ REPORT/CASE 行锁（applyReportReviewTx
- *   内部）→ 锁后授权复核 → transition → 写入 → 通知（同事务，既有 §35/§36
- *   合同：IN_REVIEW/RESOLVED/REJECTED 三段文案零改动）。
+ *   内部）→ 锁后授权复核 → transition → 写入 → 通知（同事务；Phase 9B 起文案
+ *   由 notification-registry 渲染——handledNote 不再复制进通知 content）。
  */
+
+// Phase 9B：emitNotificationTx 写边界挂在 withTransaction 的 tx 桩上
+const txStub = {
+  txMarker: true,
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
+  },
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
   transactionMock.mockReset().mockImplementation(
-    async (callback: (tx: unknown) => Promise<unknown>) => callback({ txMarker: true }),
+    async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub),
   );
   acquireGovernanceSubjectLocksMock.mockReset().mockResolvedValue(undefined);
   loadAuthorizationContextMock.mockReset().mockResolvedValue({
@@ -67,6 +75,9 @@ beforeEach(() => {
     ],
   });
   requirePermissionInContextMock.mockReset().mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
   applyReportReviewTxMock.mockReset().mockResolvedValue({
     reportId: "report-1",
     status: "RESOLVED",
@@ -148,7 +159,7 @@ describe("reviewReportInGovernance（FR01 actor serialization）", () => {
       reviewReportInGovernance({ actorId: "admin-1", reportId: "report-1", status: "RESOLVED" }),
     ).rejects.toThrow(RbacError);
     // seam 拒绝后零通知（事务回滚）
-    expect(createNotificationMock).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("锁后授权复核：campus reviewer 授权缺失 → AUTH_PERMISSION_DENIED", async () => {
@@ -185,7 +196,10 @@ describe("reviewReportInGovernance（FR01 actor serialization）", () => {
 });
 
 describe("reviewReportInGovernance（reporter 通知文案合同 §35/§36）", () => {
-  it("IN_REVIEW：处理中文案（含备注）", async () => {
+  // Phase 9B：REPORT_REVIEW_STATUS_CHANGED 由 registry 渲染固定文案；
+  // handledNote（operator 自由文本）不再进入通知 content，dedupeKey 带
+  // per-invocation epoch（reopen 后可再次进入同一 status）。
+  it("IN_REVIEW：固定处理中文案（handledNote 不再复制进通知）", async () => {
     await reviewReportInGovernance({
       actorId: "admin-1",
       reportId: "report-1",
@@ -193,33 +207,35 @@ describe("reviewReportInGovernance（reporter 通知文案合同 §35/§36）", 
       handledNote: "已转交复核",
     });
 
-    expect(createNotificationMock).toHaveBeenCalledWith(
-      expect.objectContaining({ txMarker: true }),
-      {
-        userId: "reporter-1",
-        type: "REPORT",
-        title: "举报处理中",
-        content: "你提交的举报正在处理中。处理说明：已转交复核",
-      },
-    );
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "reporter-1",
+      orderId: null,
+      type: "REPORT",
+      title: "举报处理中",
+      content: "你提交的举报正在处理中，平台会在核查完成后通知你结果。",
+      dedupeKey: expect.stringMatching(/^REPORT_REVIEW_STATUS_CHANGED:report-1:IN_REVIEW:/),
+      kind: "REPORT_REVIEW_STATUS_CHANGED",
+      payload: { reportId: "report-1", status: "IN_REVIEW" },
+    });
+    // handledNote 隔离：operator 自由文本绝不进入通知载荷
+    expect(JSON.stringify(txNotificationCreateMany.mock.calls)).not.toContain("已转交复核");
   });
 
-  it("IN_REVIEW：无备注文案", async () => {
+  it("IN_REVIEW：无备注文案一致", async () => {
     await reviewReportInGovernance({
       actorId: "admin-1",
       reportId: "report-1",
       status: "IN_REVIEW",
     });
 
-    expect(createNotificationMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        content: "你提交的举报正在处理中，平台会在核查完成后通知你结果。",
-      }),
-    );
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      content: "你提交的举报正在处理中，平台会在核查完成后通知你结果。",
+    });
   });
 
-  it("RESOLVED：处理完成文案", async () => {
+  it("RESOLVED：处理完成固定文案", async () => {
     await reviewReportInGovernance({
       actorId: "admin-1",
       reportId: "report-1",
@@ -227,13 +243,14 @@ describe("reviewReportInGovernance（reporter 通知文案合同 §35/§36）", 
       handledNote: "已下架违规商品",
     });
 
-    expect(createNotificationMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        title: "举报已处理",
-        content: "你提交的举报已处理完成。处理说明：已下架违规商品",
-      }),
-    );
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      title: "举报已处理",
+      content: "你提交的举报已处理完成。",
+      dedupeKey: expect.stringMatching(/^REPORT_REVIEW_STATUS_CHANGED:report-1:RESOLVED:/),
+      payload: { reportId: "report-1", status: "RESOLVED" },
+    });
+    expect(JSON.stringify(txNotificationCreateMany.mock.calls)).not.toContain("已下架违规商品");
   });
 
   it("REJECTED：未通过文案（无备注）", async () => {
@@ -243,17 +260,17 @@ describe("reviewReportInGovernance（reporter 通知文案合同 §35/§36）", 
       status: "REJECTED",
     });
 
-    expect(createNotificationMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        title: "举报处理结果已更新",
-        content: "你提交的举报未通过。如有需要可补充更完整的信息后再次提交。",
-      }),
-    );
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      title: "举报处理结果已更新",
+      content: "你提交的举报未通过。如有需要可补充更完整的信息后再次提交。",
+      dedupeKey: expect.stringMatching(/^REPORT_REVIEW_STATUS_CHANGED:report-1:REJECTED:/),
+      payload: { reportId: "report-1", status: "REJECTED" },
+    });
   });
 
   it("通知失败随事务回滚（既有事务性合同，零改动）", async () => {
-    createNotificationMock.mockRejectedValue(new Error("db down"));
+    txNotificationCreateMany.mockRejectedValue(new Error("db down"));
 
     await expect(
       reviewReportInGovernance({ actorId: "admin-1", reportId: "report-1", status: "RESOLVED" }),

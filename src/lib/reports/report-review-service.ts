@@ -5,7 +5,8 @@ import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock"
 import { withTransaction } from "@/lib/prisma";
 import { REPORT_REVIEW_PERMISSION } from "@/lib/reports/report-access";
 import { resolveReportReviewScope } from "@/lib/reports/report-scope";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { REPORT_REVIEW_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
 import { rbacError } from "@/lib/rbac/errors";
 import { loadAuthorizationContext, requirePermissionInContext } from "@/lib/rbac/service";
 
@@ -48,40 +49,13 @@ export type ReviewReportResult = {
   dueAt: Date;
 };
 
-/** 既有通知文案（自 admin.ts 原样搬移——合同零改动）。 */
-function getReportNotificationCopy(
-  status: "IN_REVIEW" | "RESOLVED" | "REJECTED",
-  handledNote?: string,
-) {
-  if (status === "IN_REVIEW") {
-    return {
-      title: "举报处理中",
-      content: handledNote
-        ? `你提交的举报正在处理中。处理说明：${handledNote}`
-        : "你提交的举报正在处理中，平台会在核查完成后通知你结果。",
-    };
-  }
-
-  if (status === "RESOLVED") {
-    return {
-      title: "举报已处理",
-      content: `你提交的举报已处理完成。${handledNote ? `处理说明：${handledNote}` : ""}`,
-    };
-  }
-
-  return {
-    title: "举报处理结果已更新",
-    content: `你提交的举报未通过。${
-      handledNote ? `处理说明：${handledNote}` : "如有需要可补充更完整的信息后再次提交。"
-    }`,
-  };
-}
+/** Phase 9B：reporter 通知文案由 notification-registry 按 status 渲染
+ * （§6/§17：handledNote 属 operator 自由文本，不再复制进通知 content——
+ * 处理说明的唯一权威在 Report.handledNote 本体）。 */
 
 export async function reviewReportInGovernance(
   input: ReviewReportInput,
 ): Promise<ReviewReportResult> {
-  const notification = getReportNotificationCopy(input.status, input.handledNote || undefined);
-
   return withTransaction(async (tx) => {
     // FR01（Final Review Repair 1）：USER:actor advisory lock 与 claim/release
     // 同源——在同一事务内、REPORT 行锁之前取得，序列化 role revoke / 账号停用
@@ -119,11 +93,13 @@ export async function reviewReportInGovernance(
       },
     });
 
-    await createNotification(tx, {
-      userId: review.reporterId,
-      type: "REPORT",
-      title: notification.title,
-      content: notification.content,
+    // dedupe 携带 per-invocation epoch：报告 reopen 后可再次进入同一 status，
+    // 每次治理动作都是独立真实事件（事务回滚则本行一并消失）。
+    await emitNotificationTx(tx, {
+      kind: REPORT_REVIEW_STATUS_CHANGED_KIND,
+      recipientUserId: review.reporterId,
+      dedupeKey: `${REPORT_REVIEW_STATUS_CHANGED_KIND}:${input.reportId}:${input.status}:${new Date().toISOString()}`,
+      payload: { reportId: input.reportId, status: input.status },
     });
 
     return review;

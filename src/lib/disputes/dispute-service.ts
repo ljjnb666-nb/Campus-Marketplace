@@ -21,7 +21,8 @@ import {
   loadAuthorizationContext,
   requirePermissionInContext,
 } from "@/lib/rbac/service";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { RENTAL_DISPUTE_RESOLVED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 7G：纠纷运营 canonical 治理服务（claim / release / resolve / close）。
@@ -419,18 +420,19 @@ async function resolveDisputeTxLocked(
     tx,
   );
 
-  await createNotifications(tx, [
+  // Phase 9B：canonical notification domain；dedupe 以 disputeId 为聚合。
+  await emitNotificationsTx(tx, [
     {
-      userId: order.ownerId,
-      type: "RENTAL",
-      title: "订单纠纷已处理",
-      content: `你的订单纠纷已${isResolved ? "解决" : "关闭"}，订单状态已更新。`,
+      kind: RENTAL_DISPUTE_RESOLVED_KIND,
+      recipientUserId: order.ownerId,
+      dedupeKey: `${RENTAL_DISPUTE_RESOLVED_KIND}:${dispute.id}:${order.ownerId}`,
+      payload: { disputeId: dispute.id, resolution: isResolved ? "RESOLVED" : "CLOSED" },
     },
     {
-      userId: order.renterId,
-      type: "RENTAL",
-      title: "订单纠纷已处理",
-      content: `你的订单纠纷已${isResolved ? "解决" : "关闭"}，订单状态已更新。`,
+      kind: RENTAL_DISPUTE_RESOLVED_KIND,
+      recipientUserId: order.renterId,
+      dedupeKey: `${RENTAL_DISPUTE_RESOLVED_KIND}:${dispute.id}:${order.renterId}`,
+      payload: { disputeId: dispute.id, resolution: isResolved ? "RESOLVED" : "CLOSED" },
     },
   ]);
 

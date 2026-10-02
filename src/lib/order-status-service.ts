@@ -6,7 +6,8 @@ import {
   acceptProductOrderTx,
   cancelProductOrderTx,
 } from "@/lib/product-order-lifecycle";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ORDER_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * RB-03 REVIEW FIX（GROUP 2）：GENERAL ORDER STATUS authority。
@@ -59,21 +60,6 @@ async function incrementCompletedUsers(
 ): Promise<void> {
   await tx.user.update({ where: { id: buyerId }, data: { completedOrdersCount: { increment: 1 } } });
   await tx.user.update({ where: { id: sellerId }, data: { completedOrdersCount: { increment: 1 } } });
-}
-
-function getStatusLabel(status: string): string {
-  switch (status) {
-    case "ACCEPTED":
-      return "已接单";
-    case "IN_PROGRESS":
-      return "进行中";
-    case "COMPLETED":
-      return "已完成";
-    case "CANCELLED":
-      return "已取消";
-    default:
-      return status;
-  }
 }
 
 export async function updateOrderStatusTx(
@@ -290,23 +276,22 @@ export async function updateOrderStatusTx(
     await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
   }
 
-  const actorLabel = isBuyer ? "买家" : "卖家";
-  const statusLabel = getStatusLabel(requestedStatus);
+  const actorRole = isBuyer ? "BUYER" : "SELLER";
 
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.buyerId,
       orderId: order.id,
-      type: "ORDER",
-      title: `订单状态更新：${statusLabel}`,
-      content: `${actorLabel}已将订单状态更新为“${statusLabel}”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:${requestedStatus}:${order.buyerId}`,
+      payload: { orderId: order.id, status: requestedStatus, actorRole },
     },
     {
-      userId: order.sellerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.sellerId,
       orderId: order.id,
-      type: "ORDER",
-      title: `订单状态更新：${statusLabel}`,
-      content: `${actorLabel}已将订单状态更新为“${statusLabel}”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:${requestedStatus}:${order.sellerId}`,
+      payload: { orderId: order.id, status: requestedStatus, actorRole },
     },
   ]);
 

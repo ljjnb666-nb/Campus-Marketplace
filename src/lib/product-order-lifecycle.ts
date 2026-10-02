@@ -10,9 +10,10 @@ import {
   isProductReservationExpired,
   PRODUCT_RESERVATION_EXPIRED_CANCEL_REASON,
 } from "@/lib/product-reservation";
-// Phase 9A：accept/cancel 期限内的同步通知仍走既有 createNotifications；
-// EXPIRY 通知改经 OutboxEvent（见 expireLockedProductReservation）
-import { createNotifications } from "@/repositories/notification-repository";
+// Phase 9A：EXPIRY 通知改经 OutboxEvent（见 expireLockedProductReservation）；
+// Phase 9B：全部通知写入收敛到 canonical notification domain
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ORDER_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
 import { recordOutboxEventTx } from "@/lib/async/outbox";
 import {
   PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE,
@@ -236,22 +237,22 @@ export async function cancelProductOrderTx(
   }
 
   const isBuyer = order.buyerId === actorUserId;
-  const actorLabel = isBuyer ? "买家" : "卖家";
+  const actorRole = isBuyer ? "BUYER" : "SELLER";
 
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.buyerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单状态更新：已取消",
-      content: `${actorLabel}已将订单状态更新为“已取消”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:CANCELLED:${order.buyerId}`,
+      payload: { orderId: order.id, status: "CANCELLED", actorRole },
     },
     {
-      userId: order.sellerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.sellerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单状态更新：已取消",
-      content: `${actorLabel}已将订单状态更新为“已取消”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:CANCELLED:${order.sellerId}`,
+      payload: { orderId: order.id, status: "CANCELLED", actorRole },
     },
   ]);
 
@@ -352,20 +353,20 @@ export async function acceptProductOrderTx(
   }
 
   // 既有 accept 通知语义完全保留（文案与 general path 逐字一致）
-  await createNotifications(tx, [
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.buyerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单状态更新：已接单",
-      content: `卖家已将订单状态更新为“已接单”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:ACCEPTED:${order.buyerId}`,
+      payload: { orderId: order.id, status: "ACCEPTED", actorRole: "SELLER" },
     },
     {
-      userId: order.sellerId,
+      kind: ORDER_STATUS_CHANGED_KIND,
+      recipientUserId: order.sellerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单状态更新：已接单",
-      content: `卖家已将订单状态更新为“已接单”，请前往订单中心查看。`,
+      dedupeKey: `${ORDER_STATUS_CHANGED_KIND}:${order.id}:ACCEPTED:${order.sellerId}`,
+      payload: { orderId: order.id, status: "ACCEPTED", actorRole: "SELLER" },
     },
   ]);
 

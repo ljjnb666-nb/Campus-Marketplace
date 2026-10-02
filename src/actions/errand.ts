@@ -11,7 +11,6 @@ import { claimErrandTx } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateErrandViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
-import { createNotifications } from "@/repositories/notification-repository";
 import { errandFormSchema, errandStatusSchema } from "@/validators/errand";
 
 export type ErrandActionState = {

@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
-const { createNotifications, checkTimeConflict } = vi.hoisted(() => ({
-  createNotifications: vi.fn(),
+const { txNotificationCreateMany, txNotificationFindUnique, checkTimeConflict } = vi.hoisted(() => ({
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   checkTimeConflict: vi.fn(),
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 const { marketplaceObligationValidator } = vi.hoisted(() => ({
@@ -65,6 +63,11 @@ function buildTx() {
         where.userId.in.map((userId: string) => ({ userId })),
       ),
     },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
 }
 
@@ -75,9 +78,10 @@ function asTx(tx: ReturnType<typeof buildTx>): Prisma.TransactionClient {
 
 describe("rental-order-machine", () => {
   beforeEach(() => {
-    createNotifications.mockReset();
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
     checkTimeConflict.mockReset();
-    createNotifications.mockResolvedValue(undefined);
   });
 
   it("writes the status log with from/to/operator/note", async () => {
@@ -213,10 +217,18 @@ describe("rental-order-machine", () => {
         note: "出租者同意租赁",
       },
     });
-    expect(createNotifications).toHaveBeenCalledWith(
-      asTx(tx),
-      [expect.objectContaining({ userId: "user-renter", title: "租赁申请已通过" })],
-    );
+    // Phase 9B：canonical RENTAL_ORDER_APPROVED 通知发给 renter
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-renter",
+      orderId: null,
+      type: "RENTAL",
+      title: "租赁申请已通过",
+      content: "你的租赁申请已被通过，请留意取货信息。",
+      dedupeKey: "RENTAL_ORDER_APPROVED:order-1:user-renter",
+      kind: "RENTAL_ORDER_APPROVED",
+      payload: { orderId: "order-1" },
+    });
   });
 
   it("SECONDARY-02/03：reject 原始原因保留在权威列，绝不进入 status log note / notification", async () => {
@@ -258,11 +270,19 @@ describe("rental-order-machine", () => {
     expect(logPayload).not.toContain(RAW_REASON);
 
     // notification content = generic system copy（SECONDARY-02）
-    expect(createNotifications).toHaveBeenCalledWith(
-      asTx(tx),
-      [expect.objectContaining({ userId: "user-renter", title: "租赁申请被拒绝" })],
-    );
-    const notificationPayload = JSON.stringify(createNotifications.mock.calls);
+    // Phase 9B：canonical RENTAL_ORDER_REJECTED 通知发给 renter
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-renter",
+      orderId: null,
+      type: "RENTAL",
+      title: "租赁申请被拒绝",
+      content: "你的租赁申请未通过，请前往订单详情查看。",
+      dedupeKey: "RENTAL_ORDER_REJECTED:order-1:user-renter",
+      kind: "RENTAL_ORDER_REJECTED",
+      payload: { orderId: "order-1" },
+    });
+    const notificationPayload = JSON.stringify(txNotificationCreateMany.mock.calls);
     expect(notificationPayload).not.toContain(RAW_REASON);
   });
 
@@ -274,7 +294,7 @@ describe("rental-order-machine", () => {
 
     expect(result).toEqual({ error: "订单不存在或状态不允许" });
     expect(tx.rentalOrder.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("completes the order without deduction when the renter rejects the claim", async () => {
@@ -417,9 +437,13 @@ describe("rental-order-machine", () => {
       rentalOrderStatusLog: { create: vi.fn().mockResolvedValue({}) },
       // Phase 7C：活跃 moderation 复查（无活跃行）
       listingModeration: { findFirst: vi.fn().mockResolvedValue(null) },
+      // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+      notification: {
+        createMany: txNotificationCreateMany,
+        findUnique: txNotificationFindUnique,
+      },
     };
 
-    createNotifications.mockResolvedValue(undefined);
     checkTimeConflict.mockResolvedValue({ available: true });
 
     const result = await createRentalOrderTx(tx as unknown as Prisma.TransactionClient, {
@@ -530,7 +554,8 @@ function buildExtensionTx(config: {
         calls.push("pending-count");
         return config.pendingCount ?? 0;
       }),
-      create: vi.fn(async () => ({})),
+      // Phase 9B：emit payload 需要真实 extensionRequestId（strict schema + dedupeKey）
+      create: vi.fn(async () => ({ id: "ext-new" })),
       updateMany: vi.fn(async () => {
         calls.push("winner-gate");
         return { count: config.gateCount ?? 1 };
@@ -543,6 +568,11 @@ function buildExtensionTx(config: {
     },
     rentalOrder: { update: vi.fn(async () => ({})) },
     rentalOrderStatusLog: { create: vi.fn(async () => ({})) },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
   return tx;
 }
@@ -553,8 +583,9 @@ function asExtensionTx(tx: ReturnType<typeof buildExtensionTx>): Prisma.Transact
 
 describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
   beforeEach(() => {
-    createNotifications.mockReset();
-    createNotifications.mockResolvedValue(undefined);
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
     checkTimeConflict.mockReset();
     mockAssertActive.mockReset();
     mockAssertActive.mockResolvedValue(undefined);
@@ -617,7 +648,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
 
     expect(result).toEqual({ error: "已有待处理的续租请求" });
     expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("request stale status：PENDING_RETURN 不可发起续租", async () => {
@@ -732,7 +763,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
       }),
     });
     // §39 winner 通知恰一条
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
   });
 
   it("§25 approve stale order state：PENDING_RETURN → 拒绝，extension 保持 PENDING", async () => {
@@ -882,7 +913,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
 
     expect(result).toEqual({ error: "无效请求" });
     expect(tx.rentalOrder.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("§40 reject pending：conditional PENDING→REJECTED + renter 通知", async () => {
@@ -903,7 +934,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
       where: { id: "ext-1", status: "PENDING" },
       data: { status: "REJECTED" },
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
   });
 
   it("§41 reject after order terminal：COMPLETED 订单仍可拒绝清理 stale request", async () => {
@@ -952,7 +983,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
       await rejectExtensionTx(asExtensionTx(loser), { extensionRequestId: "ext-1", userId: "user-owner" }),
     ).toEqual({ error: "无效请求" });
     // 通知只有 winner 一条
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
   });
 
   // ---- AUDIT2-RB03 EXTERNAL REVIEW FIX：maximumDuration 总租期合同 ----
@@ -975,7 +1006,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
 
     expect(result).toEqual({ error: "最长租期为 3 个计价单位" });
     expect(tx.rentalExtensionRequest.create).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("EXT-MAX-UNIT-02 approve total duration > maximumDuration → blocked，extension 保持 PENDING 零订单写", async () => {
@@ -995,7 +1026,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
     expect(result).toEqual({ error: "最长租期为 3 个计价单位" });
     expect(tx.rentalExtensionRequest.updateMany).not.toHaveBeenCalled();
     expect(tx.rentalOrder.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("EXT-MAX-UNIT-03 duration == maximumDuration → request 与 approve 均允许（> 而非 >=）", async () => {
@@ -1121,6 +1152,11 @@ function buildReviewTx(config: {
       count: vi.fn(async () => 0),
     },
     user: { update: vi.fn(async () => ({}) as unknown) },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
   return tx;
 }
@@ -1131,8 +1167,9 @@ function asReviewTx(tx: ReturnType<typeof buildReviewTx>): Prisma.TransactionCli
 
 describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () => {
   beforeEach(() => {
-    createNotifications.mockReset();
-    createNotifications.mockResolvedValue(undefined);
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
     mockAssertActive.mockReset();
     mockAssertActive.mockResolvedValue(undefined);
   });
@@ -1151,7 +1188,7 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
     expect(tx.calls).toEqual(["order-pre-read"]);
     expect(tx.rentalReview.create).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("REVIEW-SER-UNIT-02 锁序：pre-read → sorted owner+renter USER locks → FOR UPDATE（非 actor-only）", async () => {
@@ -1205,7 +1242,7 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
       }),
     });
     // Phase 8E §23：FIRST_BLIND_REVIEW → counterparty 零通知
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
     // blind 评价不进入 stored 缓存
     expect(tx.user.update).not.toHaveBeenCalled();
   });
@@ -1256,12 +1293,19 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
       where: { orderId: "order-1", authorId: { in: ["user-renter", "user-owner"] } },
       data: { publishedAt: expect.any(Date) },
     });
-    // §24：generic event，双方各一条，不携带评分/内容/作者
-    expect(createNotifications).toHaveBeenCalledTimes(1);
-    expect(createNotifications).toHaveBeenCalledWith(tx, [
-      { userId: "user-owner", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") },
-      { userId: "user-renter", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") },
+    // §24：generic event，双方各一条（Phase 9B：RENTAL_REVIEW_PUBLISHED 逐条 emit）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    const publishedRows = txNotificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as Record<string, unknown>,
+    );
+    expect(publishedRows).toEqual([
+      expect.objectContaining({ userId: "user-owner", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") }),
+      expect.objectContaining({ userId: "user-renter", type: "RENTAL", title: "交易评价已公开", content: expect.stringContaining("已公开") }),
     ]);
+    for (const row of publishedRows) {
+      expect(row.orderId).toBeNull();
+      expect(row.dedupeKey).toBe(`RENTAL_REVIEW_PUBLISHED:order-1:${row.userId}`);
+    }
   });
 
   it("REVIEW-SER-UNIT-04 锁后 fresh IN_DISPUTE：DENY，review/reputation/notification 全零", async () => {
@@ -1279,7 +1323,7 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
     expect(result).toEqual({ error: "订单状态错误" });
     expect(tx.rentalReview.create).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("REVIEW-SER-UNIT-05 pre-read 非 authority：candidate COMPLETED 但锁后 IN_DISPUTE → DENY", async () => {
@@ -1332,7 +1376,7 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
     expect(result).toEqual({ error: "该订单存在进行中的纠纷，无法评价" });
     expect(tx.rentalReview.create).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("REVIEW-SER-UNIT-08 duplicate author review：已评价 → 稳定错误，零重复创建", async () => {
@@ -1351,7 +1395,7 @@ describe("rental-order-machine review/dispute serialization (Phase 8A-04)", () =
     expect(result).toEqual({ error: "已经评价过" });
     expect(tx.rentalReview.create).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("§34 双向评价：owner 与 renter 各评一次（不限制整个订单一条）", async () => {
