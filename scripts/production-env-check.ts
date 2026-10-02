@@ -15,7 +15,7 @@ import {
   EMAIL_PROVIDER_TIMEOUT_MS_MAX,
   EMAIL_PROVIDER_TIMEOUT_MS_MIN,
   OFFICIAL_RESEND_BASE_URL,
-} from "../src/lib/notifications/email-config";
+} from "../src/lib/notifications/email-contract";
 
 const UNSAFE_DEFAULTS = [
   "minioadmin",
