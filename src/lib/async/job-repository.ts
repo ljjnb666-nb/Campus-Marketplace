@@ -177,6 +177,31 @@ export type CompleteAsyncJobInput = {
 };
 
 /**
+ * RB01 execution fencing（与 beginOutboxMaterializeTx 同构）：
+ * 在【handler 的同一个数据库事务】内以条件 UPDATE 复核 execution ownership
+ * ——WHERE { id, status = RUNNING, leaseToken = current } 命中即刷新
+ * leaseExpiresAt。该 UPDATE 取得 AsyncJob 行锁，且因与 handler 同事务，
+ * 行锁保持到 handler 事务 COMMIT：期间其它 worker 的 FOR UPDATE SKIP LOCKED
+ * 必须跳过该行（即使最初 claim 的 lease 时间已接近到期，execution
+ * transaction 仍有数据库行锁保护）。
+ *
+ * 返回 false = execution ownership 已丢失（lease 过期被 worker B 回收等）
+ * → 调用方必须让 handler 完全不运行（STALE WORKER MUST NOT ENTER DOMAIN
+ * HANDLER SIDE EFFECTS；domain side effects = 0）。
+ */
+export async function beginAsyncJobExecutionTx(
+  tx: Prisma.TransactionClient,
+  input: { id: string; leaseToken: string; leaseSeconds: number; now?: Date },
+): Promise<boolean> {
+  const now = input.now ?? new Date();
+  const result = await tx.asyncJob.updateMany({
+    where: { id: input.id, status: "RUNNING", leaseToken: input.leaseToken },
+    data: { leaseExpiresAt: new Date(now.getTime() + input.leaseSeconds * 1000) },
+  });
+  return result.count > 0;
+}
+
+/**
  * 完成 marker（独立于业务事务的 fencing 写）：条件 { id, status = RUNNING,
  * leaseToken }。0 rows = lease 已被回收/覆盖（stale worker）→ FENCED，
  * 绝不允许 A 完成 B 的 lease（J-LEASE-02 merge blocker）。

@@ -588,6 +588,148 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(completed.leaseToken).toBeNull();
     });
 
+    it("J-LEASE-03（RB01）：STALE WORKER CANNOT EXECUTE HANDLER——execution fence 未命中 → handler 调用数 0、Order/Product 零变化、OutboxEvent 0", async () => {
+      const seller = await createFixtureUser("栅栏卖家");
+      const buyer = await createFixtureUser("栅栏买家");
+      const product = await createProductFixture(seller.id, "RESERVED");
+      const order = await createOrderFixture({
+        buyerId: buyer.id,
+        sellerId: seller.id,
+        productId: product.id,
+        status: "PENDING",
+        deadlineIsPast: true,
+      });
+      const job = await insertJobFixture({ orderId: order.id });
+
+      const { claimDueAsyncJobs, beginAsyncJobExecutionTx } = await import(
+        "@/lib/async/job-repository"
+      );
+      const { withTransaction } = await import("@/lib/prisma");
+
+      // Worker A claim（短 lease）
+      const now1 = new Date();
+      const first = await withTransaction((tx) =>
+        claimDueAsyncJobs(tx, { workerId: "worker-A", leaseSeconds: 1, batchSize: 10, now: now1 }),
+      );
+      const tokenA = first.find((j) => j.id === job.id)!.leaseToken;
+
+      // 推进 now 越过 lease → Worker B reclaim
+      const now2 = new Date(now1.getTime() + 2 * 1000);
+      const second = await withTransaction((tx) =>
+        claimDueAsyncJobs(tx, { workerId: "worker-B", leaseSeconds: 60, batchSize: 10, now: now2 }),
+      );
+      const tokenB = second.find((j) => j.id === job.id)!.leaseToken;
+      expect(tokenB).not.toBe(tokenA);
+
+      // fence 原语直证：token A → false
+      const beginWithStaleToken = await withTransaction((tx) =>
+        beginAsyncJobExecutionTx(tx, { id: job.id, leaseToken: tokenA, leaseSeconds: 60 }),
+      );
+      expect(beginWithStaleToken).toBe(false);
+
+      // 生产 execution path 直调（executeClaimedAsyncJob = runner 同一合同，
+      // 禁止测试复制实现）：stale token A 绝不允许进入 handler
+      const { executeClaimedAsyncJob } = await import("@/lib/async/job-runner");
+      const { registerJobHandler, resolveJobHandler } = await import("@/lib/async/job-registry");
+      const realHandler = resolveJobHandler("PRODUCT_RESERVATION_EXPIRE", 1)!;
+      let handlerInvocations = 0;
+      registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, async () => {
+        handlerInvocations += 1;
+        return { kind: "COMPLETED" };
+      });
+      try {
+        const result = await executeClaimedAsyncJob(
+          {
+            id: job.id,
+            kind: "PRODUCT_RESERVATION_EXPIRE",
+            schemaVersion: 1,
+            payload: { orderId: order.id },
+            attempts: 1,
+            maxAttempts: 8,
+            leaseToken: tokenA,
+            previousStatus: "RUNNING",
+          },
+          { leaseSeconds: 60 },
+        );
+        expect(result.fencedBeforeExecution).toBe(true);
+        expect(handlerInvocations).toBe(0);
+      } finally {
+        registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, realHandler);
+      }
+
+      // domain side effects = 0：Order / Product / OutboxEvent 全部原状
+      const finalOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(finalOrder.status).toBe("PENDING");
+      expect(finalOrder.productReservationResolution).toBeNull();
+      expect(
+        (await rawClient!.product.findUniqueOrThrow({ where: { id: product.id } })).status,
+      ).toBe("RESERVED");
+      expect(
+        await rawClient!.outboxEvent.count({
+          where: { aggregateId: order.id, eventType: "PRODUCT_RESERVATION_EXPIRED" },
+        }),
+      ).toBe(0);
+    });
+
+    it("J-LOCK-EXEC-01（RB01）：execution transaction 持行锁期间 → 其它 worker 的 SKIP LOCKED claim 必须跳过该行（deterministic barrier）", async () => {
+      const job = await insertJobFixture({ orderId: `lockexec-${randomUUID().slice(0, 6)}` });
+
+      const { claimDueAsyncJobs, beginAsyncJobExecutionTx } = await import(
+        "@/lib/async/job-repository"
+      );
+      const { prisma } = await import("@/lib/prisma");
+
+      const now1 = new Date();
+      const first = await prisma.$transaction((tx) =>
+        claimDueAsyncJobs(tx as unknown as Prisma.TransactionClient, {
+          workerId: "worker-A",
+          leaseSeconds: 1,
+          batchSize: 10,
+          now: now1,
+        }),
+      );
+      const tokenA = first.find((j) => j.id === job.id)!.leaseToken;
+
+      let signalT1Began!: () => void;
+      const t1Began = new Promise<void>((resolve) => {
+        signalT1Began = resolve;
+      });
+      let releaseT1!: () => void;
+      const t1Gate = new Promise<void>((resolve) => {
+        releaseT1 = resolve;
+      });
+
+      // T1：execution fence UPDATE（取行锁）后在 handler 位置挂起（事务未提交）
+      const t1Promise = prisma.$transaction(async (tx) => {
+        const ok = await beginAsyncJobExecutionTx(tx as unknown as Prisma.TransactionClient, {
+          id: job.id,
+          leaseToken: tokenA,
+          leaseSeconds: 60,
+          now: new Date(now1.getTime() + 100),
+        });
+        signalT1Began();
+        await t1Gate;
+        return ok;
+      });
+      await t1Began;
+
+      // T2：now 已越过原始短 lease（RUNNING + leaseExpiresAt <= now 的
+      // crash-recovery candidate）——但该行被 T1 行锁持有，SKIP LOCKED 必跳过
+      const reclaimAttempt = await prisma.$transaction((tx) =>
+        claimDueAsyncJobs(tx as unknown as Prisma.TransactionClient, {
+          workerId: "worker-B",
+          leaseSeconds: 60,
+          batchSize: 100,
+          now: new Date(now1.getTime() + 5_000),
+        }),
+      );
+
+      releaseT1();
+      const t1Result = await t1Promise;
+      expect(t1Result).toBe(true);
+      expect(reclaimAttempt.find((j) => j.id === job.id)).toBeUndefined();
+    });
+
     it("RETRY-01（§15/§18/§50）：retryable 失败 → RETRY + 统一 backoff（attempt1=5s、attempt2=10s）+ 消毒错误落库", async () => {
       const job = await insertJobFixture({ orderId: `retry-${randomUUID().slice(0, 6)}` });
 
@@ -601,8 +743,9 @@ describe.skipIf(!integrationDatabaseUrl)(
       const claimed = first.find((j) => j.id === job.id)!;
 
       const failureTime = new Date(now1.getTime() + 100);
-      // runner 合同：错误先经 jobErrorMessage 消毒再落库（§18，runner 唯一
-      // 生产调用方；消毒原语已在 job-types.test 单测覆盖）
+      // runner 合同：错误先经 jobErrorMessage 处理再落库。RB02 合同：raw
+      // exception message 默认拒绝 → 固定 generic message（消毒原语已在
+      // job-types.test 覆盖）；机器诊断依赖 lastErrorCode
       const { jobErrorMessage } = await import("@/lib/async/job-types");
       const outcome1 = await failAsyncJob(queueClient, {
         id: job.id,
@@ -611,7 +754,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         maxAttempts: claimed.maxAttempts,
         failureClass: "RETRYABLE",
         errorCode: "P1001",
-        errorMessage: jobErrorMessage("db transient\npassword=secret\r\nstack-line"),
+        errorMessage: jobErrorMessage(new Error("db transient\npassword=secret\r\nstack-line")),
         now: failureTime,
       });
       expect(outcome1).toMatchObject({ kind: "RETRY" });
@@ -623,9 +766,10 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(afterFirst.status).toBe("RETRY");
       expect(afterFirst.attempts).toBe(1);
       expect(afterFirst.leaseToken).toBeNull();
-      // 消毒合同：只存首行、控制字符剥离，绝不带完整 stack/secret 换行内容
+      // RB02 ERR-SAFE：raw message 绝不落库（generic message + 安全 code）
       expect(afterFirst.lastErrorCode).toBe("P1001");
-      expect(afterFirst.lastErrorMessage).toBe("db transient");
+      expect(afterFirst.lastErrorMessage).toBe("异步任务执行失败");
+      expect(afterFirst.lastErrorMessage).not.toContain("secret");
       expect(afterFirst.lastErrorMessage!.length).toBeLessThanOrEqual(500);
 
       // attempt 2 失败 → +10s（central backoff 指数）
@@ -772,7 +916,61 @@ describe.skipIf(!integrationDatabaseUrl)(
         where: { id: invalidPayload.id },
       });
       expect(invalidPayloadRow.lastErrorCode).toBe("PRODUCT_RESERVATION_EXPIRE_PAYLOAD_INVALID");
+      // ERR-SAFE-02：PermanentJobFailure 的受控内部文案允许落库（安全机器诊断，
+      // 不含任何 raw exception text / user content）
+      expect(invalidPayloadRow.lastErrorMessage).toBe(
+        "PRODUCT_RESERVATION_EXPIRE payload 形状非法（期望 { orderId: string }）",
+      );
       expect(summary.deadLettered).toBeGreaterThanOrEqual(3);
+    });
+
+    it("ERR-SAFE-01（RB02）：handler 抛 raw exception（含 password/jwt/user note）→ lastErrorMessage = 固定 generic，秘密绝不落库", async () => {
+      const leakyJob = await insertJobFixture({ orderId: `errsafe-${randomUUID().slice(0, 6)}` });
+
+      const { registerJobHandler, resolveJobHandler } = await import("@/lib/async/job-registry");
+      const realHandler = resolveJobHandler("PRODUCT_RESERVATION_EXPIRE", 1)!;
+      registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, async () => {
+        throw new Error("password=super-secret jwt=abc.def.ghi user note=私密内容");
+      });
+      try {
+        await runWorkerBatch();
+      } finally {
+        registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, realHandler);
+      }
+
+      const row = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: leakyJob.id } });
+      expect(row.lastErrorCode).toBe("Error");
+      expect(row.lastErrorMessage).toBe("异步任务执行失败");
+      expect(row.lastErrorMessage).not.toContain("super-secret");
+      expect(row.lastErrorMessage).not.toContain("abc.def.ghi");
+      expect(row.lastErrorMessage).not.toContain("私密内容");
+    });
+
+    it("ERR-SAFE-OUTBOX-01（RB02）：materializer 抛 raw exception → event.lastErrorMessage = 固定 generic，秘密绝不落库", async () => {
+      const leakyEvent = await insertEventFixture({
+        orderId: `errsafe-out-${randomUUID().slice(0, 6)}`,
+      });
+
+      const {
+        registerOutboxEventHandler,
+        resolveOutboxEventHandler,
+      } = await import("@/lib/async/outbox-registry");
+      const original = resolveOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1)!;
+      registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, async () => {
+        throw new Error("smtp_password=hunter2 provider_response=account-suspended user note=内部备注");
+      });
+      try {
+        await runOutboxBatch();
+      } finally {
+        registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, original);
+      }
+
+      const row = await rawClient!.outboxEvent.findUniqueOrThrow({ where: { id: leakyEvent.id } });
+      expect(row.lastErrorCode).toBe("Error");
+      expect(row.lastErrorMessage).toBe("异步事件处理失败");
+      expect(row.lastErrorMessage).not.toContain("hunter2");
+      expect(row.lastErrorMessage).not.toContain("account-suspended");
+      expect(row.lastErrorMessage).not.toContain("内部备注");
     });
 
     it("WORKER-INT-01（§53/§54/§31）：真实生产 entrypoint --run-once → canonical expiry materialize + outbox PUBLISHED + 恰一对通知（buyer SUSPENDED 不阻断）", async () => {
