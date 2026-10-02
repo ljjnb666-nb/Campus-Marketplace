@@ -127,7 +127,13 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     });
   });
 
-  afterAll(async () => {
+  /**
+   * 并行套件清理阶段的 FK ShareLock 互锁可能以 40P01（deadlock victim）
+   * 中断 teardown（CI 实测：legalDocument.deleteMany 与其它套件的 campus/
+   * user 清理互锁；与被测业务代码无关——NO_40P01 哨兵覆盖的是业务事务）。
+   * deleteMany 全链幂等 → 整体重试安全；单次重试即可解除（对手事务已提交）。
+   */
+  async function runCleanup(): Promise<void> {
     await rawClient!.dataHold.deleteMany({ where: { id: { in: holdIds } } });
     // 订单/义务类（含竞态测试创建、未登记 orderNo 的行）：按参与方清理
     await rawClient!.order.deleteMany({
@@ -200,6 +206,23 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await rawClient!.legalDocument.deleteMany({ where: { id: { in: createdDocumentIds } } });
     await rawClient!.$disconnect();
     await prisma?.$disconnect();
+  };
+
+  afterAll(async () => {
+    try {
+      await runCleanup();
+    } catch (error) {
+      // Prisma 对 PG 40P01 抛 UnknownRequestError（顶层 code 可能为空）——
+      // 序列化判定兜底；P2034（写冲突）同样可安全幂等重放
+      const serialized = String(error);
+      const code = (error as { code?: string } | null)?.code;
+      if (code !== "P2034" && !serialized.includes("40P01")) {
+        throw error;
+      }
+      // deadlock victim：对手事务已终结，整体幂等重放
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await runCleanup();
+    }
   });
 
   // ============================================================
