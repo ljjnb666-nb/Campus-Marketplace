@@ -98,6 +98,10 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.listingModeration.deleteMany();
   await prisma.report.deleteMany();
   await prisma.notification.deleteMany();
+  // Phase 9A：async intent 行无 FK（不随 Order 级联）——必须显式清理，
+  // 否则上一轮失败残留的 due job 会挤占 async-worker 的 claim batch
+  await prisma.asyncJob.deleteMany();
+  await prisma.outboxEvent.deleteMany();
   await prisma.message.deleteMany();
   await prisma.conversationParticipant.deleteMany();
   await prisma.conversation.deleteMany();
