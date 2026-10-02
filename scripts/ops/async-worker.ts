@@ -14,8 +14,13 @@
  * - 单 job/event 失败只影响自身（RETRY / DEAD_LETTER），同 batch 后续继续
  *   （crash isolation，§33）；单周期整体失败记日志等下个周期，不 tight-loop；
  * - 配置级 fatal（env 非法）：exit non-zero，交给 container restart policy；
- * - graceful shutdown（§34）：SIGTERM/SIGINT 停止新 claim，允许当前周期
- *   完成（bounded）；被硬 kill 时 lease 过期回收保证最终重试；
+ * - graceful shutdown（§34/RB03，bounded）：第一次 SIGTERM/SIGINT → 停止新
+ *   claim + 启动 shutdown deadline（ASYNC_WORKER_SHUTDOWN_GRACE_MS，默认
+ *   15s；production 下限 1s / 上限 60s）；deadline 内当前周期完成 → exit 0；
+ *   超时 → 记 async_worker_shutdown_timeout 并立即退出（未完成 job 绝不
+ *   伪造 COMPLETED marker，其 RUNNING lease 过期后由 recovery 重放——无需
+ *   JS 侧取消事务：进程退出 → 连接断开 → DB tx 回滚 → durable recovery）。
+ *   第二次信号 → 立即强制退出（同样不伪造任何 marker）；
  * - backlog 可观测（§38/§40）：周期 summary 携带 queue stats（结构化日志），
  *   与 /api/ready 完全解耦——backlog > 0 不影响 web readiness。
  *
@@ -24,9 +29,11 @@
  *     run --rm async-worker --run-once
  *
  * 配置（生产下限防误配成 DB 风暴）：
- *   ASYNC_WORKER_POLL_MS        默认 1000（production 下限 250）
- *   ASYNC_WORKER_LEASE_SECONDS  默认 60（production 下限 30）
- *   ASYNC_WORKER_BATCH_SIZE     默认 10（production 上限 100）
+ *   ASYNC_WORKER_POLL_MS              默认 1000（production 下限 250）
+ *   ASYNC_WORKER_LEASE_SECONDS        默认 60（production 下限 30）
+ *   ASYNC_WORKER_BATCH_SIZE           默认 10（production 上限 100）
+ *   ASYNC_WORKER_SHUTDOWN_GRACE_MS    默认 15000（production 1000..60000；
+ *                                     compose stop_grace_period: 20s 与之对齐）
  */
 
 import "dotenv/config";
@@ -42,6 +49,9 @@ const DEFAULT_LEASE_SECONDS = 60;
 const MIN_PRODUCTION_LEASE_SECONDS = 30;
 const DEFAULT_BATCH_SIZE = 10;
 const MAX_PRODUCTION_BATCH_SIZE = 100;
+const DEFAULT_SHUTDOWN_GRACE_MS = 15_000;
+const MIN_PRODUCTION_SHUTDOWN_GRACE_MS = 1_000;
+const MAX_PRODUCTION_SHUTDOWN_GRACE_MS = 60_000;
 /** 空转时每 N 个周期输出一次含 queue stats 的 heartbeat（避免刷屏） */
 const HEARTBEAT_LOG_INTERVAL_CYCLES = 60;
 
@@ -49,6 +59,7 @@ interface WorkerConfig {
   pollMs: number;
   leaseSeconds: number;
   batchSize: number;
+  shutdownGraceMs: number;
 }
 
 function isProduction(): boolean {
@@ -87,6 +98,11 @@ function resolveWorkerConfig(): WorkerConfig {
     DEFAULT_BATCH_SIZE,
     "ASYNC_WORKER_BATCH_SIZE",
   );
+  const shutdownGraceMs = resolvePositiveInt(
+    process.env.ASYNC_WORKER_SHUTDOWN_GRACE_MS,
+    DEFAULT_SHUTDOWN_GRACE_MS,
+    "ASYNC_WORKER_SHUTDOWN_GRACE_MS",
+  );
 
   if (isProduction()) {
     if (pollMs < MIN_PRODUCTION_POLL_MS) {
@@ -104,9 +120,17 @@ function resolveWorkerConfig(): WorkerConfig {
         `ASYNC_WORKER_BATCH_SIZE 生产环境上限为 ${MAX_PRODUCTION_BATCH_SIZE}（当前值：${batchSize}）`,
       );
     }
+    if (
+      shutdownGraceMs < MIN_PRODUCTION_SHUTDOWN_GRACE_MS ||
+      shutdownGraceMs > MAX_PRODUCTION_SHUTDOWN_GRACE_MS
+    ) {
+      throw new Error(
+        `ASYNC_WORKER_SHUTDOWN_GRACE_MS 生产环境边界为 ${MIN_PRODUCTION_SHUTDOWN_GRACE_MS}..${MAX_PRODUCTION_SHUTDOWN_GRACE_MS}ms（当前值：${shutdownGraceMs}）`,
+      );
+    }
   }
 
-  return { pollMs, leaseSeconds, batchSize };
+  return { pollMs, leaseSeconds, batchSize, shutdownGraceMs };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -152,20 +176,40 @@ function didWork(summary: CycleSummary): boolean {
 async function main() {
   const runOnce = process.argv.includes("--run-once");
   const config = resolveWorkerConfig();
-  let shuttingDown = false;
+  // RB03 shutdown 状态机：0 = running；1 = draining（deadline 已启动）；
+  // 第二次信号 = 立即强制退出（绝不伪造 completion marker）。
+  // 显式 number：闭包内赋值不受 TS 字面量收窄影响。
+  let shutdownPhase: number = 0;
+  let shutdownTimer: NodeJS.Timeout | null = null;
 
-  const onSignal = () => {
-    if (shuttingDown) {
-      return;
+  process.on("SIGTERM", () => onShutdownSignal());
+  process.on("SIGINT", () => onShutdownSignal());
+
+  function onShutdownSignal() {
+    if (shutdownPhase === 1) {
+      // 第二次信号：立即强制退出。当前未完成 job 绝不标记成功——其 RUNNING
+      // lease 过期后由 recovery 重放（durable，无需 JS 侧取消事务）
+      logger.warn("收到第二次退出信号，立即强制退出", "async-worker", {
+        event: "async_worker_shutdown_forced",
+      });
+      process.exit(1);
     }
-    shuttingDown = true;
+    shutdownPhase = 1;
     logger.info("async worker 收到退出信号，停止新 claim，等待当前周期完成", "async-worker", {
       event: "async_worker_shutdown_signal",
-      signal: runOnce ? "run-once" : "SIGTERM/SIGINT",
+      shutdownGraceMs: config.shutdownGraceMs,
     });
-  };
-  process.on("SIGTERM", onSignal);
-  process.on("SIGINT", onSignal);
+    // bounded drain：deadline 到点即退出（进程退出 → 连接断开 → DB tx 回滚
+    // → lease 过期 recovery），绝不无限等待当前周期
+    shutdownTimer = setTimeout(() => {
+      logger.warn("shutdown grace 超时，退出（未完成 job 由 lease recovery 接管）", "async-worker", {
+        event: "async_worker_shutdown_timeout",
+        shutdownGraceMs: config.shutdownGraceMs,
+      });
+      process.exit(0);
+    }, config.shutdownGraceMs);
+    shutdownTimer.unref();
+  }
 
   logger.info("async worker 启动", "async-worker", {
     event: "async_worker_started",
@@ -222,11 +266,16 @@ async function main() {
       }
     }
 
-    if (runOnce || shuttingDown) {
+    if (runOnce || shutdownPhase === 1) {
+      // deadline 内完成：清理 timer 后优雅退出（exit 0）
+      if (shutdownTimer) {
+        clearTimeout(shutdownTimer);
+        shutdownTimer = null;
+      }
       return;
     }
     await sleep(config.pollMs);
-  } while (!shuttingDown);
+  } while (shutdownPhase === 0);
 }
 
 main()

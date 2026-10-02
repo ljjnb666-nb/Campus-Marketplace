@@ -88,14 +88,19 @@ describe("Phase 9A async-worker 生产拓扑 gate", () => {
     expect(text).not.toMatch(/profiles:/);
   });
 
-  it("async-worker 轮询配置存在（poll/lease/batch env 覆盖）", () => {
+  it("async-worker 轮询配置存在（poll/lease/batch/shutdown-grace env 覆盖）", () => {
     const block = extractServiceBlock(stripComments(composeContent), "async-worker");
     const text = block.join("\n");
     expect(text).toMatch(/ASYNC_WORKER_POLL_MS:\s*\$\{ASYNC_WORKER_POLL_MS:-1000\}/);
     expect(text).toMatch(/ASYNC_WORKER_LEASE_SECONDS:\s*\$\{ASYNC_WORKER_LEASE_SECONDS:-60\}/);
     expect(text).toMatch(/ASYNC_WORKER_BATCH_SIZE:\s*\$\{ASYNC_WORKER_BATCH_SIZE:-10\}/);
+    // RB03：shutdown grace 默认 15s，compose stop_grace_period 与之对齐
+    expect(text).toMatch(
+      /ASYNC_WORKER_SHUTDOWN_GRACE_MS:\s*\$\{ASYNC_WORKER_SHUTDOWN_GRACE_MS:-15000\}/,
+    );
+    expect(text).toMatch(/stop_grace_period:\s*20s/);
 
-    // worker 源码强制生产安全下限/上限（防 0 poll / 巨 batch 风暴）
+    // worker 源码强制生产安全下限/上限（防 0 poll / 巨 batch 风暴 / 无界 drain）
     const worker = readFileSync(
       path.join(repoRoot, "scripts", "ops", "async-worker.ts"),
       "utf8",
@@ -103,7 +108,12 @@ describe("Phase 9A async-worker 生产拓扑 gate", () => {
     expect(worker).toMatch(/MIN_PRODUCTION_POLL_MS = 250/);
     expect(worker).toMatch(/MIN_PRODUCTION_LEASE_SECONDS = 30/);
     expect(worker).toMatch(/MAX_PRODUCTION_BATCH_SIZE = 100/);
+    expect(worker).toMatch(/MIN_PRODUCTION_SHUTDOWN_GRACE_MS = 1_000/);
+    expect(worker).toMatch(/MAX_PRODUCTION_SHUTDOWN_GRACE_MS = 60_000/);
     expect(worker).toMatch(/NODE_ENV === "production"/);
+    // bounded shutdown 事件合同（§14/RB03）
+    expect(worker).toMatch(/async_worker_shutdown_timeout/);
+    expect(worker).toMatch(/async_worker_shutdown_forced/);
   });
 
   it("worker 入口存在 --run-once 运维 escape hatch", () => {
