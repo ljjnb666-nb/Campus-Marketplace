@@ -81,6 +81,14 @@ APP_NAME=校园集市
 DEFAULT_CAMPUS_SLUG=main-campus
 BACKUP_OFFSITE_TARGET=
 BACKUP_RETENTION_DAYS=14
+# Phase 9B：production env 契约的一部分（与 .env.production.synthetic 同一
+# 合同；缺 EMAIL 配置 = env-check fail closed，release verifier 拒绝放行）。
+# 全部为合成占位值，绝不使用真实凭据。
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=re_SandboxPlaceholderKey0000000001
+EMAIL_FROM=Campus Sandbox <noreply@campus.example.edu.cn>
+EMAIL_PROVIDER_TIMEOUT_MS=10000
+RESEND_API_BASE_URL=
 ENV
   printf 'BACKUP_DIR=%s\n' "${SANDBOX}/backups" >> "${SANDBOX}/.env.production"
 

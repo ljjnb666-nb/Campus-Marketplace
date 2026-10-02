@@ -1,6 +1,27 @@
-import { z } from "zod";
-
 import { PermanentJobFailure } from "@/lib/async/job-types";
+
+import {
+  EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS,
+  EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS,
+  EMAIL_PROVIDER_TIMEOUT_MS_DEFAULT,
+  EMAIL_PROVIDER_TIMEOUT_MS_MAX,
+  EMAIL_PROVIDER_TIMEOUT_MS_MIN,
+  OFFICIAL_RESEND_BASE_URL,
+  extractEmailAddress,
+} from "./email-contract";
+
+// 纯契约常量/校验器在 alias-free leaf（scripts/production-env-check.ts 的
+// tsx CLI 链路不解析 @/ 别名，绝不 import 本文件）；此处 re-export 维持
+// 既有单一 import 面。
+export {
+  EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS,
+  EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS,
+  EMAIL_PROVIDER_TIMEOUT_MS_DEFAULT,
+  EMAIL_PROVIDER_TIMEOUT_MS_MAX,
+  EMAIL_PROVIDER_TIMEOUT_MS_MIN,
+  OFFICIAL_RESEND_BASE_URL,
+  extractEmailAddress,
+};
 
 /**
  * Phase 9B：transactional email 配置契约（§44/§45/§29/§26）。
@@ -18,19 +39,9 @@ import { PermanentJobFailure } from "@/lib/async/job-types";
  *   DEAD_LETTER（fail closed，禁止盲目重发）。
  *
  * 隐私：本模块绝不打印/返回任何秘密值（API key / 收件地址由消费方持有，
- * 部署 preflight 日志只允许变量名 + PASS/FAIL——见
- * scripts/production-env-check.ts）。
+ * 部署 preflight 日志只允许变量名 + PASS/FAIL——scripts/production-env-check.ts
+ * 只从 alias-free email-contract.ts 取常量，绝不 import 本文件）。
  */
-
-export const OFFICIAL_RESEND_BASE_URL = "https://api.resend.com";
-
-export const EMAIL_PROVIDER_TIMEOUT_MS_DEFAULT = 10_000;
-export const EMAIL_PROVIDER_TIMEOUT_MS_MIN = 1_000;
-export const EMAIL_PROVIDER_TIMEOUT_MS_MAX = 30_000;
-
-/** Resend 幂等保留窗口 = 24h；本地安全窗口 = 23h（§26）。 */
-export const EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS = 23;
-export const EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS = EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS * 60 * 60 * 1000;
 
 export type EmailProviderName = "resend" | "disabled";
 
@@ -61,20 +72,6 @@ export class EmailProviderConfigError extends PermanentJobFailure {
     super(code, message);
     this.name = "EmailProviderConfigError";
   }
-}
-
-/**
- * 严格但现实的 email 地址校验（§42）：支持 "addr@domain" 与
- * "Display Name <addr@domain>" 两种形态，地址部分用 z.string().email()。
- * 绝不自写 RFC 巨型 regex。非法/缺失返回 null（调用方据此抑制 delivery）。
- */
-export function extractEmailAddress(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return null;
-  const angle = trimmed.match(/<([^<>]+)>\s*$/);
-  const candidate = (angle ? angle[1]! : trimmed).trim();
-  return z.string().email().safeParse(candidate).success ? candidate : null;
 }
 
 type EmailEnv = Record<string, string | undefined>;

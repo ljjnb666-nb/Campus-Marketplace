@@ -177,8 +177,33 @@ export const notificationDeliveryHandler = async (
     notification.userId,
   );
 
-  // 7) provider send（deterministic 快照，§33；resend 为 9B 唯一 production provider）
-  const sendConfig = resolveEmailSendConfig();
+  // 7) provider send（deterministic 快照，§33；resend 为 9B 唯一 production provider）。
+  //    EMAIL 配置缺失/非法 = worker 环境态（如滚动发布中的未配置实例、共享
+  //    集成队列的无 env runner），不是 payload/结构性问题 → RETRYABLE
+  //    （0 provider call；env 修复后的 worker 接管；maxAttempts 兜底
+  //    DEAD_LETTER）。生产 env-check 保证配置存在，此路径正常不可达。
+  const sendConfig = (() => {
+    try {
+      return resolveEmailSendConfig();
+    } catch (error) {
+      if (error instanceof EmailProviderPermanentError) {
+        logEmail("email_delivery_retry_scheduled", {
+          job,
+          deliveryId,
+          notificationId: notification.id,
+          kind: notification.kind,
+          provider: delivery.provider,
+          code: "EMAIL_PROVIDER_CONFIG_UNAVAILABLE",
+          startedAt,
+        });
+        throw new EmailProviderRetryableError(
+          "EMAIL_PROVIDER_CONFIG_UNAVAILABLE",
+          "当前 worker 缺少可用 EMAIL 配置：RETRYABLE（等待已配置 worker 接管）",
+        );
+      }
+      throw error;
+    }
+  })();
   const provider = new ResendEmailProvider({
     apiKey: sendConfig.apiKey,
     baseUrl: sendConfig.baseUrl,
