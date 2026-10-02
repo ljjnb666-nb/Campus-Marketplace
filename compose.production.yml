@@ -5,7 +5,8 @@
 #                                   ├─▶ postgres (backend, 无端口发布)
 #                                   ├─▶ redis    (backend, 无端口发布)
 #                                   ├─▶ minio    (可选 profile，backend，无端口发布)
-#                                   └─▶ storage-cleanup (backend, 常驻单实例清理 worker，无端口发布)
+#                                   ├─▶ storage-cleanup (backend, 常驻单实例清理 worker，无端口发布)
+#                                   └─▶ async-worker    (backend, 常驻单实例 job/outbox worker，无端口发布)
 #
 # 原则：
 # - 只有 caddy 发布 80/443；5432/6379/9000/9001/3000 一律不进公网
@@ -176,6 +177,47 @@ services:
     environment:
       NODE_ENV: production
       ASSET_CLEANUP_INTERVAL_SECONDS: ${ASSET_CLEANUP_INTERVAL_SECONDS:-1800}
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---- Async worker（Phase 9A：durable jobs + transactional outbox 消费者）----
+  # 单实例常驻：仅 backend 网络、无端口发布、与 app 相同 .env.production。
+  # 循环：claim due AsyncJob → 执行（canonical domain lifecycle，如
+  # reservation expiry 经 expireProductReservationTx）→ claim OutboxEvent →
+  # 幂等派生 In-App 通知 → bounded sleep。durable queue authority =
+  # PostgreSQL（SKIP LOCKED + lease token fencing）——不依赖 Redis 才能正确
+  # 运行。配置（production 下限防 DB 轮询风暴，见 scripts/ops/async-worker.ts）：
+  #   ASYNC_WORKER_POLL_MS / ASYNC_WORKER_LEASE_SECONDS / ASYNC_WORKER_BATCH_SIZE
+  # RB03 bounded shutdown：SIGTERM → ASYNC_WORKER_SHUTDOWN_GRACE_MS（默认
+  # 15s，production 1s..60s）内允许当前周期完成；超时记
+  # async_worker_shutdown_timeout 后立即退出（未完成 job 不伪造 COMPLETED，
+  # RUNNING lease 过期后由 recovery 接管）。stop_grace_period: 20s 与默认
+  # grace 对齐——Docker SIGTERM → worker grace(15s) → 5s 余量 → SIGKILL 上限。
+  # 与 /api/ready 完全解耦：queue backlog 是后台消费进度，不影响接流量判定。
+  # 手动 escape hatch（无需宿主机 node_modules）：
+  #   docker compose --env-file .env.production -f compose.production.yml \
+  #     run --rm async-worker --run-once
+  async-worker:
+    build:
+      context: .
+      target: async-runner
+      # release identity 与 cleanup-runner 同一 provenance 模式（构建期 bake
+      # /app/.release-sha，运行时 env 不可伪造）
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    image: campus-marketplace-async-worker:${GIT_SHA:-local}
+    <<: *service-defaults
+    stop_grace_period: 20s
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      ASYNC_WORKER_POLL_MS: ${ASYNC_WORKER_POLL_MS:-1000}
+      ASYNC_WORKER_LEASE_SECONDS: ${ASYNC_WORKER_LEASE_SECONDS:-60}
+      ASYNC_WORKER_BATCH_SIZE: ${ASYNC_WORKER_BATCH_SIZE:-10}
+      ASYNC_WORKER_SHUTDOWN_GRACE_MS: ${ASYNC_WORKER_SHUTDOWN_GRACE_MS:-15000}
     networks:
       - backend
     depends_on:

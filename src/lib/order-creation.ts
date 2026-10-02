@@ -1,5 +1,10 @@
 import type { Prisma } from "@prisma/client";
 
+import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
+import {
+  PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
+  PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION,
+} from "@/lib/async/job-types";
 import { decimalValue } from "@/lib/decimal";
 import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
 import { createOrderNo } from "@/lib/order-no";
@@ -112,6 +117,7 @@ export async function createProductOrderTx(
       // Phase 8B-01：deadline 基于同一次事务内捕获的单一 now（禁止多次
       // new Date() 漂移）；reservation resolution 二元组保持 NULL（未关闭）。
       const reservationNow = options?.now ?? new Date();
+      const productReservationExpiresAt = computeProductReservationExpiresAt(reservationNow);
 
       const order = await tx.order.create({
         data: {
@@ -124,8 +130,20 @@ export async function createProductOrderTx(
           buyerId: input.buyerId,
           sellerId: fresh.sellerId,
           productId: fresh.id,
-          productReservationExpiresAt: computeProductReservationExpiresAt(reservationNow),
+          productReservationExpiresAt,
         },
+      });
+
+      // Phase 9A（§8/§9）：Order exists ⇔ expiry job durable intent exists。
+      // AsyncJob 与 Order 在同一业务事务内原子落盘——严禁事务后 enqueue
+      // （两步之间 crash → reservation 永不过期）。dedupeKey 幂等，worker
+      // 到期后只负责 wake up → expireProductReservationTx（canonical authority）。
+      await enqueueAsyncJobTx(tx, {
+        kind: PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
+        schemaVersion: PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION,
+        dedupeKey: `${PRODUCT_RESERVATION_EXPIRE_JOB_KIND}:${order.id}`,
+        payload: { orderId: order.id },
+        runAt: productReservationExpiresAt,
       });
 
       await createNotifications(tx, [

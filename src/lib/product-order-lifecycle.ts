@@ -10,7 +10,15 @@ import {
   isProductReservationExpired,
   PRODUCT_RESERVATION_EXPIRED_CANCEL_REASON,
 } from "@/lib/product-reservation";
+// Phase 9A：accept/cancel 期限内的同步通知仍走既有 createNotifications；
+// EXPIRY 通知改经 OutboxEvent（见 expireLockedProductReservation）
 import { createNotifications } from "@/repositories/notification-repository";
+import { recordOutboxEventTx } from "@/lib/async/outbox";
+import {
+  PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE,
+  PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION,
+  PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE,
+} from "@/lib/async/outbox-event-registry";
 
 /**
  * AUDIT2-RB01（PRODUCT LISTING / ORDER AUTHORITY CLOSURE）：
@@ -42,7 +50,8 @@ import { createNotifications } from "@/repositories/notification-repository";
  *   → 条件更新安全带（PENDING → CANCELLED / ACCEPTED）
  *   → Product 行 FOR UPDATE（seller/deletedAt/status 权威复核）
  *   → capability / other-active-order reads
- *   → Product 投影写入 → 通知
+ *   → Product 投影写入 → OutboxEvent（Phase 9A：In-App expiry 通知改由
+ *     outbox materializer 幂等派生，不再事务内直写 Notification）
  *
  * 参与方资格语义：accept/cancel 属既有义务 progression/wind-down，仅要求
  * actor 满足 ACTIVE account mutation contract；counterparty SUSPENDED /
@@ -461,7 +470,13 @@ export async function expireProductReservationTx(
  *   → fresh Order = PRODUCT / PENDING / now >= expiresAt
  *
  * 负责：条件 PENDING → CANCELLED（resolution EXPIRED）→ Product release
- * 投影 → expiry 通知（恰好一次；安全带失抢时零副作用返回 false）。
+ * 投影 → OutboxEvent insert（安全带失抢时零副作用返回 false）。
+ *
+ * Phase 9A（§23）：In-App expiry 通知改为 transactional outbox——本事务
+ * 原子落盘 OutboxEvent（dedupeKey 幂等），通知行由 outbox materializer
+ * （async-worker）按 §27 冻结文案幂等派生（Notification.dedupeKey 恰好
+ * 一次，§28）；late accept/cancel 与 scheduler 三条路径共享同一 event，
+ * 绝不重复通知（§25）。payload 仅 { orderId }，禁止 user-authored 内容。
  */
 async function expireLockedProductReservation(
   tx: Prisma.TransactionClient,
@@ -491,23 +506,17 @@ async function expireLockedProductReservation(
     });
   }
 
-  // 禁止 user-authored 内容（Product title / note / meetingLocation）
-  await createNotifications(tx, [
-    {
-      userId: lockedOrder.buyerId,
-      orderId: lockedOrder.id,
-      type: "ORDER",
-      title: "商品预留已过期",
-      content: "卖家未在确认期限内接受订单，商品预留已自动释放。",
-    },
-    {
-      userId: lockedOrder.sellerId,
-      orderId: lockedOrder.id,
-      type: "ORDER",
-      title: "商品预留已过期",
-      content: "该商品订单已超过确认期限，预留已自动释放。",
-    },
-  ]);
+  // Phase 9A：domain transition + outbox intent 同一事务（§9 禁止事务后
+  // enqueue）。recorded=false = dedupe 命中（同订单重复 expire 的防御，
+  // 约束下 transition 安全带已保证只有一路 EXPIRED）。
+  await recordOutboxEventTx(tx, {
+    eventType: PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE,
+    schemaVersion: PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION,
+    aggregateType: PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE,
+    aggregateId: lockedOrder.id,
+    dedupeKey: `${PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE}:${lockedOrder.id}`,
+    payload: { orderId: lockedOrder.id },
+  });
 
   return true;
 }

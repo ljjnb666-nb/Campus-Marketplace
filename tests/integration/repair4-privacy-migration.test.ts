@@ -165,12 +165,11 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
 
       // 历史通知：无法定位作者（含 raw free text）——全部 redact
-      await db.notification.create({
-        data: { userId: erased.id, type: "SYSTEM", title: "历史标题A", content: "审核未通过：材料模糊" },
-      });
-      await db.notification.create({
-        data: { userId: survivor.id, type: "RENTAL", title: "历史标题B", content: "拒绝原因：不想租了" },
-      });
+      // （pre-9A 历史 schema 上播种：当前 client 的 Notification RETURNING
+      // 已含 Phase 9A dedupeKey/sourceEventId 新列，历史 schema 尚不存在——
+      // 与上方 Order 最小 select 同类问题，故用 raw INSERT 播种）
+      await db.$executeRaw`INSERT INTO "Notification" ("id", "userId", "type", "title", "content") VALUES (${`nb04-${randomUUID()}`}, ${erased.id}, 'SYSTEM', ${"历史标题A"}, ${"审核未通过：材料模糊"})`;
+      await db.$executeRaw`INSERT INTO "Notification" ("id", "userId", "type", "title", "content") VALUES (${`nb04-${randomUUID()}`}, ${survivor.id}, 'RENTAL', ${"历史标题B"}, ${"拒绝原因：不想租了"})`;
 
       // R4-01 canary：erased 用户 schoolName 仍为原值（迁移后 → marker）
       await db.user.update({
