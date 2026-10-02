@@ -76,3 +76,36 @@
 - master 受保护：PR before merge、`verify` + `e2e` required checks、
   禁 force push / 禁删除、enforce admins
 - 发布镜像不可变 tag（git SHA）；部署历史见 `.releases.log`
+
+## 8. Transactional Email 安全契约（Phase 9B）
+
+所有 transactional email 经唯一链路投递：canonical Notification →
+NotificationDelivery（EMAIL 渠道快照）→ NOTIFICATION_DELIVERY AsyncJob
+（Phase 9A 队列）→ EmailProvider（resend）。业务事务绝不直接调用外部
+email API（只 durable record intent；external send 仅发生在 async-worker
+的 job 执行事务内）。
+
+- **API key 处理**：`RESEND_API_KEY` 仅存在于 env（`.env.production`，
+  600 权限）；只进 `Authorization` header，绝不入库、绝不入日志、绝不进
+  错误对象/上报。preflight（`npm run env:check`）只打印变量名 + PASS/FAIL。
+- **provider 幂等**：每次发送携带 deterministic `Idempotency-Key`
+  （`notification/<notificationId>/email/v1`），重试/超时重放在 provider
+  24h 保留窗口内收敛为一次真实投递；本地安全窗口 23h，超窗后任何 retry
+  一律 no-provider-call → DEAD_LETTER（fail closed，禁止盲目重发；如需
+  重发必须显式产生新的 notification/delivery intent）。
+- **EMAIL_FROM 域名验证**：发信域名必须在 Resend 完成域名验证（SPF/DKIM）。
+  域名验证属 Phase 3B external evidence；未完成前生产 email gate 通过也
+  不代表真实收件可用。
+- **日志红线**：结构化日志只允许 notificationId / deliveryId / jobId /
+  provider / kind / attempt / durationMs / 安全错误码。收件地址、主题、
+  正文、API key、provider raw response 绝不入日志，也绝不入 DB
+  （DB 只存 provider / providerMessageId / providerAcceptedAt /
+  受控 suppressionCode；destination 属 CONTACT_INFO，注销时清空）。
+- **dead-letter 行为**：PERMANENT 失败（auth/请求非法/幂等键冲突）立即
+  DEAD_LETTER；RETRYABLE（429/5xx/超时/网络）按 9A 中央退避重试至
+  maxAttempts。dead-letter 不自动重放；409 invalid_idempotent_request 或
+  超出幂等窗口的投递如需重发必须显式新 intent。
+- **providerAcceptedAt 语义**：= provider 接受发送请求。绝不声称邮箱实际
+  收件/已读（API success 不能证明 mailbox delivery）；9B 不做 delivery
+  webhook。历史真实邮箱不永久保留：注销时 unsent 投递被抑制
+  （RECIPIENT_ERASED）、已接受投递的 destination 一并清空。

@@ -11,6 +11,11 @@ import { readFileSync } from "node:fs";
 // scripts/ 由 tsx CLI 直接执行：不能用 @/ alias（不经过 Next/vitest 的
 // 路径解析），必须相对路径引用 src
 import { metricsTokenEnvChecks } from "../src/lib/metrics-token";
+import {
+  EMAIL_PROVIDER_TIMEOUT_MS_MAX,
+  EMAIL_PROVIDER_TIMEOUT_MS_MIN,
+  OFFICIAL_RESEND_BASE_URL,
+} from "../src/lib/notifications/email-config";
 
 const UNSAFE_DEFAULTS = [
   "minioadmin",
@@ -23,6 +28,9 @@ const UNSAFE_DEFAULTS = [
   "password",
   "123456",
 ];
+
+/** Phase 9B：RESEND_API_KEY 合理形态（re_ 前缀 + 机器字符，>=16 长度）。 */
+const RESEND_API_KEY_PATTERN = /^re_[A-Za-z0-9_-]{12,}$/;
 
 type CheckResult = { name: string; ok: boolean; message?: string };
 
@@ -255,6 +263,77 @@ export function collectEnvChecks(vars: Record<string, string | undefined>): EnvC
   for (const tokenCheck of metricsTokenEnvChecks(vars)) {
     check(results, tokenCheck.name, tokenCheck.ok, tokenCheck.message);
   }
+
+  // ---- Phase 9B：transactional email（§44/§45/§46；只打印变量名+PASS/FAIL）----
+  // 生产 EMAIL_PROVIDER 必须 = resend（fail closed；disabled 仅限开发）。
+  check(
+    results,
+    "EMAIL_PROVIDER",
+    vars.EMAIL_PROVIDER === "resend",
+    "生产必须为 resend（transactional email 经 canonical NotificationDelivery + AsyncJob 投递）",
+  );
+
+  const resendApiKey = vars.RESEND_API_KEY ?? "";
+  check(
+    results,
+    "RESEND_API_KEY",
+    RESEND_API_KEY_PATTERN.test(resendApiKey) && containsUnsafeDefault(resendApiKey) === undefined,
+    "缺失/形态非法（要求 re_ 前缀机器串）/含危险默认值",
+  );
+
+  // EMAIL_FROM：支持 "addr@domain" 与 "Display Name <addr@domain>"。
+  const emailFrom = vars.EMAIL_FROM ?? "";
+  const emailFromCandidate = (() => {
+    const angle = emailFrom.match(/<([^<>]+)>\s*$/);
+    return (angle ? angle[1] : emailFrom).trim();
+  })();
+  check(
+    results,
+    "EMAIL_FROM",
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailFromCandidate),
+    "缺失或不是合法 email（支持 Name <addr@domain> 形态）",
+  );
+
+  const emailReplyTo = vars.EMAIL_REPLY_TO ?? "";
+  if (emailReplyTo !== "") {
+    const replyToCandidate = (() => {
+      const angle = emailReplyTo.match(/<([^<>]+)>\s*$/);
+      return (angle ? angle[1] : emailReplyTo).trim();
+    })();
+    check(
+      results,
+      "EMAIL_REPLY_TO",
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(replyToCandidate),
+      "设置时必须是合法 email",
+    );
+  }
+
+  // EMAIL_PROVIDER_TIMEOUT_MS：与 email-config 运行时契约完全一致
+  // （1000..30000；未设置 = 缺省 10000，放行）。
+  const emailTimeoutRaw = vars.EMAIL_PROVIDER_TIMEOUT_MS;
+  if (emailTimeoutRaw === undefined || emailTimeoutRaw === "") {
+    check(results, "EMAIL_PROVIDER_TIMEOUT_MS", true, "未设置（默认 10000ms）");
+  } else {
+    const emailTimeout = Number(emailTimeoutRaw);
+    check(
+      results,
+      "EMAIL_PROVIDER_TIMEOUT_MS",
+      Number.isInteger(emailTimeout) &&
+        emailTimeout >= EMAIL_PROVIDER_TIMEOUT_MS_MIN &&
+        emailTimeout <= EMAIL_PROVIDER_TIMEOUT_MS_MAX,
+      `必须是 ${EMAIL_PROVIDER_TIMEOUT_MS_MIN}..${EMAIL_PROVIDER_TIMEOUT_MS_MAX} 的整数（与 worker 运行时契约一致）`,
+    );
+  }
+
+  // RESEND_API_BASE_URL：生产固定官方 origin（§45 防 SSRF/API key exfil）——
+  // 未设置 = 官方（放行）；设置则必须与官方完全一致。
+  const resendBaseUrl = vars.RESEND_API_BASE_URL ?? "";
+  check(
+    results,
+    "RESEND_API_BASE_URL",
+    resendBaseUrl === "" || resendBaseUrl.replace(/\/+$/, "") === OFFICIAL_RESEND_BASE_URL,
+    "生产禁止覆盖 provider host（固定 https://api.resend.com）",
+  );
 
   return results;
 }
