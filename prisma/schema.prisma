@@ -867,6 +867,13 @@ model Notification {
   order     Order?           @relation(fields: [orderId], references: [id], onDelete: SetNull)
   createdAt DateTime         @default(now())
 
+  // Phase 9A：outbox-driven In-App 通知的 exactly-once 身份。
+  // dedupeKey = OUTBOX:<eventId>:IN_APP:<userId>（DB 级幂等唯一键；
+  // PostgreSQL unique index 允许多行 NULL——历史同步通知 dedupeKey 为 NULL，
+  // 行为完全兼容）。sourceEventId = 产生本通知的 OutboxEvent.id（溯源）。
+  dedupeKey     String?
+  sourceEventId String?
+
   @@index([userId, isRead, createdAt])
 }
 
@@ -2209,4 +2216,119 @@ model ListingModeration {
   @@index([serviceListingId])
   @@index([errandTaskId])
   @@index([rentalListingId])
+}
+
+// ============================================================
+// Phase 9A — Async Core / Transactional Outbox
+// ============================================================
+// 永久原则：business transaction COMMIT ≠ external/async side effect
+// completed。domain state 与 async intent（job / outbox event）必须在同一
+// 数据库事务内原子落盘；durable queue authority = PostgreSQL（禁止
+// Kafka / RabbitMQ / Redis durable queue / 新微服务）。
+//
+// AsyncJob（业务 job intent）与 OutboxEvent（domain event outbox）是两张
+// 语义分离的表：job = "稍后必须执行的领域动作"；outbox = "已发生的事实，
+// 需幂等派生副作用（通知/未来渠道）"。禁止合并成一张语义模糊的大表。
+//
+// 隐私契约（privacy-data-registry 同步登记）：payload 只允许 IDs + 机器
+// 状态（如 { orderId }），禁止任何 user-authored 自由文本 / secret；
+// leaseToken 是机器 fencing token（UUID），非用户数据。
+// ============================================================
+
+enum AsyncJobStatus {
+  // 可被 claim（PENDING + RETRY 都是 runnable candidate；RETRY = 已失败
+  // 且按 backoff 排程中）。绝不引入语义模糊的 FAILED——无法表达
+  // "还会不会自动重试" 的状态一律禁止。
+  PENDING
+  RUNNING
+  RETRY
+  COMPLETED
+  DEAD_LETTER
+}
+
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  DEAD_LETTER
+}
+
+model AsyncJob {
+  id            String @id @default(cuid())
+  kind          String
+  // job kind 不用 Prisma enum：新增 worker handler 不应每次都改
+  // PostgreSQL enum。fail closed 由 runtime registry 保证——未知
+  // kind / schemaVersion 直接 PERMANENT → DEAD_LETTER，禁止猜测执行。
+  schemaVersion Int
+  // 幂等 enqueue 唯一键（如 PRODUCT_RESERVATION_EXPIRE:<orderId>）；
+  // createMany skipDuplicates 语义依赖此 UNIQUE 约束。
+  dedupeKey     String @unique
+  payload       Json
+
+  status AsyncJobStatus @default(PENDING)
+  runAt  DateTime
+
+  // attempts = 实际 execution claim 次数（第一次 claim 0 → 1），
+  // 不是 failure 次数——worker crash（lease 过期被回收）也计入 attempt。
+  attempts    Int @default(0)
+  maxAttempts Int @default(8)
+
+  // lease 所有权：leaseOwner 仅是诊断 label（process-instance unique
+  // workerId，可含 hostname）；真正 fencing authority = leaseToken
+  // （每次 claim 重新生成；completion / failure 更新必须条件命中
+  // status = RUNNING AND leaseToken = current，否则 0 rows = 被 fence）。
+  leaseOwner     String?
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+
+  // 只存安全 error code + 截断（<=500）的 sanitized message；
+  // 完整 stack 走结构化应用日志，绝不入库。
+  lastErrorCode    String?
+  lastErrorMessage String?
+
+  completedAt    DateTime?
+  deadLetteredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // claim candidate 扫描：(PENDING/RETRY, runAt <= now) 与 crash
+  // recovery（RUNNING, leaseExpiresAt <= now）
+  @@index([status, runAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([kind, status, runAt])
+}
+
+model OutboxEvent {
+  id            String @id @default(cuid())
+  eventType     String
+  schemaVersion Int
+  aggregateType String
+  aggregateId   String
+  dedupeKey     String @unique
+
+  payload Json
+
+  status      OutboxEventStatus @default(PENDING)
+  availableAt DateTime
+
+  attempts    Int @default(0)
+  maxAttempts Int @default(8)
+
+  leaseOwner     String?
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+
+  lastErrorCode    String?
+  lastErrorMessage String?
+
+  publishedAt    DateTime?
+  deadLetteredAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, availableAt, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([eventType, status, availableAt])
 }

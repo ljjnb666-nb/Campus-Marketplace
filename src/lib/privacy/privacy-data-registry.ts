@@ -428,6 +428,15 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
   // admin UI，fixture/未来治理面管理），不是任何用户的自由文本面
   { model: "MeetupPoint", field: "name", because: "见面点公开名称（平台参考数据）" },
   { model: "MeetupPoint", field: "locationText", because: "见面点公开位置描述（平台参考数据）" },
+  // Phase 9A：async infra 的 lease fencing token（每次 claim 重新生成的机器
+  // UUID，fencing authority）。两张表整体非 personal-bearing：
+  //   AsyncJob.payload / OutboxEvent.payload 只允许 IDs + 机器状态
+  //   （zod payload schema 逐 kind/eventType 冻结，如 { orderId }），
+  //   禁止 user-authored 自由文本 / secret / raw provider payload；
+  //   lastErrorCode/lastErrorMessage 只存安全 error code + 截断 sanitized
+  //   message（<=500），完整 stack 走结构化应用日志，绝不入库。
+  { model: "AsyncJob", field: "leaseToken", because: "worker lease fencing token（机器 UUID，非用户数据）" },
+  { model: "OutboxEvent", field: "leaseToken", because: "dispatcher lease fencing token（机器 UUID，非用户数据）" },
 ];
 
 // ============================================================
