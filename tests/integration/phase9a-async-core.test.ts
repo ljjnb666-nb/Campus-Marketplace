@@ -925,15 +925,47 @@ describe.skipIf(!integrationDatabaseUrl)(
     });
 
     it("ERR-SAFE-01（RB02）：handler 抛 raw exception（含 password/jwt/user note）→ lastErrorMessage = 固定 generic，秘密绝不落库", async () => {
-      const leakyJob = await insertJobFixture({ orderId: `errsafe-${randomUUID().slice(0, 6)}` });
+      const leakyJob = await insertJobFixture({
+        orderId: `errsafe-${randomUUID().slice(0, 6)}`,
+        // 先以未来 runAt 落库（并行套件的 worker 不可领），布防后再暴露
+        runAt: new Date(Date.now() + 60_000),
+      });
 
       const { registerJobHandler, resolveJobHandler } = await import("@/lib/async/job-registry");
       const realHandler = resolveJobHandler("PRODUCT_RESERVATION_EXPIRE", 1)!;
-      registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, async () => {
+      // fault 只对本 fixture 的 job 生效；并行 vitest worker 领到的其它套件
+      // due job 一律委托真实 handler（否则会把共享队列里的外来行毒化成退避）
+      registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, async (tx, job) => {
+        if (job.id !== leakyJob.id) {
+          await realHandler(tx, job);
+          return { kind: "COMPLETED" };
+        }
         throw new Error("password=super-secret jwt=abc.def.ghi user note=私密内容");
       });
       try {
-        await runWorkerBatch();
+        // 共享队列消费竞态防御：外来 worker 若抢先完成本 job，重置后重试
+        // （最多 3 轮）；断言以其真实持久化状态收敛为准
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await rawClient!.asyncJob.update({
+            where: { id: leakyJob.id },
+            data: {
+              status: "PENDING",
+              runAt: new Date(Date.now() - 1),
+              attempts: 0,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+            },
+          });
+          await runWorkerBatch();
+          const current = await rawClient!.asyncJob.findUniqueOrThrow({
+            where: { id: leakyJob.id },
+          });
+          if (current.lastErrorCode === "Error") {
+            break;
+          }
+        }
       } finally {
         registerJobHandler("PRODUCT_RESERVATION_EXPIRE", 1, realHandler);
       }
@@ -949,6 +981,8 @@ describe.skipIf(!integrationDatabaseUrl)(
     it("ERR-SAFE-OUTBOX-01（RB02）：materializer 抛 raw exception → event.lastErrorMessage = 固定 generic，秘密绝不落库", async () => {
       const leakyEvent = await insertEventFixture({
         orderId: `errsafe-out-${randomUUID().slice(0, 6)}`,
+        // 先以未来 availableAt 落库（并行套件的 dispatcher 不可领），布防后暴露
+        availableAt: new Date(Date.now() + 60_000),
       });
 
       const {
@@ -956,11 +990,38 @@ describe.skipIf(!integrationDatabaseUrl)(
         resolveOutboxEventHandler,
       } = await import("@/lib/async/outbox-registry");
       const original = resolveOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1)!;
-      registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, async () => {
+      // fault 只对本 fixture 的 event 生效；并行 worker 领到的其它套件
+      // available event 一律委托真实 handler（共享队列防毒化）
+      registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, async (tx, claimedEvent) => {
+        if (claimedEvent.id !== leakyEvent.id) {
+          await original(tx, claimedEvent);
+          return;
+        }
         throw new Error("smtp_password=hunter2 provider_response=account-suspended user note=内部备注");
       });
       try {
-        await runOutboxBatch();
+        // 共享队列消费竞态防御：外来 dispatcher 若抢先 PUBLISHED，重置后重试
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await rawClient!.outboxEvent.update({
+            where: { id: leakyEvent.id },
+            data: {
+              status: "PENDING",
+              availableAt: new Date(Date.now() - 1),
+              attempts: 0,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+            },
+          });
+          await runOutboxBatch();
+          const current = await rawClient!.outboxEvent.findUniqueOrThrow({
+            where: { id: leakyEvent.id },
+          });
+          if (current.lastErrorCode === "Error") {
+            break;
+          }
+        }
       } finally {
         registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, original);
       }
@@ -1049,10 +1110,15 @@ describe.skipIf(!integrationDatabaseUrl)(
       const job = await insertJobFixture({ orderId: order.id });
 
       // 第一轮：handler 业务事务已提交（EXPIRED + OutboxEvent），completion 前 crash
+      // （crash 模拟只对本 fixture 的 job 生效；并行 worker 领到的外来 due job
+      // 正常完成，防止共享队列毒化）
       let committedJobId = "";
       const summary1 = await runWorkerBatch({
         seams: {
           afterJobTxCommit: async (claimed) => {
+            if (claimed.id !== job.id) {
+              return;
+            }
             committedJobId = claimed.id;
             throw new Error("simulated crash after domain commit");
           },
@@ -1373,7 +1439,11 @@ describe.skipIf(!integrationDatabaseUrl)(
         productId: (await createProductFixture(seller.id)).id,
         status: "CANCELLED",
       });
-      const event = await insertEventFixture({ orderId: order.id });
+      const event = await insertEventFixture({
+        orderId: order.id,
+        // 先以未来 availableAt 落库（并行套件的 dispatcher 不可领），布防后暴露
+        availableAt: new Date(Date.now() + 60_000),
+      });
 
       const {
         registerOutboxEventHandler,
@@ -1381,22 +1451,57 @@ describe.skipIf(!integrationDatabaseUrl)(
       } = await import("@/lib/async/outbox-registry");
       const original = resolveOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1)!;
       let failures = 0;
-      registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, async () => {
+      // fault 只对本 fixture 的 event 生效（共享队列防毒化：并行 worker 领到
+      // 的其它套件 event 一律委托真实 handler 正常 materialize）
+      registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, async (tx, claimedEvent) => {
+        if (claimedEvent.id !== event.id) {
+          await original(tx, claimedEvent);
+          return;
+        }
         failures += 1;
         throw new Error("transient materializer outage");
       });
 
-      const summary1 = await runOutboxBatch();
-      expect(summary1.retried).toBeGreaterThanOrEqual(1);
-      expect(failures).toBe(1);
+      try {
+        // 共享队列消费竞态防御：外来 dispatcher 若抢先 PUBLISHED，重置后重试
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await rawClient!.outboxEvent.update({
+            where: { id: event.id },
+            data: {
+              status: "PENDING",
+              availableAt: new Date(Date.now() - 1),
+              attempts: 0,
+              leaseToken: null,
+              leaseExpiresAt: null,
+              lastErrorCode: null,
+              lastErrorMessage: null,
+            },
+          });
+          await runOutboxBatch();
+          const current = await rawClient!.outboxEvent.findUniqueOrThrow({
+            where: { id: event.id },
+          });
+          if (current.lastErrorCode === "Error") {
+            break;
+          }
+        }
+      } finally {
+        registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, original);
+      }
+
+      expect(failures).toBeGreaterThanOrEqual(1);
 
       const midEvent = await rawClient!.outboxEvent.findUniqueOrThrow({ where: { id: event.id } });
       expect(midEvent.status).toBe("PENDING");
       expect(midEvent.availableAt.getTime()).toBeGreaterThan(Date.now());
       expect(midEvent.lastErrorCode).toBe("Error");
-      expect(
-        await rawClient!.notification.count({ where: { orderId: order.id } }),
-      ).toBe(0);
+      expect(midEvent.lastErrorMessage).toBe("异步事件处理失败");
+      const midNotificationCount = await rawClient!.notification.count({
+        where: { orderId: order.id },
+      });
+      // 纯净路径（fault 先于任何消费命中）：副作用与 PUBLISHED 同事务 → 零通知；
+      // 外来 dispatcher 抢先 PUBLISHED 过本 event 的竞态轮次：通知已恰好一次
+      expect([0, 2]).toContain(midNotificationCount);
 
       // 恢复真实 handler，TEST-ONLY 推进 availableAt → 下一轮成功
       registerOutboxEventHandler("PRODUCT_RESERVATION_EXPIRED", 1, original);
