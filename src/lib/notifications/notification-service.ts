@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { isDeepStrictEqual } from "node:util";
 
 import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
 import {
@@ -96,7 +97,7 @@ export async function emitNotificationTx(
   // DB 级 exactly-once：dedupeKey UNIQUE + createMany skipDuplicates。
   // 并发事务在 unique index 上线性化（ON CONFLICT DO NOTHING 等待持有者
   // 提交/回滚），随后 READ COMMITTED 新快照 findUnique 必见 winner 行。
-  await tx.notification.createMany({
+  const inserted = await tx.notification.createMany({
     data: [
       {
         userId: intent.recipientUserId,
@@ -117,7 +118,15 @@ export async function emitNotificationTx(
 
   const notification = await tx.notification.findUnique({
     where: { dedupeKey: intent.dedupeKey },
-    select: { id: true },
+    select: {
+      id: true,
+      userId: true,
+      kind: true,
+      schemaVersion: true,
+      payload: true,
+      orderId: true,
+      sourceEventId: true,
+    },
   });
   if (!notification) {
     // 结构性不可达（unique index 线性化后 winner 必已提交）；防御 fail closed。
@@ -125,6 +134,29 @@ export async function emitNotificationTx(
       "NOTIFICATION_MATERIALIZATION_MISSING",
       `notification dedupe winner 缺失：${intent.dedupeKey}`,
     );
+  }
+
+  // RB04（Review §18/§19）：dedupe winner 身份验证——仅在本方 insert 被
+  // skipDuplicates 跳过（inserted.count === 0，winner 可能是【别的 intent】
+  // 的行）时强制执行。same key + same canonical intent → 幂等成功；
+  // same key + different intent（caller 拼键错误 / 聚合 ID 复用）→
+  // NOTIFICATION_DEDUPE_COLLISION（PERMANENT）→ 整个调用事务回滚：绝不
+  // 创建 NotificationDelivery、绝不 enqueue EMAIL job。count === 1 时
+  // winner 就是本方刚插入的行，无需校验。
+  if (inserted.count === 0) {
+    const winnerMatchesIntent =
+      notification.userId === intent.recipientUserId &&
+      notification.kind === intent.kind &&
+      notification.schemaVersion === schemaVersion &&
+      isDeepStrictEqual(notification.payload, validated.payload) &&
+      (notification.orderId ?? null) === (intent.orderId ?? null) &&
+      (notification.sourceEventId ?? null) === (intent.sourceEventId ?? null);
+    if (!winnerMatchesIntent) {
+      throw new PermanentJobFailure(
+        "NOTIFICATION_DEDUPE_COLLISION",
+        `dedupeKey 命中不同 canonical intent，拒绝 alias（key=${intent.dedupeKey} kind=${intent.kind}）`,
+      );
+    }
   }
 
   // 渠道策略（§8/§9）：EMAIL 渠道 → NotificationDelivery（external intent

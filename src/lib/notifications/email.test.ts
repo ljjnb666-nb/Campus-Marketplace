@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { PermanentJobFailure } from "@/lib/async/job-types";
+
 import {
   EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS,
   EMAIL_PROVIDER_TIMEOUT_MS_MAX,
   EMAIL_PROVIDER_TIMEOUT_MS_MIN,
+  EmailRuntimeConfigUnavailableError,
+  EmailTemplateContractError,
   extractEmailAddress,
   OFFICIAL_RESEND_BASE_URL,
   resolveEmailAppBaseUrl,
@@ -73,6 +77,25 @@ describe("email-config（§42/§44/§45/§41）", () => {
     expect(() =>
       resolveEmailChannelConfig({ NODE_ENV: "test", EMAIL_PROVIDER: "resend", EMAIL_FROM: "bad" }),
     ).toThrow(expect.objectContaining({ code: "EMAIL_PROVIDER_CONFIG_INVALID" }));
+  });
+
+  it("RB03（§12/§13/§14）：config 不可用 = RETRYABLE 环境态；模板契约缺陷 = PERMANENT", () => {
+    let caught: unknown;
+    try {
+      resolveEmailChannelConfig({ NODE_ENV: "test", EMAIL_PROVIDER: "resend", EMAIL_FROM: "bad" });
+    } catch (error) {
+      caught = error;
+    }
+    // runtime config 不可用：extends Error（classifyJobFailure → RETRYABLE），
+    // 绝不继承 PermanentJobFailure
+    expect(caught).toBeInstanceOf(EmailRuntimeConfigUnavailableError);
+    expect((caught as Error).name).toBe("EmailRuntimeConfigUnavailableError");
+    expect(caught as unknown).not.toBeInstanceOf(PermanentJobFailure);
+
+    // 结构性模板契约缺陷：PERMANENT → DEAD_LETTER（禁止无限 retry）
+    const template = new EmailTemplateContractError("EMAIL_TEMPLATE_UNREGISTERED", "x");
+    expect(template).toBeInstanceOf(PermanentJobFailure);
+    expect(template.failureClass).toBe("PERMANENT");
   });
 
   it("生产禁止覆盖 RESEND_API_BASE_URL（§45 防 SSRF/exfil）；非生产允许 fake URL", () => {

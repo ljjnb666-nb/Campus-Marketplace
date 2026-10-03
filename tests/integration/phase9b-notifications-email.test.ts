@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS } from "@/lib/notifications/email-contract";
+
 /**
  * Phase 9B — Unified Notifications / Transactional Email 集成测试
  * （真实 PostgreSQL + fake HTTP provider）。
@@ -320,6 +322,35 @@ async function createExpiredOrderFixture(buyerId: string, sellerId: string) {
 async function runOutboxBatch() {
   const { runOutboxBatchOnce } = await import("@/lib/async/outbox-dispatcher");
   return runOutboxBatchOnce();
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("waitFor timeout");
+}
+
+/**
+ * RB02 确定性锁 barrier（非 sleep ordering）：轮询 pg_stat_activity 中
+ * 本数据库内正在等待行锁、且查询文本包含 mark 的会话（出现 = 目标事务
+ * 已真实进入锁等待队列）。
+ */
+async function waitForBlockedLockQuery(mark: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await rawClient!.$queryRaw<{ count: bigint }[]>`
+      SELECT count(*) AS count
+      FROM pg_stat_activity
+      WHERE wait_event_type = 'Lock'
+        AND datname = current_database()
+        AND query ILIKE ${"%" + mark + "%"}`;
+    if (Number(rows[0]?.count ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`blocked-lock barrier 超时：未观察到等待 ${mark} 的锁等待会话`);
 }
 
 /** 同 runWorkerBatchesUntil：outbox 派发共享队列 loop 版。 */
@@ -922,6 +953,400 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(httpAttemptsForKey(delivery.providerIdempotencyKey)).toBe(0);
       const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
       expect(job.status).toBe("COMPLETED");
+    });
+
+    it("EMAIL-IDEMP-02（RB01）：crash 回滚后 firstAttemptAt 仍 durable；23h+ε 重放 → 0 provider call → DEAD_LETTER", async () => {
+      const buyer = await createFixtureUser("锚点买家");
+      const seller = await createFixtureUser("锚点卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+      scriptBehavior(key, [
+        { kind: "ok", messageId: "msg-anchor-1" },
+        { kind: "ok", messageId: "msg-anchor-1" },
+      ]);
+
+      const { registerJobHandler, resolveJobHandler } = await import("@/lib/async/job-registry");
+      const { notificationDeliveryPayloadSchema } = await import("@/lib/async/job-types");
+      const realHandler = resolveJobHandler("NOTIFICATION_DELIVERY", 1)!;
+      let crashedOnce = false;
+      registerJobHandler("NOTIFICATION_DELIVERY", 1, async (tx, job) => {
+        const outcome = await realHandler(tx, job);
+        const parsed = notificationDeliveryPayloadSchema.safeParse(job.payload);
+        if (parsed.success && parsed.data.deliveryId === delivery.id && !crashedOnce) {
+          crashedOnce = true;
+          throw new Error("simulated crash after provider accept, before delivery-state commit");
+        }
+        return outcome;
+      });
+      await runWorkerBatchesUntil(async () => crashedOnce);
+
+      // provider 已受理一次；execution tx 已回滚：
+      //   providerAcceptedAt = NULL（未提交）但 firstAttemptAt != NULL
+      //   （RB01 durable anchor 独立短事务已 COMMIT，不随 execution 回滚）
+      expect(httpAttemptsForKey(key)).toBe(1);
+      const afterCrash = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+      });
+      expect(afterCrash.providerAcceptedAt).toBeNull();
+      expect(afterCrash.firstAttemptAt).not.toBeNull();
+      const anchorAt = afterCrash.firstAttemptAt!;
+
+      // 模拟 now = firstAttemptAt + 23h + ε（等价：把 anchor 回拨 23h+1s；
+      // 生产无任何路径可将 firstAttemptAt 后移/置 NULL——NULL→ts 单向）
+      await rawClient!.notificationDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          firstAttemptAt: new Date(anchorAt.getTime() - EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS - 1000),
+        },
+      });
+      registerJobHandler("NOTIFICATION_DELIVERY", 1, realHandler);
+      await rawClient!.asyncJob.update({
+        where: { dedupeKey: jobDedupeKey },
+        data: { runAt: new Date(Date.now() - 1000) },
+      });
+
+      await runWorkerBatchesUntil(async () => (await jobStatus(jobDedupeKey)) === "DEAD_LETTER");
+
+      expect(httpAttemptsForKey(key)).toBe(1);
+      expect(logicalSendCount([key])).toBe(1);
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.status).toBe("DEAD_LETTER");
+      expect(job.lastErrorCode).toBe("EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED");
+    });
+
+    it("ERASURE-RACE-01（RB02）：erasure wins —— 抑制先行提交 → worker 阻塞后见 suppressed → 0 provider call 幂等完成", async () => {
+      const buyer = await createFixtureUser("竞速注销买家");
+      const seller = await createFixtureUser("竞速注销卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+
+      // 确定性 barrier：erasure 事务在 delivery 抑制写入后持锁暂停
+      let releaseErasure!: () => void;
+      const erasureHolding = new Promise<void>((resolve) => { releaseErasure = resolve; });
+      let seamEntered = false;
+      const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+      const erasePromise = eraseAccount(buyer.id, undefined, undefined, async () => {
+        seamEntered = true;
+        await erasureHolding;
+      });
+      await waitFor(() => seamEntered);
+
+      // worker 启动：anchor UPDATE / FOR UPDATE 阻塞在 erasure 行锁上
+      const workerDone = runWorkerBatchesUntil(
+        async () => (await jobStatus(jobDedupeKey)) === "COMPLETED",
+      );
+      await waitForBlockedLockQuery("firstAttemptAt");
+
+      releaseErasure();
+      await erasePromise;
+      await workerDone;
+
+      expect(httpAttemptsForKey(key)).toBe(0);
+      expect(logicalSendCount([key])).toBe(0);
+      const row = await rawClient!.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } });
+      expect(row.suppressedAt).not.toBeNull();
+      expect(row.suppressionCode).toBe("RECIPIENT_ERASED");
+      expect(row.destination).toBe("");
+      expect(row.providerAcceptedAt).toBeNull();
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.status).toBe("COMPLETED");
+    });
+
+    it("ERASURE-RACE-02（RB02）：send wins —— worker 持行锁先 accept → erasure 阻塞 → 提交后仅 redact destination", async () => {
+      const buyer = await createFixtureUser("竞速发送买家");
+      const seller = await createFixtureUser("竞速发送卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+      scriptBehavior(key, [{ kind: "ok", messageId: "msg-race2-stable" }]);
+      const { getEmailDeliveryAcceptanceStats } = await import("@/lib/notifications/email-ops");
+      const statsBaseline = await getEmailDeliveryAcceptanceStats();
+
+      const { setNotificationDeliveryHandlerSeamForTests } = await import(
+        "@/lib/async/handlers/notification-delivery"
+      );
+      let releaseSend!: () => void;
+      const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+      let workerLocked = false;
+      setNotificationDeliveryHandlerSeamForTests({
+        afterDeliveryRowLock: async () => {
+          workerLocked = true;
+          await sendGate;
+        },
+      });
+
+      const workerDone = runWorkerBatchesUntil(
+        async () => (await jobStatus(jobDedupeKey)) === "COMPLETED",
+      );
+      await waitFor(() => workerLocked);
+
+      // erasure 在 worker 持有 delivery 行锁期间启动 → updateMany 阻塞
+      const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+      const erasePromise = eraseAccount(buyer.id);
+      await waitForBlockedLockQuery("suppressedAt");
+
+      releaseSend();
+      await workerDone;
+      await erasePromise;
+      setNotificationDeliveryHandlerSeamForTests(null);
+
+      // send win：恰好一次逻辑投递 + accepted；erasure 事后仅 redact destination，
+      // 绝不伪称 suppressed（§10：accepted delivery is NOT "suppressed"）
+      expect(httpAttemptsForKey(key)).toBe(1);
+      expect(logicalSendCount([key])).toBe(1);
+      const row = await rawClient!.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } });
+      expect(row.providerAcceptedAt).not.toBeNull();
+      expect(row.providerMessageId).toBe("msg-race2-stable");
+      expect(row.destination).toBe("");
+      expect(row.suppressedAt).toBeNull();
+      expect(row.suppressionCode).toBeNull();
+
+      // §11 ops stats（基线差分）：accepted 计数包含它；suppressed 计数不包含它
+      const stats = await getEmailDeliveryAcceptanceStats();
+      expect(stats.providerAccepted).toBe(statsBaseline.providerAccepted + 1);
+      expect(stats.suppressed).toBe(statsBaseline.suppressed);
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.status).toBe("COMPLETED");
+    });
+
+    it("CONFIG-RETRY-01（RB03）：worker 缺 RESEND_API_KEY → job RETRY（绝不 DEAD_LETTER）、0 provider call", async () => {
+      const buyer = await createFixtureUser("配置重试买家");
+      const seller = await createFixtureUser("配置重试卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+
+      delete process.env.RESEND_API_KEY;
+      try {
+        await runWorkerBatchesUntil(async () => (await jobStatus(jobDedupeKey)) === "RETRY");
+
+        expect(httpAttemptsForKey(key)).toBe(0);
+        const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+        expect(job.status).toBe("RETRY");
+        expect(job.lastErrorCode).toBe("EmailProviderRetryableError");
+      } finally {
+        applyEmailEnv();
+      }
+
+      // 配置恢复后接管完成（不遗留 due job）
+      await rawClient!.asyncJob.update({
+        where: { dedupeKey: jobDedupeKey },
+        data: { runAt: new Date(Date.now() - 1000) },
+      });
+      await runWorkerBatchesUntil(async () => (await jobStatus(jobDedupeKey)) === "COMPLETED");
+      expect(httpAttemptsForKey(key)).toBe(1);
+    });
+
+    it("CONFIG-RETRY-02（RB03）：emit 时 EMAIL_FROM 缺失 → OutboxEvent RETRY、Notification=0；恢复后重放完整物化", async () => {
+      const buyer = await createFixtureUser("配置外盒买家");
+      const seller = await createFixtureUser("配置外盒卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+
+      const { recordOutboxEventTx } = await import("@/lib/async/outbox");
+      const { withTransaction } = await import("@/lib/prisma");
+      const eventDedupeKey = `PRODUCT_RESERVATION_EXPIRED:${order.id}`;
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        recordOutboxEventTx(tx, {
+          eventType: "PRODUCT_RESERVATION_EXPIRED",
+          schemaVersion: 1,
+          aggregateType: "ORDER",
+          aggregateId: order.id,
+          dedupeKey: eventDedupeKey,
+          payload: { orderId: order.id },
+        }),
+      );
+      createdEventDedupeKeys.push(eventDedupeKey);
+
+      const notifBaseline = await rawClient!.notification.count();
+      const deliveryBaseline = await rawClient!.notificationDelivery.count();
+
+      delete process.env.EMAIL_FROM;
+      try {
+        await runOutboxBatchesUntil(async () => {
+          const event = await rawClient!.outboxEvent.findUnique({ where: { dedupeKey: eventDedupeKey } });
+          return event?.status === "PENDING" && (event?.attempts ?? 0) >= 1;
+        });
+        // In-App + Email 是同一 materialization 事务：配置不可用 → 整体回滚、
+        // OutboxEvent RETRY（绝不 DEAD_LETTER、绝不只落 In-App）。
+        // 断言用基线差分（scratch DB 保留全部前序 fixture 行）。
+        expect(await rawClient!.notification.count()).toBe(notifBaseline);
+        expect(await rawClient!.notificationDelivery.count()).toBe(deliveryBaseline);
+        expect(await rawClient!.notification.count({ where: { orderId: order.id } })).toBe(0);
+      } finally {
+        applyEmailEnv();
+      }
+
+      await rawClient!.outboxEvent.update({
+        where: { dedupeKey: eventDedupeKey },
+        data: { availableAt: new Date(Date.now() - 1000) },
+      });
+      await runOutboxBatchesUntil(async () => {
+        const event = await rawClient!.outboxEvent.findUnique({ where: { dedupeKey: eventDedupeKey } });
+        return event?.status === "PUBLISHED";
+      });
+
+      const notifications = await rawClient!.notification.findMany({ where: { orderId: order.id } });
+      expect(notifications).toHaveLength(2);
+      for (const row of notifications) {
+        expect(row.kind).toBe("PRODUCT_RESERVATION_EXPIRED");
+      }
+      const deliveries = await rawClient!.notificationDelivery.findMany({
+        where: { notificationId: { in: notifications.map((row) => row.id) }, channel: "EMAIL" },
+      });
+      expect(deliveries).toHaveLength(2);
+      const replayJobKeys = deliveries.map((row) => `NOTIFICATION_DELIVERY:${row.id}`);
+      await runWorkerBatchesUntil(async () => {
+        const jobs = await rawClient!.asyncJob.findMany({ where: { dedupeKey: { in: replayJobKeys } } });
+        return jobs.length === 2 && jobs.every((row) => row.status === "COMPLETED");
+      });
+    });
+
+    it("DEDUPE-COLLISION-01（RB04）：同 key 不同 recipient → NOTIFICATION_DEDUPE_COLLISION，零 delivery/job alias", async () => {
+      const buyer = await createFixtureUser("碰撞买家");
+      const seller = await createFixtureUser("碰撞卖家");
+      const outsider = await createFixtureUser("碰撞局外人");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+      const dedupeKey = `${RUN_TAG}:COLL1:${randomUUID().slice(0, 8)}`;
+      const payload = { orderId: order.id, buyerId: buyer.id, sellerId: seller.id };
+
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        emitNotificationTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRED",
+          recipientUserId: buyer.id,
+          orderId: order.id,
+          dedupeKey,
+          payload,
+        }),
+      );
+
+      // 同 key、不同 recipient → fail closed，整个调用事务回滚
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          emitNotificationTx(tx, {
+            kind: "PRODUCT_RESERVATION_EXPIRED",
+            recipientUserId: outsider.id,
+            orderId: order.id,
+            dedupeKey,
+            payload,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "NOTIFICATION_DEDUPE_COLLISION" });
+
+      const notifications = await rawClient!.notification.findMany({ where: { dedupeKey } });
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]!.userId).toBe(buyer.id);
+      const deliveries = await rawClient!.notificationDelivery.findMany({
+        where: { notificationId: notifications[0]!.id },
+      });
+      expect(deliveries).toHaveLength(1);
+      expect(
+        await rawClient!.asyncJob.count({
+          where: { dedupeKey: { in: deliveries.map((row) => `NOTIFICATION_DELIVERY:${row.id}`) } },
+        }),
+      ).toBe(1);
+    });
+
+    it("DEDUPE-COLLISION-02（RB04）：同 key 同 recipient 不同 payload → 拒绝；同 intent 重放幂等", async () => {
+      const buyer = await createFixtureUser("碰撞二买家");
+      const seller = await createFixtureUser("碰撞二卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+      const dedupeKey = `${RUN_TAG}:COLL2:${randomUUID().slice(0, 8)}`;
+
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      const intent = {
+        kind: "PRODUCT_RESERVATION_EXPIRED",
+        recipientUserId: buyer.id,
+        orderId: order.id,
+        dedupeKey,
+        payload: { orderId: order.id, buyerId: buyer.id, sellerId: seller.id },
+      } as const;
+      await withTransaction((tx: Prisma.TransactionClient) => emitNotificationTx(tx, intent));
+
+      // 同 recipient/kind/version、不同 payload（orderId 漂移）→ 拒绝
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          emitNotificationTx(tx, {
+            ...intent,
+            payload: { orderId: `${order.id}-x`, buyerId: buyer.id, sellerId: seller.id },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "NOTIFICATION_DEDUPE_COLLISION" });
+
+      // 完全相同 intent 重放 → 幂等成功（same Notification id / same delivery / same job）
+      const replay = await withTransaction((tx: Prisma.TransactionClient) => emitNotificationTx(tx, intent));
+      const winner = await rawClient!.notification.findUniqueOrThrow({ where: { dedupeKey } });
+      expect(replay.notificationId).toBe(winner.id);
+      const deliveries = await rawClient!.notificationDelivery.findMany({
+        where: { notificationId: winner.id },
+      });
+      expect(deliveries).toHaveLength(1);
+      expect(
+        await rawClient!.asyncJob.count({
+          where: { dedupeKey: `NOTIFICATION_DELIVERY:${deliveries[0]!.id}` },
+        }),
+      ).toBe(1);
+    });
+
+    it("STATUS-PAYLOAD-01（RB05）：ORDER_STATUS_CHANGED 携带自由文本 status → INVALID_PAYLOAD、零落库", async () => {
+      const buyer = await createFixtureUser("状态校验买家");
+      const dedupeKey = `${RUN_TAG}:STAT:${randomUUID().slice(0, 8)}`;
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          emitNotificationTx(tx, {
+            kind: "ORDER_STATUS_CHANGED",
+            recipientUserId: buyer.id,
+            orderId: null,
+            dedupeKey,
+            payload: {
+              orderId: `ord-${randomUUID().slice(0, 6)}`,
+              status: "用户私密自由文本",
+              actorRole: "BUYER",
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "NOTIFICATION_INTENT_CONTRACT_INVALID" });
+
+      expect(await rawClient!.notification.count({ where: { dedupeKey } })).toBe(0);
+    });
+
+    it("CANCELLATION-PAYLOAD-01（RB05）：非法 cancellationReason 拒绝；合法机器枚举通过", async () => {
+      const renter = await createFixtureUser("取消校验租客");
+      const dedupeKeyBase = `${RUN_TAG}:CANC:${randomUUID().slice(0, 8)}`;
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+
+      await expect(
+        withTransaction((tx: Prisma.TransactionClient) =>
+          emitNotificationTx(tx, {
+            kind: "RENTAL_ORDER_CANCELLED",
+            recipientUserId: renter.id,
+            dedupeKey: `${dedupeKeyBase}:bad`,
+            payload: { orderId: `ro-${randomUUID().slice(0, 6)}`, cancellationReason: "随便编造的理由文本" },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "NOTIFICATION_INTENT_CONTRACT_INVALID" });
+
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        emitNotificationTx(tx, {
+          kind: "RENTAL_ORDER_CANCELLED",
+          recipientUserId: renter.id,
+          dedupeKey: `${dedupeKeyBase}:good`,
+          payload: { orderId: `ro-${randomUUID().slice(0, 6)}`, cancellationReason: "RENTER_CHANGED_PLAN" },
+        }),
+      );
+      expect(
+        await rawClient!.notification.count({
+          where: { dedupeKey: { startsWith: dedupeKeyBase } },
+        }),
+      ).toBe(1);
     });
   },
 );

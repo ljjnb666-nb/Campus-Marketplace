@@ -380,7 +380,15 @@ describe("conversation actions", () => {
       });
       expect(txNotificationFindUnique).toHaveBeenCalledWith({
         where: { dedupeKey: "ORDER_CONVERSATION_STARTED:conversation-new:seller-1" },
-        select: { id: true },
+        select: {
+          id: true,
+          userId: true,
+          kind: true,
+          schemaVersion: true,
+          payload: true,
+          orderId: true,
+          sourceEventId: true,
+        },
       });
       expect(revalidatePath).toHaveBeenCalledWith("/messages/conversation-new");
       // MARKETPLACE_LISTING 路径：完整参与方锁 + 锁内校验（actor + 参与方）

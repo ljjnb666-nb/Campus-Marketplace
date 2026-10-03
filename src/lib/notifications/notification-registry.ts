@@ -224,7 +224,9 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
     payloadSchema: z
       .object({
         orderId: idField(),
-        status: z.string().min(1),
+        // RB05：与生产 writer frozen value set 精确一致（general path 状态
+        // 矩阵 + PRODUCT accept/cancel 唯一可 emit 的四个机器状态）
+        status: z.enum(["ACCEPTED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]),
         actorRole: z.enum(["BUYER", "SELLER"]),
       })
       .strict(),
@@ -246,7 +248,10 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
     payloadSchema: z
       .object({
         orderId: idField(),
-        status: z.string().min(1),
+        // RB05：notifyErrandStatusChange writer 唯一可 emit 的四个机器状态
+        //（CLAIMED/COMPLETED 走 ERRAND_ORDER_CLAIMED / ERRAND_ORDER_COMPLETED；
+        //  DISPUTED 属 dispute 域 authority，不经本 lifecycle 通知）
+        status: z.enum(["OPEN", "IN_PROGRESS", "PENDING_CONFIRMATION", "CANCELLED"]),
       })
       .strict(),
     channels: [NOTIFICATION_CHANNEL_IN_APP],
@@ -439,8 +444,17 @@ const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
     payloadSchema: z
       .object({
         orderId: idField(),
-        // 机器可读取消类别枚举（DECLARED_NON_PERSONAL 同类；非自由文本）
-        cancellationReason: z.string().min(1),
+        // RB05：RentalCancellationReason 机器枚举精确绑定（schema 冻结值集；
+        // DECLARED_NON_PERSONAL 同类——机器类别，非自由文本）
+        cancellationReason: z.enum([
+          "RENTER_CHANGED_PLAN",
+          "OWNER_CANNOT_PROVIDE",
+          "CANNOT_CONTACT",
+          "ITEM_DAMAGED",
+          "TIME_ERROR",
+          "FAKE_INFO",
+          "OTHER",
+        ]),
       })
       .strict(),
     channels: [NOTIFICATION_CHANNEL_IN_APP],

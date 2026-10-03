@@ -26,7 +26,9 @@ function txStub() {
   return {
     notification: {
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
-      findUnique: vi.fn().mockResolvedValue({ id: "notification-1" }),
+      // RB04 winner validation：默认返回与 createMany 写入行一致的全量
+      // winner（各测试可覆盖 mockResolvedValue / mockImplementation）
+      findUnique: vi.fn(),
     },
     user: {
       findUnique: vi.fn().mockResolvedValue({ email: "rcpt@campus.test", erasedAt: null }),
@@ -45,6 +47,27 @@ function txStub() {
       createMany: ReturnType<typeof vi.fn>;
       findUnique: ReturnType<typeof vi.fn>;
     };
+  };
+}
+
+/** RB04：按 emit intent 构造匹配的 dedupe winner 行（findUnique stub 用）。 */
+function winnerRowFor(intent: {
+  recipientUserId: string;
+  kind: string;
+  schemaVersion?: number;
+  dedupeKey: string;
+  payload: unknown;
+  orderId?: string | null;
+  sourceEventId?: string | null;
+}) {
+  return {
+    id: "notification-1",
+    userId: intent.recipientUserId,
+    kind: intent.kind,
+    schemaVersion: intent.schemaVersion ?? 1,
+    payload: intent.payload,
+    orderId: intent.orderId ?? null,
+    sourceEventId: intent.sourceEventId ?? null,
   };
 }
 
@@ -152,14 +175,18 @@ describe("emitNotificationTx（canonical write path）", () => {
 
   it("write shape：createMany skipDuplicates + findUnique(dedupeKey)，kind/version/payload 落库", async () => {
     const tx = txStub();
-    const result = await emitNotificationTx(tx, {
+    const intent = {
       kind: PRODUCT_RESERVATION_EXPIRED_KIND,
       recipientUserId: "buyer-1",
       dedupeKey: "OUTBOX:e1:IN_APP:buyer-1",
       sourceEventId: "e1",
       orderId: "o1",
       payload: { orderId: "o1", buyerId: "buyer-1", sellerId: "seller-1" },
-    });
+    } as const;
+    (tx.notification.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+      winnerRowFor(intent),
+    );
+    const result = await emitNotificationTx(tx, intent);
 
     expect(result).toEqual({ notificationId: "notification-1" });
     const createMany = tx.notification.createMany as ReturnType<typeof vi.fn>;
@@ -179,7 +206,15 @@ describe("emitNotificationTx（canonical write path）", () => {
     const findUnique = tx.notification.findUnique as ReturnType<typeof vi.fn>;
     expect(findUnique).toHaveBeenCalledWith({
       where: { dedupeKey: "OUTBOX:e1:IN_APP:buyer-1" },
-      select: { id: true },
+      select: {
+        id: true,
+        userId: true,
+        kind: true,
+        schemaVersion: true,
+        payload: true,
+        orderId: true,
+        sourceEventId: true,
+      },
     });
   });
 
@@ -225,7 +260,7 @@ describe("emitNotificationTx（canonical write path）", () => {
 
   it("emitNotificationsTx 逐条 emit 并保持顺序", async () => {
     const tx = txStub();
-    const results = await emitNotificationsTx(tx, [
+    const intents = [
       {
         kind: PRODUCT_RESERVATION_EXPIRED_KIND,
         recipientUserId: "buyer",
@@ -238,11 +273,61 @@ describe("emitNotificationTx（canonical write path）", () => {
         dedupeKey: "k-seller",
         payload: { orderId: "o", buyerId: "buyer", sellerId: "seller" },
       },
-    ]);
+    ];
+    (tx.notification.findUnique as ReturnType<typeof vi.fn>).mockImplementation(
+      (args: { where: { dedupeKey: string } }) => {
+        const intent = intents.find((entry) => entry.dedupeKey === args.where.dedupeKey)!;
+        return Promise.resolve(winnerRowFor(intent));
+      },
+    );
+    const results = await emitNotificationsTx(tx, intents);
     expect(results).toEqual([
       { notificationId: "notification-1" },
       { notificationId: "notification-1" },
     ]);
     expect(tx.notification.createMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("RB04 winner validation：insert 被跳过（count=0）且 payload 形状漂移 → NOTIFICATION_DEDUPE_COLLISION（不物化渠道）", async () => {
+    const tx = txStub();
+    const intent = {
+      kind: PRODUCT_RESERVATION_EXPIRED_KIND,
+      recipientUserId: "buyer-1",
+      dedupeKey: "OUTBOX:e1:IN_APP:buyer-1",
+      sourceEventId: "e1",
+      orderId: "o1",
+      payload: { orderId: "o1", buyerId: "buyer-1", sellerId: "seller-1" },
+    } as const;
+    // createMany 返回 count=0：本方 insert 被 skipDuplicates 跳过——winner
+    // 可能是别的 intent 的行 → 必须身份校验（findUnique 返回漂移 payload）
+    (tx.notification.createMany as ReturnType<typeof vi.fn>).mockResolvedValue({ count: 0 });
+    (tx.notification.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+      winnerRowFor({ ...intent, payload: { orderId: "o-DIFFERENT", buyerId: "buyer-1", sellerId: "seller-1" } }),
+    );
+
+    await expect(emitNotificationTx(tx, intent)).rejects.toMatchObject({
+      code: "NOTIFICATION_DEDUPE_COLLISION",
+    });
+    expect(tx.notificationDelivery.createMany).not.toHaveBeenCalled();
+  });
+
+  it("RB04：insert 被跳过但 winner 与 intent 完全一致 → 幂等成功（same id）", async () => {
+    const tx = txStub();
+    const intent = {
+      kind: PRODUCT_RESERVATION_EXPIRED_KIND,
+      recipientUserId: "buyer-1",
+      dedupeKey: "OUTBOX:e1:IN_APP:buyer-1",
+      sourceEventId: "e1",
+      orderId: "o1",
+      payload: { orderId: "o1", buyerId: "buyer-1", sellerId: "seller-1" },
+    } as const;
+    (tx.notification.createMany as ReturnType<typeof vi.fn>).mockResolvedValue({ count: 0 });
+    (tx.notification.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(
+      winnerRowFor(intent),
+    );
+
+    await expect(emitNotificationTx(tx, intent)).resolves.toEqual({
+      notificationId: "notification-1",
+    });
   });
 });
