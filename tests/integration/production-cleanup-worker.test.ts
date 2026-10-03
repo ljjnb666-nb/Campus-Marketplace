@@ -223,6 +223,50 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       expect(afterRepeat.quota).toBe(0);
     }, 60_000);
 
+    it("PRODUCTION-WORKER-HOLD-01：--run-once 尊重 ACTIVE DataHold（exit 0、对象/行/配额保留），release 后收敛回收", async () => {
+      const { objectKey, assetId } = await seedPostOutageState("hold-guard");
+      const { createHold, releaseHold } = await import("@/lib/privacy/data-hold-service");
+      const hold = await createHold({
+        type: "LEGAL",
+        subjectType: "USER",
+        subjectId: userId,
+        reasonCode: "IT_9C_WORKER_HOLD",
+      });
+
+      // hold ACTIVE：worker 一轮零破坏性副作用 + 零失败（business block 非 error）
+      const blocked = await runWorker(["--run-once"], {
+        DATABASE_URL: process.env.DATABASE_URL!,
+        S3_ENDPOINT: endpoint!,
+        S3_BUCKET_PUBLIC: "campus-public",
+        S3_BUCKET_PRIVATE: "campus-private",
+        NEXTAUTH_SECRET: "worker-it-env-validation-only",
+      });
+      expect(blocked.code, `worker exit: ${blocked.stderr.slice(0, 400)}`).toBe(0);
+      expect(blocked.stdout).toMatch(/storage_cleanup_cycle_completed/);
+      expect(blocked.stdout).toMatch(/"purgeHoldBlocked":[1-9]/);
+
+      const { row, quota } = await readState(assetId);
+      expect(row!.status).toBe("PENDING_DELETE");
+      expect(await objectExists("campus-public", objectKey)).toBe(true);
+      expect(quota).toBe(SIZE_BYTES);
+
+      // release hold → 再一轮：对象删除、DELETED、配额释放
+      await releaseHold(hold.id);
+      const released = await runWorker(["--run-once"], {
+        DATABASE_URL: process.env.DATABASE_URL!,
+        S3_ENDPOINT: endpoint!,
+        S3_BUCKET_PUBLIC: "campus-public",
+        S3_BUCKET_PRIVATE: "campus-private",
+        NEXTAUTH_SECRET: "worker-it-env-validation-only",
+      });
+      expect(released.code).toBe(0);
+
+      const after = await readState(assetId);
+      expect(after.row!.status).toBe("DELETED");
+      expect(await objectExists("campus-public", objectKey)).toBe(false);
+      expect(after.quota).toBe(0);
+    }, 90_000);
+
     it("automatic loop：interval 驱动自动回收（真实常驻子进程，非手动触发）", async () => {
       const { objectKey, assetId } = await seedPostOutageState("auto-loop");
 

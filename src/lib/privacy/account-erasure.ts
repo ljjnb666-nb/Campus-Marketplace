@@ -117,7 +117,9 @@ export async function eraseAccount(
     }
 
     // ---- 前置检查（事务内，TOCTOU 防护） ----
-    await assertNoActiveHold(userId, client);
+    // Phase 9C-01：hold lookup subject 显式化，与上方 governance lock subject
+    // （acquireGovernanceSubjectLock(client, "USER", userId)）逐字段一致。
+    await assertNoActiveHold({ subjectType: "USER", subjectId: userId }, client);
 
     const activeOrderCount = await client.order.count({
       where: {

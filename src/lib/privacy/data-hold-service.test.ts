@@ -64,11 +64,11 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
       { id: "hold-1", type: "LEGAL", status: "ACTIVE", subjectId: "user-1" },
     ]);
 
-    await expect(assertNoActiveHold("user-1")).rejects.toMatchObject({
+    await expect(assertNoActiveHold({ subjectType: "USER", subjectId: "user-1" })).rejects.toMatchObject({
       code: "ACTIVE_DATA_HOLD",
       status: 409,
     });
-    await expect(assertNoActiveHold("user-1", txClient as never)).rejects.toMatchObject({
+    await expect(assertNoActiveHold({ subjectType: "USER", subjectId: "user-1" }, txClient as never)).rejects.toMatchObject({
       code: "ACTIVE_DATA_HOLD",
     });
   });
@@ -78,7 +78,7 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
       { id: "hold-2", type: "DISPUTE", status: "ACTIVE", subjectId: "user-2" },
     ]);
 
-    await expect(assertNoActiveHold("user-2")).rejects.toMatchObject({
+    await expect(assertNoActiveHold({ subjectType: "USER", subjectId: "user-2" })).rejects.toMatchObject({
       code: "ACTIVE_DATA_HOLD",
     });
   });
@@ -86,8 +86,8 @@ describe("DataHold（ACTIVE_LEGAL_HOLD_BLOCKS / RELEASED_HOLD_ALLOWS）", () => 
   it("allows erasure once every hold has been released", async () => {
     dataHoldFindMany.mockResolvedValue([]);
 
-    await expect(assertNoActiveHold("user-1")).resolves.toBeUndefined();
-    expect(await hasActiveHold("user-1")).toBe(false);
+    await expect(assertNoActiveHold({ subjectType: "USER", subjectId: "user-1" })).resolves.toBeUndefined();
+    expect(await hasActiveHold({ subjectType: "USER", subjectId: "user-1" })).toBe(false);
   });
 
   it("creates and releases holds through the subject-locked seam", async () => {

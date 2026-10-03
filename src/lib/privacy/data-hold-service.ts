@@ -232,44 +232,79 @@ export async function releaseHold(holdId: string, releasedById?: string): Promis
   );
 }
 
+/**
+ * 破坏性边界的 hold 检查 subject（Phase 9C-01）。
+ * 必须、且只能以显式 (subjectType, subjectId) 二元组查询——hold lookup
+ * subject 与 governance lock subject（acquireGovernanceSubjectLock 的键）
+ * 由调用方保证逐字段一致。
+ */
+export interface DataHoldSubject {
+  subjectType: string;
+  subjectId: string;
+}
+
 export async function listActiveHolds(
-  subjectId: string,
+  subject: DataHoldSubject,
   tx?: Prisma.TransactionClient,
 ): Promise<DataHold[]> {
   const client = tx ?? prisma;
   return client.dataHold.findMany({
-    where: { subjectId, status: "ACTIVE" },
+    where: {
+      subjectType: subject.subjectType,
+      subjectId: subject.subjectId,
+      status: "ACTIVE",
+    },
   });
 }
 
 export async function hasActiveHold(
-  subjectId: string,
+  subject: DataHoldSubject,
   tx?: Prisma.TransactionClient,
 ): Promise<boolean> {
-  const holds = await listActiveHolds(subjectId, tx);
+  const holds = await listActiveHolds(subject, tx);
   return holds.length > 0;
 }
 
 /**
  * hold 拦截断言。必须在满足以下全部条件的破坏性事务内调用：
- * 1. 事务已通过 acquireGovernanceSubjectLock 取得 subject 锁；
+ * 1. 事务已通过 acquireGovernanceSubjectLock 取得【同一 subject】的锁
+ *    （lock subject == hold lookup subject，Phase 9C-01 显式化）；
  * 2. assertNoActiveHold 与破坏性写处于同一事务。
  * 单独满足 2 不满足 1 时（无锁的 READ COMMITTED 事务），本函数只能
  * 检测"调用时点已提交"的 hold，不能关闭 check→commit 窗口内的并发
  * hold 创建——这是引入 subject 锁的原因。
  */
 export async function assertNoActiveHold(
-  subjectId: string,
+  subject: DataHoldSubject,
   tx?: Prisma.TransactionClient,
 ): Promise<void> {
-  const holds = await listActiveHolds(subjectId, tx);
+  const holds = await listActiveHolds(subject, tx);
 
   if (holds.length > 0) {
     logger.warn("account_erasure_blocked", "privacy", {
-      subjectId,
+      subjectType: subject.subjectType,
+      subjectId: subject.subjectId,
       reasonCode: "ACTIVE_DATA_HOLD",
       holdCount: holds.length,
     });
     throw governanceError("ACTIVE_DATA_HOLD");
   }
+}
+
+/**
+ * Phase 9C-01：当前存在 ACTIVE USER hold 的全部 subjectId（去重）。
+ *
+ * 【仅限 cleanup candidate discovery 的公平性预过滤使用】——用于防止
+ * 长期 hold 的行永久占据 cleanup batch 前部（head-of-line blocking）。
+ * 这不是 authority：任何破坏性路径仍必须在 subject 锁内做 fresh
+ * hasActiveHold/assertNoActiveHold 复核（prefilter 与破坏性决策之间
+ * 的窗口由锁内复核关闭）。
+ */
+export async function listActiveUserHoldSubjectIds(): Promise<string[]> {
+  const rows = await prisma.dataHold.findMany({
+    where: { status: "ACTIVE", subjectType: "USER" },
+    select: { subjectId: true },
+    distinct: ["subjectId"],
+  });
+  return rows.map((row) => row.subjectId);
 }

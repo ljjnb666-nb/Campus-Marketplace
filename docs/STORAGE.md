@@ -225,10 +225,21 @@ HEAD 元数据与 GET 响应头的实际值。`PutObjectInput.cacheControl`
 `npm run storage:cleanup`（支持 `--dry-run`）：
 
 1. UPLOADED 且 createdAt 超过 `ASSET_ORPHAN_TTL_HOURS` → PENDING_DELETE
-2. `expiresAt` 已过的敏感资源 → PENDING_DELETE
+2. `expiresAt` 已过的敏感资源 → PENDING_DELETE（Phase 9C-01 起：候选发现与
+   authoritative 推进分离——每条候选在 USER governance subject 锁内 fresh
+   复核 hold 与行 predicate 后才推进）
 3. 所有 PENDING_DELETE → 删除远端对象 → DELETED + 释放配额
+   （Phase 9C-01 起：物理删除前在同一事务内取得 USER subject 锁并 fresh
+   复核 ACTIVE DataHold，S3 DeleteObject 在锁内执行）
 
 幂等：重复执行第二轮无操作；单条对象删除失败不中断批次，下轮自动重试。
+
+**DataHold-safe（Phase 9C-01）**：owner 存在 ACTIVE DataHold（LEGAL/DISPUTE）
+时，其资产的保留期推进与物理删除一律 fail closed——对象字节、DB 行、配额
+全部原样保留（hold blocked ≠ failure，worker 不因 hold 报错/紧重试）；
+hold 解除后由后续 cleanup 周期自然收敛。候选发现阶段的 hold 预过滤仅用于
+公平性（防止长期 hold 的行占据 batch 前部），不是 authority——破坏性决策
+以 subject 锁内 fresh 复核为准。
 
 ## 9. 敏感材料保留期
 

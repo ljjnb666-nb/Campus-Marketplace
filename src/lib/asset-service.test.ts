@@ -9,9 +9,11 @@ const {
   executeRaw,
   assetCreate,
   assetFindFirst,
+  assetFindUnique,
   assetUpdateMany,
   assetDeleteMany,
   userFindUnique,
+  dataHoldFindMany,
   transactionMock,
   loadAuthorizationContextMock,
   campusMembershipFindFirstMock,
@@ -25,9 +27,11 @@ const {
   executeRaw: vi.fn(),
   assetCreate: vi.fn(),
   assetFindFirst: vi.fn(),
+  assetFindUnique: vi.fn(),
   assetUpdateMany: vi.fn(),
   assetDeleteMany: vi.fn(),
   userFindUnique: vi.fn(),
+  dataHoldFindMany: vi.fn(),
   transactionMock: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   campusMembershipFindFirstMock: vi.fn(),
@@ -68,9 +72,11 @@ vi.mock("@/lib/image-processing", () => ({
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: transactionMock,
+    dataHold: { findMany: dataHoldFindMany },
     uploadedAsset: {
       create: assetCreate,
       findFirst: assetFindFirst,
+      findUnique: assetFindUnique,
       updateMany: assetUpdateMany,
       deleteMany: assetDeleteMany,
     },
@@ -79,6 +85,8 @@ vi.mock("@/lib/prisma", () => ({
     // Phase 7G：dispute evidence 绑定解析
     rentalDispute: { findFirst: rentalDisputeFindFirstMock },
   },
+  // Phase 9C-01：withTransaction 模块级导出（hold-safe purge / retention mark 使用）
+  withTransaction: transactionMock,
 }));
 
 // hasPermission 用真实实现（纯函数），只替换 context 加载——权限路径测试基于
@@ -123,6 +131,7 @@ function buildImageFile(size = 16) {
 }
 
 /** 事务客户端桩：T1 预留事务直接透传 $executeRaw / uploadedAsset 委托 */
+/** 事务客户端桩：T1 预留事务直接透传 $executeRaw / uploadedAsset 委托 */
 const txStub = {
   $executeRaw: executeRaw,
   uploadedAsset: {
@@ -130,7 +139,9 @@ const txStub = {
     updateMany: assetUpdateMany,
     deleteMany: assetDeleteMany,
     findFirst: assetFindFirst,
+    findUnique: assetFindUnique,
   },
+  dataHold: { findMany: dataHoldFindMany },
 } as unknown as Parameters<typeof attachAssetsToEntity>[0];
 
 const baseAsset: UploadedAsset & {
@@ -178,6 +189,19 @@ describe("uploadImageAsset（可恢复状态机）", () => {
     assetCreate.mockResolvedValue({ id: "asset-1" });
     assetUpdateMany.mockResolvedValue({ count: 1 });
     assetDeleteMany.mockResolvedValue({ count: 1 });
+    // Phase 9C-01：inline purge 锁内 fresh 读取——fresh 行回读真实上传 locator
+    // （生产语义：行 bucket/objectKey 即 PUT 时写入的值）+ 默认无 ACTIVE hold
+    assetFindUnique.mockImplementation(async () => {
+      const put = putObject.mock.calls.at(-1)?.[0] as
+        | { bucket: string; objectKey: string }
+        | undefined;
+      return {
+        ...baseAsset,
+        status: "PENDING_DELETE",
+        ...(put ? { bucket: put.bucket, objectKey: put.objectKey } : {}),
+      };
+    });
+    dataHoldFindMany.mockResolvedValue([]);
     // T1：交互事务直接以 txStub 执行回调
     transactionMock.mockImplementation(
       async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub),
@@ -297,13 +321,13 @@ describe("uploadImageAsset（可恢复状态机）", () => {
     });
     // 禁止删行（旧即时补偿已废除：PUT throw ≠ 远端对象不存在）
     expect(assetDeleteMany).not.toHaveBeenCalled();
-    // purge 成功路径：DeleteObject → T2（条件转移 DELETED + 同事务释放配额）
+    // purge 成功路径：DeleteObject → 单事务（条件转移 DELETED + 同事务释放配额）
     expect(deleteObject).toHaveBeenCalledWith({
       bucket: "campus-public",
       objectKey: expect.any(String),
     });
-    // executeRaw 调用 = 预留（T1）+ 释放（T2 purge 内）——无提前/重复释放
-    expect(executeRaw).toHaveBeenCalledTimes(2);
+    // executeRaw 调用 = 预留（T1）+ subject 锁 + 释放（purge 事务内）——无提前/重复释放
+    expect(executeRaw).toHaveBeenCalledTimes(3);
   });
 
   it("S3 PUT 失败且远端删除仍不可用：停留 PENDING_DELETE，配额保持占用，由 cleanup 重试", async () => {
@@ -314,12 +338,12 @@ describe("uploadImageAsset（可恢复状态机）", () => {
       uploadImageAsset({ userId: "user-1", category: "product", file: buildImageFile() }),
     ).rejects.toMatchObject({ code: "STORAGE_UPLOAD_FAILED", status: 503 });
 
-    // PENDING_DELETE 标记成功，但删除失败 → 不释放配额（executeRaw 仅 T1 预留一次）
+    // PENDING_DELETE 标记成功，但删除失败 → 不释放配额（executeRaw = T1 预留 + subject 锁）
     expect(assetUpdateMany).toHaveBeenCalledWith({
       where: { id: "asset-1", status: "UPLOADING" },
       data: { status: "PENDING_DELETE" },
     });
-    expect(executeRaw).toHaveBeenCalledTimes(1);
+    expect(executeRaw).toHaveBeenCalledTimes(2);
   });
 
   it("S3 PUT 失败且标记 PENDING_DELETE 本身失败：行保持 UPLOADING 走 stale 恢复，不释放配额", async () => {
@@ -577,12 +601,15 @@ describe("resolveImageTokens（授权绑定）", () => {
   });
 });
 
-describe("delete lifecycle（exactly-once 配额）", () => {
+describe("delete lifecycle（exactly-once 配额 + DataHold-safe destructive boundary）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     deleteObject.mockResolvedValue(undefined);
     assetUpdateMany.mockResolvedValue({ count: 1 });
     executeRaw.mockResolvedValue(1);
+    // 锁内 fresh 行（pre-read 与 fresh read 共用 mock：pre-read 只取 ownerId）
+    assetFindUnique.mockResolvedValue({ ...baseAsset, status: "PENDING_DELETE" });
+    dataHoldFindMany.mockResolvedValue([]);
     transactionMock.mockImplementation(
       async (callback: (tx: unknown) => Promise<unknown>) => callback(txStub),
     );
@@ -595,68 +622,75 @@ describe("delete lifecycle（exactly-once 配额）", () => {
     expect(await markAssetPendingDelete("asset-1")).toBe(false);
   });
 
-  it("purges: S3 delete → 单事务 [DELETED 转移 + 配额减额]", async () => {
-    const purged = await purgePendingDeleteAsset({
-      id: "asset-1",
-      ownerId: "user-1",
+  it("purges: subject 锁 + fresh 复核 → S3 delete → 单事务 [DELETED 转移 + 配额减额]", async () => {
+    const purge = await purgePendingDeleteAsset("asset-1");
+
+    expect(purge.outcome).toBe("PURGED");
+    expect(purge.releasedQuotaBytes).toBe(1024);
+    expect(deleteObject).toHaveBeenCalledTimes(1);
+    expect(deleteObject).toHaveBeenCalledWith({
       bucket: "campus-private",
       objectKey: baseAsset.objectKey,
-      sizeBytes: 1024,
     });
-
-    expect(purged).toBe(true);
-    expect(deleteObject).toHaveBeenCalledTimes(1);
     expect(assetUpdateMany).toHaveBeenCalledWith({
       where: { id: "asset-1", status: "PENDING_DELETE" },
       data: { status: "DELETED", expiresAt: null },
     });
-    // 转移与减额在同一事务（executeRaw 在 transactionMock 回调内被调用）
-    expect(executeRaw).toHaveBeenCalledTimes(1);
+    // 转移与减额在同一事务（executeRaw = subject advisory 锁 + 配额减额）
+    expect(executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("HOLD_BLOCKED：ACTIVE DataHold 时零 S3 删除、零转移、零减额（hold != failure）", async () => {
+    dataHoldFindMany.mockResolvedValue([
+      { id: "hold-1", type: "LEGAL", status: "ACTIVE", subjectType: "USER", subjectId: "user-1" },
+    ]);
+
+    const purge = await purgePendingDeleteAsset("asset-1");
+
+    expect(purge.outcome).toBe("HOLD_BLOCKED");
+    expect(purge.releasedQuotaBytes).toBe(0);
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(assetUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("NOOP：fresh 行已不是 PENDING_DELETE（并发 worker 已完成）→ 无 S3 副作用", async () => {
+    assetFindUnique.mockResolvedValue({ ...baseAsset, status: "DELETED" });
+
+    const purge = await purgePendingDeleteAsset("asset-1");
+
+    expect(purge.outcome).toBe("NOOP");
+    expect(deleteObject).not.toHaveBeenCalled();
+    expect(assetUpdateMany).not.toHaveBeenCalled();
   });
 
   it("keeps PENDING_DELETE when object deletion fails (retry later)", async () => {
     deleteObject.mockRejectedValue(new Error("s3 down"));
 
-    const purged = await purgePendingDeleteAsset({
-      id: "asset-1",
-      ownerId: "user-1",
-      bucket: "campus-private",
-      objectKey: baseAsset.objectKey,
-      sizeBytes: 1024,
-    });
+    const purge = await purgePendingDeleteAsset("asset-1");
 
-    expect(purged).toBe(false);
-    expect(transactionMock).not.toHaveBeenCalled();
+    expect(purge.outcome).toBe("RETRYABLE_FAILURE");
+    expect(purge.releasedQuotaBytes).toBe(0);
+    // S3 失败发生在条件转移之前：DELETED 转移与减额未执行
+    expect(assetUpdateMany).not.toHaveBeenCalled();
   });
 
   it("does not release quota when the DELETED transition loses the race", async () => {
     // 并发 cleanup：条件转移匹配 0 行（对方已完成）
     assetUpdateMany.mockResolvedValue({ count: 0 });
 
-    const purged = await purgePendingDeleteAsset({
-      id: "asset-1",
-      ownerId: "user-1",
-      bucket: "campus-private",
-      objectKey: baseAsset.objectKey,
-      sizeBytes: 1024,
-    });
+    const purge = await purgePendingDeleteAsset("asset-1");
 
-    expect(purged).toBe(false);
-    expect(executeRaw).not.toHaveBeenCalled();
+    expect(purge.outcome).toBe("NOOP");
+    // 减额未执行（$executeRaw 仅 subject 锁一次）
+    expect(executeRaw).toHaveBeenCalledTimes(1);
   });
 
   it("transaction failure keeps PENDING_DELETE for the next run", async () => {
     transactionMock.mockRejectedValue(new Error("db down"));
 
-    const purged = await purgePendingDeleteAsset({
-      id: "asset-1",
-      ownerId: "user-1",
-      bucket: "campus-private",
-      objectKey: baseAsset.objectKey,
-      sizeBytes: 1024,
-    });
+    const purge = await purgePendingDeleteAsset("asset-1");
 
-    expect(purged).toBe(false);
+    expect(purge.outcome).toBe("RETRYABLE_FAILURE");
   });
 
   it("marks assets by asset id and by public url value", async () => {

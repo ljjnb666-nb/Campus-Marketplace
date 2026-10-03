@@ -331,14 +331,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
 
       // 存储恢复（DeleteObject 可用）→ cleanup 原语完成回收
       faultStorage.deleteShouldFail = false;
-      const purged = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(purged).toBe(true);
+      const purged = await purgePendingDeleteAsset(row!.id);
+      expect(purged.outcome).toBe("PURGED");
 
       // 对象真实消失
       expect(await realStorage.headObject({ bucket: row!.bucket, objectKey: row!.objectKey }))
@@ -349,14 +343,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);
 
       // 重复 cleanup 幂等：条件转移不再命中，不二次释放
-      const repeat = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(repeat).toBe(false);
+      const repeat = await purgePendingDeleteAsset(row!.id);
+      expect(repeat.outcome).toBe("NOOP");
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);
     });
 
@@ -385,14 +373,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
 
       // 存储恢复后（切回真实 MinIO），cleanup 原语完成回收
       setStorageForTests(realStorage);
-      const purged = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(purged).toBe(true);
+      const purged = await purgePendingDeleteAsset(row!.id);
+      expect(purged.outcome).toBe("PURGED");
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);
       const afterRow = await prisma.uploadedAsset.findUnique({ where: { id: row!.id } });
       expect(afterRow!.status).toBe("DELETED");
@@ -442,14 +424,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
       // 存储恢复（直连真实 MinIO）→ cleanup 原语回收：对象删除 + DELETED +
       // 配额 exactly-once 释放
       setStorageForTests(realStorage);
-      const purged = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(purged).toBe(true);
+      const purged = await purgePendingDeleteAsset(row!.id);
+      expect(purged.outcome).toBe("PURGED");
       expect(
         await realStorage.headObject({ bucket: row!.bucket, objectKey: row!.objectKey }),
       ).toBeNull();
@@ -458,14 +434,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);
 
       // 重复 cleanup 幂等：条件转移不再命中，无二次释放
-      const repeat = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(repeat).toBe(false);
+      const repeat = await purgePendingDeleteAsset(row!.id);
+      expect(repeat.outcome).toBe("NOOP");
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);
     }, 60_000);
 
@@ -506,14 +476,8 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint)(
 
       // 存储恢复 → cleanup 原语完成回收（exactly-once）
       setStorageForTests(realStorage);
-      const purged = await purgePendingDeleteAsset({
-        id: row!.id,
-        ownerId: row!.ownerId,
-        bucket: row!.bucket,
-        objectKey: row!.objectKey,
-        sizeBytes: row!.sizeBytes,
-      });
-      expect(purged).toBe(true);
+      const purged = await purgePendingDeleteAsset(row!.id);
+      expect(purged.outcome).toBe("PURGED");
       const afterRow = await prisma.uploadedAsset.findUnique({ where: { id: row!.id } });
       expect(afterRow!.status).toBe("DELETED");
       expect((await getStorageUsage(userId)).usedBytes).toBe(0);

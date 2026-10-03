@@ -299,13 +299,13 @@ describe.skipIf(!integrationDatabaseUrl)("上传配额并发与崩溃恢复集�
         data: { status: "PENDING_DELETE" },
       });
       // 第一遍 purge 正常成功（对象删除 + 转移 + 减额一个事务）
-      const purged = await purgePendingDeleteAsset(asset);
-      expect(purged).toBe(true);
+      const purged = await purgePendingDeleteAsset(asset.id);
+      expect(purged.outcome).toBe("PURGED");
       expect((await getStorageUsage(userId)).usedBytes).toBe(before - SIZE);
 
       // 对已 DELETED 的资产重复 purge：不得再次减额（exactly-once）
-      const repeat = await purgePendingDeleteAsset(asset);
-      expect(repeat).toBe(false);
+      const repeat = await purgePendingDeleteAsset(asset.id);
+      expect(repeat.outcome).toBe("NOOP");
       expect((await getStorageUsage(userId)).usedBytes).toBe(before - SIZE);
     });
   });
