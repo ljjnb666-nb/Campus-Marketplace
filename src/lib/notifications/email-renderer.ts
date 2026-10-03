@@ -1,5 +1,5 @@
 import {
-  EmailProviderConfigError,
+  EmailTemplateContractError,
   resolveEmailAppBaseUrl,
 } from "@/lib/notifications/email-config";
 import {
@@ -38,7 +38,8 @@ export function renderNotificationEmail(
 ): EmailRenderedContent {
   const definition = resolveNotificationDefinition(notification.kind, notification.schemaVersion);
   if (!definition || !hasEmailChannel(definition) || !definition.renderEmail) {
-    throw new EmailProviderConfigError(
+    // RB03（§14）：结构性 contract 缺陷 → PERMANENT（重试不可能成功）
+    throw new EmailTemplateContractError(
       "EMAIL_TEMPLATE_UNREGISTERED",
       `notification kind 未开通 EMAIL 渠道/渲染器：${notification.kind}@${notification.schemaVersion}`,
     );

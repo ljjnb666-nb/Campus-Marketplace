@@ -1,5 +1,8 @@
+import type { Prisma } from "@prisma/client";
+
 /**
- * Phase 9B：NotificationDelivery 渠道投递常量（canonical notification 域）。
+ * Phase 9B：NotificationDelivery 渠道投递常量与 durable 原语
+ * （canonical notification 域）。
  *
  * channel 是开放集合（String，不用 Prisma enum）：9B 实现 IN_APP / EMAIL；
  * IN_APP 是站内投影，不产生 external delivery row（Notification 本身即
@@ -9,7 +12,9 @@
 export const NOTIFICATION_CHANNEL_IN_APP = "IN_APP";
 export const NOTIFICATION_CHANNEL_EMAIL = "EMAIL";
 
-export type NotificationChannel = typeof NOTIFICATION_CHANNEL_IN_APP | typeof NOTIFICATION_CHANNEL_EMAIL;
+export type NotificationChannel =
+  | typeof NOTIFICATION_CHANNEL_IN_APP
+  | typeof NOTIFICATION_CHANNEL_EMAIL;
 
 /**
  * 抑制语义（§28/§35/§42）：suppressedAt != null ⇒ 该 delivery 永不发起
@@ -49,4 +54,109 @@ export function buildEmailIdempotencyKey(notificationId: string): string {
  */
 export function buildNotificationDeliveryJobDedupeKey(deliveryId: string): string {
   return `NOTIFICATION_DELIVERY:${deliveryId}`;
+}
+
+// ============================================================
+// RB01：firstAttemptAt = durable idempotency-window anchor。
+//
+// 语义精度（§4）：firstAttemptAt 是【provider attempt safety-window
+// anchor】——在第一次 external provider attempt 即将执行前，以独立短事务
+// durable COMMIT（NULL → timestamp 单向迁移）；它【不是】provider
+// acceptance timestamp（后者是 providerAcceptedAt，只在 provider 返回
+// successful acceptance 后写入）。
+//
+// 冻结合同：
+//   - 只允许 NULL → timestamp；
+//   - 禁止 timestamp → newer timestamp、timestamp → NULL；
+//   - 此后任何 execution transaction rollback / process crash / lease
+//     recovery 都不得回退或重置 23h local safety window 的起算点。
+//
+// RB02：FOR UPDATE 行锁——EMAIL 执行事务在整个关键区间（suppression
+// recheck → accepted recheck → window check → provider.send → accepted
+// update → COMMIT）持有 delivery 行锁；account erasure 的
+// notificationDelivery.updateMany 与该锁天然串行，关闭
+// "erasure 先提交 → worker 用 stale destination 发送" 穿透窗口。
+// ============================================================
+
+/** anchor/锁面读取的 delivery 权威行形状（handler 关键区间使用）。 */
+export type LockedNotificationDeliveryRow = {
+  id: string;
+  notificationId: string;
+  channel: string;
+  provider: string;
+  destination: string;
+  senderSnapshot: string;
+  replyToSnapshot: string | null;
+  providerIdempotencyKey: string;
+  firstAttemptAt: Date | null;
+  providerAcceptedAt: Date | null;
+  suppressedAt: Date | null;
+  suppressionCode: string | null;
+};
+
+/**
+ * RB01 durable anchor（独立短事务，必须 COMMIT 后才允许 provider.send）：
+ * UPDATE ... WHERE id AND firstAttemptAt IS NULL AND suppressedAt IS NULL
+ * AND providerAcceptedAt IS NULL——条件迁移保证 NULL → timestamp 单向、
+ * 永不覆盖既有 anchor、永不给已抑制/已接受行补锚。
+ *
+ * 使用 root Prisma client（独立连接/事务）——绝不在 execution transaction
+ * 内调用（否则 anchor 随 execution rollback 一起消失，正是 RB01 修复的
+ * bug；且会与 execution tx 的 FOR UPDATE 行锁自等待）。
+ */
+export async function ensureEmailFirstAttemptAnchor(
+  rootClient: {
+    notificationDelivery: {
+      updateMany(args: {
+        where: {
+          id: string;
+          firstAttemptAt: null;
+          suppressedAt: null;
+          providerAcceptedAt: null;
+        };
+        data: { firstAttemptAt: Date };
+      }): Promise<{ count: number }>;
+    };
+  },
+  deliveryId: string,
+  now: Date,
+): Promise<void> {
+  await rootClient.notificationDelivery.updateMany({
+    where: {
+      id: deliveryId,
+      firstAttemptAt: null,
+      suppressedAt: null,
+      providerAcceptedAt: null,
+    },
+    data: { firstAttemptAt: now },
+  });
+}
+
+/**
+ * RB02 权威行锁读取（必须在 EMAIL execution transaction 内调用——行锁保持
+ * 到该事务 COMMIT，与 erasure 的行更新串行）。返回锁后权威行；禁止继续
+ * 使用锁前 snapshot。
+ */
+export async function lockNotificationDeliveryRow(
+  tx: Prisma.TransactionClient,
+  deliveryId: string,
+): Promise<LockedNotificationDeliveryRow | null> {
+  const rows = await tx.$queryRaw<LockedNotificationDeliveryRow[]>`
+    SELECT
+      "id",
+      "notificationId",
+      "channel",
+      "provider",
+      "destination",
+      "senderSnapshot",
+      "replyToSnapshot",
+      "providerIdempotencyKey",
+      "firstAttemptAt",
+      "providerAcceptedAt",
+      "suppressedAt",
+      "suppressionCode"
+    FROM "NotificationDelivery"
+    WHERE "id" = ${deliveryId}
+    FOR UPDATE`;
+  return rows[0] ?? null;
 }

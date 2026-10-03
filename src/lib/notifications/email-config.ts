@@ -66,11 +66,40 @@ export type EmailSendConfig = {
   timeoutMs: number;
 };
 
-/** 受控配置错误（fail closed；code 属受控机器码格式）。 */
-export class EmailProviderConfigError extends PermanentJobFailure {
+/**
+ * RB03（§12/§13）：runtime config 不可用 = worker 环境态（EMAIL_PROVIDER
+ * 缺失、RESEND_API_KEY 缺失、EMAIL_FROM/NEXTAUTH_URL 不可用、滚动发布中的
+ * 混合配置实例）——在 async processing path 中必须 RETRYABLE：
+ * 0 provider call → 9A backoff retry → maxAttempts 兜底 DEAD_LETTER。
+ *
+ * 刻意 extends Error 而非 PermanentJobFailure：classifyJobFailure /
+ * classifyOutboxFailure 对非 PermanentJobFailure 一律 RETRYABLE——
+ * emit 路径（outbox materialization）同样据此把 OutboxEvent 置 RETRY
+ * 等待已配置 worker 接管，绝不让配置问题把结构性合法的 intent 打进
+ * DEAD_LETTER。
+ */
+export class EmailRuntimeConfigUnavailableError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "EmailRuntimeConfigUnavailableError";
+    this.code = code;
+  }
+}
+
+/** runtime config 检查的统一失败码（观测/日志用，语义 = 环境态可重试）。 */
+export const EMAIL_RUNTIME_CONFIG_UNAVAILABLE = "EMAIL_PROVIDER_CONFIG_UNAVAILABLE";
+
+/**
+ * 结构性 email contract 错误（§14）：kind 声明 EMAIL 但未注册渲染器、
+ * 未知模板 version、canonical payload 结构性非法等【代码/契约缺陷】——
+ * 重试不可能成功，必须 PERMANENT → DEAD_LETTER，禁止无限 retry。
+ */
+export class EmailTemplateContractError extends PermanentJobFailure {
   constructor(code: string, message: string) {
     super(code, message);
-    this.name = "EmailProviderConfigError";
+    this.name = "EmailTemplateContractError";
   }
 }
 
@@ -81,7 +110,7 @@ type EmailEnv = Record<string, string | undefined>;
  * - EMAIL_PROVIDER=disabled → { provider: "disabled", from: null, replyTo: null }
  *   （delivery 将以 PROVIDER_DISABLED 抑制，0 provider call）；
  * - EMAIL_PROVIDER=resend → from 必须是合法 email 形态（生产由 env-check
- *   保证；运行时 fail closed——非法即 EmailProviderConfigError，emit 事务
+ *   保证；运行时 fail closed——非法即 EmailRuntimeConfigUnavailableError（retryable），emit 事务
  *   回滚零落库）；replyTo 可选（设置时必须合法）。
  * 未设置 EMAIL_PROVIDER：非生产环境按 disabled 处理；生产环境拒绝
  * （生产 env 契约要求显式配置）。
@@ -92,7 +121,7 @@ export function resolveEmailChannelConfig(env: EmailEnv = process.env): EmailCha
 
   if (rawProvider === "" || rawProvider === "disabled") {
     if (isProduction && rawProvider === "") {
-      throw new EmailProviderConfigError(
+      throw new EmailRuntimeConfigUnavailableError(
         "EMAIL_PROVIDER_CONFIG_INVALID",
         "生产环境 EMAIL_PROVIDER 必须显式配置为 resend",
       );
@@ -101,7 +130,7 @@ export function resolveEmailChannelConfig(env: EmailEnv = process.env): EmailCha
   }
 
   if (rawProvider !== "resend") {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_PROVIDER_CONFIG_INVALID",
       `未知 EMAIL_PROVIDER：仅支持 resend / disabled`,
     );
@@ -109,7 +138,7 @@ export function resolveEmailChannelConfig(env: EmailEnv = process.env): EmailCha
 
   const from = extractEmailAddress(env.EMAIL_FROM);
   if (!from) {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_PROVIDER_CONFIG_INVALID",
       "EMAIL_PROVIDER=resend 要求合法的 EMAIL_FROM",
     );
@@ -120,7 +149,7 @@ export function resolveEmailChannelConfig(env: EmailEnv = process.env): EmailCha
   if (replyToRaw !== "") {
     replyTo = extractEmailAddress(replyToRaw);
     if (!replyTo) {
-      throw new EmailProviderConfigError(
+      throw new EmailRuntimeConfigUnavailableError(
         "EMAIL_PROVIDER_CONFIG_INVALID",
         "EMAIL_REPLY_TO 设置时必须是合法 email",
       );
@@ -143,7 +172,7 @@ export function resolveEmailSendConfig(env: EmailEnv = process.env): EmailSendCo
   const isProduction = env.NODE_ENV === "production";
 
   if (rawProvider !== "resend") {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_PROVIDER_CONFIG_INVALID",
       "EMAIL send config 仅在 EMAIL_PROVIDER=resend 下可用",
     );
@@ -151,7 +180,7 @@ export function resolveEmailSendConfig(env: EmailEnv = process.env): EmailSendCo
 
   const apiKey = env.RESEND_API_KEY?.trim() ?? "";
   if (apiKey.length === 0 || apiKey.toLowerCase().includes("dummy") || /changeme|your[-_]?key/i.test(apiKey)) {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_PROVIDER_CONFIG_INVALID",
       "RESEND_API_KEY 缺失或为不安全占位值",
     );
@@ -161,13 +190,13 @@ export function resolveEmailSendConfig(env: EmailEnv = process.env): EmailSendCo
   let baseUrl = OFFICIAL_RESEND_BASE_URL;
   if (configuredBase !== "") {
     if (isProduction) {
-      throw new EmailProviderConfigError(
+      throw new EmailRuntimeConfigUnavailableError(
         "EMAIL_PROVIDER_CONFIG_INVALID",
         "生产环境禁止覆盖 RESEND_API_BASE_URL（固定 https://api.resend.com）",
       );
     }
     if (!configuredBase.startsWith("http://") && !configuredBase.startsWith("https://")) {
-      throw new EmailProviderConfigError(
+      throw new EmailRuntimeConfigUnavailableError(
         "EMAIL_PROVIDER_CONFIG_INVALID",
         "RESEND_API_BASE_URL 必须是 http(s) URL",
       );
@@ -180,7 +209,7 @@ export function resolveEmailSendConfig(env: EmailEnv = process.env): EmailSendCo
   if (rawTimeout !== "") {
     const parsed = Number(rawTimeout);
     if (!Number.isInteger(parsed) || parsed < EMAIL_PROVIDER_TIMEOUT_MS_MIN || parsed > EMAIL_PROVIDER_TIMEOUT_MS_MAX) {
-      throw new EmailProviderConfigError(
+      throw new EmailRuntimeConfigUnavailableError(
         "EMAIL_PROVIDER_CONFIG_INVALID",
         `EMAIL_PROVIDER_TIMEOUT_MS 必须是 ${EMAIL_PROVIDER_TIMEOUT_MS_MIN}..${EMAIL_PROVIDER_TIMEOUT_MS_MAX} 的整数`,
       );
@@ -198,19 +227,19 @@ export function resolveEmailSendConfig(env: EmailEnv = process.env): EmailSendCo
 export function resolveEmailAppBaseUrl(env: EmailEnv = process.env): string {
   const raw = env.NEXTAUTH_URL?.trim() ?? "";
   if (raw === "") {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_LINK_ORIGIN_INVALID",
       "NEXTAUTH_URL 缺失：邮件链接 origin 必须来自 canonical 配置",
     );
   }
   if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_LINK_ORIGIN_INVALID",
       "NEXTAUTH_URL 必须是 http(s) URL",
     );
   }
   if (env.NODE_ENV === "production" && !raw.startsWith("https://")) {
-    throw new EmailProviderConfigError(
+    throw new EmailRuntimeConfigUnavailableError(
       "EMAIL_LINK_ORIGIN_INVALID",
       "生产环境邮件链接 origin 必须 https://",
     );

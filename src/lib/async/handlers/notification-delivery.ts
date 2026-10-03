@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { logger } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
 import {
   PermanentJobFailure,
   notificationDeliveryPayloadSchema,
@@ -9,6 +10,9 @@ import {
 } from "@/lib/async/job-types";
 import {
   EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS,
+  EmailRuntimeConfigUnavailableError,
+  EMAIL_RUNTIME_CONFIG_UNAVAILABLE,
+  resolveEmailAppBaseUrl,
   resolveEmailSendConfig,
 } from "@/lib/notifications/email-config";
 import {
@@ -16,8 +20,13 @@ import {
   EmailProviderRetryableError,
   isEmailIdempotencyWindowExpired,
 } from "@/lib/notifications/email-provider";
-import { renderNotificationEmailFromEnv } from "@/lib/notifications/email-renderer";
+import { renderNotificationEmail } from "@/lib/notifications/email-renderer";
 import { ResendEmailProvider } from "@/lib/notifications/providers/resend";
+import {
+  ensureEmailFirstAttemptAnchor,
+  lockNotificationDeliveryRow,
+  type LockedNotificationDeliveryRow,
+} from "@/lib/notifications/notification-delivery";
 
 /**
  * Phase 9B：NOTIFICATION_DELIVERY@1 handler（§13/§26/§28/§55/§56）。
@@ -28,21 +37,30 @@ import { ResendEmailProvider } from "@/lib/notifications/providers/resend";
  * （provider accepted → 本事务未 COMMIT）由 deterministic provider 幂等键
  * 收敛（同一 key 重放 → provider 幂等保留窗口内仅一次真实投递，§56/§57）。
  *
- * 幂等顺序（§55）：
+ * 幂等顺序（§55 + Review RB01/RB02）：
  *   strict parse { deliveryId }
- *   → fresh 读取 delivery（结构性缺失 = PERMANENT，fail closed）
- *   → suppressed → COMPLETED_IDEMPOTENT（0 provider call；erasure/
- *     INVALID_DESTINATION/provider-disabled 收敛语义）
- *   → providerAcceptedAt != null → COMPLETED_IDEMPOTENT（crash-after-accept
- *     replay：不重复发送）
- *   → 幂等窗口（§26）：firstAttemptAt 起算 >= 23h → no provider request
- *     → PermanentJobFailure(EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED)
- *     → DEAD_LETTER（禁止超窗盲目重发；重发必须显式新 intent，§27）
- *   → canonical Notification fresh 读取（legacy 无 kind 行 = 结构性损坏
- *     → PERMANENT；EMAIL 只可能由 canonical service 创建）
- *   → registry 模板渲染（strict payload re-validation，§6 read-time）
+ *   → execution tx 预读 delivery（结构性缺失 = PERMANENT，fail closed；
+ *     suppressed / providerAcceptedAt 预检快速幂等出口）
+ *   → RB01 durable anchor：独立短事务（root client）COMMIT
+ *     firstAttemptAt（NULL → timestamp 单向；绝不在 execution tx 内写——
+ *     否则 provider accept 后 rollback 会把 anchor 一起回滚，23h local
+ *     safety window 在 crash replay 后重新起算）。anchor 是【provider
+ *     attempt safety-window anchor】，不是 acceptance timestamp。
+ *   → execution tx 内 SELECT ... FOR UPDATE 行锁 + 权威 re-read
+ *     （suppressedAt / providerAcceptedAt / destination / firstAttemptAt；
+ *     RB02：禁止使用锁前 snapshot）——erasure 的行更新与本锁天然串行：
+ *     erasure 先提交 → worker 见 suppressed（0 provider call）；
+ *     worker 先拿到锁 → erasure 阻塞至本事务提交后再 redact destination。
+ *   → 幂等窗口（§26）：权威 firstAttemptAt 起算 >= 23h → no provider
+ *     request → PermanentJobFailure(EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_
+ *     EXPIRED) → DEAD_LETTER（禁止超窗盲目重发；重发必须显式新 intent，
+ *     §27）
+ *   → registry 模板渲染（strict payload re-validation，§6 read-time）；
+ *     结构性 contract 缺陷 = EmailTemplateContractError → PERMANENT；
+ *     runtime config 不可用（NEXTAUTH_URL 等）= RETRYABLE
  *   → provider.send（deterministic 快照：destination/sender/replyTo 全部
- *     来自 delivery 行，§33）
+ *     来自锁后权威行，§33；runtime config 不可用 → RETRYABLE，0 provider
+ *     call，等已配置 worker 接管——滚动发布安全）
  *   → 条件落 providerMessageId + providerAcceptedAt → COMMIT
  *
  * 语义（§28）：providerAcceptedAt = provider 接受发送请求，绝不声称
@@ -54,6 +72,23 @@ import { ResendEmailProvider } from "@/lib/notifications/providers/resend";
  */
 
 const EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED = "EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED";
+
+/**
+ * TEST-ONLY seam（生产绝不调用）：在 delivery 行锁 + 权威 re-read 之后、
+ * provider.send 之前的受控暂停点（ERASURE-RACE-02 确定性 barrier）。
+ */
+type NotificationDeliveryHandlerSeam = {
+  afterDeliveryRowLock?: (delivery: LockedNotificationDeliveryRow) => Promise<void>;
+};
+
+let handlerTestSeam: NotificationDeliveryHandlerSeam | null = null;
+
+/** 仅测试注入；生产路径必须保持 null。 */
+export function setNotificationDeliveryHandlerSeamForTests(
+  seam: NotificationDeliveryHandlerSeam | null,
+): void {
+  handlerTestSeam = seam;
+}
 
 function logEmail(
   event: string,
@@ -80,6 +115,22 @@ function logEmail(
   });
 }
 
+/** runtime config 不可用 → 统一转 RETRYABLE（0 provider call，等配置 worker 接管）。 */
+function toRetryableIfConfigUnavailable(error: unknown, deliveryId: string): unknown {
+  if (error instanceof EmailRuntimeConfigUnavailableError) {
+    logger.warn("worker EMAIL runtime config 不可用（retryable）", "notification-delivery", {
+      event: "email_delivery_config_unavailable",
+      deliveryId,
+      code: error.code,
+    });
+    return new EmailProviderRetryableError(
+      EMAIL_RUNTIME_CONFIG_UNAVAILABLE,
+      "当前 worker 缺少可用 EMAIL 配置：RETRYABLE（等待已配置 worker 接管）",
+    );
+  }
+  return error;
+}
+
 export const notificationDeliveryHandler = async (
   tx: Prisma.TransactionClient,
   job: ClaimedAsyncJob,
@@ -96,17 +147,60 @@ export const notificationDeliveryHandler = async (
   }
   const { deliveryId } = parsed.data;
 
-  // 2) fresh 读取 delivery（单 job ⇔ 单 delivery；AsyncJob lease 保证无并发执行者）
-  const delivery = await tx.notificationDelivery.findUnique({ where: { id: deliveryId } });
-  if (!delivery || delivery.channel !== "EMAIL") {
+  // 2) execution tx 预读（无行锁；仅快速幂等出口与结构校验）
+  const preRead = await tx.notificationDelivery.findUnique({ where: { id: deliveryId } });
+  if (!preRead || preRead.channel !== "EMAIL") {
     throw new PermanentJobFailure(
       "NOTIFICATION_DELIVERY_AGGREGATE_MISSING",
       `EMAIL NotificationDelivery 缺失或渠道不符：${deliveryId}`,
     );
   }
 
-  // 3) suppressed → 幂等成功（erasure / INVALID_DESTINATION / provider-disabled；
-  //    §35：provider call = 0）
+  // 3) suppressed 预检（§35：erasure / INVALID_DESTINATION / provider-disabled；
+  //    0 provider call）
+  if (preRead.suppressedAt !== null) {
+    logEmail("email_delivery_suppressed", {
+      job,
+      deliveryId,
+      provider: preRead.provider,
+      code: preRead.suppressionCode ?? "SUPPRESSED",
+      startedAt,
+    });
+    return { kind: "COMPLETED_IDEMPOTENT" };
+  }
+
+  // 4) crash-after-accept 预检 → 幂等成功（不重复发送，§56）
+  if (preRead.providerAcceptedAt !== null) {
+    logEmail("email_delivery_provider_accepted", {
+      job,
+      deliveryId,
+      provider: preRead.provider,
+      code: "IDEMPOTENT_REPLAY",
+      startedAt,
+    });
+    return { kind: "COMPLETED_IDEMPOTENT" };
+  }
+
+  // 5) RB01 durable anchor：独立短事务（root client）先 COMMIT firstAttemptAt，
+  //    然后才允许 provider attempt。条件迁移（WHERE firstAttemptAt IS NULL
+  //    AND suppressedAt IS NULL AND providerAcceptedAt IS NULL）保证：
+  //    NULL → timestamp 单向；绝不覆盖/回退既有 anchor；绝不给已抑制/已
+  //    接受行补锚。erasure 并发持有行锁时本 UPDATE 阻塞至其提交，随后
+  //    no-op（suppressed 已置位）→ 下一步锁后 re-read 幂等出口。
+  const anchorNow = new Date();
+  await ensureEmailFirstAttemptAnchor(prisma, deliveryId, anchorNow);
+
+  // 6) RB02 权威行锁 + re-read（关键区间起点：锁保持到 execution tx COMMIT，
+  //    erasure 的行更新与本区间串行；禁止使用锁前 snapshot）
+  const delivery = await lockNotificationDeliveryRow(tx, deliveryId);
+  if (!delivery || delivery.channel !== "EMAIL") {
+    throw new PermanentJobFailure(
+      "NOTIFICATION_DELIVERY_AGGREGATE_MISSING",
+      `EMAIL NotificationDelivery 锁后缺失：${deliveryId}`,
+    );
+  }
+
+  // 7) 锁后幂等 recheck（权威行；erasure 可能在 anchor 与锁之间提交）
   if (delivery.suppressedAt !== null) {
     logEmail("email_delivery_suppressed", {
       job,
@@ -117,8 +211,6 @@ export const notificationDeliveryHandler = async (
     });
     return { kind: "COMPLETED_IDEMPOTENT" };
   }
-
-  // 4) crash-after-accept replay → 幂等成功（不重复发送，§56）
   if (delivery.providerAcceptedAt !== null) {
     logEmail("email_delivery_provider_accepted", {
       job,
@@ -130,19 +222,11 @@ export const notificationDeliveryHandler = async (
     return { kind: "COMPLETED_IDEMPOTENT" };
   }
 
-  // 5) 幂等窗口（§26）：firstAttemptAt = 首次实际 provider attempt 基准。
-  //    条件 stamp 保证 fenced replay 不改写既有基准；超窗 no-provider-call。
-  const now = new Date();
-  if (delivery.firstAttemptAt === null) {
-    await tx.notificationDelivery.updateMany({
-      where: { id: delivery.id, firstAttemptAt: null },
-      data: { firstAttemptAt: now },
-    });
-  }
-  const firstAttemptAt = delivery.firstAttemptAt ?? now;
-  if (isEmailIdempotencyWindowExpired(firstAttemptAt, now, EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS)) {
-    // §27：9B 不提供 blind requeue——provider 幂等保证已过期，重发必须
-    // 显式新 notification/delivery intent。0 次 provider request。
+  // 8) RB01 幂等窗口（§26）：以 durable anchor 起算；超窗 no-provider-call
+  //    → PERMANENT → DEAD_LETTER（§27：重发必须显式新 intent）
+  const firstAttemptAt = delivery.firstAttemptAt ?? anchorNow;
+  const windowNow = new Date();
+  if (isEmailIdempotencyWindowExpired(firstAttemptAt, windowNow, EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS)) {
     logEmail("email_delivery_dead_lettered", {
       job,
       deliveryId,
@@ -156,7 +240,12 @@ export const notificationDeliveryHandler = async (
     );
   }
 
-  // 6) canonical Notification fresh 读取 + registry 渲染（read-time strict）
+  // 9) TEST-ONLY seam（ERASURE-RACE-02 barrier；生产恒 null）
+  await handlerTestSeam?.afterDeliveryRowLock?.(delivery);
+
+  // 10) 渲染（read-time strict validation）：结构性 contract 缺陷 →
+  //     EmailTemplateContractError（PERMANENT）；runtime config 不可用
+  //     （NEXTAUTH_URL 等）→ RETRYABLE
   const notification = await tx.notification.findUnique({
     where: { id: delivery.notificationId },
     select: { id: true, kind: true, schemaVersion: true, payload: true, userId: true },
@@ -172,38 +261,26 @@ export const notificationDeliveryHandler = async (
     );
   }
 
-  const rendered = renderNotificationEmailFromEnv(
-    { kind: notification.kind, schemaVersion: notification.schemaVersion, payload: notification.payload },
-    notification.userId,
-  );
+  let rendered;
+  try {
+    const appBaseUrl = resolveEmailAppBaseUrl();
+    rendered = renderNotificationEmail(
+      { kind: notification.kind, schemaVersion: notification.schemaVersion, payload: notification.payload },
+      notification.userId,
+      appBaseUrl,
+    );
+  } catch (error) {
+    throw toRetryableIfConfigUnavailable(error, deliveryId);
+  }
 
-  // 7) provider send（deterministic 快照，§33；resend 为 9B 唯一 production provider）。
-  //    EMAIL 配置缺失/非法 = worker 环境态（如滚动发布中的未配置实例、共享
-  //    集成队列的无 env runner），不是 payload/结构性问题 → RETRYABLE
-  //    （0 provider call；env 修复后的 worker 接管；maxAttempts 兜底
-  //    DEAD_LETTER）。生产 env-check 保证配置存在，此路径正常不可达。
-  const sendConfig = (() => {
-    try {
-      return resolveEmailSendConfig();
-    } catch (error) {
-      if (error instanceof EmailProviderPermanentError) {
-        logEmail("email_delivery_retry_scheduled", {
-          job,
-          deliveryId,
-          notificationId: notification.id,
-          kind: notification.kind,
-          provider: delivery.provider,
-          code: "EMAIL_PROVIDER_CONFIG_UNAVAILABLE",
-          startedAt,
-        });
-        throw new EmailProviderRetryableError(
-          "EMAIL_PROVIDER_CONFIG_UNAVAILABLE",
-          "当前 worker 缺少可用 EMAIL 配置：RETRYABLE（等待已配置 worker 接管）",
-        );
-      }
-      throw error;
-    }
-  })();
+  // 11) provider send config：runtime config 不可用 → RETRYABLE（0 provider
+  //     call；resend 为 9B 唯一 production provider）
+  let sendConfig;
+  try {
+    sendConfig = resolveEmailSendConfig();
+  } catch (error) {
+    throw toRetryableIfConfigUnavailable(error, deliveryId);
+  }
   const provider = new ResendEmailProvider({
     apiKey: sendConfig.apiKey,
     baseUrl: sendConfig.baseUrl,
@@ -269,9 +346,9 @@ export const notificationDeliveryHandler = async (
     throw error;
   }
 
-  // 8) 条件落 provider accepted 状态（suppressed 并发竞态防御：erasure 在
-  //    本 job 执行期间抑制 delivery 时，信件可能已发出——如实记录 provenance
-  //    并幂等完成，provider accepted 事实不可回滚）
+  // 12) 条件落 provider accepted 状态（行锁保持中——erasure 在本事务提交前
+  //     无法改写本行；suppressed 竞态在锁后 recheck 已排除，此处防御性
+  //     条件谓词保留）
   const accepted = await tx.notificationDelivery.updateMany({
     where: { id: delivery.id, providerAcceptedAt: null, suppressedAt: null },
     data: {

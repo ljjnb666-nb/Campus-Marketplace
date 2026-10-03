@@ -93,6 +93,12 @@ email API（只 durable record intent；external send 仅发生在 async-worker
   24h 保留窗口内收敛为一次真实投递；本地安全窗口 23h，超窗后任何 retry
   一律 no-provider-call → DEAD_LETTER（fail closed，禁止盲目重发；如需
   重发必须显式产生新的 notification/delivery intent）。
+  窗口起算锚点 `NotificationDelivery.firstAttemptAt` 是【provider attempt
+  safety-window anchor】：在第一次 external provider attempt 执行前以独立
+  短事务 durable COMMIT（NULL → timestamp 单向迁移，绝不回退/重置），
+  因此 provider accept 后的任何 crash/rollback 都不会重新起算 23h 窗口。
+  它【不是】acceptance timestamp——acceptance 语义只属于
+  `providerAcceptedAt`。
 - **EMAIL_FROM 域名验证**：发信域名必须在 Resend 完成域名验证（SPF/DKIM）。
   域名验证属 Phase 3B external evidence；未完成前生产 email gate 通过也
   不代表真实收件可用。
