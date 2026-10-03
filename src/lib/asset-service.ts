@@ -23,6 +23,9 @@ import {
 } from "@/lib/asset-ref";
 import { isUploadCategory, UPLOAD_LIMITS, type UploadCategory } from "@/lib/upload-limits";
 import { recordAdminAudit } from "@/lib/governance/admin-audit";
+import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
+import { hasActiveHold } from "@/lib/privacy/data-hold-service";
+import { withTransaction } from "@/lib/prisma";
 import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
 
 export { buildAssetReference, isAssetReference, parseAssetReference };
@@ -38,9 +41,19 @@ export { buildAssetReference, isAssetReference, parseAssetReference };
  *     ↓ attach
  *   [ATTACHED] ⇄（编辑复用，仅同实体幂等）
  *     ↓ 标记
- *   [PENDING_DELETE] → S3 DeleteObject（幂等）
- *     ↓ [事务 T2: 条件转移 DELETED + 同事务配额减额]（exactly-once）
+ *   [PENDING_DELETE] → [USER governance subject 锁 + fresh hold/行复核]
+ *     ↓ S3 DeleteObject（幂等，锁内执行）
+ *     ↓ [同一事务: 条件转移 DELETED + 配额减额]（exactly-once）
  *   [DELETED]
+ *
+ * Phase 9C-01（DataHold-safe destructive boundary）：
+ * 物理清除（purgePendingDeleteAsset）与保留期 authoritative 标记
+ * （markRetentionExpiredAssetPendingDelete）必须与 createHold / releaseHold /
+ * eraseAccount 共享同一把 USER governance subject 锁（governance-lock.ts），
+ * 锁内 fresh 复核 ACTIVE DataHold——cleanup 拿到锁并确认无 hold 后才能删除；
+ * 并发 createHold 被锁阻塞到 cleanup 提交之后（cleanup wins，合法顺序）；
+ * hold 先提交则锁内 fresh check 看到 ACTIVE hold → HOLD_BLOCKED（hold wins），
+ * 绝不产生"S3 DeleteObject 已执行而 hold 检查过期"的 TOCTOU。
  *
  * PUT 失败语义（AMBIGUOUS_PUT_OUTCOME，LR-071）：putObject 抛错不代表远端
  * 对象未写入（远端可能已提交而 client 观察到异常）。因此失败路径不删行、
@@ -326,14 +339,8 @@ export async function uploadImageAsset(params: {
       });
 
     if (batchCount(marked) === 1) {
-      const purged = await purgePendingDeleteAsset({
-        id: assetId,
-        ownerId: userId,
-        bucket,
-        objectKey,
-        sizeBytes,
-      }).catch(() => false);
-      if (purged) {
+      const purge = await purgePendingDeleteAsset(assetId).catch(() => null);
+      if (purge?.outcome === "PURGED") {
         logger.info("失败上传恢复完成：对象已删除、配额已释放", "asset-service", {
           operation: "upload-recover",
           event: "storage_upload_recovery_completed",
@@ -342,6 +349,8 @@ export async function uploadImageAsset(params: {
           sizeBytes,
         });
       } else {
+        // HOLD_BLOCKED（罕见竞态：上传失败窗口内 owner 被 hold）/
+        // NOOP / RETRYABLE_FAILURE —— 行停留 PENDING_DELETE，cleanup 稍后收敛
         logger.warn("远端对象删除未完成，PENDING_DELETE 保留待 cleanup 重试", "asset-service", {
           operation: "upload-recover",
           event: "storage_upload_recovery_pending",
@@ -615,83 +624,193 @@ export async function markAssetPendingDelete(assetId: string): Promise<boolean> 
 }
 
 /**
- * 物理删除 PENDING_DELETE 资源的对象并完成状态转移 + 配额释放。
- *
- * S3 DeleteObject 幂等（对象不存在视为成功）；随后在【同一事务】内完成
- * 条件转移（PENDING_DELETE → DELETED）与配额减额——转移只可能命中一次，
- * 因此两个并发 cleanup worker 也只会有一个完成减额（exactly-once）。
- * 对象删除或事务失败时保留 PENDING_DELETE，由 cleanup 重试。
+ * 物理删除结果分类（Phase 9C-01 §7 taxonomy）。
+ * hold blocked != failure；lost race != storage failure；存储不可用 != hold blocked。
+ * 日志与 cleanup summary 必须能区分这四种结局。
  */
-export async function purgePendingDeleteAsset(asset: {
-  id: string;
-  ownerId: string;
-  bucket: string;
-  objectKey: string;
-  sizeBytes: number;
-}): Promise<boolean> {
-  const storage = getStorage();
-  try {
-    await storage.deleteObject({ bucket: asset.bucket, objectKey: asset.objectKey });
-  } catch (error) {
-    logger.error("对象删除失败，保留待重试", "asset-service", {
-      operation: "purge",
-      assetId: asset.id,
-      userId: asset.ownerId,
-      error,
-    });
-    return false;
-  }
+export type AssetPurgeOutcome = "PURGED" | "HOLD_BLOCKED" | "NOOP" | "RETRYABLE_FAILURE";
 
-  let completed = false;
+export interface AssetPurgeResult {
+  outcome: AssetPurgeOutcome;
+  /** 仅 outcome === "PURGED" 时非 0：本次实际释放的配额字节数（fresh 行 sizeBytes） */
+  releasedQuotaBytes: number;
+}
+
+/**
+ * 物理删除 PENDING_DELETE 资源（canonical destructive authority）。
+ *
+ * canonical flow（全部在同一个 DB 事务内）：
+ *   begin tx
+ *   → 取 USER governance subject 锁（与 hold/erasure 同一把锁，TOCTOU 关闭点）
+ *   → 锁内 fresh 读取 UploadedAsset（discovery 只是线索，绝不信任 stale 快照：
+ *     id / ownerId / status / bucket / objectKey / sizeBytes 全部以 fresh 行为准）
+ *   → 锁内 fresh ACTIVE DataHold check（hold lookup subject == lock subject）
+ *   → 验证 status == PENDING_DELETE
+ *   → S3 DeleteObject（使用 fresh 行定位符；幂等，对象不存在视为成功）
+ *   → 条件转移 PENDING_DELETE → DELETED
+ *   → 同事务配额减额
+ *   → COMMIT
+ *
+ * 预算算术（不放宽全局事务 timeout）：S3_DELETE_OPERATION_TIMEOUT_MS = 3s
+ * 封顶 DeleteObject；同一 subject 上的竞争破坏性操作持锁时长 ≤ 一次
+ * delete（3s）+ 点查/点写（毫秒级）；自身 delete ≤ 3s；余量明确
+ * （withTransaction 默认 10s，prisma.ts TRANSACTION_TIMEOUT_MS）。
+ *
+ * 崩溃安全（crash after external success）：S3 删除成功而事务失败/回滚 →
+ * 对象可能已不在远端，但行保持 PENDING_DELETE、配额保持占用——下轮 cleanup
+ * 对缺失对象再次 DeleteObject（幂等）后完成转移与释放，recovery authority
+ * 不丢失。
+ *
+ * 并发语义：两个 cleanup worker 只有一个能完成转移与减额（条件转移 +
+ * subject 锁双重防线），quota decrement exactly once；输家 fresh 读取看到
+ * DELETED → NOOP（正常竞争，非失败）。
+ */
+export async function purgePendingDeleteAsset(assetId: string): Promise<AssetPurgeResult> {
   try {
-    completed = await prisma.$transaction(async (rawTx) => {
-      const tx = rawTx as unknown as Prisma.TransactionClient;
+    const result = await withTransaction(async (tx) => {
+      // ownerId 是不可变列（无任何写路径）：仅作 subject 锁键的定位读取。
+      // 全部破坏性判定（status / bucket / objectKey / sizeBytes / hold）都在
+      // 锁内 fresh 读取上执行；fresh 行 ownerId 与定位读取不一致时 fail closed。
+      const located = await tx.uploadedAsset.findUnique({
+        where: { id: assetId },
+        select: { ownerId: true },
+      });
+      if (!located) {
+        return { outcome: "NOOP" as const, releasedQuotaBytes: 0 };
+      }
+      await acquireGovernanceSubjectLock(tx, "USER", located.ownerId);
+
+      const fresh = await tx.uploadedAsset.findUnique({ where: { id: assetId } });
+      if (!fresh || fresh.ownerId !== located.ownerId) {
+        return { outcome: "NOOP" as const, releasedQuotaBytes: 0 };
+      }
+      if (fresh.status !== "PENDING_DELETE") {
+        // 并发 worker 已完成转移（或行被其他路径推进）：正常竞争，非失败
+        return { outcome: "NOOP" as const, releasedQuotaBytes: 0 };
+      }
+
+      // 锁内 fresh ACTIVE hold check（hold lookup subject == lock subject）。
+      // ACTIVE hold 是 business/governance block，不是 storage failure：
+      // 对象字节、DB 行、配额全部原样保留，hold 解除后由后续 cleanup 收敛。
+      if (await hasActiveHold({ subjectType: "USER", subjectId: fresh.ownerId }, tx)) {
+        logger.warn("asset_purge_blocked_by_hold", "asset-service", {
+          operation: "purge",
+          event: "asset_purge_hold_blocked",
+          assetId: fresh.id,
+          userId: fresh.ownerId,
+        });
+        return { outcome: "HOLD_BLOCKED" as const, releasedQuotaBytes: 0 };
+      }
+
+      // S3 DeleteObject 在 serialization boundary 内执行（外部副作用被锁覆盖：
+      // hold check → delete → DELETED 转移 → 配额释放之间无解锁窗口）
+      const storage = getStorage();
+      await storage.deleteObject({ bucket: fresh.bucket, objectKey: fresh.objectKey });
+
       const claimed = await tx.uploadedAsset.updateMany({
-        where: { id: asset.id, status: "PENDING_DELETE" },
+        where: { id: fresh.id, status: "PENDING_DELETE" },
         data: { status: "DELETED", expiresAt: null },
       });
       if (batchCount(claimed) !== 1) {
-        return false;
+        return { outcome: "NOOP" as const, releasedQuotaBytes: 0 };
       }
-      await releaseQuotaBytes(tx, asset.ownerId, asset.sizeBytes);
-      return true;
+      await releaseQuotaBytes(tx, fresh.ownerId, fresh.sizeBytes);
+      return { outcome: "PURGED" as const, releasedQuotaBytes: fresh.sizeBytes };
     });
+
+    if (result.outcome === "PURGED") {
+      logger.info("资源已删除", "asset-service", {
+        operation: "purge",
+        assetId,
+        sizeBytes: result.releasedQuotaBytes,
+      });
+    }
+    return result;
   } catch (error) {
-    // 事务失败：转移与减额一并回滚，行保持 PENDING_DELETE 由下次 cleanup 重试
+    // S3 成功后事务失败：转移与减额一并回滚，行保持 PENDING_DELETE、
+    // 配额保持占用，由 cleanup 幂等重试（下轮 DeleteObject 对缺失对象安全）
     logger.error("PENDING_DELETE 完成事务失败，保留待重试", "asset-service", {
       operation: "purge",
-      assetId: asset.id,
-      userId: asset.ownerId,
+      assetId,
       error,
     });
-    return false;
+    return { outcome: "RETRYABLE_FAILURE", releasedQuotaBytes: 0 };
   }
-
-  if (completed) {
-    logger.info("资源已删除", "asset-service", {
-      operation: "purge",
-      assetId: asset.id,
-      userId: asset.ownerId,
-      sizeBytes: asset.sizeBytes,
-    });
-  }
-  return completed;
 }
 
-/** 标记 + 物理删除一条资源（业务删除路径的完整入口） */
+/** 保留期 authoritative 标记结果（Phase 9C-01：candidate discovery != transition） */
+export type RetentionMarkOutcome = "MARKED" | "HOLD_BLOCKED" | "NOT_CANDIDATE";
+
+/**
+ * 保留期到期的 authoritative PENDING_DELETE 标记（单条、锁内、fresh 复核）。
+ *
+ * candidate discovery（asset-cleanup 的批量扫描）只是线索；真正的状态推进
+ * 必须逐条在 USER governance subject 锁内完成：锁 → fresh 行 → fresh
+ * predicate（status ∈ {UPLOADED, ATTACHED} 且 expiresAt < now）→ fresh
+ * ACTIVE hold check → 条件 update。hold 已 ACTIVE 时保持原状态
+ * （不推进 destructive retention lifecycle），hold 解除后由后续周期收敛。
+ */
+export async function markRetentionExpiredAssetPendingDelete(
+  assetId: string,
+  now: Date,
+): Promise<RetentionMarkOutcome> {
+  return withTransaction(async (tx) => {
+    // ownerId 不可变列：仅作锁键定位（同 purgePendingDeleteAsset）
+    const located = await tx.uploadedAsset.findUnique({
+      where: { id: assetId },
+      select: { ownerId: true },
+    });
+    if (!located) {
+      return "NOT_CANDIDATE";
+    }
+    await acquireGovernanceSubjectLock(tx, "USER", located.ownerId);
+
+    const fresh = await tx.uploadedAsset.findUnique({
+      where: { id: assetId },
+      select: { id: true, ownerId: true, status: true, expiresAt: true },
+    });
+    if (
+      !fresh ||
+      fresh.ownerId !== located.ownerId ||
+      !(fresh.status === "UPLOADED" || fresh.status === "ATTACHED") ||
+      !fresh.expiresAt ||
+      fresh.expiresAt >= now
+    ) {
+      return "NOT_CANDIDATE";
+    }
+
+    if (await hasActiveHold({ subjectType: "USER", subjectId: fresh.ownerId }, tx)) {
+      logger.warn("retention_mark_blocked_by_hold", "asset-service", {
+        operation: "retention-mark",
+        event: "retention_mark_hold_blocked",
+        assetId: fresh.id,
+        userId: fresh.ownerId,
+      });
+      return "HOLD_BLOCKED";
+    }
+
+    const marked = await tx.uploadedAsset.updateMany({
+      where: {
+        id: fresh.id,
+        status: { in: ["UPLOADED", "ATTACHED"] },
+        expiresAt: { lt: now },
+      },
+      data: { status: "PENDING_DELETE" },
+    });
+    return batchCount(marked) === 1 ? "MARKED" : "NOT_CANDIDATE";
+  });
+}
+
+/** 标记 + 物理删除一条资源（业务删除路径的完整入口）。
+ * ACTIVE DataHold 时物理清除被 HOLD_BLOCKED（行保持 PENDING_DELETE，
+ * hold 解除后由 cleanup 收敛），业务侧表现为本方法返回 false。 */
 export async function deleteAssetCompletely(assetId: string): Promise<boolean> {
   const marked = await markAssetPendingDelete(assetId);
   if (!marked) {
     return false;
   }
-  const asset = await prisma.uploadedAsset.findUnique({
-    where: { id: assetId },
-    select: { id: true, ownerId: true, bucket: true, objectKey: true, sizeBytes: true },
-  });
-  if (!asset) {
-    return false;
-  }
-  return purgePendingDeleteAsset(asset);
+  const purge = await purgePendingDeleteAsset(assetId);
+  return purge.outcome === "PURGED";
 }
 
 function objectKeyFromPublicUrl(url: string): string | null {

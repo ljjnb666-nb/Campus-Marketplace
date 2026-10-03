@@ -332,15 +332,7 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
 
       // 清理：标记 → 物理删除 → 状态转移 → 配额释放
       expect(await markAssetPendingDelete(asset!.id)).toBe(true);
-      expect(
-        await purgePendingDeleteAsset({
-          id: asset!.id,
-          ownerId: user.id,
-          bucket: asset!.bucket,
-          objectKey: asset!.objectKey,
-          sizeBytes: asset!.sizeBytes,
-        }),
-      ).toBe(true);
+      expect((await purgePendingDeleteAsset(asset!.id)).outcome).toBe("PURGED");
 
       expect((await getStorageUsage(user.id)).usedBytes).toBe(0);
       expect(

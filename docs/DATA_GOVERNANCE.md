@@ -144,16 +144,22 @@ DATA_EXPORT 请求记录。
 `reasonCode` / 审计字段（createdById/releasedById/releasedAt）。
 
 - active hold **阻断**破坏性擦除/匿名化与保留期清理（`assertNoActiveHold`）；
-- **Serialization contract（REPAIR）**：`createHold` / `releaseHold` /
-  `eraseAccount` 在各自事务内先取得**同一把 subject advisory lock**
-  （`pg_advisory_xact_lock`，键 = 命名空间 + hashtext(subjectType:subjectId)）。
+- **Serialization contract（REPAIR / Phase 9C-01 扩展）**：
+  `createHold` / `releaseHold` / `eraseAccount` / **storage retention
+  destruction（保留期 authoritative 标记 + PENDING_DELETE 物理清除）**
+  在各自事务内先取得**同一把 subject advisory lock**
+  （`pg_advisory_xact_lock`，键 = 命名空间 + hashtext(subjectType:subjectId)；
+  hold lookup subject 与 lock subject 逐字段一致）。
   PostgreSQL 默认 READ COMMITTED——"事务内再查一次 hold"只能看见检查时点
   已提交的行，不构成 serialization boundary；锁把 check→commit 窗口
   彻底互斥关闭，保证：
   1. erase 先取锁 → check 无 hold → 提交 → hold 创建随后发生；或
   2. hold 先取锁 → 提交 → erase 后取锁 → check 见 hold → BLOCK。
   "hold 已提交而 erase 未见 hold 即提交"不可能出现（真实 PG 竞态测试
-  HOLD_ERASURE_POST_CHECK_RACE_TEST 以 barrier seam 证明 lock ordering）；
+  HOLD_ERASURE_POST_CHECK_RACE_TEST 以 barrier seam 证明 lock ordering）。
+  存储侧同构：cleanup 物理删除在锁内 fresh 复核无 hold 后才执行
+  S3 DeleteObject（cleanup wins 为合法顺序；hold 先提交则 HOLD_BLOCKED，
+  真实 PG+MinIO 竞态测试 HOLD-RACE-01/02 双向锁定）；
 - Phase 5 仅提供 service seam（`createHold`/`releaseHold`，测试与 seed 使用）；
   **不建**生产 debug endpoint；管理界面属 Phase 6 RBAC / Phase 7 运营后台。
 

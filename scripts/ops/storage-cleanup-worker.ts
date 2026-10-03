@@ -38,8 +38,10 @@ interface CycleSummary {
   dryRun: boolean;
   orphansMarked: number;
   retentionExpiredMarked: number;
+  retentionHoldBlocked: number;
   objectsDeleted: number;
   quotaReleasedBytes: number;
+  purgeHoldBlocked: number;
   failures: number;
 }
 
@@ -71,12 +73,16 @@ async function runCycle(dryRun: boolean): Promise<CycleSummary> {
   return runStorageCleanup({ dryRun });
 }
 
-/** 仅在产生实际工作时输出 summary（空转周期不刷日志） */
+/** 仅在产生实际工作时输出 summary（空转周期不刷日志）。
+ * hold 阻塞属于受控 business/governance block（INV-11）：计入 summary 观测，
+ * 既不是失败也不触发非零退出/紧重试。 */
 function logSummaryIfWorked(summary: CycleSummary): void {
   const didWork =
     summary.objectsDeleted > 0 ||
     summary.orphansMarked > 0 ||
     summary.retentionExpiredMarked > 0 ||
+    summary.retentionHoldBlocked > 0 ||
+    summary.purgeHoldBlocked > 0 ||
     summary.failures > 0;
   if (!didWork) {
     return;

@@ -599,7 +599,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
         });
         holdIds.push(hold.id);
 
-        return assertNoActiveHold(target.id, tx as never);
+        return assertNoActiveHold({ subjectType: "USER", subjectId: target.id }, tx as never);
       }),
     ).rejects.toMatchObject({ code: "ACTIVE_DATA_HOLD" });
   });
