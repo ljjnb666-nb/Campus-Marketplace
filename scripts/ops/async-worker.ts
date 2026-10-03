@@ -4,9 +4,23 @@
  * 生产拓扑（compose.production.yml `async-worker` 服务：单实例、仅 backend
  * 网络、无端口发布、restart unless-stopped、依赖 PostgreSQL healthy）：
  *
- *   claim due jobs → execute（canonical domain lifecycle）
+ *   Phase 9C-02 起每个 cycle：
+ *   schedule due domain intents（errand deadline expiry discovery → durable
+ *     one-shot AsyncJob；producer 失败只记日志，不影响本周期其余部分）
+ *   → claim due jobs → execute（canonical domain lifecycle）
  *   → claim outbox events → dispatch（幂等派生 In-App 通知）
  *   → bounded sleep → repeat
+ *
+ *   --run-once 同一次 invocation 内完成 schedule → execute → dispatch：
+ *   一个已过期 OPEN Errand 单次 worker 运行即可 materialize 为 CANCELLED
+ *   （PRODUCTION-WORKER-ERRAND-DEADLINE-01 冻结该合同）。
+ *
+ * Recurrence 冻结原则（Phase 9C-02 §12）：本进程内的 recurrence 只属于
+ * scheduler producer / worker cycle；AsyncJob 永远是一次性 durable intent。
+ * 绝对禁止引入"永久存在的 sweep job + 每次 RESCHEDULE 同一行"的循环——
+ * attempts = 实际 claim 次数且 RESCHEDULE 不重置，forever-recurring job
+ * 会污染 attempts/maxAttempts 语义。RESCHEDULE 仅允许用于 one-shot intent
+ * 的 NOT_DUE stale-schedule 防御。
  *
  * 设计约束（与 storage-cleanup worker 同一工程原则）：
  * - durable queue authority = PostgreSQL（SKIP LOCKED + lease token fencing）；
@@ -43,6 +57,7 @@ import { writeSync } from "node:fs";
 import { logger } from "@/lib/logger";
 import { runAsyncJobBatchOnce } from "@/lib/async/job-runner";
 import { runOutboxBatchOnce } from "@/lib/async/outbox-dispatcher";
+import { scheduleDueErrandDeadlineJobs } from "@/lib/async/errand-deadline-scheduler";
 import { getQueueStatsSnapshot } from "@/lib/async/queue-stats";
 
 const DEFAULT_POLL_MS = 1000;
@@ -168,6 +183,8 @@ function emitSyncShutdownLog(
 }
 
 interface CycleSummary {
+  /** Phase 9C-02：本轮 scheduler producer 新 enqueue 的 errand expiry intent 数。 */
+  errandDeadlinesScheduled: number;
   jobsClaimed: number;
   jobsCompleted: number;
   jobsRetried: number;
@@ -181,7 +198,7 @@ interface CycleSummary {
 function summarize(
   jobSummary: Awaited<ReturnType<typeof runAsyncJobBatchOnce>>,
   outboxSummary: Awaited<ReturnType<typeof runOutboxBatchOnce>>,
-): CycleSummary {
+): Omit<CycleSummary, "errandDeadlinesScheduled"> {
   return {
     jobsClaimed: jobSummary.claimed,
     jobsCompleted: jobSummary.completed + jobSummary.idempotentNoOp,
@@ -254,8 +271,23 @@ async function main() {
   do {
     let cycle: CycleSummary;
     try {
-      // jobs 在前：本轮执行的 domain transition（如 reservation expiry）产生
-      // 的 outbox event 在同周期即可被派发（run-once 语义对测试/运维可预期）
+      // Phase 9C-02（§13）：schedule due domain intents 先行——producer 只
+      // enqueue durable intent（非 authority）；失败不伪造 expiry、不阻断
+      // 本周期其余部分（下轮重新 discovery）
+      let errandDeadlinesScheduled = 0;
+      try {
+        const scheduled = await scheduleDueErrandDeadlineJobs();
+        errandDeadlinesScheduled = scheduled.enqueued;
+      } catch (error) {
+        logger.warn("errand deadline scheduler producer 失败，等待下个周期", "async-worker", {
+          event: "async_worker_scheduler_failed",
+          errorName: error instanceof Error ? error.name : "unknown",
+        });
+      }
+
+      // jobs 在前：本轮执行的 domain transition（如 reservation/errand
+      // expiry）产生的 outbox event 在同周期即可被派发（run-once 语义对
+      // 测试/运维可预期）
       const jobSummary = await runAsyncJobBatchOnce({
         leaseSeconds: config.leaseSeconds,
         batchSize: config.batchSize,
@@ -264,7 +296,7 @@ async function main() {
         leaseSeconds: config.leaseSeconds,
         batchSize: config.batchSize,
       });
-      cycle = summarize(jobSummary, outboxSummary);
+      cycle = { errandDeadlinesScheduled, ...summarize(jobSummary, outboxSummary) };
     } catch (error) {
       // 单周期失败（如 DB 闪断）：记录后等待下个周期重试（claim 幂等）
       logger.error("async worker 周期执行失败，等待下个周期重试", "async-worker", {

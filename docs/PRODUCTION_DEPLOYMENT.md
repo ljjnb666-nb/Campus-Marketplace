@@ -387,3 +387,40 @@ RESEND_API_BASE_URL=             # 生产禁止设置（固定 https://api.resen
 
 红线：生产不得覆盖 `RESEND_API_BASE_URL`（防 SSRF/secret exfil）；
 CI 永不发起真实 Resend 调用（真实 provider 验证属 Phase 3B）。
+
+## 12. Errand deadline 定时到期（Phase 9C-02）
+
+跑腿任务 deadline 到期的 materialization 复用 `async-worker` 服务（不新增
+容器/队列）。worker 每个 cycle 的顺序：
+
+```
+schedule due domain intents（errand deadline discovery）
+  → claim due jobs → execute（canonical domain lifecycle）
+  → claim outbox events → dispatch
+```
+
+契约要点（SSOT 见 `src/lib/async/errand-deadline-scheduler.ts` 与
+`src/lib/async/job-types.ts`）：
+
+- AsyncJob kind registry 新增 `ERRAND_DEADLINE_EXPIRE@1`，payload 只允许
+  `{ errandId }`（strict，未知键拒绝落库）；dedupeKey =
+  `ERRAND_DEADLINE_EXPIRE:<errandId>`——一个 Errand 生命周期至多一个
+  expiry intent，任何状态（PENDING/RETRY/RUNNING/COMPLETED/DEAD_LETTER）
+  的既有 job 都会被 scheduler discovery 的 anti-join 排除，绝不复制
+  （DEAD_LETTER 走既有 requeue seam）。
+- public correctness 不依赖 scheduler latency：deadline 过期的任务在
+  公开列表/首页/搜索/推荐/收藏/陌生详情即时消失（query-time
+  `OPEN + deadline > now`，`errandPublicExposureFilter` 唯一口径）；
+  scheduler 只负责最终把 DB 行 materialize 成 CANCELLED。
+- 过期 materialize = OPEN → CANCELLED（不新增 EXPIRED enum）；deadline
+  不自动终止既有 CLAIMED/IN_PROGRESS 履约义务；过期任务禁止通过编辑
+  deadline 或 CLAIMED→OPEN 撤单复活（锁内 fresh 判定）。
+- Recurrence 冻结原则：recurrence 属 scheduler producer / worker cycle；
+  AsyncJob 永远是一次性 durable intent。禁止"永久存在的 sweep job +
+  无限 RESCHEDULE 同一行"（attempts = 实际 claim 次数且 RESCHEDULE 不
+  重置，会污染 attempts/maxAttempts 语义）；RESCHEDULE 仅允许用于
+  one-shot intent 的 NOT_DUE stale-schedule 防御。未来若需要周期性业务
+  tick，必须 new job per deterministic time bucket。
+- 运维验证：`async-worker --run-once` 单次 invocation 即可完成
+  discovery → enqueue → claim → CANCELLED（结构化日志事件
+  `errand_deadline_scheduler_cycle`，只含 IDs/counts）。
