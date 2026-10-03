@@ -13,7 +13,8 @@ import {
 import { governanceError } from "@/lib/governance/domain-errors";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { prisma, withTransaction } from "@/lib/prisma";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { ORDER_CONVERSATION_STARTED_KIND } from "@/lib/notifications/notification-registry";
 import { resolvePairBlockStateTx } from "@/lib/trust/communication-policy";
 
 /**
@@ -92,8 +93,13 @@ export type ConversationCreationInput = {
   initialData: {
     title: string;
     initialMessageContent: string;
-    notificationTitle: string;
-    notificationContent: string;
+    /**
+     * Phase 9B：通知 title/content 由 notification-registry 按
+     * (bizType, bizNumber) 渲染——调用方不再传入自由文案。order 会话
+     * 携带机器生成的业务编号（orderNo / orderNumber）；listing 会话不携带
+     * （listing title 是 user-authored，禁止进入 notification 域）。
+     */
+    bizNumber?: string;
     counterpartId: string;
     currentUserId: string;
   };
@@ -237,11 +243,18 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
         select: { id: true },
       });
 
-      await createNotification(tx, {
-        userId: initialData.counterpartId,
-        type: "MESSAGE",
-        title: initialData.notificationTitle,
-        content: initialData.notificationContent,
+      // Phase 9B：canonical notification domain——title/content 由 registry
+      // 按 (bizType, bizNumber) 渲染；dedupe 以 conversation 为聚合
+      // （每个 conversation 只通知对手方一次）。
+      await emitNotificationTx(tx, {
+        kind: ORDER_CONVERSATION_STARTED_KIND,
+        recipientUserId: initialData.counterpartId,
+        dedupeKey: `${ORDER_CONVERSATION_STARTED_KIND}:${conv.id}:${initialData.counterpartId}`,
+        payload: {
+          conversationId: conv.id,
+          bizType,
+          ...(initialData.bizNumber ? { bizNumber: initialData.bizNumber } : {}),
+        },
       });
 
       return conv;

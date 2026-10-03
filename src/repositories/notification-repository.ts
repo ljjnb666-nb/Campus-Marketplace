@@ -1,60 +1,17 @@
-import { Prisma, type NotificationType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
-type NotificationPayload = {
-  userId: string;
-  orderId?: string | null;
-  type: NotificationType;
-  title: string;
-  content: string;
-  // Phase 9A：outbox-driven 通知的 exactly-once 身份（可省略——历史同步
-  // 调用不传，行为完全兼容；dedupeKey 命中 UNIQUE 时由调用方选择
-  // skipDuplicates 或 upsert 语义）
-  dedupeKey?: string | null;
-  sourceEventId?: string | null;
-};
-
-// 写入入口仅接收事务客户端：扩展客户端与基础客户端的联合类型会在
-// schema 增大后触发 Prisma 扩展的类型深度超限（excessive stack depth）。
-type NotificationClient = Prisma.TransactionClient;
-
-function toNotificationRow(payload: NotificationPayload) {
-  return {
-    userId: payload.userId,
-    orderId: payload.orderId ?? null,
-    type: payload.type,
-    title: payload.title,
-    content: payload.content,
-    dedupeKey: payload.dedupeKey ?? null,
-    sourceEventId: payload.sourceEventId ?? null,
-  };
-}
-
-export async function createNotification(client: NotificationClient, payload: NotificationPayload) {
-  return client.notification.create({
-    data: toNotificationRow(payload),
-  });
-}
-
 /**
- * Phase 9A：批量写入。dedupeKey 携带时以 skipDuplicates 保证 DB 级
- * exactly-once（并发/重放安全）；不携带时行为与历史版本逐字兼容。
+ * Notification 读取面（Phase 9B 收敛后仅存 read primitives）。
+ *
+ * Phase 9B（§17/§20/§50）：createNotification / createNotifications 已从
+ * production 移除——所有 production 通知写入必须经 canonical notification
+ * domain（src/lib/notifications/notification-service.ts emitNotificationTx/
+ * emitNotificationsTx），title/content 由 notification-registry 渲染器生成，
+ * 业务域不再持有任意 title/content 写入能力。静态 gate（direct-writer gate
+ * test）保证新增直写 → CI fail。
+ *
+ * 本文件的读原语保持 /notifications 页面与未读数行为完全不变（§51）。
  */
-export async function createNotifications(
-  client: NotificationClient,
-  payloads: NotificationPayload[],
-) {
-  if (payloads.length === 0) {
-    return;
-  }
-
-  const hasDedupeKey = payloads.some((payload) => payload.dedupeKey != null);
-
-  await client.notification.createMany({
-    data: payloads.map(toNotificationRow),
-    skipDuplicates: hasDedupeKey,
-  });
-}
 
 export async function getNotificationsForUser(userId: string) {
   return prisma.notification.findMany({

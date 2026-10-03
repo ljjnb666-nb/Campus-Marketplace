@@ -14,7 +14,8 @@ import {
 } from "@/lib/enforcement/report-projection";
 import { createModerationCaseForReportTx } from "@/lib/reports/moderation-case-sync";
 import { deriveReportScopeSnapshot } from "@/lib/reports/report-scope";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { REPORT_SUBMITTED_KIND } from "@/lib/notifications/notification-registry";
 import { reportFormSchema, reviewFormSchema } from "@/validators/trust";
 
 export type TrustActionState = {
@@ -220,11 +221,12 @@ export async function createReport(
       // 来自显式 enforcement 决策（见 src/lib/enforcement/*）。
       await reconcileReportRiskProjection({ reportId: report.id }, tx);
 
-      await createNotification(tx, {
-        userId: user.id,
-        type: "REPORT",
-        title: "举报已提交",
-        content: `你的举报已受理，编号 ${report.id.slice(-8)}，平台会尽快核查并在处理后通知你。`,
+      // Phase 9B：canonical notification domain（编号由 registry 从 reportId 渲染）
+      await emitNotificationTx(tx, {
+        kind: REPORT_SUBMITTED_KIND,
+        recipientUserId: user.id,
+        dedupeKey: `${REPORT_SUBMITTED_KIND}:${report.id}:${user.id}`,
+        payload: { reportId: report.id },
       });
 
       return { success: true, message: "举报已提交，客服人员会尽快审核处理" };

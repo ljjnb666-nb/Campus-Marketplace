@@ -8,6 +8,10 @@ import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
 import { assertNoActiveHold } from "@/lib/privacy/data-hold-service";
 import { ERASED_USER_CONTENT_MARKER } from "@/lib/privacy/privacy-data-registry";
+import {
+  NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
+  REDACTED_EMAIL_DESTINATION,
+} from "@/lib/notifications/notification-delivery";
 
 /**
  * 账号注销 / 匿名化服务（fail closed）。
@@ -84,11 +88,17 @@ export type ErasureRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;
 /**
  * 执行账号匿名化。调用方必须已经建立 PrivacyRequest（REQUESTED→IN_PROGRESS）。
  * 前置检查在 subject 治理锁保护下的事务内执行；任何阻断命中时零写回滚。
+ *
+ * deliverySuppressedRacePoint 为 TEST-ONLY seam（生产绝不传参）：在 EMAIL
+ * delivery 抑制/redact 写入之后、notification 删除之前调用（此时 erasure
+ * 事务持有 delivery 行锁——EMAIL worker 的 FOR UPDATE / anchor UPDATE 阻塞
+ * 至本事务提交，构成 ERASURE-RACE 确定性 barrier）。
  */
 export async function eraseAccount(
   userId: string,
   tx?: Prisma.TransactionClient,
   racePoint?: ErasureRacePoint,
+  deliverySuppressedRacePoint?: ErasureRacePoint,
 ): Promise<AccountErasureResult> {
   const run = async (client: Prisma.TransactionClient): Promise<AccountErasureResult> => {
     // ---- serialization boundary：先取 subject 治理锁（TOCTOU 关闭点）----
@@ -250,6 +260,56 @@ export async function eraseAccount(
 
     // Repair 4 / RB-23：Notification 是 derived ephemeral inbox——注销后无
     // 保留必要，整表删除（在 erasure 事务内）。
+    //
+    // Phase 9B（§35/§71 + Review RB02 §10）：删除前先收敛 EMAIL delivery
+    // provenance——【真正 unsent】（suppressedAt IS NULL AND
+    // providerAcceptedAt IS NULL）的 EMAIL delivery 置 suppressedAt =
+    // RECIPIENT_ERASED 并清空 destination（对应 NOTIFICATION_DELIVERY
+    // AsyncJob 重放见到 suppressed → 0 次 provider call 幂等完成）；
+    // 已 provider-accepted 的 delivery 仅清空 destination、保持
+    // suppressedAt = NULL（邮件已发出，不得伪称 suppressed；不永久保留
+    // 真实邮箱；时间型 retention 属 9C）。
+    // delivery 行刻意无 FK 级联（见 schema NotificationDelivery 注释），
+    // 随后的 notification.deleteMany 不触碰它们。同一事务内先收敛、后删除，
+    // 不存在"未抑制 delivery 失去父通知"的中间态。
+    const erasedNotificationIds = (
+      await client.notification.findMany({
+        where: { userId },
+        select: { id: true },
+      })
+    ).map((row) => row.id);
+
+    if (erasedNotificationIds.length > 0) {
+      const erasedEmailAt = new Date();
+      await client.notificationDelivery.updateMany({
+        where: {
+          channel: "EMAIL",
+          notificationId: { in: erasedNotificationIds },
+          suppressedAt: null,
+          providerAcceptedAt: null,
+        },
+        data: {
+          suppressedAt: erasedEmailAt,
+          suppressionCode: NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
+          destination: REDACTED_EMAIL_DESTINATION,
+        },
+      });
+      await client.notificationDelivery.updateMany({
+        where: {
+          channel: "EMAIL",
+          notificationId: { in: erasedNotificationIds },
+          providerAcceptedAt: { not: null },
+        },
+        data: { destination: REDACTED_EMAIL_DESTINATION },
+      });
+
+      // TEST-ONLY barrier（RB02）：此处 erasure 事务持有 delivery 行锁——
+      // EMAIL worker 的 FOR UPDATE / anchor UPDATE 阻塞至本事务提交。
+      if (deliverySuppressedRacePoint) {
+        await deliverySuppressedRacePoint(client);
+      }
+    }
+
     await client.notification.deleteMany({ where: { userId } });
 
     // Repair 4 / RB-24：本人发送的消息保留行（conversation/report 关系历史

@@ -7,12 +7,15 @@ const {
   assertActiveAccountMutationAllowed,
   requireMarketplaceCapability,
   completeErrandOrderTx,
-  createNotifications,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => ({
   assertActiveAccountMutationAllowed: vi.fn(),
   requireMarketplaceCapability: vi.fn(),
   completeErrandOrderTx: vi.fn(),
-  createNotifications: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
 }));
 
 vi.mock("@/lib/governance/active-account-mutation", () => ({
@@ -25,10 +28,6 @@ vi.mock("@/lib/enforcement/capability-gate", () => ({
 
 vi.mock("@/lib/errand-completion", () => ({
   completeErrandOrderTx,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
 }));
 
 import {
@@ -68,6 +67,8 @@ type TxMocks = {
   taskUpdate: ReturnType<typeof vi.fn>;
   orderUpdateMany: ReturnType<typeof vi.fn>;
   orderFindFirst: ReturnType<typeof vi.fn>;
+  notificationCreateMany: ReturnType<typeof vi.fn>;
+  notificationFindUnique: ReturnType<typeof vi.fn>;
 };
 
 function makeTx(input: {
@@ -124,6 +125,9 @@ function makeTx(input: {
   const orderFindFirst = vi
     .fn()
     .mockResolvedValue(input.historicalOrder ?? null);
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  const notificationCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+  const notificationFindUnique = vi.fn().mockResolvedValue({ id: "notification-1" });
 
   const tx = {
     $executeRaw: executeRaw,
@@ -136,6 +140,10 @@ function makeTx(input: {
       updateMany: orderUpdateMany,
       findFirst: orderFindFirst,
     },
+    notification: {
+      createMany: notificationCreateMany,
+      findUnique: notificationFindUnique,
+    },
   } as unknown as Prisma.TransactionClient;
 
   return {
@@ -146,6 +154,8 @@ function makeTx(input: {
     taskUpdate,
     orderUpdateMany,
     orderFindFirst,
+    notificationCreateMany,
+    notificationFindUnique,
   };
 }
 
@@ -166,7 +176,8 @@ beforeEach(() => {
   assertActiveAccountMutationAllowed.mockReset().mockResolvedValue(undefined);
   requireMarketplaceCapability.mockReset().mockResolvedValue(undefined);
   completeErrandOrderTx.mockReset().mockResolvedValue({ completed: true });
-  createNotifications.mockReset().mockResolvedValue(undefined);
+  // Phase 9B：emitNotificationTx 写边界（makeTx 的 tx 桩已持有 stub；
+  // 这里复位跨用例共享的 hoisted 默认不适用——桩按 makeTx 实例创建）
 });
 
 describe("transitionErrandTx（canonical state pairs）", () => {
@@ -190,9 +201,16 @@ describe("transitionErrandTx（canonical state pairs）", () => {
       where: { id: ORDER_ID, status: "ACCEPTED" },
       data: { status: "CANCELLED", cancelReason: "发布者撤销接单" },
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
-    const payloads = createNotifications.mock.calls[0]![1] as Array<{ userId: string }>;
-    expect(payloads.map((p) => p.userId).sort()).toEqual([ACCEPTER, PUBLISHER]);
+    // Phase 9B：canonical 通知 = publisher + accepter 各一条 ERRAND_TASK_STATUS_CHANGED
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    const reopenRows = m.notificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as { userId: string; dedupeKey: string; status?: unknown },
+    );
+    expect(reopenRows.map((row) => row.userId).sort()).toEqual([ACCEPTER, PUBLISHER]);
+    expect(reopenRows.map((row) => row.dedupeKey).sort()).toEqual([
+      `ERRAND_TASK_STATUS_CHANGED:${ORDER_ID}:OPEN:${ACCEPTER}`,
+      `ERRAND_TASK_STATUS_CHANGED:${ORDER_ID}:OPEN:${PUBLISHER}`,
+    ]);
   });
 
   it("CLAIMED→IN_PROGRESS：accepter → Task IN_PROGRESS + Order IN_PROGRESS（无 capability）", async () => {
@@ -210,7 +228,15 @@ describe("transitionErrandTx（canonical state pairs）", () => {
       where: { id: ORDER_ID, status: "ACCEPTED" },
       data: { status: "IN_PROGRESS" },
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    // Phase 9B：canonical 双接收者通知（IN_PROGRESS）
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(m.notificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      orderId: ORDER_ID,
+      type: "ORDER",
+      title: "跑腿任务状态更新：进行中",
+      content: "当前跑腿任务状态已更新为“进行中”，请前往订单中心查看。",
+      kind: "ERRAND_TASK_STATUS_CHANGED",
+    });
   });
 
   it("IN_PROGRESS→PENDING_CONFIRMATION：accepter → 仅 Task 更新，Order 保持 IN_PROGRESS", async () => {
@@ -241,7 +267,11 @@ describe("transitionErrandTx（canonical state pairs）", () => {
       data: { status: "PENDING_CONFIRMATION" },
     });
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    // Phase 9B：canonical 双接收者通知（PENDING_CONFIRMATION）
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(m.notificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      title: "跑腿任务状态更新：待确认完成",
+    });
   });
 
   it("PENDING_CONFIRMATION→COMPLETED：publisher → 委派唯一 completeErrandOrderTx，不叠加 Task/Order 写", async () => {
@@ -294,7 +324,7 @@ describe("transitionErrandTx（canonical state pairs）", () => {
     });
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
     expect(m.orderFindFirst).toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("OPEN→CANCELLED：存在历史订单时通知挂载其上（既有行为）", async () => {
@@ -314,12 +344,16 @@ describe("transitionErrandTx（canonical state pairs）", () => {
     const ok = await transitionErrandTx(m.tx, PUBLISHER, ERRAND_ID, "CANCELLED");
 
     expect(ok).toBe(true);
-    expect(createNotifications).toHaveBeenCalledTimes(1);
-    const payloads = createNotifications.mock.calls[0]![1] as Array<{
-      userId: string;
-      orderId: string;
-    }>;
-    expect(payloads.every((p) => p.orderId === "order-old")).toBe(true);
+    // Phase 9B：canonical 双接收者通知，全部挂载历史订单（orderId = order-old）
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    const cancelRows = m.notificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as { userId: string; orderId: string; dedupeKey: string },
+    );
+    expect(cancelRows.every((row) => row.orderId === "order-old")).toBe(true);
+    expect(cancelRows.map((row) => row.dedupeKey).sort()).toEqual([
+      `ERRAND_TASK_STATUS_CHANGED:order-old:CANCELLED:${ACCEPTER}`,
+      `ERRAND_TASK_STATUS_CHANGED:order-old:CANCELLED:${PUBLISHER}`,
+    ]);
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
   });
 
@@ -350,7 +384,9 @@ describe("transitionErrandTx（canonical state pairs）", () => {
     expect(claimed.taskUpdateMany).not.toHaveBeenCalled();
     expect(claimed2.taskUpdateMany).not.toHaveBeenCalled();
     expect(pending.taskUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(claimed.notificationCreateMany).not.toHaveBeenCalled();
+    expect(claimed2.notificationCreateMany).not.toHaveBeenCalled();
+    expect(pending.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("stale candidate：candidate 与锁内 fresh row 参与者失配 → fail closed 零写", async () => {
@@ -390,7 +426,8 @@ describe("transitionErrandTx（canonical state pairs）", () => {
 
     expect(start.taskUpdateMany).not.toHaveBeenCalled();
     expect(reopen.taskUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(start.notificationCreateMany).not.toHaveBeenCalled();
+    expect(reopen.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("multiple active orders：CLAIMED + 2 个 active order → fail closed，不猜 latest", async () => {
@@ -482,7 +519,7 @@ describe("transitionErrandTx（canonical state pairs）", () => {
 
     expect(m.taskUpdateMany).not.toHaveBeenCalled();
     expect(m.orderUpdateMany).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("锁序：sorted participant advisory 锁 → ErrandTask 行锁 → Order 行锁", async () => {
@@ -531,9 +568,14 @@ describe("transitionErrandOrderTx（订单中心委派）", () => {
       where: { id: ORDER_ID, status: "ACCEPTED" },
       data: { status: "IN_PROGRESS" },
     });
-    expect(createNotifications).toHaveBeenCalledTimes(1);
-    const payloads = createNotifications.mock.calls[0]![1] as Array<{ title: string }>;
-    expect(payloads[0]!.title).toContain("跑腿任务状态更新");
+    // Phase 9B：canonical 双接收者通知（ERRAND_TASK_STATUS_CHANGED）
+    expect(m.notificationCreateMany).toHaveBeenCalledTimes(2);
+    const rows = m.notificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as { title: string },
+    );
+    for (const row of rows) {
+      expect(row.title).toContain("跑腿任务状态更新");
+    }
   });
 
   it("ERRAND COMPLETED：publisher → 委派唯一 completeErrandOrderTx", async () => {

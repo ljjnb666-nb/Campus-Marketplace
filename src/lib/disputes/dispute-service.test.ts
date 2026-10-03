@@ -2,16 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   recordAdminAudit,
-  createNotifications,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loadAuthorizationContextMock,
 } = vi.hoisted(() => ({
   recordAdminAudit: vi.fn(),
-  createNotifications: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
 }));
 
 vi.mock("@/lib/governance/admin-audit", () => ({ recordAdminAudit }));
-vi.mock("@/repositories/notification-repository", () => ({ createNotifications }));
 vi.mock("@/lib/rbac/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
   return { ...actual, loadAuthorizationContext: loadAuthorizationContextMock };
@@ -32,6 +34,11 @@ const txStub = {
   },
   dataHold: {
     updateMany: vi.fn(),
+  },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
   },
 };
 
@@ -90,7 +97,8 @@ beforeEach(() => {
     txStub.rentalOrderStatusLog.create,
     txStub.dataHold.updateMany,
     recordAdminAudit,
-    createNotifications,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     loadAuthorizationContextMock,
   ]) {
     fn.mockReset();
@@ -102,7 +110,9 @@ beforeEach(() => {
   txStub.rentalOrderStatusLog.create.mockResolvedValue({});
   txStub.dataHold.updateMany.mockResolvedValue({ count: 2 });
   recordAdminAudit.mockResolvedValue(undefined);
-  createNotifications.mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   loadAuthorizationContextMock.mockResolvedValue(ACTIVE_CTX);
 
   // 默认锁读：dispute FOR UPDATE（第一个 $queryRaw）→ order FOR UPDATE（含
@@ -304,7 +314,23 @@ describe("resolveDispute / closeDispute（sorted set → 双行锁 → 收敛 �
       }),
       txStub,
     );
-    expect(createNotifications).toHaveBeenCalledTimes(1);
+    // Phase 9B：canonical 双方通知 = owner + renter 各一条 RENTAL_DISPUTE_RESOLVED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "owner-1",
+      orderId: null,
+      type: "RENTAL",
+      title: "订单纠纷已处理",
+      content: "你的订单纠纷已解决，订单状态已更新。",
+      dedupeKey: "RENTAL_DISPUTE_RESOLVED:dispute-1:owner-1",
+      kind: "RENTAL_DISPUTE_RESOLVED",
+      payload: { disputeId: "dispute-1", resolution: "RESOLVED" },
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "renter-1",
+      orderId: null,
+      dedupeKey: "RENTAL_DISPUTE_RESOLVED:dispute-1:renter-1",
+    });
   });
 
   it("RESTORE_PREVIOUS 且 openedFromOrderStatus=null → DISPUTE_RESTORE_UNAVAILABLE（绝不猜历史）", async () => {

@@ -12,7 +12,11 @@ import {
   loadAuthorizationContext,
   requirePermissionInContext,
 } from "@/lib/rbac/service";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import {
+  VERIFICATION_DECIDED_KIND,
+  VERIFICATION_SUBMITTED_KIND,
+} from "@/lib/notifications/notification-registry";
 import { withTransaction } from "@/lib/prisma";
 
 /**
@@ -238,11 +242,14 @@ export async function submitMembershipVerification(
       await markAssetsForValuesPendingDelete(input.userId, [previousStudentCardImage], tx);
     }
 
-    await createNotification(tx, {
-      userId: input.userId,
-      type: "SYSTEM",
-      title: "认证材料已提交",
-      content: "你的校园认证材料已提交，平台会尽快完成审核，请留意后续通知。",
+    // Phase 9B：canonical notification domain。重新提交是合法的重复事件
+    // （REJECTED/REVOKED → PENDING），dedupeKey 以 per-invocation epoch 区分
+    // （事务回滚则本行一并消失）。
+    await emitNotificationTx(tx, {
+      kind: VERIFICATION_SUBMITTED_KIND,
+      recipientUserId: input.userId,
+      dedupeKey: `${VERIFICATION_SUBMITTED_KIND}:${finalVerification.id}:${new Date().toISOString()}`,
+      payload: { verificationId: finalVerification.id },
     });
 
     return finalVerification;
@@ -382,21 +389,13 @@ export async function decideMembershipVerification(
     // 存储。reviewNote（operator 自由文本）绝不复制进 Notification.content
     // ——拒绝/吊销原因的唯一权威在 UserVerification.reviewNote/reasonCode，
     // 由认证页面按需展示；通知侧只允许 generic system copy。
-    await createNotification(tx, {
-      userId: current.userId,
-      type: "SYSTEM",
-      title:
-        input.decision === "VERIFIED"
-          ? "校园认证已通过"
-          : input.decision === "REJECTED"
-            ? "校园认证未通过"
-            : "校园认证已被吊销",
-      content:
-        input.decision === "VERIFIED"
-          ? "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。"
-          : input.decision === "REJECTED"
-            ? "你的校园认证未通过审核，请前往认证页面查看详情并完善材料后重新提交。"
-            : "你的校园认证已被平台吊销，请前往认证页面查看详情。",
+    // Phase 9B：canonical notification domain（文案由 registry 渲染）；
+    // VERIFIED/REJECTED/REVOKED 可跨 epoch 重复，dedupeKey 以 reviewedAt 区分。
+    await emitNotificationTx(tx, {
+      kind: VERIFICATION_DECIDED_KIND,
+      recipientUserId: current.userId,
+      dedupeKey: `${VERIFICATION_DECIDED_KIND}:${current.id}:${input.decision}:${reviewedAt.toISOString()}`,
+      payload: { verificationId: current.id, decision: input.decision },
     });
 
     // 敏感材料保留期：出结果后 VERIFICATION_ASSET_RETENTION_DAYS 天由 cleanup

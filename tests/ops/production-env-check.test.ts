@@ -129,4 +129,47 @@ describe("production-env-check（连接池容量 gate）", () => {
       rmSync(path.dirname(file), { recursive: true, force: true });
     }
   }, 150_000);
+
+  // ---- Phase 9B：transactional email 契约（§46）----
+
+  it("Phase 9B email：synthetic fixture 含合法 email 配置 → PASS", async () => {
+    const file = buildFixture({});
+    try {
+      const { stdout } = await runEnvCheck(file);
+      expect(stdout).toContain("PASS EMAIL_PROVIDER");
+      expect(stdout).toContain("PASS RESEND_API_KEY");
+      expect(stdout).toContain("PASS EMAIL_FROM");
+      expect(stdout).toContain("PASS EMAIL_PROVIDER_TIMEOUT_MS");
+      expect(stdout).toContain("PASS RESEND_API_BASE_URL");
+      expect(stdout).not.toContain("FAIL EMAIL");
+      expect(stdout).not.toContain("FAIL RESEND");
+    } finally {
+      rmSync(path.dirname(file), { recursive: true, force: true });
+    }
+  }, 150_000);
+
+  it("Phase 9B email：EMAIL_PROVIDER != resend → FAIL 拒绝部署", async () => {
+    const file = buildFixture({ EMAIL_PROVIDER: "smtp" });
+    await expectFail(file, "EMAIL_PROVIDER");
+  }, 150_000);
+
+  it("Phase 9B email：RESEND_API_KEY 形态非法 → FAIL 拒绝部署", async () => {
+    const file = buildFixture({ RESEND_API_KEY: "sk-not-resend-shape" });
+    await expectFail(file, "RESEND_API_KEY");
+  }, 150_000);
+
+  it("Phase 9B email：EMAIL_FROM 非法 → FAIL 拒绝部署", async () => {
+    const file = buildFixture({ EMAIL_FROM: "not-an-email" });
+    await expectFail(file, "EMAIL_FROM");
+  }, 150_000);
+
+  it("Phase 9B email：EMAIL_PROVIDER_TIMEOUT_MS 越界 → FAIL 拒绝部署", async () => {
+    const file = buildFixture({ EMAIL_PROVIDER_TIMEOUT_MS: "100" });
+    await expectFail(file, "EMAIL_PROVIDER_TIMEOUT_MS");
+  }, 150_000);
+
+  it("Phase 9B email：生产覆盖 RESEND_API_BASE_URL → FAIL 拒绝部署（§45 SSRF/secret exfil）", async () => {
+    const file = buildFixture({ RESEND_API_BASE_URL: "http://evil.example" });
+    await expectFail(file, "RESEND_API_BASE_URL");
+  }, 150_000);
 });

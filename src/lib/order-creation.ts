@@ -10,7 +10,14 @@ import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gat
 import { createOrderNo } from "@/lib/order-no";
 import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
 import { computeProductReservationExpiresAt } from "@/lib/product-reservation";
-import { createNotifications } from "@/repositories/notification-repository";
+import {
+  emitNotificationsTx,
+} from "@/lib/notifications/notification-service";
+import {
+  ERRAND_ORDER_CLAIMED_KIND,
+  PRODUCT_ORDER_CREATED_KIND,
+  SERVICE_ORDER_CREATED_KIND,
+} from "@/lib/notifications/notification-registry";
 import {
   withObligationGuard,
   type ObligationRacePoint,
@@ -146,20 +153,21 @@ export async function createProductOrderTx(
         runAt: productReservationExpiresAt,
       });
 
-      await createNotifications(tx, [
+      // Phase 9B：canonical notification domain（文案由 registry 渲染）
+      await emitNotificationsTx(tx, [
         {
-          userId: input.buyerId,
+          kind: PRODUCT_ORDER_CREATED_KIND,
+          recipientUserId: input.buyerId,
           orderId: order.id,
-          type: "ORDER",
-          title: "购买申请已提交",
-          content: "你的商品购买申请已提交，等待卖家确认。",
+          dedupeKey: `${PRODUCT_ORDER_CREATED_KIND}:${order.id}:${input.buyerId}`,
+          payload: { orderId: order.id, buyerId: input.buyerId, sellerId: fresh.sellerId },
         },
         {
-          userId: fresh.sellerId,
+          kind: PRODUCT_ORDER_CREATED_KIND,
+          recipientUserId: fresh.sellerId,
           orderId: order.id,
-          type: "ORDER",
-          title: "收到新的商品订单",
-          content: "有同学提交了你的商品购买申请，请尽快确认订单状态。",
+          dedupeKey: `${PRODUCT_ORDER_CREATED_KIND}:${order.id}:${fresh.sellerId}`,
+          payload: { orderId: order.id, buyerId: input.buyerId, sellerId: fresh.sellerId },
         },
       ]);
 
@@ -231,20 +239,20 @@ export async function createServiceOrderTx(
         },
       });
 
-      await createNotifications(tx, [
+      await emitNotificationsTx(tx, [
         {
-          userId: input.buyerId,
+          kind: SERVICE_ORDER_CREATED_KIND,
+          recipientUserId: input.buyerId,
           orderId: order.id,
-          type: "ORDER",
-          title: "服务预约已提交",
-          content: "你的服务预约已提交，等待服务提供者确认。",
+          dedupeKey: `${SERVICE_ORDER_CREATED_KIND}:${order.id}:${input.buyerId}`,
+          payload: { orderId: order.id, buyerId: input.buyerId, sellerId: fresh.providerId },
         },
         {
-          userId: fresh.providerId,
+          kind: SERVICE_ORDER_CREATED_KIND,
+          recipientUserId: fresh.providerId,
           orderId: order.id,
-          type: "ORDER",
-          title: "收到新的服务预约",
-          content: "有同学预约了你的服务，请尽快确认并安排后续沟通。",
+          dedupeKey: `${SERVICE_ORDER_CREATED_KIND}:${order.id}:${fresh.providerId}`,
+          payload: { orderId: order.id, buyerId: input.buyerId, sellerId: fresh.providerId },
         },
       ]);
 
@@ -334,20 +342,20 @@ export async function claimErrandTx(
         },
       });
 
-      await createNotifications(tx, [
+      await emitNotificationsTx(tx, [
         {
-          userId: input.publisherId,
+          kind: ERRAND_ORDER_CLAIMED_KIND,
+          recipientUserId: input.publisherId,
           orderId: order.id,
-          type: "ORDER",
-          title: "跑腿任务已被接单",
-          content: "你的跑腿任务已有同学接单，可以前往订单中心继续跟进。",
+          dedupeKey: `${ERRAND_ORDER_CLAIMED_KIND}:${order.id}:${input.publisherId}`,
+          payload: { orderId: order.id, publisherId: input.publisherId, claimerId: input.claimerId },
         },
         {
-          userId: input.claimerId,
+          kind: ERRAND_ORDER_CLAIMED_KIND,
+          recipientUserId: input.claimerId,
           orderId: order.id,
-          type: "ORDER",
-          title: "你已接下跑腿任务",
-          content: "接单成功，请尽快与发布者沟通并推进任务。",
+          dedupeKey: `${ERRAND_ORDER_CLAIMED_KIND}:${order.id}:${input.claimerId}`,
+          payload: { orderId: order.id, publisherId: input.publisherId, claimerId: input.claimerId },
         },
       ]);
 

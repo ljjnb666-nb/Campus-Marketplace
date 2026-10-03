@@ -4,7 +4,6 @@ const {
   redirect,
   revalidatePath,
   requireUser,
-  createNotification,
   containsBannedKeyword,
   userFindMany,
   productFindFirst,
@@ -35,11 +34,16 @@ const {
   txMessageCreate,
   txConversationUpdate,
   txConversationParticipantUpdateMany,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => {
   const txConversationCreate = vi.fn();
   const txMessageCreate = vi.fn();
   const txConversationUpdate = vi.fn();
   const txConversationParticipantUpdateMany = vi.fn();
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  const txNotificationCreateMany = vi.fn();
+  const txNotificationFindUnique = vi.fn();
   const transactionClient = {
     conversation: {
       create: txConversationCreate,
@@ -138,6 +142,11 @@ const {
     listingModeration: {
       findFirst: vi.fn(async () => null),
     },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
 
   return {
@@ -146,7 +155,6 @@ const {
     }),
     revalidatePath: vi.fn(),
     requireUser: vi.fn(),
-    createNotification: vi.fn(),
     containsBannedKeyword: vi.fn(),
     userFindMany: vi.fn(),
     productFindFirst: vi.fn(),
@@ -179,6 +187,8 @@ const {
     txMessageCreate,
     txConversationUpdate,
     txConversationParticipantUpdateMany,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
   };
 });
 
@@ -201,10 +211,6 @@ vi.mock("@/lib/server-auth", () => ({
 
 vi.mock("@/lib/moderation", () => ({
   containsBannedKeyword,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 // Phase 6C-3：gate/governance-lock 以 mock 注入——本文件聚焦会话串行化与
@@ -300,7 +306,9 @@ describe("conversation actions", () => {
     txMessageCreate.mockResolvedValue({ id: "message-1" });
     txConversationUpdate.mockResolvedValue({});
     txConversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
-    createNotification.mockResolvedValue({});
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   });
 
   describe("createOrOpenProductConversation", () => {
@@ -358,10 +366,30 @@ describe("conversation actions", () => {
       expect(createData.title).toBe("商品咨询：高数教材");
       expect(createData.productId).toBe("product-1");
       expect(createData.messages.create.senderId).toBe("user-1");
-      expect(createNotification).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ userId: "seller-1", type: "MESSAGE" }),
-      );
+      // Phase 9B：通知走 canonical emitNotificationTx（registry 渲染，不含 listing title）
+      expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+      expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+        userId: "seller-1",
+        orderId: null,
+        type: "MESSAGE",
+        title: "收到新的商品咨询",
+        content: "有同学向你发起了会话，快去看看。",
+        dedupeKey: "ORDER_CONVERSATION_STARTED:conversation-new:seller-1",
+        kind: "ORDER_CONVERSATION_STARTED",
+        payload: { conversationId: "conversation-new", bizType: "PRODUCT" },
+      });
+      expect(txNotificationFindUnique).toHaveBeenCalledWith({
+        where: { dedupeKey: "ORDER_CONVERSATION_STARTED:conversation-new:seller-1" },
+        select: {
+          id: true,
+          userId: true,
+          kind: true,
+          schemaVersion: true,
+          payload: true,
+          orderId: true,
+          sourceEventId: true,
+        },
+      });
       expect(revalidatePath).toHaveBeenCalledWith("/messages/conversation-new");
       // MARKETPLACE_LISTING 路径：完整参与方锁 + 锁内校验（actor + 参与方）
       expect(acquireGovernanceSubjectLocks).toHaveBeenCalledWith(
@@ -796,7 +824,7 @@ describe("conversation actions", () => {
         "REDIRECT:/messages/conversation-new",
       );
       expect(txConversationCreate).toHaveBeenCalledTimes(1);
-      expect(createNotification).toHaveBeenCalledTimes(1);
+      expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
     });
 
     // §41：pair blocked + terminal order → 新订单会话 DENY
@@ -822,7 +850,7 @@ describe("conversation actions", () => {
         "REDIRECT:/my/orders",
       );
       expect(txConversationCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
     });
 
     // §41：pair blocked + rental obligation active → ALLOW
@@ -1172,7 +1200,7 @@ describe("conversation actions", () => {
       });
       expect(txConversationCreate).not.toHaveBeenCalled();
       expect(txMessageCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
     });
 
@@ -1196,7 +1224,7 @@ describe("conversation actions", () => {
         message: "你们之间存在消息屏蔽，无法发起新的会话沟通",
       });
       expect(txConversationCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
 
       // RENTAL listing 同责
       rentalListingFindFirst.mockResolvedValue({
@@ -1229,7 +1257,7 @@ describe("conversation actions", () => {
       );
       expect(txConversationCreate).not.toHaveBeenCalled();
       expect(txMessageCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
       expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
     });
 
@@ -1248,7 +1276,7 @@ describe("conversation actions", () => {
       );
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
       expect(txConversationCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
     });
 
     it("ERRAND listing：pair blocked → 新会话 DENY", async () => {
@@ -1277,7 +1305,7 @@ describe("conversation actions", () => {
         message: "你们之间存在消息屏蔽，无法发起新的会话沟通",
       });
       expect(txConversationCreate).not.toHaveBeenCalled();
-      expect(createNotification).not.toHaveBeenCalled();
+      expect(txNotificationCreateMany).not.toHaveBeenCalled();
     });
 
     it("returns the unified counterparty denial when the owner is restricted（409 合同，rental catch）", async () => {

@@ -4,7 +4,8 @@ import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-acco
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { computeReviewDeadline, isReviewWindowOpen } from "@/lib/reviews/review-integrity";
 import { visibleGeneralReviewCondition } from "@/lib/reviews/review-query";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ORDER_REVIEW_PUBLISHED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 8E：General Review（PRODUCT / SERVICE / ERRAND）提交的唯一领域
@@ -103,12 +104,8 @@ export async function refreshUserReviewRateCache(
   });
 }
 
-/** 双方评价公开时的 generic event 通知（§24：零评分/内容/tags/作者名复制） */
-const PUBLICATION_NOTIFICATION = {
-  type: "REVIEW" as const,
-  title: "交易评价已公开",
-  content: "本次交易的双方评价已公开，可前往评价记录查看。",
-};
+// Phase 9B：双方评价公开时的 generic event 通知（§24：零评分/内容/tags/
+// 作者名复制）；文案由 notification-registry 渲染器生成。
 
 export async function submitOrderReviewTx(
   tx: Prisma.TransactionClient,
@@ -285,9 +282,21 @@ export async function submitOrderReviewTx(
   await refreshUserReviewRateCache(tx, targetUserId);
   await refreshUserReviewRateCache(tx, input.userId);
 
-  await createNotifications(tx, [
-    { userId: order.buyerId, orderId: order.id, ...PUBLICATION_NOTIFICATION },
-    { userId: order.sellerId, orderId: order.id, ...PUBLICATION_NOTIFICATION },
+  await emitNotificationsTx(tx, [
+    {
+      kind: ORDER_REVIEW_PUBLISHED_KIND,
+      recipientUserId: order.buyerId,
+      orderId: order.id,
+      dedupeKey: `${ORDER_REVIEW_PUBLISHED_KIND}:${order.id}:${order.buyerId}`,
+      payload: { orderId: order.id },
+    },
+    {
+      kind: ORDER_REVIEW_PUBLISHED_KIND,
+      recipientUserId: order.sellerId,
+      orderId: order.id,
+      dedupeKey: `${ORDER_REVIEW_PUBLISHED_KIND}:${order.id}:${order.sellerId}`,
+      payload: { orderId: order.id },
+    },
   ]);
 
   return { success: true, targetUserId, published: true };

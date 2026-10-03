@@ -12,7 +12,8 @@ import {
   DATA_HOLD_SOURCE_TYPE_ORDER_DISPUTE,
   ORDER_DISPUTE_HOLD_REASON_CODE,
 } from "@/lib/privacy/data-hold-service";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ORDER_DISPUTE_OPENED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 8C-01：General OrderDispute initiation 的唯一领域 authority
@@ -272,26 +273,23 @@ export async function createOrderDisputeFromLockedOrderTx(
     });
   }
 
-  // generic system copy（§35：禁止 reason / title / meetingLocation / note）
-  const isBuyerInitiator = order.buyerId === context.initiatorId;
-  await createNotifications(tx, [
+  // generic system copy（§35：禁止 reason / title / meetingLocation / note）；
+  // Phase 9B：canonical notification domain（角色化文案由 registry 渲染）。
+  // dedupe 以 disputeId 为聚合（同单可在旧纠纷关闭后再次开纠纷）。
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: ORDER_DISPUTE_OPENED_KIND,
+      recipientUserId: order.buyerId,
       orderId: order.id,
-      type: "ORDER",
-      title: isBuyerInitiator ? "订单纠纷已提交" : "订单进入纠纷流程",
-      content: isBuyerInitiator
-        ? "你的订单已进入纠纷处理流程。"
-        : "该订单已被交易对方发起纠纷，请留意平台处理进展。",
+      dedupeKey: `${ORDER_DISPUTE_OPENED_KIND}:${dispute.id}:${order.buyerId}`,
+      payload: { orderId: order.id, disputeId: dispute.id, initiatorUserId: context.initiatorId },
     },
     {
-      userId: order.sellerId,
+      kind: ORDER_DISPUTE_OPENED_KIND,
+      recipientUserId: order.sellerId,
       orderId: order.id,
-      type: "ORDER",
-      title: isBuyerInitiator ? "订单进入纠纷流程" : "订单纠纷已提交",
-      content: isBuyerInitiator
-        ? "该订单已被交易对方发起纠纷，请留意平台处理进展。"
-        : "你的订单已进入纠纷处理流程。",
+      dedupeKey: `${ORDER_DISPUTE_OPENED_KIND}:${dispute.id}:${order.sellerId}`,
+      payload: { orderId: order.id, disputeId: dispute.id, initiatorUserId: context.initiatorId },
     },
   ]);
 

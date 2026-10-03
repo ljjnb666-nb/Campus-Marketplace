@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
-const { createNotifications } = vi.hoisted(() => ({
-  createNotifications: vi.fn(),
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
+const {
+  txNotificationCreateMany,
+  txNotificationFindUnique,
+} = vi.hoisted(() => ({
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
 }));
 
 import { completeErrandOrderTx } from "@/lib/errand-completion";
@@ -16,6 +17,11 @@ function buildTx() {
     errandTask: { updateMany: vi.fn() },
     order: { updateMany: vi.fn() },
     user: { update: vi.fn() },
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   };
 }
 
@@ -32,8 +38,9 @@ const baseInput = {
 
 describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
   beforeEach(() => {
-    createNotifications.mockReset();
-    createNotifications.mockResolvedValue(undefined);
+    // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+    txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+    txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
   });
 
   it("闸门拒绝：ErrandTask 仍为 IN_PROGRESS（接单者未提交完成）时不产生任何变更", async () => {
@@ -50,7 +57,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("过期重试：ErrandTask 已 COMPLETED 时 no-op", async () => {
@@ -62,7 +69,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(result).toEqual({ completed: false });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("胜者路径：条件流转两表、双方计数各 +1、每个接收者恰好一条完成通知", async () => {
@@ -87,11 +94,26 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
       where: { id: "user-seller" },
       data: { completedOrdersCount: { increment: 1 } },
     });
-    // 每个预期接收者恰好一条完成通知
-    expect(createNotifications).toHaveBeenCalledTimes(1);
-    const payloads = createNotifications.mock.calls[0][1] as Array<{ userId: string }>;
-    expect(payloads).toHaveLength(2);
-    expect(payloads.map((p) => p.userId).sort()).toEqual(["user-buyer", "user-seller"]);
+    // 每个预期接收者恰好一条完成通知（Phase 9B：ERRAND_ORDER_COMPLETED 逐条 emit）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    const rows = txNotificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as { userId: string; dedupeKey: string },
+    );
+    expect(rows.map((row) => row.userId).sort()).toEqual(["user-buyer", "user-seller"]);
+    for (const row of rows) {
+      expect(row).toMatchObject({
+        orderId: "order-1",
+        type: "ORDER",
+        title: "跑腿订单已完成",
+        content: "跑腿任务已确认完成，订单正式结算归档。",
+        kind: "ERRAND_ORDER_COMPLETED",
+        payload: { orderId: "order-1" },
+      });
+    }
+    expect(rows.map((row) => row.dedupeKey).sort()).toEqual([
+      "ERRAND_ORDER_COMPLETED:order-1:user-buyer",
+      "ERRAND_ORDER_COMPLETED:order-1:user-seller",
+    ]);
   });
 
   it("冲突防御：闸门通过但 Order 条件更新落空时抛错（调用方事务整体回滚）", async () => {
@@ -104,7 +126,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     );
     // 抛错路径不得已执行任何副作用
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("落败并发：闸门 count=0 直接 no-op，不触碰 Order/计数/通知", async () => {
@@ -117,6 +139,6 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(result).toEqual({ completed: false });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 });

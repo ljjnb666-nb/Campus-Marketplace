@@ -6,7 +6,8 @@ import { computeAppealReviewDueAt } from "@/lib/appeals/appeal-sla";
 import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { APPEAL_DECIDED_KIND, APPEAL_SUBMITTED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 6C-1B：申诉提交 / 撤回服务（user-facing domain service）。
@@ -80,22 +81,27 @@ function isUniqueViolationOn(error: unknown, column: string): boolean {
 /**
  * post-commit best-effort 通知：失败仅记结构化日志（APPEAL_NOTIFICATION_FAILED），
  * 绝不回滚 Appeal 决策 / restoration，绝不影响 command success。
- * 文案固定，绝不携带 statement / decisionNote。
+ * Phase 9B：文案由 notification-registry 渲染，绝不携带 statement / decisionNote。
  */
 export async function bestEffortAppealNotification(
   event: "APPEAL_SUBMITTED" | "APPEAL_DECIDED",
   appealId: string,
   userId: string,
-  title: string,
-  content: string,
+  outcome?: "GRANTED" | "UPHELD" | "DISMISSED",
 ): Promise<boolean> {
   try {
     await withTransaction((tx) =>
-      createNotification(tx, {
-        userId,
-        type: "SYSTEM",
-        title,
-        content,
+      emitNotificationTx(tx, {
+        kind: event === "APPEAL_SUBMITTED" ? APPEAL_SUBMITTED_KIND : APPEAL_DECIDED_KIND,
+        recipientUserId: userId,
+        dedupeKey:
+          event === "APPEAL_SUBMITTED"
+            ? `${APPEAL_SUBMITTED_KIND}:${appealId}:${userId}`
+            : `${APPEAL_DECIDED_KIND}:${appealId}:${outcome ?? "UNKNOWN"}:${userId}`,
+        payload:
+          event === "APPEAL_SUBMITTED"
+            ? { appealId }
+            : { appealId, outcome: outcome ?? "DISMISSED" },
       }),
     );
     return true;
@@ -200,8 +206,6 @@ export async function submitAppeal(
     "APPEAL_SUBMITTED",
     appeal.id,
     targetUserId,
-    "已收到你的申诉",
-    "你提交的申诉已进入平台审核流程，审核结果将通过站内消息通知你。",
   );
 
   return { appeal };

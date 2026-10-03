@@ -1226,8 +1226,6 @@ describe.skipIf(!integrationDatabaseUrl)(
         initialData: {
           title: "商品咨询：RBC02",
           initialMessageContent: "你好，我想咨询一下。",
-          notificationTitle: "收到新的商品咨询",
-          notificationContent: "有同学就商品向你发起了会话。",
           counterpartId: seller.id,
           currentUserId: buyer.id,
         },

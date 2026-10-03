@@ -2,20 +2,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   recordAdminAudit,
-  createNotifications,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loadAuthorizationContextMock,
   releaseHoldsBySourceTxLocked,
   projectProductAfterReservationRelease,
 } = vi.hoisted(() => ({
   recordAdminAudit: vi.fn(),
-  createNotifications: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   releaseHoldsBySourceTxLocked: vi.fn(),
   projectProductAfterReservationRelease: vi.fn(),
 }));
 
 vi.mock("@/lib/governance/admin-audit", () => ({ recordAdminAudit }));
-vi.mock("@/repositories/notification-repository", () => ({ createNotifications }));
 vi.mock("@/lib/privacy/data-hold-service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/privacy/data-hold-service")>();
   return {
@@ -47,6 +49,11 @@ const txStub = {
   },
   errandTask: {
     update: vi.fn(),
+  },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
   },
 };
 
@@ -142,12 +149,16 @@ beforeEach(() => {
     txStub.$queryRaw,
     txStub.$executeRaw,
     recordAdminAudit,
-    createNotifications,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     releaseHoldsBySourceTxLocked,
     projectProductAfterReservationRelease,
   ]) {
     mock.mockReset();
   }
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   loadAuthorizationContextMock.mockReset().mockResolvedValue(ACTIVE_CTX);
 });
 
@@ -438,10 +449,23 @@ describe("resolveOrderDispute / closeOrderDispute", () => {
       resolutionAction: "RESTORE_PREVIOUS",
     });
 
-    expect(createNotifications).toHaveBeenCalledWith(txStub, [
-      expect.objectContaining({ userId: "buyer-1", title: "订单纠纷已处理" }),
-      expect.objectContaining({ userId: "seller-1", title: "订单纠纷已处理" }),
-    ]);
+    // Phase 9B：canonical 双方通知 = buyer + seller 各一条 ORDER_DISPUTE_RESOLVED
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(2);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "buyer-1",
+      orderId: "order-1",
+      type: "ORDER",
+      title: "订单纠纷已处理",
+      content: "你的订单纠纷已解决，订单状态已更新。",
+      dedupeKey: "ORDER_DISPUTE_RESOLVED:dispute-1:buyer-1",
+      kind: "ORDER_DISPUTE_RESOLVED",
+      payload: { orderId: "order-1", disputeId: "dispute-1", resolution: "RESOLVED" },
+    });
+    expect(txNotificationCreateMany.mock.calls[1][0].data[0]).toMatchObject({
+      userId: "seller-1",
+      orderId: "order-1",
+      dedupeKey: "ORDER_DISPUTE_RESOLVED:dispute-1:seller-1",
+    });
     expect(recordAdminAudit).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "ORDER_DISPUTE_RESOLVED",

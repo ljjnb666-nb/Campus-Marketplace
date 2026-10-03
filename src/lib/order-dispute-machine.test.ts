@@ -4,11 +4,14 @@ import type { Prisma } from "@prisma/client";
 const {
   assertActiveAccountMutationAllowed,
   createHoldTxLocked,
-  createNotifications,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
 } = vi.hoisted(() => ({
   assertActiveAccountMutationAllowed: vi.fn(),
   createHoldTxLocked: vi.fn(),
-  createNotifications: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
 }));
 
 vi.mock("@/lib/governance/active-account-mutation", () => ({
@@ -22,10 +25,6 @@ vi.mock("@/lib/privacy/data-hold-service", async (importOriginal) => {
     createHoldTxLocked,
   };
 });
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotifications,
-}));
 
 import {
   initiateOrderDisputeTx,
@@ -88,6 +87,11 @@ function makeTx(input: {
     orderDispute: { findFirst: disputeFindFirst, create: disputeCreate },
     $queryRaw: queryRaw,
     $executeRaw: vi.fn().mockResolvedValue(0),
+    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+    notification: {
+      createMany: txNotificationCreateMany,
+      findUnique: txNotificationFindUnique,
+    },
   } as unknown as Prisma.TransactionClient;
 
   return {
@@ -121,7 +125,9 @@ beforeEach(() => {
   createHoldTxLocked.mockReset().mockImplementation(async (_tx: unknown, args: { subjectId: string }) => ({
     id: `hold-${args.subjectId}`,
   }));
-  createNotifications.mockReset().mockResolvedValue(undefined);
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
 });
 
 describe("initiateOrderDisputeTx：disputable 状态矩阵", () => {
@@ -186,7 +192,7 @@ describe("initiateOrderDisputeTx：disputable 状态矩阵", () => {
     expect(await initiateOrderDisputeTx(m.tx, baseInput)).toEqual({ error: "状态不允许纠纷" });
     expect(m.disputeCreate).not.toHaveBeenCalled();
     expect(createHoldTxLocked).not.toHaveBeenCalled();
-    expect(createNotifications).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("OD-UNIT-04：SERVICE ACCEPTED / IN_PROGRESS / COMPLETED → allowed（campus snapshot 自 listing）", async () => {
@@ -389,14 +395,33 @@ describe("initiateOrderDisputeTx：授权 / 一致性 / 幂等", () => {
     const m = makeProductTx({});
     await initiateOrderDisputeTx(m.tx, { ...baseInput, reason: "我的私人地址是……" });
 
-    const notifications = createNotifications.mock.calls.flatMap((call) => call[1]);
-    for (const notification of notifications) {
-      expect(JSON.stringify(notification)).not.toContain("我的私人地址");
+    // Phase 9B：registry 渲染的通知行（每接收者一条 createMany）
+    const rows = txNotificationCreateMany.mock.calls.map(
+      (call) => call[0].data[0] as Record<string, unknown>,
+    );
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(JSON.stringify(row)).not.toContain("我的私人地址");
     }
-    expect(notifications.map((n: { title: string }) => n.title).sort()).toEqual([
+    expect(rows.map((row) => row.title as string).sort()).toEqual([
       "订单纠纷已提交",
       "订单进入纠纷流程",
     ]);
+    // 角色化渲染：发起方（buyer）= 已提交；对手方（seller）= 进入纠纷流程
+    expect(rows.find((row) => row.userId === buyerId)).toMatchObject({
+      type: "ORDER",
+      title: "订单纠纷已提交",
+      content: "你的订单已进入纠纷处理流程。",
+      orderId,
+      dedupeKey: `ORDER_DISPUTE_OPENED:dispute-1:${buyerId}`,
+      kind: "ORDER_DISPUTE_OPENED",
+      payload: { orderId, disputeId: "dispute-1", initiatorUserId: buyerId },
+    });
+    expect(rows.find((row) => row.userId === sellerId)).toMatchObject({
+      title: "订单进入纠纷流程",
+      content: "该订单已被交易对方发起纠纷，请留意平台处理进展。",
+      dedupeKey: `ORDER_DISPUTE_OPENED:dispute-1:${sellerId}`,
+    });
   });
 });
 

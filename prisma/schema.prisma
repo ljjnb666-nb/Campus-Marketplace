@@ -874,7 +874,73 @@ model Notification {
   dedupeKey     String? @unique
   sourceEventId String?
 
+  // Phase 9B：canonical notification identity（kind/version registry）。
+  // 三列原子 NULL 或原子 NOT NULL（DB CHECK 强制，禁止半迁移状态）：
+  // - 历史（9B 前）同步通知保持三列 NULL，禁止按 title 猜测回填；
+  // - 9B 起所有 production 通知由 canonical service 写入，kind !=
+  //   null 且 schemaVersion != null 且 payload != null 且 dedupeKey != null。
+  // payload 只允许 IDs + 机器状态（zod strict 契约在写边界强制），
+  // 禁止 user-authored 自由文本 / secret / provider raw payload。
+  kind          String?
+  schemaVersion Int?
+  payload       Json?
+
   @@index([userId, isRead, createdAt])
+}
+
+// Phase 9B：canonical channel delivery provenance（EMAIL 等 external channel）。
+//
+// 定位（§12）：本表只保存 channel delivery provenance——retry / lease /
+// attempts / backoff authority 全部属于 Phase 9A AsyncJob
+// （NOTIFICATION_DELIVERY:<deliveryId>），禁止在本表复制第二套状态机。
+//
+// 关系（契约，非 Prisma relation）：Notification 1 → many NotificationDelivery，
+// 通过裸 notificationId 列关联。刻意不建 FK relation：账号注销按 RB-23
+// 整表删除 Notification（derived ephemeral inbox），而 delivery 行必须
+// 存活以表达 RECIPIENT_ERASED 抑制语义（§35：注销时 unsent EMAIL delivery
+// 置 suppressedAt/suppressionCode 并清空 destination，重放 job 见 suppressed
+// → 0 次 provider call 幂等完成）。erasure 事务保证先抑制 delivery、后删除
+// notification（同事务原子），应用层是唯一写入方（canonical emit service）。
+//
+// 语义（§28）：providerAcceptedAt = provider 接受发送请求；绝不声称
+// mailbox delivered / opened / read。9B 不做 delivery webhook。
+// destination = CONTACT_INFO（DIRECT_IDENTITY，privacy registry 登记），
+// 绝不进入结构化日志；erasure 时按 RECIPIENT_ERASED / retention 收敛。
+model NotificationDelivery {
+  id                     String  @id @default(cuid())
+  notificationId         String
+  // channel 是 String（不用 Prisma enum，与 job kind 同哲学）：9B 实现
+  // IN_APP（无 external delivery row）/ EMAIL；未来 WEB_PUSH / EXTERNAL
+  // channel 可扩展，不得为未实现渠道预建 provider。
+  channel                String
+  // provider 快照 = emit 时刻解析的投递渠道实现（如 resend / disabled）。
+  provider               String
+  // 收件目的地快照（EMAIL = 收件邮箱）：emit 时刻快照，retry 绝不重读
+  // User.email——payload 在 retry 间必须 deterministic（§33）。
+  destination            String
+  senderSnapshot         String
+  replyToSnapshot        String?
+  // provider 幂等键（deterministic：notification/<id>/email/v1），
+  // 绝不允许每次 retry 生成随机 UUID。
+  providerIdempotencyKey String  @unique
+  providerMessageId      String?
+
+  // 首次实际 provider attempt 时刻（provider 24h 幂等保留窗口的本地
+  // 安全基准；EMAIL_IDEMPOTENCY_SAFE_WINDOW = 23h，超窗 fail closed）。
+  firstAttemptAt     DateTime?
+  providerAcceptedAt DateTime?
+  suppressedAt       DateTime?
+  suppressionCode    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // 每个通知的每个渠道至多一条 delivery（重复 canonical emit → 复用）。
+  @@unique([notificationId, channel])
+  @@index([notificationId])
+  // ops/observability seam：按渠道扫描 suppressed / accepted 状态
+  @@index([channel, suppressedAt])
+  @@index([channel, providerAcceptedAt])
 }
 
 model BlockedUser {

@@ -1,6 +1,6 @@
 import { logger } from "@/lib/logger";
-import { prisma, withTransaction } from "@/lib/prisma";
-import { resolveJobHandler } from "@/lib/async/job-registry";
+import { prisma, withTransaction, TRANSACTION_TIMEOUT_MS } from "@/lib/prisma";
+import { resolveJobHandler, resolveJobExecutionPolicy } from "@/lib/async/job-registry";
 import {
   beginAsyncJobExecutionTx,
   claimDueAsyncJobs,
@@ -136,19 +136,26 @@ export async function executeClaimedAsyncJob(
     }
 
     const startedAt = Date.now();
+    // RB06（Review Round 2）：per-job execution policy（SSOT = job
+    // registry）。EMAIL execution transaction 在 serialization boundary
+    // 内含 provider HTTP，必须使用扩展事务预算 + 覆盖它的 execution
+    // lease；未注册 policy 的 job（含 9A PRODUCT_RESERVATION_EXPIRE）
+    // 解析为 {}，继承既有默认（TRANSACTION_TIMEOUT_MS / lease 覆盖链），
+    // 行为零变化。
+    const policy = resolveJobExecutionPolicy(job.kind, job.schemaVersion);
     const execution = await withTransaction(async (tx) => {
       // RB01：execution ownership 复核与 handler 同事务——条件 UPDATE 刷新
       // lease 并取行锁，锁保持到本事务 COMMIT（SKIP LOCKED 期间必跳过本行）
       const owned = await beginAsyncJobExecutionTx(tx, {
         id: job.id,
         leaseToken: job.leaseToken,
-        leaseSeconds: options.leaseSeconds ?? DEFAULT_LEASE_SECONDS,
+        leaseSeconds: policy.executionLeaseSeconds ?? options.leaseSeconds ?? DEFAULT_LEASE_SECONDS,
       });
       if (!owned) {
         return { fenced: true as const };
       }
       return { fenced: false as const, outcome: await handler(tx, job) };
-    });
+    }, { timeout: policy.transactionTimeoutMs ?? TRANSACTION_TIMEOUT_MS });
 
     if (execution.fenced) {
       // stale worker：execution ownership 已丢失，handler 从未进入

@@ -353,3 +353,37 @@ cat .releases.log                         # 部署历史（RELEASE_SHA/IMAGE/REA
 | 6379 | Redis | 限流存储，未授权访问可刷写键 |
 | 9000/9001 | MinIO API/Console | 对象存储控制面 |
 | 22 | SSH | 仅管理需要，建议限源 IP/VPN |
+
+## 11. Transactional Email 配置（Phase 9B）
+
+email 投递复用现有 `async-worker` 服务（禁止新增 email-worker 容器）——
+NOTIFICATION_DELIVERY job 与既有 job 同一 claim/lease/backoff/dead-letter
+机制，继续受 immutable release SHA 保护。
+
+`.env.production` 必须包含（`npm run env:check` fail-closed 校验，缺失/
+非法拒绝部署）：
+
+```text
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=re_xxx            # Resend 控制台创建；绝不提交真实值入仓
+EMAIL_FROM=noreply@<已验证域名>   # 域名需在 Resend 完成 SPF/DKIM 验证
+EMAIL_REPLY_TO=                  # 可选
+EMAIL_PROVIDER_TIMEOUT_MS=10000  # 1000..30000
+RESEND_API_BASE_URL=             # 生产禁止设置（固定 https://api.resend.com）
+```
+
+部署后验证：
+
+1. `npm run env:check` 全部 PASS（只打印变量名，不输出秘密值）。
+2. 触发一条双渠道通知（如 PRODUCT 预留过期）：`async-worker` 日志出现
+   `email_delivery_attempted` / `email_delivery_provider_accepted`；
+   NotificationDelivery 行 `providerAcceptedAt` 非空且
+   `providerMessageId` 非空。
+3. 失败排查：dead-letter 查询见 `src/lib/notifications/email-ops.ts`
+   （dead-lettered email deliveries / oldest pending email /
+   provider-accepted count，read-only）。`lastErrorCode` 为受控机器码
+   （EMAIL_PROVIDER_AUTH_FAILED = key/域名问题；EMAIL_PROVIDER_TIMEOUT =
+   网络问题会自动重试）。
+
+红线：生产不得覆盖 `RESEND_API_BASE_URL`（防 SSRF/secret exfil）；
+CI 永不发起真实 Resend 调用（真实 provider 验证属 Phase 3B）。

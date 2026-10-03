@@ -1531,8 +1531,6 @@ describe.skipIf(!integrationDatabaseUrl)(
           initialData: {
             title: "R8 会话",
             initialMessageContent: "你好",
-            notificationTitle: "通知",
-            notificationContent: "内容",
             counterpartId: seller.id,
             currentUserId: buyer.id,
           },

@@ -11,7 +11,8 @@ const {
   txRiskStateFindUnique,
   acquireGovernanceSubjectLocks,
   recordAdminAudit,
-  createNotification,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loggerWarn,
   loadAuthorizationContextMock,
   restoreFromAppealTxLocked,
@@ -26,7 +27,9 @@ const {
   txRiskStateFindUnique: vi.fn(),
   acquireGovernanceSubjectLocks: vi.fn(),
   recordAdminAudit: vi.fn(),
-  createNotification: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loggerWarn: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   restoreFromAppealTxLocked: vi.fn(),
@@ -43,10 +46,6 @@ vi.mock("@/lib/governance/governance-lock", () => ({
 
 vi.mock("@/lib/governance/admin-audit", () => ({
   recordAdminAudit,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 vi.mock("@/lib/logger", () => ({
@@ -85,6 +84,11 @@ const txStub = {
   user: { findUnique: txUserFindUnique },
   campusMembership: { findUnique: txCampusMembershipFindUnique },
   riskState: { findUnique: txRiskStateFindUnique },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
+  },
 };
 
 function accountAction(overrides: Partial<{
@@ -145,7 +149,8 @@ beforeEach(() => {
     txRiskStateFindUnique,
     acquireGovernanceSubjectLocks,
     recordAdminAudit,
-    createNotification,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     loggerWarn,
     loadAuthorizationContextMock,
     restoreFromAppealTxLocked,
@@ -167,7 +172,9 @@ beforeEach(() => {
   txRiskStateFindUnique.mockResolvedValue({ state: "RESTRICTED" });
   acquireGovernanceSubjectLocks.mockResolvedValue(undefined);
   recordAdminAudit.mockResolvedValue(undefined);
-  createNotification.mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   restoreFromAppealTxLocked.mockResolvedValue(undefined);
   loadAuthorizationContextMock.mockResolvedValue(reviewerContext());
   withTransactionMock.mockImplementation(
@@ -364,10 +371,18 @@ describe("decideAppeal（程序性 DISMISSED = 提交成功；GRANT 经 canonica
         enforcementActionId: "ea-1",
       }),
     }), expect.anything());
-    expect(createNotification).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+    // Phase 9B：canonical APPEAL_DECIDED 通知（post-commit best-effort withTransaction）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
       userId: "target-1",
+      orderId: null,
       type: "SYSTEM",
-    }));
+      title: "你的申诉已通过",
+      content: "你提交的申诉已审核通过，相关处罚已被解除。",
+      dedupeKey: "APPEAL_DECIDED:ap-1:GRANTED:target-1",
+      kind: "APPEAL_DECIDED",
+      payload: { appealId: "ap-1", outcome: "GRANTED" },
+    });
   });
 
   it("UPHELD：零 operational mutation（不触 seam），reason = MERIT_VIOLATION_CONFIRMED", async () => {
@@ -504,13 +519,13 @@ describe("decideAppeal（程序性 DISMISSED = 提交成功；GRANT 经 canonica
       const serialized = JSON.stringify(input.metadata ?? {});
       expect(serialized).not.toContain(canary);
     }
-    const notificationPayload = JSON.stringify(createNotification.mock.calls);
+    const notificationPayload = JSON.stringify(txNotificationCreateMany.mock.calls);
     expect(notificationPayload).not.toContain(canary);
   });
 
   it("decision 通知失败仅记 APPEAL_NOTIFICATION_FAILED（command success 不受影响）", async () => {
     installAppeal();
-    createNotification.mockRejectedValue(new Error("down"));
+    txNotificationCreateMany.mockRejectedValue(new Error("down"));
 
     const result = await decideAppeal({ reviewerId: "reviewer-1", appealId: "ap-1", decision: "UPHELD" });
     expect(result.outcome).toBe("UPHELD");

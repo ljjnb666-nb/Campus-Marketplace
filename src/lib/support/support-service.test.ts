@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   recordAdminAudit,
-  createNotification,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loadAuthorizationContextMock,
   ticketCreate,
   ticketCount,
@@ -10,7 +11,9 @@ const {
   ticketUpdate,
 } = vi.hoisted(() => ({
   recordAdminAudit: vi.fn(),
-  createNotification: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
   ticketCreate: vi.fn(),
   ticketCount: vi.fn(),
@@ -19,7 +22,6 @@ const {
 }));
 
 vi.mock("@/lib/governance/admin-audit", () => ({ recordAdminAudit }));
-vi.mock("@/repositories/notification-repository", () => ({ createNotification }));
 vi.mock("@/lib/rbac/service", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/rbac/service")>();
   return { ...actual, loadAuthorizationContext: loadAuthorizationContextMock };
@@ -34,6 +36,11 @@ const txStub = {
     findUnique: ticketFindUnique,
     findFirst: vi.fn(),
     update: ticketUpdate,
+  },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
   },
 };
 
@@ -81,7 +88,8 @@ beforeEach(() => {
     ticketFindUnique,
     ticketUpdate,
     recordAdminAudit,
-    createNotification,
+    txNotificationCreateMany,
+    txNotificationFindUnique,
     loadAuthorizationContextMock,
   ]) {
     fn.mockReset();
@@ -92,7 +100,9 @@ beforeEach(() => {
   ticketCount.mockResolvedValue(0);
   ticketUpdate.mockResolvedValue({});
   recordAdminAudit.mockResolvedValue(undefined);
-  createNotification.mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockResolvedValue({ id: "notification-1" });
   loadAuthorizationContextMock.mockResolvedValue(AGENT_GLOBAL_CTX);
 
   // 默认行锁行：UNSCOPED OPEN 工单
@@ -354,18 +364,19 @@ describe("resolve / close（ONE sorted set：actor + requester）", () => {
     );
     // FR04：通知是固定安全文本的事件信号——绝不复制 resolutionMessage /
     // internalNote 自由文本（唯一权威用户可见文本 = SupportTicket.resolutionMessage）
-    expect(createNotification).toHaveBeenCalledWith(
-      txStub,
-      {
-        userId: "requester-1",
-        type: "SYSTEM",
-        title: "支持工单已处理",
-        content: "你的支持工单已处理完成，请进入工单详情查看处理结果。",
-      },
-    );
-    const notificationPayload = JSON.stringify(
-      createNotification.mock.calls.at(-1)![1],
-    );
+    // Phase 9B：canonical SUPPORT_TICKET_RESOLVED emit
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "requester-1",
+      orderId: null,
+      type: "SYSTEM",
+      title: "支持工单已处理",
+      content: "你的支持工单已处理完成，请进入工单详情查看处理结果。",
+      dedupeKey: "SUPPORT_TICKET_RESOLVED:t1:requester-1",
+      kind: "SUPPORT_TICKET_RESOLVED",
+      payload: { ticketId: "t1" },
+    });
+    const notificationPayload = JSON.stringify(txNotificationCreateMany.mock.calls);
     expect(notificationPayload).not.toContain("已为你重置密码入口");
     expect(notificationPayload).not.toContain("用户可能遭遇钓鱼");
   });

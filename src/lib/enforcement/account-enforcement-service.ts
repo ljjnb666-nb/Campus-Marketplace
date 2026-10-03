@@ -6,7 +6,8 @@ import { recordAdminAudit } from "@/lib/governance/admin-audit";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { logger } from "@/lib/logger";
 import { prisma, withTransaction } from "@/lib/prisma";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { ACCOUNT_REINSTATED_KIND, ACCOUNT_SUSPENDED_KIND } from "@/lib/notifications/notification-registry";
 import { rbacError } from "@/lib/rbac/errors";
 import {
   hasPermission,
@@ -73,28 +74,25 @@ export type AccountEnforcementResult = AccountAuthoritativeResult & {
   notificationDelivered: boolean;
 };
 
-type NotificationPayloadSpec = {
-  title: string;
-  content: string;
-};
-
 /**
  * post-commit best-effort 通知：失败仅记结构化日志，不回滚、不上抛。
  * 日志载荷仅含 event/action/targetUserId/error class——不含 reason note
  * 原文、私密举报详情、凭据（Repair 2 §15）。
+ * Phase 9B：文案由 notification-registry 渲染；suspend/reinstate 可跨
+ * cycle 重复（真实 transition 才通知），dedupeKey 以 per-invocation epoch 区分。
  */
 async function bestEffortEnforcementNotification(
   action: "ACCOUNT_SUSPEND" | "ACCOUNT_REINSTATE",
   targetUserId: string,
-  payload: NotificationPayloadSpec,
 ): Promise<boolean> {
+  const kind = action === "ACCOUNT_SUSPEND" ? ACCOUNT_SUSPENDED_KIND : ACCOUNT_REINSTATED_KIND;
   try {
     await withTransaction((tx) =>
-      createNotification(tx, {
-        userId: targetUserId,
-        type: "SYSTEM",
-        title: payload.title,
-        content: payload.content,
+      emitNotificationTx(tx, {
+        kind,
+        recipientUserId: targetUserId,
+        dedupeKey: `${kind}:${targetUserId}:${new Date().toISOString()}`,
+        payload: {},
       }),
     );
     return true;
@@ -300,10 +298,7 @@ export async function suspendAccount(
   // Repair 2 Blocker C：post-commit best-effort 通知（失败不影响 command success）
   const notificationDelivered = authoritative.alreadyInState
     ? false
-    : await bestEffortEnforcementNotification("ACCOUNT_SUSPEND", input.targetUserId, {
-        title: "账号已被停用",
-        content: "你的账号当前已被管理员暂停使用，如有疑问请联系平台管理员。",
-      });
+    : await bestEffortEnforcementNotification("ACCOUNT_SUSPEND", input.targetUserId);
 
   return { ...authoritative, notificationDelivered };
 }
@@ -328,10 +323,7 @@ export async function reinstateAccount(
 
   const notificationDelivered = authoritative.alreadyInState
     ? false
-    : await bestEffortEnforcementNotification("ACCOUNT_REINSTATE", input.targetUserId, {
-        title: "账号已恢复正常",
-        content: "你的账号已恢复正常使用。",
-      });
+    : await bestEffortEnforcementNotification("ACCOUNT_REINSTATE", input.targetUserId);
 
   return { ...authoritative, notificationDelivered };
 }

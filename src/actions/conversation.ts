@@ -81,8 +81,6 @@ export async function createOrOpenProductConversation(
       initialData: {
         title: `商品咨询：${product.title}`,
         initialMessageContent: `你好，我想咨询一下“${product.title}”。`,
-        notificationTitle: "收到新的商品咨询",
-        notificationContent: `有同学就“${product.title}”向你发起了会话，快去看看。`,
         counterpartId: product.sellerId,
         currentUserId: user.id,
       },
@@ -154,8 +152,6 @@ export async function createOrOpenErrandConversation(
       initialData: {
         title: `跑腿沟通：${errand.title}`,
         initialMessageContent: `你好，关于跑腿任务“${errand.title}”与你沟通一下。`,
-        notificationTitle: "收到跑腿任务沟通",
-        notificationContent: `有同学就“${errand.title}”向你发起了沟通。`,
         counterpartId,
         currentUserId: user.id,
       },
@@ -226,8 +222,6 @@ export async function createOrOpenServiceConversation(
       initialData: {
         title: `服务咨询：${service.title}`,
         initialMessageContent: `你好，我想预约咨询你的“${service.title}”服务。`,
-        notificationTitle: "收到新的服务预约咨询",
-        notificationContent: `有同学向你发起了会话。`,
         counterpartId: service.providerId,
         currentUserId: user.id,
       },
@@ -293,8 +287,6 @@ export async function createOrOpenRentalConversation(
       initialData: {
         title: `租赁咨询：${rental.title}`,
         initialMessageContent: `你好，我想咨询租用“${rental.title}”。`,
-        notificationTitle: "收到物品租赁咨询",
-        notificationContent: `有同学向你咨询“${rental.title}”的出租详情。`,
         counterpartId: rental.ownerId,
         currentUserId: user.id,
       },
@@ -341,6 +333,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
 
   let counterpartId = "";
   let orderTitle = "";
+  let orderBizNumber = "";
   let orderKey: "orderId" | "rentalOrderId" = "orderId";
   let bizType: ConversationBizType = "PRODUCT_ORDER";
 
@@ -355,6 +348,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
     if (!rentalOrder) redirect("/my/orders");
     counterpartId = rentalOrder.ownerId === user.id ? rentalOrder.renterId : rentalOrder.ownerId;
     orderTitle = `租赁订单：${rentalOrder.orderNumber}`;
+    orderBizNumber = rentalOrder.orderNumber;
     orderKey = "rentalOrderId";
     bizType = "RENTAL_ORDER";
   } else {
@@ -368,6 +362,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
     if (!order) redirect("/my/orders");
     counterpartId = order.buyerId === user.id ? order.sellerId : order.buyerId;
     orderTitle = `订单：${order.orderNo}`;
+    orderBizNumber = order.orderNo;
     orderKey = "orderId";
     bizType = "PRODUCT_ORDER";
   }
@@ -383,8 +378,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
       initialData: {
         title: orderTitle,
         initialMessageContent: `你好，关于“${orderTitle}”想和你沟通一下交接事宜。`,
-        notificationTitle: "收到订单交易联系",
-        notificationContent: `关于“${orderTitle}”，交易对方向你发起了会话。`,
+        bizNumber: orderBizNumber,
         counterpartId,
         currentUserId: user.id,
       },

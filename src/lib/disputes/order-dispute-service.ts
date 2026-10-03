@@ -24,7 +24,8 @@ import {
   requirePermissionInContext,
 } from "@/lib/rbac/service";
 import { projectProductAfterReservationRelease } from "@/lib/product-order-lifecycle";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ORDER_DISPUTE_RESOLVED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 8C-01：General OrderDispute 运营 canonical 治理服务
@@ -491,20 +492,21 @@ async function resolveOrderDisputeTxLocked(
     tx,
   );
 
-  await createNotifications(tx, [
+  // Phase 9B：canonical notification domain；dedupe 以 disputeId 为聚合。
+  await emitNotificationsTx(tx, [
     {
-      userId: order.buyerId,
+      kind: ORDER_DISPUTE_RESOLVED_KIND,
+      recipientUserId: order.buyerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单纠纷已处理",
-      content: `你的订单纠纷已${isResolved ? "解决" : "关闭"}，订单状态已更新。`,
+      dedupeKey: `${ORDER_DISPUTE_RESOLVED_KIND}:${dispute.id}:${order.buyerId}`,
+      payload: { orderId: order.id, disputeId: dispute.id, resolution: isResolved ? "RESOLVED" : "CLOSED" },
     },
     {
-      userId: order.sellerId,
+      kind: ORDER_DISPUTE_RESOLVED_KIND,
+      recipientUserId: order.sellerId,
       orderId: order.id,
-      type: "ORDER",
-      title: "订单纠纷已处理",
-      content: `你的订单纠纷已${isResolved ? "解决" : "关闭"}，订单状态已更新。`,
+      dedupeKey: `${ORDER_DISPUTE_RESOLVED_KIND}:${dispute.id}:${order.sellerId}`,
+      payload: { orderId: order.id, disputeId: dispute.id, resolution: isResolved ? "RESOLVED" : "CLOSED" },
     },
   ]);
 

@@ -7,7 +7,8 @@ import {
   type ActiveAccountMutationSeams,
 } from "@/lib/governance/active-account-mutation";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
-import { createNotifications } from "@/repositories/notification-repository";
+import { emitNotificationsTx } from "@/lib/notifications/notification-service";
+import { ERRAND_TASK_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * AUDIT2-RB02（ERRAND LIFECYCLE AUTHORITY CLOSURE）：
@@ -154,25 +155,6 @@ function isOwnedByParticipants(
   );
 }
 
-function getErrandStatusLabel(
-  status: "OPEN" | "CLAIMED" | "IN_PROGRESS" | "PENDING_CONFIRMATION" | "COMPLETED" | "CANCELLED",
-) {
-  switch (status) {
-    case "OPEN":
-      return "待接单";
-    case "CLAIMED":
-      return "已接单";
-    case "IN_PROGRESS":
-      return "进行中";
-    case "PENDING_CONFIRMATION":
-      return "待确认完成";
-    case "COMPLETED":
-      return "已完成";
-    case "CANCELLED":
-      return "已取消";
-  }
-}
-
 /** canonical 通知（§30）：同一 transition 无论来自详情页还是订单中心，
  * 通知集合完全一致；由唯一实现产生，禁止入口各自组装。DISPUTED 属 dispute
  * 域 authority，不经本 lifecycle 产生通知。 */
@@ -185,22 +167,21 @@ async function notifyErrandStatusChange(
     status: "OPEN" | "IN_PROGRESS" | "PENDING_CONFIRMATION" | "CANCELLED";
   },
 ): Promise<void> {
-  const statusLabel = getErrandStatusLabel(input.status);
-
-  await createNotifications(tx, [
+  // Phase 9B：canonical notification domain（label 由 registry 渲染）
+  await emitNotificationsTx(tx, [
     {
-      userId: input.publisherId,
+      kind: ERRAND_TASK_STATUS_CHANGED_KIND,
+      recipientUserId: input.publisherId,
       orderId: input.orderId,
-      type: "ORDER",
-      title: `跑腿任务状态更新：${statusLabel}`,
-      content: `当前跑腿任务状态已更新为“${statusLabel}”，请前往订单中心查看。`,
+      dedupeKey: `${ERRAND_TASK_STATUS_CHANGED_KIND}:${input.orderId}:${input.status}:${input.publisherId}`,
+      payload: { orderId: input.orderId, status: input.status },
     },
     {
-      userId: input.accepterId,
+      kind: ERRAND_TASK_STATUS_CHANGED_KIND,
+      recipientUserId: input.accepterId,
       orderId: input.orderId,
-      type: "ORDER",
-      title: `跑腿任务状态更新：${statusLabel}`,
-      content: `当前跑腿任务状态已更新为“${statusLabel}”，请前往订单中心查看。`,
+      dedupeKey: `${ERRAND_TASK_STATUS_CHANGED_KIND}:${input.orderId}:${input.status}:${input.accepterId}`,
+      payload: { orderId: input.orderId, status: input.status },
     },
   ]);
 }

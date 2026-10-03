@@ -15,7 +15,8 @@ const {
   applyVerificationAssetRetention,
   markAssetsForValuesPendingDelete,
   recordAdminAudit,
-  createNotification,
+  txNotificationCreateMany,
+  txNotificationFindUnique,
   loadAuthorizationContextMock,
 } = vi.hoisted(() => ({
   withTransactionMock: vi.fn(),
@@ -32,7 +33,9 @@ const {
   applyVerificationAssetRetention: vi.fn(),
   markAssetsForValuesPendingDelete: vi.fn(),
   recordAdminAudit: vi.fn(),
-  createNotification: vi.fn(),
+  // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
+  txNotificationCreateMany: vi.fn(),
+  txNotificationFindUnique: vi.fn(),
   loadAuthorizationContextMock: vi.fn(),
 }));
 
@@ -58,10 +61,6 @@ vi.mock("@/lib/governance/admin-audit", () => ({
 
 vi.mock("@/lib/campus/verification-policy-service", () => ({
   getCurrentVerificationPolicy: getCurrentVerificationPolicyMock,
-}));
-
-vi.mock("@/repositories/notification-repository", () => ({
-  createNotification,
 }));
 
 // requirePermissionInContext / hasPermission 用真实实现，仅替换 context 加载
@@ -90,6 +89,11 @@ const txStub = {
     update: txVerificationUpdate,
   },
   campusMembership: { findFirst: txMembershipFindFirst },
+  // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
+  notification: {
+    createMany: txNotificationCreateMany,
+    findUnique: txNotificationFindUnique,
+  },
 } as unknown as Prisma.TransactionClient;
 
 const ACTIVE_USER = {
@@ -143,7 +147,9 @@ beforeEach(() => {
   applyVerificationAssetRetention.mockReset().mockResolvedValue(1);
   markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
   recordAdminAudit.mockReset().mockResolvedValue(undefined);
-  createNotification.mockReset().mockResolvedValue({});
+  // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
+  txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
+  txNotificationFindUnique.mockReset().mockResolvedValue({ id: "notification-1" });
   loadAuthorizationContextMock.mockReset();
 });
 
@@ -210,7 +216,18 @@ describe("submitMembershipVerification（学生侧提交）", () => {
       where: { id: "verification-1" },
       data: { studentCardImage: "asset:asset-1" },
     });
-    expect(createNotification).toHaveBeenCalled();
+    // Phase 9B：canonical VERIFICATION_SUBMITTED 通知（dedupeKey 带 per-invocation epoch）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: null,
+      type: "SYSTEM",
+      title: "认证材料已提交",
+      content: "你的校园认证材料已提交，平台会尽快完成审核，请留意后续通知。",
+      dedupeKey: expect.stringMatching(/^VERIFICATION_SUBMITTED:verification-1:/),
+      kind: "VERIFICATION_SUBMITTED",
+      payload: { verificationId: "verification-1" },
+    });
     expect(result).toEqual({ id: "verification-1" });
   });
 
@@ -350,7 +367,18 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
       }),
       txStub,
     );
-    expect(createNotification).toHaveBeenCalled();
+    // Phase 9B：canonical VERIFICATION_DECIDED 通知（dedupeKey 带 reviewedAt epoch）
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      orderId: null,
+      type: "SYSTEM",
+      title: "校园认证已通过",
+      content: "你的校园认证已通过审核，平台会向其他同学展示你的认证状态。",
+      dedupeKey: expect.stringMatching(/^VERIFICATION_DECIDED:verification-1:VERIFIED:/),
+      kind: "VERIFICATION_DECIDED",
+      payload: { verificationId: "verification-1", decision: "VERIFIED" },
+    });
     expect(applyVerificationAssetRetention).toHaveBeenCalledWith(
       txStub,
       "verification-1",
@@ -558,15 +586,20 @@ describe("decideMembershipVerification（审核决定唯一入口）", () => {
       data: expect.objectContaining({ reviewNote: "内部拒绝原因X" }),
     });
 
-    // 通知只做事件信号：content 不携带 reviewNote 原文
-    expect(createNotification).toHaveBeenCalledWith(
-      txStub,
-      expect.objectContaining({
-        type: "SYSTEM",
-        title: "校园认证未通过",
-        content: expect.not.stringContaining("内部拒绝原因X"),
-      }),
-    );
+    // 通知只做事件信号（Phase 9B registry 固定文案）：content 不携带 reviewNote 原文
+    expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
+    expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
+      userId: "user-1",
+      type: "SYSTEM",
+      title: "校园认证未通过",
+      content: "你的校园认证未通过审核，请前往认证页面查看详情并完善材料后重新提交。",
+      dedupeKey: expect.stringMatching(/^VERIFICATION_DECIDED:verification-1:REJECTED:/),
+      kind: "VERIFICATION_DECIDED",
+      payload: { verificationId: "verification-1", decision: "REJECTED" },
+    });
+    expect(
+      JSON.stringify(txNotificationCreateMany.mock.calls),
+    ).not.toContain("内部拒绝原因X");
   });
 
   it("runs the racePoint seam after checks and before the write（并发测试契约）", async () => {

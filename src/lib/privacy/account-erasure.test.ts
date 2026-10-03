@@ -43,7 +43,11 @@ const txStub = {
     updateMany: vi.fn(),
   },
   notification: {
+    findMany: vi.fn(),
     deleteMany: vi.fn(),
+  },
+  notificationDelivery: {
+    updateMany: vi.fn(),
   },
   message: {
     updateMany: vi.fn(),
@@ -156,6 +160,11 @@ beforeEach(() => {
   txStub.supportTicket.count.mockResolvedValue(0);
   txStub.supportTicket.updateMany.mockResolvedValue({ count: 0 });
   txStub.notification.deleteMany.mockResolvedValue({ count: 3 });
+  txStub.notification.findMany.mockResolvedValue([
+    { id: "notification-1" },
+    { id: "notification-2" },
+  ]);
+  txStub.notificationDelivery.updateMany.mockResolvedValue({ count: 1 });
   txStub.message.updateMany.mockResolvedValue({ count: 2 });
   txStub.review.updateMany.mockResolvedValue({ count: 1 });
   txStub.rentalReview.updateMany.mockResolvedValue({ count: 1 });

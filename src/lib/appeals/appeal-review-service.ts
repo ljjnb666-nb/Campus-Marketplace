@@ -20,7 +20,8 @@ import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock"
 import { logger } from "@/lib/logger";
 import { withTransaction } from "@/lib/prisma";
 import { hasPermission, loadAuthorizationContext, type AuthorizationContext } from "@/lib/rbac/service";
-import { createNotification } from "@/repositories/notification-repository";
+import { emitNotificationTx } from "@/lib/notifications/notification-service";
+import { APPEAL_DECIDED_KIND } from "@/lib/notifications/notification-registry";
 
 /**
  * Phase 6C-1B：申诉审核服务（begin review + terminal decision）。
@@ -562,28 +563,15 @@ return {
 }
 
 async function notifyDecision(appealId: string, userId: string, outcome: AppealReviewOutcome): Promise<void> {
-  const copy: Record<AppealReviewOutcome, { title: string; content: string }> = {
-    GRANTED: {
-      title: "你的申诉已通过",
-      content: "你提交的申诉已审核通过，相关处罚已被解除。",
-    },
-    UPHELD: {
-      title: "你的申诉已审核",
-      content: "你提交的申诉已审核完毕，原处罚维持不变。",
-    },
-    DISMISSED: {
-      title: "你的申诉已处理",
-      content: "你提交的申诉已按平台流程处理完毕。",
-    },
-  };
-  const { title, content } = copy[outcome];
+  // Phase 9B：文案由 notification-registry 按 outcome 渲染（post-commit
+  // best-effort，失败仅记日志）。
   try {
     await withTransaction((tx) =>
-      createNotification(tx, {
-        userId,
-        type: "SYSTEM",
-        title,
-        content,
+      emitNotificationTx(tx, {
+        kind: APPEAL_DECIDED_KIND,
+        recipientUserId: userId,
+        dedupeKey: `${APPEAL_DECIDED_KIND}:${appealId}:${outcome}:${userId}`,
+        payload: { appealId, outcome },
       }),
     );
   } catch (error) {
