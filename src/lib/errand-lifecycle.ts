@@ -73,6 +73,7 @@ type LockedErrandRow = {
   status: string;
   publisherId: string;
   accepterId: string | null;
+  deadline: Date;
   deletedAt: Date | null;
 };
 
@@ -112,13 +113,15 @@ function errandParticipantSubjects(
 }
 
 /** ErrandTask 行权威（§16）：锁后 fresh 重验 id/deletedAt/publisherId/
- * accepterId/status/campusId。 */
+ * accepterId/status/campusId。Phase 9C-02：deadline 一并读取——expired
+ * 判定（edit revival guard / CLAIMED→OPEN reopen guard / canonical expiry）
+ * 全部以锁内 fresh deadline 为唯一权威。 */
 async function lockErrandTaskRow(
   tx: Prisma.TransactionClient,
   errandId: string,
 ): Promise<LockedErrandRow | null> {
   const rows = await tx.$queryRaw<LockedErrandRow[]>`
-    SELECT id, "campusId", status, "publisherId", "accepterId", "deletedAt"
+    SELECT id, "campusId", status, "publisherId", "accepterId", "deadline", "deletedAt"
     FROM "ErrandTask"
     WHERE id = ${errandId}
     FOR UPDATE
@@ -227,6 +230,8 @@ export async function transitionErrandTx(
   errandId: string,
   requestedStatus: ErrandTaskStatus,
   seams?: ErrandLifecycleSeams,
+  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  options?: { now?: Date },
 ): Promise<boolean> {
   // 无任何入口允许把任务写回 CLAIMED（claim 之外的路径一律拒绝）
   if (requestedStatus === "CLAIMED") {
@@ -290,6 +295,18 @@ export async function transitionErrandTx(
 
   // CLAIMED → OPEN：重新暴露为可接单（EXPOSURE_INCREASING）
   if (requestedStatus === "OPEN") {
+    // Phase 9C-02（§5.2 reopen guard）：重新曝光增加公开面——deadline 已过
+    // 的 CLAIMED 任务不得撤销接单后重新暴露为 OPEN（fresh 锁内判定，不信任
+    // 事务外 snapshot）。仅拒绝 reopen：既有 CLAIMED obligation 原样保留
+    //（deadline 不自动终止履约义务，§2.1），Task/Order 零写入零通知。
+    const reopenNow = options?.now ?? new Date();
+    if (
+      !(errand.deadline instanceof Date) ||
+      errand.deadline.getTime() <= reopenNow.getTime()
+    ) {
+      return false;
+    }
+
     await requireMarketplaceCapability(
       tx,
       actorUserId,
@@ -596,7 +613,11 @@ export type ErrandContentUpdateInput = {
   advanceAmount: Prisma.Decimal | null;
 };
 
-export type ErrandContentUpdateOutcome = "UPDATED" | "MISSING" | "NOT_OPEN";
+export type ErrandContentUpdateOutcome =
+  | "UPDATED"
+  | "MISSING"
+  | "NOT_OPEN"
+  | "DEADLINE_EXPIRED";
 
 /**
  * 编辑跑腿任务内容的唯一权威实现（§32-§34）：关闭 stale OPEN snapshot——
@@ -606,6 +627,11 @@ export type ErrandContentUpdateOutcome = "UPDATED" | "MISSING" | "NOT_OPEN";
  *
  * claim 先提交时 fresh row 已是 CLAIMED → NOT_OPEN（NO WRITE，零内容变更）。
  * MISSING 覆盖缺失 / 软删除 / 非发布者（同形，不泄漏存在性）。
+ *
+ * Phase 9C-02（§5.1 revival guard）：OPEN 且当前 deadline 已过的任务禁止
+ * 编辑（含把 deadline 延长到未来）——即使 row 尚未被 scheduler materialize
+ * 成 CANCELLED，edit 也不得复活已过期任务 → DEADLINE_EXPIRED（零写入）。
+ * 事务外 deadline 校验只用于 UX；authority 在锁内 fresh row 上。
  */
 export async function updateErrandContentTx(
   tx: Prisma.TransactionClient,
@@ -613,7 +639,11 @@ export async function updateErrandContentTx(
   errandId: string,
   content: ErrandContentUpdateInput,
   seams?: ErrandLifecycleSeams,
+  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  options?: { now?: Date },
 ): Promise<ErrandContentUpdateOutcome> {
+  // Phase 9C-02（§19）：本 transition 的全部 deadline 判定共用同一 now。
+  const now = options?.now ?? new Date();
   if (seams?.beforeLock) {
     await seams.beforeLock(tx);
   }
@@ -644,6 +674,16 @@ export async function updateErrandContentTx(
   const activeOrders = await resolveActiveErrandOrderRows(tx, errand.id);
   if (activeOrders.length > 0) {
     return "NOT_OPEN";
+  }
+
+  // Phase 9C-02 revival guard：当前 deadline 已过（或 corrupt 缺失）→ 拒绝；
+  // 请求的 deadline 也不再接受过去时刻（deadline truth > late user intent）
+  if (
+    !(errand.deadline instanceof Date) ||
+    errand.deadline.getTime() <= now.getTime() ||
+    content.deadline.getTime() <= now.getTime()
+  ) {
+    return "DEADLINE_EXPIRED";
   }
 
   if (seams?.afterOrderRowLock) {

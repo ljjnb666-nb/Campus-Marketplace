@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
-import { ERRAND_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
-import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 import { prisma } from "@/lib/prisma";
 import { getPublishedGeneralReviewStats } from "@/lib/reviews/review-query";
 
@@ -167,15 +166,14 @@ export async function getErrandFormMeta() {
 }
 
 export async function getErrandList(query: ErrandListQuery = {}) {
+  // Phase 9C-02（§6/§7）：公开 list = canonical exposure contract（OPEN +
+  // deadline > now + moderation）。now 在同一 query 内捕获一次，items 与
+  // count 共用（deadline 跨界时 items/total 不漂移）。
+  const now = new Date();
+  const exposure = errandPublicExposureFilter(now);
   const deadlineFilter = getDeadlineFilter(query.deadline);
   const where = {
-    deletedAt: null,
-    // Phase 8F（§9/§12）：公开 marketplace list = exposure state only
-    // （OPEN）。Errand 是 workflow entity——CLAIMED 及之后的全部 workflow
-    // 态都不得进入公共发现面；状态历史管理属于 /my/errands。
-    status: ERRAND_PUBLIC_EXPOSURE_STATUS,
-    // Phase 7C：PUBLIC 面——活跃治理 moderation 排除
-    ...listingModerationPublicFilter(),
+    ...exposure,
     ...(query.q
       ? {
           OR: [
@@ -187,7 +185,10 @@ export async function getErrandList(query: ErrandListQuery = {}) {
         }
       : {}),
     ...(query.category ? { categoryId: query.category } : {}),
-    ...(deadlineFilter ? { deadline: deadlineFilter } : {}),
+    ...(deadlineFilter
+      ? // 用户筛选窗口叠加在 exposure 下界之上（gt now 保持 canonical 边界）
+        { deadline: { ...exposure.deadline, ...deadlineFilter } }
+      : {}),
   };
 
   const page = Math.max(1, query.page ?? 1);
@@ -264,12 +265,12 @@ export async function getErrandDetail(errandId: string) {
     notFound();
   }
 
+  // Phase 9C-02（§6）：推荐池同属公开 discovery 面——过期（deadline 过去）
+  // 的 OPEN 任务即使尚未被 worker materialize 也不得进入推荐。
   const recommendationPool = await prisma.errandTask.findMany({
     where: {
-      deletedAt: null,
-      status: "OPEN",
+      ...errandPublicExposureFilter(new Date()),
       id: { not: errand.id },
-      ...listingModerationPublicFilter(),
       OR: [
         { campusId: errand.campusId },
         { categoryId: errand.categoryId },

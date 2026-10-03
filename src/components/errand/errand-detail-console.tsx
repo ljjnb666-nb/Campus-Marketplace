@@ -70,8 +70,10 @@ export function ErrandDetailConsole({
   const [reportOpen, setReportOpen] = useState(false);
 
   // Phase 8F（§21/§45）：非发布者的私聊 = new marketplace activity，
-  // 仅 OPEN（public exposure）开放；claim/服务端 authority 保持不变
-  const isOpen = isErrandPubliclyExposed(errand.status);
+  // 仅公开曝光任务开放。Phase 9C-02：曝光 = OPEN + deadline > now——
+  // 客户端按同一 SSOT 谓词收敛抢单入口（服务端 claim authority 不依赖
+  // 本 UI 判定；deadline 已过但行尚未 materialize 时不再展示抢单）。
+  const isOpen = isErrandPubliclyExposed(errand.status, errand.deadline, new Date());
   const windDownText =
     ERRAND_WIND_DOWN_MESSAGES[errand.status] ??
     `当前任务为“${(ERRAND_STATUS_LABELS as Record<string, string>)[errand.status] || errand.status}”状态，不可抢单`;

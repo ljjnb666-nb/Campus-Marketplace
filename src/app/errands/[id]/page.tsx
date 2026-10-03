@@ -6,7 +6,10 @@ import { Breadcrumbs } from "@/components/ui/breadcrumbs";
 import { ErrandCard } from "@/components/errand/errand-card";
 import { ErrandDetailConsole } from "@/components/errand/errand-detail-console";
 import { getActiveViewerId } from "@/lib/server-auth";
-import { ERRAND_WIND_DOWN_MESSAGES } from "@/lib/listings/listing-lifecycle";
+import {
+  isErrandPubliclyExposed,
+  ERRAND_WIND_DOWN_MESSAGES,
+} from "@/lib/listings/listing-lifecycle";
 import {
   isErrandParticipant,
   resolveListingLifecycleAccess,
@@ -43,9 +46,9 @@ export async function generateMetadata({
     if (await hasActiveModerationForPublicSurface("ERRAND", errand.id)) {
       return ERRAND_DETAIL_FALLBACK_METADATA;
     }
-    // Phase 8F（§19）：metadata 是 PUBLIC surface——只有 OPEN（exposure
-    // state）才生成 listing title/description
-    if (errand.status !== "OPEN") {
+    // Phase 8F（§19）+ Phase 9C-02：metadata 是 PUBLIC surface——只有
+    // 公开曝光（OPEN + deadline > now）才生成 listing title/description
+    if (!isErrandPubliclyExposed(errand.status, errand.deadline, new Date())) {
       return ERRAND_DETAIL_FALLBACK_METADATA;
     }
     const title = `${errand.title} - 校园集市`;
@@ -78,6 +81,8 @@ export default async function ErrandDetailPage({
   // Phase 6C-2 raw-auth hardening：发布者/接单者个性化按 ACTIVE 账号解析；
   // SUSPENDED 会话 → null → 匿名语义（操作入口抑制），公开详情照常
   const viewerId = await getActiveViewerId();
+  // Phase 9C-02（§19）：本次渲染的全部 deadline 判定共用同一 now。
+  const now = new Date();
   const { errand, relatedErrands } = await getErrandDetail(id);
   // Phase 8F（§14-§17）Detail Access Policy：PUBLIC 仅 OPEN；publisher /
   // accepter 作为既有履约参与方放行（private obligation continuity——
@@ -89,6 +94,12 @@ export default async function ErrandDetailPage({
     isParticipant: isErrandParticipant(errand, viewerId),
   });
   if (lifecycleRole === null) {
+    notFound();
+  }
+  // Phase 9C-02（§6/§21）deadline fail closed：即使 DB 行尚未被 worker
+  // materialize 成 CANCELLED，deadline 已过的任务也立即退出公开详情面
+  //（陌生人不可见）；owner / 既有参与方的履约上下文保留。
+  if (lifecycleRole === "PUBLIC" && !isErrandPubliclyExposed(errand.status, errand.deadline, now)) {
     notFound();
   }
   // Phase 7C PUBLIC detail 治理特例（同 product 页）；EXISTING_OBLIGATION

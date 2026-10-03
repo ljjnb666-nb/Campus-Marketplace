@@ -50,15 +50,31 @@ describe("Phase 8F listing lifecycle policy SSOT", () => {
     expect(isServicePubliclyExposed("SOLD")).toBe(false);
   });
 
-  it("Errand exposure 判定：仅 OPEN 公开，全部非 OPEN workflow 态隐藏", () => {
-    expect(isErrandPubliclyExposed("OPEN")).toBe(true);
-    expect(isErrandPubliclyExposed("CLAIMED")).toBe(false);
-    expect(isErrandPubliclyExposed("IN_PROGRESS")).toBe(false);
-    expect(isErrandPubliclyExposed("PENDING_CONFIRMATION")).toBe(false);
-    expect(isErrandPubliclyExposed("COMPLETED")).toBe(false);
-    expect(isErrandPubliclyExposed("CANCELLED")).toBe(false);
-    expect(isErrandPubliclyExposed("DISPUTED")).toBe(false);
-    expect(isErrandPubliclyExposed("CLOSED")).toBe(false);
+  it("Errand exposure 判定：OPEN + deadline > now 公开，全部非 OPEN workflow 态隐藏", () => {
+    const now = new Date("2026-10-04T12:00:00.000Z");
+    const future = new Date("2026-10-05T12:00:00.000Z");
+    const past = new Date("2026-10-03T12:00:00.000Z");
+    expect(isErrandPubliclyExposed("OPEN", future, now)).toBe(true);
+    expect(isErrandPubliclyExposed("CLAIMED", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("IN_PROGRESS", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("PENDING_CONFIRMATION", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("COMPLETED", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("CANCELLED", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("DISPUTED", future, now)).toBe(false);
+    expect(isErrandPubliclyExposed("CLOSED", future, now)).toBe(false);
+  });
+
+  it("Phase 9C-02 Errand deadline SSOT：deadline <= now 即不公开（fail closed），边界与缺失同样隐藏", () => {
+    const now = new Date("2026-10-04T12:00:00.000Z");
+    // 严格大于：deadline == now 属过期（PUBLIC_EXPOSED 要求 deadline > now）
+    expect(isErrandPubliclyExposed("OPEN", new Date("2026-10-04T12:00:00.000Z"), now)).toBe(false);
+    expect(isErrandPubliclyExposed("OPEN", new Date("2026-10-04T11:59:59.999Z"), now)).toBe(false);
+    expect(isErrandPubliclyExposed("OPEN", new Date("2026-10-04T12:00:00.001Z"), now)).toBe(true);
+    // ISO 字符串与 Date 等价接受
+    expect(isErrandPubliclyExposed("OPEN", "2026-10-04T12:00:00.001Z", now)).toBe(true);
+    // deadline 缺失（不可能的 corrupt 行）→ fail closed
+    expect(isErrandPubliclyExposed("OPEN", null, now)).toBe(false);
+    expect(isErrandPubliclyExposed("OPEN", undefined, now)).toBe(false);
   });
 
   it("Rental exposure 判定：仅 AVAILABLE 公开，legacy 值一律隐藏", () => {

@@ -1,5 +1,5 @@
 "use server";
-import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 
 import { revalidatePath } from "next/cache";
 import { prepareActiveAccountMutation } from "@/lib/governance/active-account-mutation";
@@ -7,7 +7,6 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { requireUser, getVerifiedSession } from "@/lib/server-auth";
 import { applyFavoriteToggle } from "@/lib/favorite-toggle";
-import { ERRAND_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 
 export async function toggleErrandFavorite(errandTaskId: string) {
   // 身份只能来自会话，绝不信任客户端传入的 userId
@@ -15,16 +14,14 @@ export async function toggleErrandFavorite(errandTaskId: string) {
 
   try {
     // 同一事务内的删除/新建 + 计数增减，并发下保持一致。
-    // Phase 8F（§21）：new favorite 仅对 public exposure（OPEN）任务开放——
-    // 锁内 fresh 判定（补上此前缺失的 listing 存在性/软删/治理检查）；
-    // 移除既有收藏属 allowed wind-down，不受限
+    // Phase 8F（§21）：new favorite 仅对公开曝光任务开放——Phase 9C-02 起
+    // 曝光 = canonical exposure contract（OPEN + deadline > now + 治理），
+    // 锁内 fresh 判定；移除既有收藏属 allowed wind-down，不受限
     const result = await withTransaction(async (tx) => {
       const exposed = await tx.errandTask.findFirst({
         where: {
           id: errandTaskId,
-          deletedAt: null,
-          status: ERRAND_PUBLIC_EXPOSURE_STATUS,
-          ...listingModerationPublicFilter(),
+          ...errandPublicExposureFilter(new Date()),
         },
         select: { id: true },
       });
@@ -84,13 +81,11 @@ export async function getMyErrandFavorites(userId: string) {
       userId,
       // Phase 7C：PUBLIC 面——被治理隐藏的跑腿任务不再出现在收藏列表；
       // 同时收口既有缺陷（nested include 不受软删扩展拦截）
-      // RB01 review repair（Phase 8F §9）：read = discovery projection，
-      // 只投影 exposure state（OPEN）；favorite 行保留（visibility !=
-      // existence）
       errandTask: {
-        deletedAt: null,
-        status: ERRAND_PUBLIC_EXPOSURE_STATUS,
-        ...listingModerationPublicFilter(),
+        // RB01 review repair（Phase 8F §9）：read = discovery projection，
+        // 只投影公开曝光（Phase 9C-02：canonical exposure contract，含
+        // deadline 下界）；favorite 行保留（visibility != existence）
+        ...errandPublicExposureFilter(new Date()),
       },
     },
     include: {

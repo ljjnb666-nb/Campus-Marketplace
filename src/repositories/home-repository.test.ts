@@ -229,6 +229,8 @@ describe("home repository", () => {
           campusId: "campus-2",
           status: "OPEN",
           deletedAt: null,
+          // Phase 9C-02：canonical exposure contract（deadline 下界）
+          deadline: { gt: expect.any(Date) },
         }),
       }),
     );

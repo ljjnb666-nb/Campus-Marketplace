@@ -237,6 +237,12 @@ export async function updateErrand(
       return { ...initialState, message: "只有待接单任务允许编辑" };
     }
 
+    // Phase 9C-02（§5.1）：锁内 fresh deadline 已过 → 禁止编辑复活（稳定
+    // 中文提示；事务外 deadline 校验只用于 UX，authority 在锁内）
+    if (outcome === "DEADLINE_EXPIRED") {
+      return { ...initialState, message: "任务截止时间已过，不能再延长，请重新发布任务" };
+    }
+
     revalidateErrandViews(errandId);
 
     return {

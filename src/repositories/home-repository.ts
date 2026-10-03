@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { cachedPublicRead, PUBLIC_LISTING_TTL_MS } from "@/lib/public-cache";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
@@ -130,7 +131,8 @@ export async function getHomepageSummary(query: HomepageQuery = {}) {
           },
         }),
         prisma.product.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
-        prisma.errandTask.count({ where: { deletedAt: null, status: "OPEN", ...campusWhere, ...listingModerationPublicFilter() } }),
+        // Phase 9C-02：公开 errand 计数 = canonical exposure contract（含 deadline 下界）
+        prisma.errandTask.count({ where: { ...errandPublicExposureFilter(new Date()), ...campusWhere } }),
         prisma.serviceListing.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
       ]);
       return {
@@ -206,16 +208,18 @@ export async function getHomepageProducts(query: { campusId?: string } = {}) {
 
 async function loadHomepageErrands(query: { campusId?: string } = {}) {
   const campusWhere = query.campusId ? { campusId: query.campusId } : {};
-  const now = new Date();
+  // Phase 9C-02：首页两榜 = 公开 discovery 面，canonical exposure contract
+  //（OPEN + deadline > now）；同一 load 内捕获一次 now。
+  const exposure = errandPublicExposureFilter(new Date());
 
   const [urgentErrands, highRewardErrands] = await Promise.all([
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
+      where: { ...exposure, ...campusWhere },
       orderBy: [{ deadline: "asc" }, { reward: "desc" }],
       take: 6,
     }),
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
+      where: { ...exposure, ...campusWhere },
       orderBy: [{ reward: "desc" }, { deadline: "asc" }],
       take: 6,
     }),

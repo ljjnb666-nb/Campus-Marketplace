@@ -80,7 +80,9 @@ describe("errand repository", () => {
         ],
         categoryId: "category-1",
         status: "OPEN",
+        // Phase 9C-02：canonical exposure 下界与用户筛选窗口同字段合并
         deadline: {
+          gt: expect.any(Date),
           gte: expect.any(Date),
           lte: expect.any(Date),
         },
@@ -132,25 +134,37 @@ describe("errand repository", () => {
     const result = await getErrandList();
 
     const findArgs = errandTaskFindMany.mock.calls[0][0];
-    // Phase 8F：无筛选默认 = exposure state only（OPEN）
-    expect(findArgs.where).toEqual({ deletedAt: null, status: "OPEN", moderations: { none: { resolvedAt: null } } });
+    // Phase 8F + 9C-02：无筛选默认 = canonical exposure contract
+    //（OPEN + deadline > now + 治理），deadline 下界不可缺省
+    expect(findArgs.where).toEqual({
+      deletedAt: null,
+      status: "OPEN",
+      deadline: { gt: expect.any(Date) },
+      moderations: { none: { resolvedAt: null } },
+    });
     expect(findArgs.orderBy).toEqual([{ createdAt: "desc" }]);
     expect(findArgs.skip).toBe(0);
     expect(result.totalPages).toBe(1);
   });
 
-  it("Phase 8F：公开 list = exposure state only（OPEN SSOT，无 ALL 短路）", async () => {
+  it("Phase 8F + 9C-02：公开 list = canonical exposure contract（OPEN + deadline 下界 SSOT，无 ALL 短路）", async () => {
     errandTaskFindMany.mockResolvedValue([]);
     errandTaskCount.mockResolvedValue(0);
     errandCategoryFindMany.mockResolvedValue([]);
 
     await getErrandList({});
 
-    expect(errandTaskFindMany.mock.calls[0][0].where).toEqual({
+    // items 与 count 必须共用同一 captured now（deadline 跨界时 items/total 一致）
+    const findWhere = errandTaskFindMany.mock.calls[0][0].where;
+    const countWhere = errandTaskCount.mock.calls[0][0].where;
+    expect(findWhere).toEqual({
       deletedAt: null,
       status: "OPEN",
+      deadline: { gt: expect.any(Date) },
       moderations: { none: { resolvedAt: null } },
     });
+    expect(countWhere).toEqual(findWhere);
+    expect(findWhere.deadline.gt).toBe(countWhere.deadline.gt);
   });
 
   it("loads form meta with active categories only", async () => {
@@ -185,7 +199,9 @@ describe("errand repository", () => {
     expect(result.errand.id).toBe("errand-1");
     const recommendationArgs = errandTaskFindMany.mock.calls[0][0];
     expect(recommendationArgs.where.id).toEqual({ not: "errand-1" });
+    // Phase 9C-02：推荐池 = canonical exposure contract（OPEN + deadline 下界）
     expect(recommendationArgs.where.status).toBe("OPEN");
+    expect(recommendationArgs.where.deadline).toEqual({ gt: expect.any(Date) });
     expect(result.relatedErrands).toHaveLength(2);
     expect(result.relatedErrands[0].id).toBe("same-campus-category");
     expect(result.relatedErrands[0].reason).toBe("同校区同分类");

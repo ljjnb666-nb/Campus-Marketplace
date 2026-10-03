@@ -262,7 +262,16 @@ export async function createServiceOrderTx(
   );
 }
 
-/** 跑腿接单：participants = publisher + claimant；义务 = CLAIMED 任务 + ACCEPTED 订单。 */
+/**
+ * 跑腿接单：participants = publisher + claimant；义务 = CLAIMED 任务 + ACCEPTED 订单。
+ *
+ * Phase 9C-02（§4 第一红线）：deadline 进入 canonical claim authority——
+ * participant 锁 → ErrandTask FOR UPDATE → fresh row 之上，`fresh.deadline
+ * <= now` 一律 DENY（零 Task/Order/Notification 写入）。事务外 snapshot
+ * deadline / UI disable / public query 隐藏都不构成 authority；本判定是
+ * deadline 与接单义务之间的唯一线性化点（与 expiry 的 publisher 锁 +
+ * 行锁互斥，见 errand-lifecycle.expireErrandDeadlineTx 锁序）。
+ */
 export async function claimErrandTx(
   tx: Prisma.TransactionClient,
   input: {
@@ -275,6 +284,8 @@ export async function claimErrandTx(
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
   domainRacePoint?: ListingModerationRacePoint,
+  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  options?: { now?: Date },
 ) {
   return withObligationGuard(
     tx,
@@ -285,11 +296,14 @@ export async function claimErrandTx(
       campusId: input.campusId,
     }),
     async () => {
+      // Phase 9C-02（§19）：本 transition 的全部 deadline 判定共用同一
+      // authoritativeNow（禁止多处 new Date() 边界漂移）。
+      const now = options?.now ?? new Date();
       // Phase 7C（R2-02）：锁内现势行 = 义务权威（amount = fresh.reward）。
       const lockedRows = await tx.$queryRaw<Array<{
-        id: string; campusId: string; status: string; reward: string; publisherId: string; accepterId: string | null; deletedAt: Date | null;
+        id: string; campusId: string; status: string; reward: string; publisherId: string; accepterId: string | null; deadline: Date; deletedAt: Date | null;
       }>>`
-        SELECT id, "campusId", status, reward, "publisherId", "accepterId", "deletedAt"
+        SELECT id, "campusId", status, reward, "publisherId", "accepterId", "deadline", "deletedAt"
         FROM "ErrandTask"
         WHERE id = ${input.errandId}
         FOR UPDATE
@@ -305,6 +319,13 @@ export async function claimErrandTx(
       ) {
         return null;
       }
+      // Phase 9C-02 红线：锁内 fresh deadline 权威（§2.1 冻结语义——
+      // deadline 是"允许该 OPEN 任务继续接受新接单"的截止时刻）。
+      // deadline 过期 → return null，zero ErrandTask mutation / Order /
+      // Notification（不依赖 public query 隐藏或 worker 是否已 materialize）。
+      if (!(fresh.deadline instanceof Date) || fresh.deadline.getTime() <= now.getTime()) {
+        return null;
+      }
       if (await hasActiveListingModeration(tx, "ERRAND", fresh.id)) {
         return null;
       }
@@ -312,12 +333,14 @@ export async function claimErrandTx(
         await domainRacePoint(tx);
       }
 
-      // 既有条件 update 保留为最终谓词安全带（行锁下恒真，幂等语义不变）
+      // 既有条件 update 保留为最终谓词安全带（行锁下恒真，幂等语义不变）；
+      // deadline 下界一并入带（防御纵深）
       const claimResult = await tx.errandTask.updateMany({
         where: {
           id: fresh.id,
           status: "OPEN",
           accepterId: null,
+          deadline: { gt: now },
         },
         data: {
           accepterId: input.claimerId,

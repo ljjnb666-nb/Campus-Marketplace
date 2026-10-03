@@ -1,3 +1,4 @@
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 
@@ -21,7 +22,8 @@ export async function getSitemapListings() {
       take: SITEMAP_TAKE,
     }),
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", ...listingModerationPublicFilter() },
+      // Phase 9C-02：sitemap 是公开 metadata 面，canonical exposure contract
+      where: errandPublicExposureFilter(new Date()),
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: SITEMAP_TAKE,
