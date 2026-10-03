@@ -39,8 +39,10 @@ global.prisma = basePrisma;
 // 业务代码无需逐查询手写 deletedAt: null，详见 prisma-soft-delete.ts
 export const prisma = basePrisma.$extends(softDeleteExtension);
 
-// 交互事务的默认超时时间（毫秒），防止慢查询阻塞连接池
-const TRANSACTION_TIMEOUT_MS = 10_000;
+// 交互事务的默认超时时间（毫秒），防止慢查询阻塞连接池。
+// 导出供 AsyncJob execution policy 继承（Phase 9B RB06：per-job 预算
+// 覆盖必须以本值为默认基线，禁止两处漂移）。
+export const TRANSACTION_TIMEOUT_MS = 10_000;
 
 /**
  * 带默认超时的交互事务封装。

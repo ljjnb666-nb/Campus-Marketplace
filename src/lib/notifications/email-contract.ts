@@ -19,6 +19,30 @@ export const EMAIL_PROVIDER_TIMEOUT_MS_MAX = 30_000;
 export const EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS = 23;
 export const EMAIL_IDEMPOTENCY_SAFE_WINDOW_MS = EMAIL_IDEMPOTENCY_SAFE_WINDOW_HOURS * 60 * 60 * 1000;
 
+// ============================================================
+// RB06（Review Round 2）：NOTIFICATION_DELIVERY execution budget。
+//
+// EMAIL execution transaction 在 serialization boundary（delivery 行锁）
+// 内完成 provider HTTP 调用，因此事务预算必须覆盖最坏 provider 超时：
+//
+//   EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS (60s)
+//     > EMAIL_PROVIDER_TIMEOUT_MS_MAX (30s)
+//       + 锁等待 / DB / render / config / commit safety budget（>=20s）
+//     > 其它最慢合法同事务路径（account erasure 事务 ≈20s 同序）
+//
+//   EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS (90s)
+//     execution lease 必须 > execution transaction max + completion
+//     safety margin（>=10s）：90_000 > 60_000 + 10_000——否则 COMMIT 后
+//     completion marker 落库前即可能进入 expired-lease reclaim 窗口，
+//     与 9A crash-recovery 合同冲突。
+//
+// 两个常量为静态不变量测试（EMAIL-TX-BUDGET-01 / EMAIL-LEASE-BUDGET-01）
+// 的冻结基线；调整任一侧必须同步复核本注释的算术。
+// ============================================================
+
+export const EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS = 60_000;
+export const EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS = 90;
+
 /**
  * 严格但现实的 email 地址校验（§42）：支持 "addr@domain" 与
  * "Display Name <addr@domain>" 两种形态，地址部分用 z.string().email()。

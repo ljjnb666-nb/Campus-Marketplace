@@ -1348,5 +1348,99 @@ describe.skipIf(!integrationDatabaseUrl)(
         }),
       ).toBe(1);
     });
+
+    it("EMAIL-SLOW-PROVIDER-01（RB06）：provider 响应 11.5s（跨越旧 10s 事务预算）→ 真实执行路径 COMPLETED", async () => {
+      const buyer = await createFixtureUser("慢提供者买家");
+      const seller = await createFixtureUser("慢提供者卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+
+      // fake provider 受理后延迟 11.5s 才返回 200——旧行为（默认 10s
+      // execution transaction 预算）下 Prisma 事务在 provider 返回前即
+      // abort → 本测试必然 RETRY 循环永不 COMPLETED；新 extended policy
+      //（60s tx / 90s lease）必须一次完成。
+      // provider 自身超时调至 15s（合法范围 1000..30000）：保证 11.5s
+      // 延迟由【事务预算】而非 provider timeout 主导。
+      process.env.EMAIL_PROVIDER_TIMEOUT_MS = "15000";
+      scriptBehavior(key, [
+        { kind: "delay-then-ok", ms: 11_500, messageId: "msg-slow-stable" },
+      ]);
+
+      await runWorkerBatchesUntil(
+        async () => (await jobStatus(jobDedupeKey)) === "COMPLETED",
+      );
+
+      expect(httpAttemptsForKey(key)).toBe(1);
+      expect(logicalSendCount([key])).toBe(1);
+      const row = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+      });
+      expect(row.providerAcceptedAt).not.toBeNull();
+      expect(row.providerMessageId).toBe("msg-slow-stable");
+      expect(row.suppressedAt).toBeNull();
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.status).toBe("COMPLETED");
+      expect(job.completedAt).not.toBeNull();
+    }, 120_000);
+
+    it("EMAIL-SLOW-ERASURE-01（RB06）：>10s provider 窗口内行锁不消失 —— erasure 全程阻塞至 COMMIT 后仅 redact", async () => {
+      const buyer = await createFixtureUser("慢速注销买家");
+      const seller = await createFixtureUser("慢速注销卖家");
+      const { delivery } = await insertEmailDeliveryFixture({ buyerId: buyer.id, sellerId: seller.id });
+      const key = delivery.providerIdempotencyKey;
+      const jobDedupeKey = `NOTIFICATION_DELIVERY:${delivery.id}`;
+      const { getEmailDeliveryAcceptanceStats } = await import("@/lib/notifications/email-ops");
+      const statsBaseline = await getEmailDeliveryAcceptanceStats();
+
+      process.env.EMAIL_PROVIDER_TIMEOUT_MS = "15000";
+      scriptBehavior(key, [
+        { kind: "delay-then-ok", ms: 11_500, messageId: "msg-slowerase-stable" },
+      ]);
+
+      // 确定性 barrier：worker 取得 delivery 行锁（afterDeliveryRowLock）
+      // 即信号——行锁自此持续到 execution tx COMMIT（含整个 11.5s provider
+      // 窗口，跨越旧 10s 事务预算边界）。
+      const { setNotificationDeliveryHandlerSeamForTests } = await import(
+        "@/lib/async/handlers/notification-delivery"
+      );
+      let workerLockTaken = false;
+      setNotificationDeliveryHandlerSeamForTests({
+        afterDeliveryRowLock: async () => {
+          workerLockTaken = true;
+        },
+      });
+
+      const workerDone = runWorkerBatchesUntil(
+        async () => (await jobStatus(jobDedupeKey)) === "COMPLETED",
+      );
+      await waitFor(() => workerLockTaken);
+
+      // erasure 在 worker 持锁 + provider 慢响应期间启动 → updateMany 阻塞
+      const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+      const erasePromise = eraseAccount(buyer.id);
+      await waitForBlockedLockQuery("suppressedAt");
+
+      // 无需人工放行：provider 于 11.5s 后返回 → worker COMMIT → 行锁释放
+      // → erasure 继续（若行锁在旧 10s 事务预算边界提前消失，erasure 会先
+      // 把行置 suppressed，worker 的 accepted 条件更新落空 → 本断言失败）
+      await workerDone;
+      await erasePromise;
+      setNotificationDeliveryHandlerSeamForTests(null);
+
+      expect(httpAttemptsForKey(key)).toBe(1);
+      expect(logicalSendCount([key])).toBe(1);
+      const row = await rawClient!.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } });
+      expect(row.providerAcceptedAt).not.toBeNull();
+      expect(row.providerMessageId).toBe("msg-slowerase-stable");
+      expect(row.destination).toBe("");
+      expect(row.suppressedAt).toBeNull();
+      expect(row.suppressionCode).toBeNull();
+      const stats = await getEmailDeliveryAcceptanceStats();
+      expect(stats.providerAccepted).toBe(statsBaseline.providerAccepted + 1);
+      expect(stats.suppressed).toBe(statsBaseline.suppressed);
+      const job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: jobDedupeKey } });
+      expect(job.status).toBe("COMPLETED");
+    }, 120_000);
   },
 );

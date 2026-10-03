@@ -7,6 +7,10 @@ import {
 } from "@/lib/async/job-types";
 import { productReservationExpireHandler } from "@/lib/async/handlers/product-reservation-expire";
 import { notificationDeliveryHandler } from "@/lib/async/handlers/notification-delivery";
+import {
+  EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
+  EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
+} from "@/lib/notifications/email-contract";
 
 /**
  * Phase 9A：AsyncJob runtime registry（§6 fail closed）。
@@ -35,7 +39,52 @@ const jobHandlers: JobHandlerRegistry = new Map([
   ],
 ]);
 
-/** 9B/9C 扩展点（tests 的 fault injection 也经由同一 seam，生产路径不调用）。 */
+// ============================================================
+// RB06（Review Round 2）：per-job execution policy（SSOT = 本 registry）。
+//
+// EMAIL execution transaction 在 serialization boundary 内含 provider
+// HTTP 调用，默认 10s 事务预算 < provider 30s 上限 = correctness bug；
+// runner 对已注册 handler 按 policy 执行（预算算术冻结于
+// email-contract.ts 注释与 EMAIL-TX-BUDGET-01 / EMAIL-LEASE-BUDGET-01
+// 静态不变量测试）。
+//
+// 未注册 kind/version → {}（runner 继承既有默认：withTransaction 的
+// TRANSACTION_TIMEOUT_MS 与 60s execution lease 覆盖链）——unknown-job 的
+// PERMANENT → DEAD_LETTER 合同不受 policy 影响，既有 9A handler
+//（PRODUCT_RESERVATION_EXPIRE@1）不被 Email 预算污染。
+// ============================================================
+
+export type JobExecutionPolicy = {
+  /** 覆盖默认事务预算（默认 = prisma.TRANSACTION_TIMEOUT_MS = 10s）。 */
+  transactionTimeoutMs?: number;
+  /** 覆盖 beginAsyncJobExecutionTx 的 execution lease（默认 60s）。 */
+  executionLeaseSeconds?: number;
+};
+
+const JOB_EXECUTION_POLICIES: Map<string, Map<number, JobExecutionPolicy>> = new Map([
+  [
+    NOTIFICATION_DELIVERY_JOB_KIND,
+    new Map([
+      [
+        NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION,
+        {
+          transactionTimeoutMs: EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
+          executionLeaseSeconds: EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
+        },
+      ],
+    ]),
+  ],
+]);
+
+/** 已注册 kind/version 的执行预算覆盖；未注册 → {}（继承既有默认合同）。 */
+export function resolveJobExecutionPolicy(
+  kind: string,
+  schemaVersion: number,
+): JobExecutionPolicy {
+  return JOB_EXECUTION_POLICIES.get(kind)?.get(schemaVersion) ?? {};
+}
+
+/** 9B 扩展点（tests 的 fault injection 也经由同一 seam，生产路径不调用）。 */
 export function registerJobHandler(kind: string, schemaVersion: number, handler: JobHandler): void {
   const versions = jobHandlers.get(kind) ?? new Map<number, JobHandler>();
   versions.set(schemaVersion, handler);
