@@ -141,9 +141,10 @@ export async function listUserPrivacyRequestDtos(userId: string): Promise<UserPr
 const ACTIVE_DELETION_STATUSES: PrivacyRequestStatus[] = ["REQUESTED", "IN_PROGRESS", "BLOCKED"];
 
 // 注：DATA_EXPORT 没有也不允许有"只创建 REQUESTED 不执行"的低层入口——
-// 同步导出的唯一执行入口是 data-export.executeSynchronousDataExport
-// （REQUESTED→IN_PROGRESS→COMPLETED/REJECTED 单事务闭环）。
-// 此前公开的 createDataExportRequest 已删除（footgun：会制造孤儿 REQUESTED）。
+// 异步导出的唯一创建入口是 data-export-async.createAsyncDataExportRequest
+// （PrivacyRequest + DATA_EXPORT_GENERATE job 同事务原子落盘；生成由
+// production async worker 完成）。此前公开的 createDataExportRequest 保持
+// 删除（footgun：会制造孤儿 REQUESTED）。
 // ACCOUNT_DELETION flow 不受影响（createAccountDeletionRequest 独立实现）。
 
 export type DeletionOutcome =

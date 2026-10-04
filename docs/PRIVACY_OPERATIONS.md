@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 查看协议 / 历史版本 | `/legal`、`/legal/<type>?version=N` | 公开可访问 |
 | 查看同意历史 / 当前版本状态 | `/my/privacy` | 仅本人 |
-| 导出本人数据 | `/my/privacy` → 导出按钮（`GET /api/privacy/export`，唯一执行入口） | 同步 JSON 下载；一次点击 = 恰好一条 COMPLETED 请求；3 次/15 分钟限流；>8MB 显式失败（请求记为 REJECTED） |
+| 导出本人数据 | `/my/privacy` → 导出按钮（`POST /api/privacy/export`，唯一创建入口） | 异步生成：HTTP 202 快速返回，UI 显示排队/生成中；完成后同源代理下载（`GET /api/privacy/export/<requestId>/download`）；文件短生命周期（默认 24h，到期自动删除）；3 次/15 分钟限流；并发重复 409 `DATA_EXPORT_ALREADY_ACTIVE` |
 | 申请注销 | `/my/privacy` → 输入"注销账号"确认 | 同步执行：成功即匿名化完成 |
 | 取消未执行请求 | `/my/privacy` 请求记录（REQUESTED 态） | 仅用户本人 |
 | 重新同意 | `/legal/accept`（consent gate 自动引导） | 显式操作，绑定当前版本 |
@@ -65,8 +65,13 @@ REQUESTED→IN_PROGRESS→COMPLETED；失败（超限/执行异常）→ REJECTE
 
 - 导出内容边界由代码强制（显式 DTO + 禁止键扫描）；运营者**不需要也不应该**
   为用户手工拼装导出数据；
-- 若用户报告导出失败 `DATA_EXPORT_TOO_LARGE`：记录 case，等待 Phase 9
-  异步导出能力；不要用 DB 直查代替（泄漏风险）；
+- 若用户报告导出失败（UI 显示"生成失败"）：请求记录为 REJECTED
+  （reasonCode 见 PrivacyRequest 行：`DATA_EXPORT_ARTIFACT_TOO_LARGE` /
+  `DATA_EXPORT_GENERATION_FAILED` / `ACCOUNT_ALREADY_DELETED`），用户可
+  直接重新申请；不要用 DB 直查拼装导出数据代替（泄漏风险）；
+- 导出文件是短生命周期私有 artifact（bucket/objectKey 内部秘密，绝不
+  出现在任何用户可见面）；到期由 storage cleanup 物理删除——无需人工
+  干预，也不要延长保留；
 - 导出响应是 `private, no-store`——不得通过共享缓存/截图工具二次分发。
 
 ## 5. 注销后的数据状态（运营可见语义）
