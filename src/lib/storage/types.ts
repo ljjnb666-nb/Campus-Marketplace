@@ -24,6 +24,14 @@ export interface PutObjectInput extends ObjectRef {
    * （业务层不得自行包装 timeout race，LR-R3 契约不变）。
    */
   operationTimeoutMs?: number;
+  /**
+   * RB04：覆盖写入失败日志中的存储定位符输出（logWriteFailure）。
+   * 提供时（应为 opaque 机器标识，如 "data-export:<artifactId>"）日志只含
+   * 该标识——绝不输出 raw bucket / objectKey / endpoint / userId-derived
+   * 路径。缺省 = 保持既有行为（raw locator 进日志，UploadedAsset 面
+   * 不变）。安全责任由本策略在代码内保证，不依赖日志平台脱敏。
+   */
+  diagnosticRef?: string;
 }
 
 export interface ObjectMetadata {
@@ -49,8 +57,12 @@ export interface StorageClient {
   /** 上传对象（服务端凭据，浏览器不持有任何 S3 密钥） */
   putObject(input: PutObjectInput): Promise<void>;
 
-  /** 删除对象；对象不存在视为成功（幂等） */
-  deleteObject(ref: ObjectRef): Promise<void>;
+  /**
+   * 删除对象；对象不存在视为成功（幂等）。
+   * options.diagnosticRef 语义同 PutObjectInput.diagnosticRef（RB04）：
+   * 提供时失败日志只输出 opaque 标识，绝不输出 raw locator。
+   */
+  deleteObject(ref: ObjectRef, options?: { diagnosticRef?: string }): Promise<void>;
 
   /** 查询对象元数据；对象不存在返回 null */
   headObject(ref: ObjectRef): Promise<ObjectMetadata | null>;

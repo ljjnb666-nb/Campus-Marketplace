@@ -405,6 +405,10 @@ export async function processDataExportGenerateJob(
     contentType: DATA_EXPORT_ARTIFACT_MIME_TYPE,
     cacheControl: DATA_EXPORT_ARTIFACT_CACHE_CONTROL,
     operationTimeoutMs: DATA_EXPORT_S3_PUT_OPERATION_TIMEOUT_MS,
+    // RB04：artifact 定位符是 logSafe=false 的 STORAGE_METADATA——失败
+    // 日志只允许 opaque artifactId（cuid，不含 userId/requestId 派生），
+    // 绝不输出 raw bucket/objectKey/endpoint。
+    diagnosticRef: `data-export:${freshArtifact.id}`,
   });
 
   // §26：TTL 从 artifact READY / request COMPLETED 起算

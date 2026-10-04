@@ -133,7 +133,11 @@ export async function runDataExportArtifactCleanup(
   for (const artifact of pendingArtifacts) {
     try {
       // S3 delete 幂等：对象不存在视为成功（§28）
-      await storage.deleteObject({ bucket: artifact.bucket, objectKey: artifact.objectKey });
+      // RB04：opaque diagnosticRef——失败日志不携带 raw locator
+      await storage.deleteObject(
+        { bucket: artifact.bucket, objectKey: artifact.objectKey },
+        { diagnosticRef: `data-export:${artifact.id}` },
+      );
 
       // 条件 DELETED 转移：two cleanup workers → one logical transition
       const deleted = await withTransaction((tx) =>
@@ -146,10 +150,12 @@ export async function runDataExportArtifactCleanup(
     } catch (error) {
       // 单条失败不中断批次：行保持 PENDING_DELETE，下轮自动重试
       summary.failures += 1;
+      // RB04：只记 errorName——S3 error message 可能内嵌 bucket/key，
+      // logSafe=false 的私有定位符不得进入结构化日志
       logger.error("导出 artifact 清理失败，下轮重试", "data-export-cleanup", {
         operation: "artifact-cleanup",
         artifactId: artifact.id,
-        error,
+        errorName: error instanceof Error ? error.name : "unknown",
       });
     }
   }

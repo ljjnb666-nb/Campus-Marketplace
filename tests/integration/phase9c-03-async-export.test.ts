@@ -610,6 +610,139 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
     });
   });
 
+  it("EXPORT-STORAGE-LOG-REDACTION-01（RB04）：data-export PUT/DELETE 失败日志零 raw locator（opaque diagnosticRef）", async () => {
+    const userId = await createFixtureUser("log-redaction");
+    const { request } = await createAsyncDataExportRequest(userId);
+    await runExportJobUntil(request.id, (row) => row.attempts >= 1);
+    const artifact = await artifactRow(request.id); // WRITING anchor
+
+    // 不可达 endpoint 的真实 S3Storage：真实失败路径 → logWriteFailure
+    // 真实触发（而非测试自造日志）。requestTimeout 1s + maxAttempts 1
+    // 保证失败快速且确定。
+    const { S3Storage } = await import("@/lib/storage/s3-storage");
+    const { S3Client } = await import("@aws-sdk/client-s3");
+    const unreachable = new S3Storage(
+      new S3Client({
+        endpoint: "http://127.0.0.1:9",
+        region: "us-east-1",
+        forcePathStyle: true,
+        credentials: { accessKeyId: "it-unreachable", secretAccessKey: "it-unreachable" },
+        requestHandler: { requestTimeout: 1000, maxAttempts: 1 } as never,
+      }),
+    );
+    setStorageForTests(unreachable);
+
+    const loggerModule = await import("@/lib/logger");
+    const warnSpy = vi.spyOn(loggerModule.logger, "warn");
+    const errorSpy = vi.spyOn(loggerModule.logger, "error");
+
+    try {
+      // ---- PUT 路径：真实 runner → handler Step B → putObject 失败 ----
+      await rawClient.asyncJob.update({
+        where: { dedupeKey: `DATA_EXPORT_GENERATE:${request.id}` },
+        data: { runAt: new Date() },
+      });
+      await runAsyncJobBatchOnce();
+
+      const putLogs = warnSpy.mock.calls
+        .filter((call) => call[1] === "S3Storage")
+        .map((call) => JSON.stringify(call[2] ?? {}));
+      expect(putLogs.length).toBeGreaterThanOrEqual(1);
+
+      const joinedPut = putLogs.join('\n');
+      for (const forbidden of [
+        artifact.bucket,
+        artifact.objectKey,
+        "private/data-exports/",
+        userId,
+        request.id,
+        "127.0.0.1",
+      ]) {
+        expect(joinedPut.includes(forbidden)).toBe(false);
+      }
+
+      // 机器诊断字段完整保留（errorClass/ambiguous/attempts/durationMs）
+      const putFields = JSON.parse(putLogs[0]!);
+      expect(putFields).toMatchObject({
+        operation: "putObject",
+        event: "storage_write_failure",
+        locator: `data-export:${artifact.id}`,
+      });
+      expect(typeof putFields.errorClass).toBe("string");
+      expect(typeof putFields.ambiguous).toBe("boolean");
+      expect(typeof putFields.attempts).toBe("number");
+      expect(typeof putFields.durationMs).toBe("number");
+
+      // 连接失败 = RETRYABLE（既有分类不变）；安全字段仅在 PERMANENT 路径收敛
+      const jobAfterPut = await rawClient.asyncJob.findUniqueOrThrow({
+        where: { dedupeKey: `DATA_EXPORT_GENERATE:${request.id}` },
+      });
+      expect(jobAfterPut.status).toBe("RETRY");
+
+      // ---- DELETE 路径：cleanup 对 PENDING_DELETE 删除失败 → 同策略 ----
+      warnSpy.mockClear();
+      await rawClient.dataExportArtifact.update({
+        where: { id: artifact.id },
+        data: { status: "PENDING_DELETE" },
+      });
+      const cleanupSummary = await runDataExportArtifactCleanup({ batchLimit: 10 });
+      expect(cleanupSummary.failures).toBeGreaterThanOrEqual(1);
+
+      const deleteLogs = warnSpy.mock.calls
+        .filter((call) => call[1] === "S3Storage")
+        .map((call) => JSON.stringify(call[2] ?? {}));
+      expect(deleteLogs.length).toBeGreaterThanOrEqual(1);
+      const joinedDelete = deleteLogs.join('\n');
+      for (const forbidden of [
+        artifact.bucket,
+        artifact.objectKey,
+        "private/data-exports/",
+        userId,
+        request.id,
+        "127.0.0.1",
+      ]) {
+        expect(joinedDelete.includes(forbidden)).toBe(false);
+      }
+      // 本套件更早用例可能遗留其它 PENDING_DELETE artifact（updatedAt 更早
+      // 排前）——断言：全部日志均为 opaque data-export:<artifactId> locator，
+      // 且包含本 artifact 的 ref（排重处理顺序不敏感）
+      const deleteFields = deleteLogs.map((entry) => JSON.parse(entry) as { locator: string });
+      expect(
+        deleteFields.some((fields) => fields.locator === `data-export:${artifact.id}`),
+      ).toBe(true);
+      expect(
+        deleteFields.every(
+          (fields) => typeof fields.locator === "string" && fields.locator.startsWith("data-export:"),
+        ),
+      ).toBe(true);
+
+      // cleanup 自身的 error 日志只含 errorName（S3 message 可能内嵌 locator）
+      const cleanupErrorLogs = errorSpy.mock.calls
+        .filter((call) => call[1] === "data-export-cleanup")
+        .map((call) => JSON.stringify(call[2] ?? {}));
+      expect(cleanupErrorLogs.length).toBeGreaterThanOrEqual(1);
+      expect(JSON.parse(cleanupErrorLogs[0]!).errorName).toBeTruthy();
+      const cleanupErrorText = cleanupErrorLogs.join('\n');
+      expect(cleanupErrorText.includes(artifact.objectKey)).toBe(false);
+      expect(cleanupErrorText.includes("private/data-exports/")).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+      setStorageForTests(realStorage);
+    }
+
+    // 收敛：request REJECTED（artifact 已 PENDING_DELETE）+ 对象受追踪，最终物理收敛
+    const reconciliation = await reconcileDataExportDeadLetters({ batchLimit: 10 });
+    void reconciliation; // 本路径 job 未 DEAD_LETTER（RETRY 中）——手动收敛该 fixture
+    await rawClient.privacyRequest.update({
+      where: { id: request.id },
+      data: { status: "REJECTED", reasonCode: "DATA_EXPORT_GENERATION_FAILED" },
+    });
+    const secondCleanup = await runDataExportArtifactCleanup({ batchLimit: 10 });
+    expect(secondCleanup.objectsDeleted).toBeGreaterThanOrEqual(1);
+    expect((await artifactRow(request.id)).status).toBe("DELETED");
+  });
+
   it("EXPORT-ERASE-RACE-01：export completion wins → erasure 跟进 → PENDING_DELETE + 下载拒绝（真实锁 barrier）", async () => {
     const userId = await createFixtureUser("erase-race-01");
     const { request } = await createAsyncDataExportRequest(userId);
