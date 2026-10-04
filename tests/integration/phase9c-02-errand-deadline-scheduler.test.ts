@@ -281,17 +281,28 @@ describe.skipIf(!integrationDatabaseUrl)(
       }
 
       // naive "先取前 N 条再 skipDuplicates" 会在 i=1..4 占满 batch=4，
-      // i=6..9 永远 starvation；anti-join discovery 必须跳过 i=1..5，
-      // 本轮让 i=6..9 恰好获得 intent
-      const summary = await runSchedulerOnce(4);
-      expect(summary.discovered).toBe(4);
-      expect(summary.enqueued).toBe(4);
+      // i=6..9 永远 starvation；anti-join discovery 必须跳过 i=1..5。
+      // 共享 DB 上并行集成文件也会产生 due OPEN errand 候选（合法地消耗
+      // batch 名额）——因此用有界重试（每轮真实 discovery/enqueue，零
+      // sleep）让全部未 schedule 候选最终获得 intent；naive 实现下 i=1..4
+      // 恒占满候选窗口，i=6..9 永远拿不到（重试耗尽 → 断言失败）。
+      const myKeys = errands.map((errand) => `${ERRAND_DEDUPE_PREFIX}:${errand.id}`);
+      for (let round = 0; round < 10; round += 1) {
+        const mine = await rawClient!.asyncJob.count({
+          where: { dedupeKey: { in: myKeys } },
+        });
+        if (mine >= 9) {
+          break;
+        }
+        await runSchedulerOnce(4);
+      }
 
       for (let i = 1; i <= 9; i += 1) {
         const count = await rawClient!.asyncJob.count({
           where: { dedupeKey: `${ERRAND_DEDUPE_PREFIX}:${errands[i - 1]!.id}` },
         });
-        // 每个 errand 生命周期至多一个 canonical expiry intent（INV-10）
+        // 每个 errand 生命周期至多一个 canonical expiry intent（INV-10）——
+        // anti-join 下 i=1..5 在重试后仍恰好 1 条（绝不复制）
         expect(count).toBe(1);
         jobDedupeKeys.push(`${ERRAND_DEDUPE_PREFIX}:${errands[i - 1]!.id}`);
       }
@@ -300,7 +311,6 @@ describe.skipIf(!integrationDatabaseUrl)(
       const newlyEnqueued = await rawClient!.asyncJob.findMany({
         where: {
           dedupeKey: { in: errands.slice(5).map((errand) => `${ERRAND_DEDUPE_PREFIX}:${errand.id}`) },
-          createdAt: { gte: new Date(Date.now() - 60_000) },
         },
         select: { dedupeKey: true, createdAt: true },
       });
