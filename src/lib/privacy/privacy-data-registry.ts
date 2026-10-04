@@ -110,6 +110,9 @@ export const FROZEN_PERSONAL_MODELS = [
   "UploadedAsset",
   "PrivacyRequest",
   "PolicyAcceptance",
+  // Phase 9C-03：隐私导出 artifact（system-generated derived copy，
+  // 短 TTL、注销/到期物理删除）
+  "DataExportArtifact",
 ] as const;
 
 export type FrozenPersonalModel = (typeof FROZEN_PERSONAL_MODELS)[number];
@@ -183,6 +186,24 @@ export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPol
   PrivacyRequest: {
     model: "PrivacyRequest",
     ...entry("GOVERNANCE_AUDIT", "SAFE_SUBSET", "RETAIN_GOVERNANCE", false, false),
+  },
+  // Phase 9C-03：DataExportArtifact 是 user-linked PII derivative——
+  // 用户请求导出时由系统生成的本人数据 JSON 副本（campus-marketplace.
+  // user-export/v3，application/json）。derived ephemeral：
+  // - 绝不是 authoritative source record，也绝不为 legal hold 永久保留
+  //   （DataHold 保护 authoritative user/governance data，artifact 只是
+  //   短 TTL 派生副本，ACTIVE hold 不阻断其到期清理）；
+  // - selfExport EXCLUDE：artifact 自身绝不进入导出载荷（否则自引用
+  //   无穷），bucket/objectKey 属 STORAGE_METADATA 结构性缺席；
+  // - erasure DELETE：注销时全部 WRITING/READY artifact 原子标记
+  //   PENDING_DELETE（运行时在 account-erasure 执行），物理对象与行由
+  //   storage cleanup 收敛删除；
+  // - secondaryCopyAllowed=true：该模型本身就是用户明确授权的导出副本
+  //   （DATA_EXPORT 权利实现），TTL 有界、删除幂等；
+  // - 不计入 User.storageUsedBytes（用户导出自身数据绝不被 quota 阻断）。
+  DataExportArtifact: {
+    model: "DataExportArtifact",
+    ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "DELETE", true, false),
   },
   PolicyAcceptance: {
     model: "PolicyAcceptance",
@@ -327,6 +348,15 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("UploadedAsset", "bucket", STORAGE_INTERNAL_FIELD),
   // ---- PrivacyRequest：handledNote 不导出 ----
   field("PrivacyRequest", "handledNote", OPERATOR_ONLY_FIELD),
+  // ---- Phase 9C-03：DataExportArtifact 内部定位符与完整性元数据 ----
+  // bucket/objectKey 与 UploadedAsset 同构（STORAGE_METADATA 绝不
+  // self-export / 绝不进入 browser-visible surface）；sha256 是 artifact
+  // 完整性摘要（机器 provenance，logSafe=true，绝不向用户展示）；
+  // mimeType/sizeBytes/expiresAt 是非敏感机器元数据（不命中敏感命名
+  // 启发式，status/requestId/userId 同）。
+  field("DataExportArtifact", "bucket", STORAGE_INTERNAL_FIELD),
+  field("DataExportArtifact", "objectKey", STORAGE_INTERNAL_FIELD),
+  field("DataExportArtifact", "sha256", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
 ];
 
 // ============================================================
@@ -733,6 +763,8 @@ export const ERASURE_IMPLEMENTATION_MODELS: ReadonlySet<string> = new Set([
   "RentalHandoverRecord",
   // Phase 8D-01：meetup custom location 快照（proposedById 唯一作者）
   "OrderMeetup",
+  // Phase 9C-03：导出 artifact 注销收敛（WRITING/READY → PENDING_DELETE）
+  "DataExportArtifact",
 ]);
 
 /** 经外部审计批准的保留例外（本轮 = 空；新增必须附审计证据） */

@@ -82,8 +82,8 @@ const schemaFields = parseSchemaModelFields(schemaText);
 const schemaModelNames = parseSchemaModelNames(schemaText);
 
 describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", () => {
-  it("17 个冻结 personal-bearing models 全部有 model 级 policy（Phase 8C-01 +OrderDispute）", () => {
-    expect(FROZEN_PERSONAL_MODELS).toHaveLength(17);
+  it("18 个冻结 personal-bearing models 全部有 model 级 policy（Phase 9C-03 +DataExportArtifact）", () => {
+    expect(FROZEN_PERSONAL_MODELS).toHaveLength(18);
 
     for (const model of FROZEN_PERSONAL_MODELS) {
       const policy = getModelPrivacyPolicy(model);

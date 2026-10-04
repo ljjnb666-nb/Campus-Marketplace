@@ -95,9 +95,14 @@ export class S3Storage implements StorageClient {
           CacheControl: input.cacheControl,
         }),
         // 应用级整个操作预算（含 SDK 重试）：超限 AbortError 终止重试链。
-        // abort ≠ 证明远端未提交——失败方（asset-service）仍按 LR-071
-        // 歧义结果安全路径恢复。
-        { abortSignal: AbortSignal.timeout(S3_PUT_OPERATION_TIMEOUT_MS) },
+        // abort ≠ 证明远端未提交——失败方仍按歧义结果安全路径恢复。
+        // MiB 级对象可显式传入更大的有界覆盖（types.ts 契约），默认
+        // 预算按小图片对象调定。
+        {
+          abortSignal: AbortSignal.timeout(
+            input.operationTimeoutMs ?? S3_PUT_OPERATION_TIMEOUT_MS,
+          ),
+        },
       );
     } catch (error) {
       this.logWriteFailure("putObject", input, error, startedAt);

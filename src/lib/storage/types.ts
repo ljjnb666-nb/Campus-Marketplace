@@ -17,6 +17,13 @@ export interface PutObjectInput extends ObjectRef {
    * 存储层不做任何猜测，避免私有对象被公开缓存策略污染。
    */
   cacheControl: string;
+  /**
+   * 可选的有界操作预算覆盖（毫秒）。默认 = S3_PUT_OPERATION_TIMEOUT_MS
+   * （按小图片对象调定）。MiB 级对象（如隐私导出 artifact，Phase 9C-03）
+   * 必须显式传入更大的【有界】预算——绝不无界；覆盖仍由存储层统一执行
+   * （业务层不得自行包装 timeout race，LR-R3 契约不变）。
+   */
+  operationTimeoutMs?: number;
 }
 
 export interface ObjectMetadata {
