@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import type { UserExportPayload } from "@/lib/privacy/data-export";
+
 /**
  * Phase 5 治理域集成测试 + Privacy/Governance Drill（真实 PostgreSQL）。
  *
@@ -187,6 +189,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await rawClient!.uploadedAsset.deleteMany({ where: { ownerId: { in: createdUserIds } } });
     await rawClient!.policyAcceptance.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: createdUserIds } } });
+    // Phase 9C-03：AsyncJob 与 PrivacyRequest 无 FK——本套件是唯一
+    // DATA_EXPORT_GENERATE producer（9C-03 专属套件走隔离库），按 kind 全清
+    await rawClient!.asyncJob.deleteMany({
+      where: { kind: "DATA_EXPORT_GENERATE" },
+    });
     await rawClient!.userVerification.deleteMany({ where: { userId: { in: createdUserIds } } });
     await rawClient!.adminLog.deleteMany({
       where: { OR: [{ adminId: { in: createdUserIds } }, { targetId: { in: createdUserIds } }] },
@@ -438,11 +445,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     expect(() => assertNoForbiddenExportFields(payload)).not.toThrow();
   });
 
-  it("SYNC_EXPORT_REQUEST_COMPLETES_TEST：一次同步导出恰好形成一条 COMPLETED 请求", async () => {
-    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+  it("ASYNC_EXPORT_REQUEST_CREATION_TEST：一次申请 = 恰一条 REQUESTED 请求 + 恰一条 durable job（原子落盘）", async () => {
+    const { createAsyncDataExportRequest } = await import("@/lib/privacy/data-export-async");
 
-    const target = await createFixtureUser("同步导出");
-    const orderNo = `${RUN_TAG}-SYNC1`;
+    const target = await createFixtureUser("异步导出申请");
+    const orderNo = `${RUN_TAG}-ASYNC1`;
     createdOrderNos.push(orderNo);
     await rawClient!.order.create({
       data: {
@@ -455,20 +462,42 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
       },
     });
 
-    const result = await executeSynchronousDataExport(target.id);
+    const result = await createAsyncDataExportRequest(target.id);
 
-    // 恰好一条 DATA_EXPORT 请求且 COMPLETED + completedAt
+    // 恰好一条 DATA_EXPORT 请求（REQUESTED 起步；生成由 worker 完成）
     const requests = await rawClient!.privacyRequest.findMany({
       where: { userId: target.id, type: "DATA_EXPORT" },
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]!.id).toBe(result.request.id);
-    expect(requests[0]!.status).toBe("COMPLETED");
-    expect(requests[0]!.completedAt).toBeTruthy();
+    expect(requests[0]!.status).toBe("REQUESTED");
+    expect(requests[0]!.completedAt).toBeNull();
 
-    // 载荷 + 请求元数据一起返回
-    expect(result.payload.account.id).toBe(target.id);
-    expect(result.payload.orders.some((order) => order.orderNo === orderNo)).toBe(true);
+    // §6 原子落盘：恰好一条 canonical generation job（dedupeKey + payload 契约）
+    const jobs = await rawClient!.asyncJob.findMany({
+      where: { dedupeKey: `DATA_EXPORT_GENERATE:${result.request.id}` },
+    });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.kind).toBe("DATA_EXPORT_GENERATE");
+    expect(jobs[0]!.schemaVersion).toBe(1);
+    expect(jobs[0]!.payload).toEqual({ requestId: result.request.id });
+
+    // §7 并发重复（双击/多 tab/retry）稳定映射 DATA_EXPORT_ALREADY_ACTIVE，
+    // 且绝不产生第二条 request/job
+    const { GovernanceError } = await import("@/lib/governance/domain-errors");
+    await expect(createAsyncDataExportRequest(target.id)).rejects.toBeInstanceOf(GovernanceError);
+    const requestsAfter = await rawClient!.privacyRequest.findMany({
+      where: { userId: target.id, type: "DATA_EXPORT" },
+    });
+    expect(requestsAfter).toHaveLength(1);
+    expect(
+      await rawClient!.asyncJob.count({
+        where: {
+          kind: "DATA_EXPORT_GENERATE",
+          payload: { path: ["requestId"], equals: result.request.id },
+        },
+      }),
+    ).toBe(1);
   });
 
   it("hold 阻断注销（BLOCKED + 零部分擦除 + 重复请求 ALREADY_ACTIVE）", async () => {
@@ -888,56 +917,147 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
   });
 
   // ============================================================
-  // ============================================================
-  // BLOCKER A REPAIR 2 — 导出失败台账必须持久化（不被事务回滚吞掉）
+  // Phase 9C-03 — 导出失败台账必须收敛 REJECTED（异步路径合同）
   // ============================================================
 
-  it("SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST CASE1：TOO_LARGE → 恰一条 REJECTED 台账（真实提交）", async () => {
-    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
-    const { governanceError, GovernanceError } = await import(
-      "@/lib/governance/domain-errors"
+  it("ASYNC_EXPORT_TOO_LARGE_CONVERGENCE_TEST：超限 → REJECTED 台账 + artifact PENDING_DELETE（零 PUT，真实提交）", async () => {
+    const { createAsyncDataExportRequest, processDataExportGenerateJob } = await import(
+      "@/lib/privacy/data-export-async"
+    );
+    const { withTransaction } = await import("@/lib/prisma");
+
+    const target = await createFixtureUser("异步导出-超限");
+    const { request } = await createAsyncDataExportRequest(target.id);
+
+    const jobRow = await rawClient!.asyncJob.findUniqueOrThrow({
+      where: { dedupeKey: `DATA_EXPORT_GENERATE:${request.id}` },
+    });
+    // fixture job context（绕过共享队列 claim——CI 并行下其它套件的 due job
+    // 会挤占 batchSize；claim/lease 机制由 phase9c-03 专属隔离库套件用真实
+    // runner 证明）。attempts=1 对应真实 Step A claim 计数。
+    const jobContext = {
+      id: jobRow.id,
+      kind: jobRow.kind,
+      schemaVersion: jobRow.schemaVersion,
+      payload: jobRow.payload,
+      attempts: 1,
+      maxAttempts: jobRow.maxAttempts,
+      leaseToken: "it-fixture-lease",
+      previousStatus: "PENDING",
+    };
+
+    // Step A（prepare anchor → RESCHEDULE）
+    const outcomeA = await withTransaction((tx) =>
+      processDataExportGenerateJob(tx, jobContext),
+    );
+    expect(outcomeA.kind).toBe("RESCHEDULE");
+    expect((await rawClient!.privacyRequest.findUniqueOrThrow({ where: { id: request.id } })).status).toBe("IN_PROGRESS");
+
+    // Step B：builder seam 注入超限载荷（序列化 > 默认 32 MiB 上界）。
+    // 超限检查发生在任何 S3 PUT 之前（零外部副作用），收敛 REJECTED
+    const hugePayload = {
+      blob: "x".repeat(33 * 1024 * 1024),
+    } as unknown as UserExportPayload;
+
+    const outcomeB = await withTransaction((tx) =>
+      processDataExportGenerateJob(tx, jobContext, {
+        builder: async () => hugePayload,
+      }),
     );
 
-    const target = await createFixtureUser("导出失败-超限");
+    // intent 已收敛（job 正常完成；request 终态 REJECTED）
+    expect(outcomeB.kind).toBe("COMPLETED");
 
-    // deterministic seam：注入的 builder 强制抛 TOO_LARGE
-    await expect(
-      executeSynchronousDataExport(target.id, async () => {
-        throw governanceError("DATA_EXPORT_TOO_LARGE");
-      }),
-    ).rejects.toBeInstanceOf(GovernanceError);
-
-    // 新连接查询 DB：REJECTED 台账真实持久化（没有被事务回滚吞掉）
+    // REJECTED 台账真实持久化（新连接查询，不被事务回滚吞掉）
     const requests = await rawClient!.privacyRequest.findMany({
       where: { userId: target.id, type: "DATA_EXPORT" },
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]!.status).toBe("REJECTED");
-    expect(requests[0]!.reasonCode).toBe("DATA_EXPORT_TOO_LARGE");
+    expect(requests[0]!.reasonCode).toBe("DATA_EXPORT_ARTIFACT_TOO_LARGE");
     expect(requests[0]!.completedAt).toBeNull();
-  });
 
-  it("SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST CASE2：执行失败 → 恰一条 REJECTED 台账 + 原错误上抛", async () => {
-    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+    const artifacts = await rawClient!.dataExportArtifact.findMany({
+      where: { requestId: request.id },
+    });
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]!.status).toBe("PENDING_DELETE");
+  }, 60_000);
 
-    const target = await createFixtureUser("导出失败-异常");
+  it("ASYNC_EXPORT_DEAD_LETTER_RECONCILE_TEST：job 终局失败 → scoped reconciler 收敛 REJECTED（幂等 + 不触碰其它 kind）", async () => {
+    const { createAsyncDataExportRequest, reconcileDataExportDeadLetters } = await import(
+      "@/lib/privacy/data-export-async"
+    );
+    const { failAsyncJob } = await import("@/lib/async/job-repository");
+    const { withTransaction } = await import("@/lib/prisma");
 
-    const boom = new Error("boom: controlled export execution failure");
+    const target = await createFixtureUser("异步导出-dead-letter");
+    const { request } = await createAsyncDataExportRequest(target.id);
 
-    await expect(
-      executeSynchronousDataExport(target.id, async () => {
-        throw boom;
+    // 以真实 repository 语义制造 attempts 耗尽 → DEAD_LETTER（fixture 置
+    // RUNNING + attempts=maxAttempts——模拟 lease 持有中的最后一次失败；
+    // failAsyncJob 的 WHERE 要求 status=RUNNING AND leaseToken 匹配 AND
+    // attempts >= maxAttempts）。request 仍 REQUESTED（Step A 未执行 →
+    // artifact 未创建）
+    const jobRow = await rawClient!.asyncJob.findUniqueOrThrow({
+      where: { dedupeKey: `DATA_EXPORT_GENERATE:${request.id}` },
+    });
+    await rawClient!.asyncJob.update({
+      where: { id: jobRow.id },
+      data: {
+        status: "RUNNING",
+        leaseToken: "it-fixture-dead-letter",
+        attempts: jobRow.maxAttempts,
+      },
+    });
+
+    const deadLetterOutcome = await withTransaction((tx) =>
+      failAsyncJob(tx, {
+        id: jobRow.id,
+        leaseToken: "it-fixture-dead-letter",
+        attempts: jobRow.maxAttempts,
+        maxAttempts: jobRow.maxAttempts,
+        failureClass: "RETRYABLE",
+        errorCode: "EXPORT_TRANSIENT_BUDGET_EXHAUSTED",
+        errorMessage: "异步任务执行失败",
       }),
-    ).rejects.toBe(boom);
+    );
+    expect(deadLetterOutcome.kind).toBe("DEAD_LETTER");
+
+    // 此时 request 仍非终态（generic runner 边界之外的残余风险面），
+    // scoped reconciler 必须收敛（§21）
+    const beforeReconcile = await rawClient!.privacyRequest.findUniqueOrThrow({
+      where: { id: request.id },
+    });
+    expect(beforeReconcile.status).toBe("REQUESTED");
+
+    const summary = await reconcileDataExportDeadLetters({ batchLimit: 10 });
+    expect(summary.convergedRequests).toBeGreaterThanOrEqual(1);
 
     const requests = await rawClient!.privacyRequest.findMany({
       where: { userId: target.id, type: "DATA_EXPORT" },
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]!.status).toBe("REJECTED");
-    expect(requests[0]!.reasonCode).toBe("EXPORT_EXECUTION_FAILED");
+    expect(requests[0]!.reasonCode).toBe("DATA_EXPORT_GENERATION_FAILED");
     expect(requests[0]!.completedAt).toBeNull();
-  });
+
+    // Step A 从未执行 → 无 WRITING anchor → 无 artifact 行（无需清理）
+    const artifacts = await rawClient!.dataExportArtifact.findMany({
+      where: { requestId: request.id },
+    });
+    expect(artifacts).toHaveLength(0);
+
+    // 幂等：再次扫描不再产生收敛（request 已 terminal，扫描谓词不匹配）
+    const secondSummary = await reconcileDataExportDeadLetters({ batchLimit: 10 });
+    expect(
+      secondSummary.convergedRequests,
+    ).toBe(0);
+
+    // job 保持 DEAD_LETTER（reconciler 不触碰 job 状态，requeue 是 ops seam）
+    const jobAfter = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: jobRow.id } });
+    expect(jobAfter.status).toBe("DEAD_LETTER");
+  }, 60_000);
 
   // ============================================================
   // BLOCKER B REPAIR 2 — obligation 创建 vs 账号注销竞态

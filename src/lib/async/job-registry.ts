@@ -1,4 +1,6 @@
 import {
+  DATA_EXPORT_GENERATE_JOB_KIND,
+  DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION,
   ERRAND_DEADLINE_EXPIRE_JOB_KIND,
   ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
   NOTIFICATION_DELIVERY_JOB_KIND,
@@ -10,10 +12,15 @@ import {
 import { productReservationExpireHandler } from "@/lib/async/handlers/product-reservation-expire";
 import { notificationDeliveryHandler } from "@/lib/async/handlers/notification-delivery";
 import { errandDeadlineExpireHandler } from "@/lib/async/handlers/errand-deadline-expire";
+import { dataExportGenerateHandler } from "@/lib/async/handlers/data-export-generate";
 import {
   EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
   EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
 } from "@/lib/notifications/email-contract";
+import {
+  DATA_EXPORT_GENERATE_EXECUTION_LEASE_SECONDS,
+  DATA_EXPORT_GENERATE_EXECUTION_TX_TIMEOUT_MS,
+} from "@/lib/privacy/data-export-contract";
 
 /**
  * Phase 9A：AsyncJob runtime registry（§6 fail closed）。
@@ -28,7 +35,10 @@ import {
  * Phase 9C-02 新增 ERRAND_DEADLINE_EXPIRE@1（§9：errand deadline 到期
  * scheduler wake-up 意图，payload 仅 errandId，dedupeKey =
  * ERRAND_DEADLINE_EXPIRE:<errandId>——一个 Errand 生命周期至多一个
- * canonical expiry intent）。RETENTION_CLEANUP / STATISTICS_REFRESH 等
+ * canonical expiry intent）；Phase 9C-03 新增 DATA_EXPORT_GENERATE@1
+ * （payload 仅 requestId，dedupeKey = DATA_EXPORT_GENERATE:<requestId>，
+ * Step A/B durable generation lifecycle + scoped dead-letter reconciler）。
+ * RETENTION_CLEANUP / STATISTICS_REFRESH 等
  * 9C handler 在各自阶段注册，不需改 PostgreSQL enum。
  */
 
@@ -46,6 +56,10 @@ const jobHandlers: JobHandlerRegistry = new Map([
   [
     ERRAND_DEADLINE_EXPIRE_JOB_KIND,
     new Map([[ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION, errandDeadlineExpireHandler]]),
+  ],
+  [
+    DATA_EXPORT_GENERATE_JOB_KIND,
+    new Map([[DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION, dataExportGenerateHandler]]),
   ],
 ]);
 
@@ -80,6 +94,23 @@ const JOB_EXECUTION_POLICIES: Map<string, Map<number, JobExecutionPolicy>> = new
         {
           transactionTimeoutMs: EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
           executionLeaseSeconds: EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
+        },
+      ],
+    ]),
+  ],
+  [
+    // Phase 9C-03（§47/§48）：execution transaction 在 serialization
+    // boundary（USER governance lock + AsyncJob 行锁）内含 export build
+    // （多查询 DB 读）+ 序列化 + MiB 级 S3 PUT，必须使用扩展事务预算 +
+    // 覆盖它的 execution lease（预算算术冻结于 data-export-contract.ts
+    // 注释与 EXPORT-TX-BUDGET-01 / EXPORT-LEASE-BUDGET-01 静态不变量测试）。
+    DATA_EXPORT_GENERATE_JOB_KIND,
+    new Map([
+      [
+        DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION,
+        {
+          transactionTimeoutMs: DATA_EXPORT_GENERATE_EXECUTION_TX_TIMEOUT_MS,
+          executionLeaseSeconds: DATA_EXPORT_GENERATE_EXECUTION_LEASE_SECONDS,
         },
       ],
     ]),
