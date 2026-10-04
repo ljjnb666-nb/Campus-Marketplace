@@ -9,7 +9,7 @@ import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isRbacError } from "@/lib/rbac/errors";
 import {
   createAccountDeletionRequest,
-  listUserPrivacyRequests,
+  listUserPrivacyRequestDtos,
 } from "@/lib/privacy/privacy-request-service";
 import { actionErrorMessage } from "@/lib/error-handler";
 
@@ -38,19 +38,10 @@ async function listHandler() {
     );
   }
 
-  const requests = await listUserPrivacyRequests(verified.user.id);
+  const requests = await listUserPrivacyRequestDtos(verified.user.id);
 
   return NextResponse.json(
-    {
-      requests: requests.map((request) => ({
-        id: request.id,
-        type: request.type,
-        status: request.status,
-        reasonCode: request.reasonCode,
-        requestedAt: request.requestedAt.toISOString(),
-        completedAt: request.completedAt?.toISOString() ?? null,
-      })),
-    },
+    { requests },
     { headers: privateCache() },
   );
 }
@@ -95,11 +86,12 @@ async function postHandler(request: NextRequest) {
   }
 
   if (parsed.data.type === "DATA_EXPORT") {
-    // 单一执行入口：同步导出必须经 GET /api/privacy/export 完成
-    // （REQUESTED→IN_PROGRESS→COMPLETED 生命周期在那里一次形成）
+    // 单一创建入口（§37）：异步导出必须经 POST /api/privacy/export 完成
+    // （request + DATA_EXPORT_GENERATE job 同事务原子落盘）。不得同时
+    // 制造两个 export creation authority。
     return NextResponse.json(
       {
-        error: "数据导出请直接访问 GET /api/privacy/export（该入口会完整执行并记录导出请求）",
+        error: "数据导出请使用 POST /api/privacy/export（该入口异步生成导出文件，完成后可在本页下载）",
         code: "USE_EXPORT_ENDPOINT",
       },
       { status: 400, headers: privateCache() },

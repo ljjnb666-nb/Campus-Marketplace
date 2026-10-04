@@ -76,6 +76,68 @@ export async function listUserPrivacyRequests(userId: string): Promise<PrivacyRe
   });
 }
 
+export type UserPrivacyRequestDto = {
+  id: string;
+  type: string;
+  status: string;
+  reasonCode: string | null;
+  requestedAt: string;
+  completedAt: string | null;
+  /**
+   * Phase 9C-03（§38）：DATA_EXPORT 安全下载面。仅相对 app route；
+   * bucket / objectKey / sha256 / 内部 status details 结构性缺席
+   * （INV-9C03-09）。
+   */
+  downloadAvailable: boolean;
+  /** artifact 下载窗口截止（仅 COMPLETED + artifact 存在时；用户可见有效期） */
+  artifactExpiresAt: string | null;
+  downloadPath: string | null;
+};
+
+/**
+ * 用户视角的请求列表 safe DTO：对 DATA_EXPORT 请求附下载可用性 /
+ * 有效期 / 相对下载路径。downloadAvailable = COMPLETED + artifact READY
+ * + 未删除 + 未过期（与下载路由同一条件，INV-9C03-08）。
+ */
+export async function listUserPrivacyRequestDtos(userId: string): Promise<UserPrivacyRequestDto[]> {
+  const requests = await listUserPrivacyRequests(userId);
+  const exportRequestIds = requests
+    .filter((request) => request.type === "DATA_EXPORT")
+    .map((request) => request.id);
+
+  const artifacts = exportRequestIds.length
+    ? await prisma.dataExportArtifact.findMany({
+        where: { requestId: { in: exportRequestIds }, userId },
+      })
+    : [];
+
+  const artifactByRequestId = new Map(artifacts.map((artifact) => [artifact.requestId, artifact]));
+  const now = Date.now();
+
+  return requests.map((request) => {
+    const artifact = artifactByRequestId.get(request.id);
+    const downloadAvailable =
+      !!artifact &&
+      request.status === "COMPLETED" &&
+      artifact.status === "READY" &&
+      !artifact.deletedAt &&
+      !!artifact.expiresAt &&
+      artifact.expiresAt.getTime() > now;
+
+    return {
+      id: request.id,
+      type: request.type,
+      status: request.status,
+      reasonCode: request.reasonCode,
+      requestedAt: request.requestedAt.toISOString(),
+      completedAt: request.completedAt?.toISOString() ?? null,
+      downloadAvailable,
+      artifactExpiresAt: artifact?.expiresAt?.toISOString() ?? null,
+      downloadPath: downloadAvailable ? `/api/privacy/export/${request.id}/download` : null,
+    };
+  });
+}
+
 const ACTIVE_DELETION_STATUSES: PrivacyRequestStatus[] = ["REQUESTED", "IN_PROGRESS", "BLOCKED"];
 
 // 注：DATA_EXPORT 没有也不允许有"只创建 REQUESTED 不执行"的低层入口——

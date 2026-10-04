@@ -43,6 +43,10 @@ interface CycleSummary {
   quotaReleasedBytes: number;
   purgeHoldBlocked: number;
   failures: number;
+  // Phase 9C-03：导出 artifact 清理观测（到期/stale 标记 + 物理删除）
+  dataExportArtifactsMarked: number;
+  dataExportObjectsDeleted: number;
+  dataExportFailures: number;
 }
 
 /** 解析并校验周期配置；非法配置属进程级 fatal（exit non-zero）。 */
@@ -80,6 +84,9 @@ function logSummaryIfWorked(summary: CycleSummary): void {
   const didWork =
     summary.objectsDeleted > 0 ||
     summary.orphansMarked > 0 ||
+    summary.dataExportArtifactsMarked > 0 ||
+    summary.dataExportObjectsDeleted > 0 ||
+    summary.dataExportFailures > 0 ||
     summary.retentionExpiredMarked > 0 ||
     summary.retentionHoldBlocked > 0 ||
     summary.purgeHoldBlocked > 0 ||

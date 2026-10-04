@@ -151,6 +151,9 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
 
   // Phase 5 治理表（acceptance 的 FK 指向 legalDocument 为 RESTRICT，先删子表）
   await prisma.policyAcceptance.deleteMany();
+  // Phase 9C-03：导出 artifact FK → PrivacyRequest（级联也会清，显式先删防御
+  // 未来 FK 语义漂移）
+  await prisma.dataExportArtifact.deleteMany();
   await prisma.privacyRequest.deleteMany();
   await prisma.dataHold.deleteMany();
   await prisma.legalDocument.deleteMany();

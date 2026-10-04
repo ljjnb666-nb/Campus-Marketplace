@@ -80,6 +80,13 @@ export type AccountErasureResult = {
   };
   /** 敏感资产（头像/认证/交接/归还/举报材料）已标记 PENDING_DELETE，由既有 storage:cleanup 物理删除 */
   sensitiveAssetsMarkedForDeletion: number;
+  /**
+   * Phase 9C-03（§24）：全部 WRITING/READY 导出 artifact 原子标记
+   * PENDING_DELETE——erased account 绝不能留下仍可下载的旧 PII export
+   * artifact（INV-9C03-10）。S3 物理删除走既有 storage cleanup
+   * （绝不在 erasure 事务里触碰大对象内容）。
+   */
+  exportArtifactsMarkedForDeletion: number;
 };
 
 /** 测试 seam：在"已取锁 + 前置检查全部通过"与"首个破坏性写"之间的受控暂停点。 */
@@ -258,6 +265,17 @@ export async function eraseAccount(
     await client.uploadedAsset.updateMany({
       where: { ownerId: userId, originalFileName: { not: null } },
       data: { originalFileName: null },
+    });
+
+    // Phase 9C-03（§24）：导出 artifact 是 derived ephemeral PII copy——
+    // 注销时全部 WRITING/READY artifact 至少原子标记 PENDING_DELETE（禁止
+    // 继续 READY：下载条件 READY + COMPLETED 即刻失效）。对象物理删除走
+    // 既有 storage cleanup（S3 DeleteObject 幂等 + 条件 DELETED 转移），
+    // 绝不在 erasure 事务里读取/触碰大对象内容。worker 侧 erasure-wins
+    // 语义由 USER governance lock 线性化（§23）。
+    const exportArtifacts = await client.dataExportArtifact.updateMany({
+      where: { userId, status: { in: ["WRITING", "READY"] } },
+      data: { status: "PENDING_DELETE" },
     });
 
     // Repair 4 / RB-23：Notification 是 derived ephemeral inbox——注销后无
@@ -609,6 +627,7 @@ export async function eraseAccount(
         rentalListings: rentalListings.count,
       },
       sensitiveAssetsMarkedForDeletion: sensitiveAssets.count,
+      exportArtifactsMarkedForDeletion: exportArtifacts.count,
     };
 
     logger.info("account_erasure_completed", "privacy", {
