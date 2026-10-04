@@ -4,13 +4,14 @@ import path from "node:path";
 import { test, expect } from "@playwright/test";
 import { storageStatePath, uniqueTag } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
+import { withE2EAsyncWorkerProtocolLock } from "./helpers/async-worker-lock";
 
 /**
  * Phase 9C-02 — 9C02-E2E-01：errand deadline 过期 → 公开面立即 fail closed
  * + 真实 async-worker 在共享 durable queue 环境下 bounded eventual
  * materialize。
  *
- * 职责分层（Review Repair Round 2 / RB05 重新冻结）：
+ * 职责分层（Review Repair Round 2 / RB05 + Round 3 / RB06 重新冻结）：
  *   - Integration（PRODUCTION-WORKER-ERRAND-DEADLINE-01）继续承担
  *     受控/空队列下 single --run-once 全链（schedule → enqueue → claim →
  *     handler → CANCELLED）的 INV-18 证明；
@@ -22,6 +23,10 @@ import { e2eDb } from "./helpers/db";
  *     通过有界真实 production worker progression 收敛到：
  *       exactly one canonical intent + COMPLETED + Task CANCELLED
  *       + zero ERRAND Order + replay safe。
+ *
+ * RB06：worker protocol 临界区纳入 E2E async-worker protocol 互斥锁——
+ * 本 spec 的 worker runtime 是普通 env，不持 9B 的 fake Resend env；互斥锁
+ * 防止它抢走需要 9B runtime 的 NOTIFICATION_DELIVERY job。
  *
  * 红线（RB05 冻结）：
  *   - 不清空/不修改共享队列上其它 spec 的 job 数据；
@@ -39,7 +44,12 @@ const E2E_DATABASE_URL =
 /** 共享队列有界推进上界：worker batchSize=10、Playwright workers=2 下的小上界。 */
 const MAX_WORKER_DRAIN_ROUNDS = 5;
 
-function runProductionWorkerOnce(): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runProductionWorkerOnce(): Promise<{
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  pid: number | undefined;
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -63,7 +73,7 @@ function runProductionWorkerOnce(): Promise<{ code: number | null; stdout: strin
     child.stdout.on("data", (chunk) => (stdout += String(chunk)));
     child.stderr.on("data", (chunk) => (stderr += String(chunk)));
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code) => resolve({ code, stdout, stderr, pid: child.pid }));
   });
 }
 
@@ -71,9 +81,9 @@ function runProductionWorkerOnce(): Promise<{ code: number | null; stdout: strin
  * TEST-ONLY bounded progression（RB05）：每轮调用真实 production
  * async-worker --run-once（exit code != 0 立即 fail），然后以 canonical
  * dedupeKey + ErrandTask.status 判定是否收敛。每轮记录 test-only machine
- * evidence（round / exit / job exists / status / attempts / runAt / task
- * status——仅机器字段，无 payload 用户文本/secret），上界耗尽时随失败消息
- * 输出，便于定位。进度只来自真实 worker 动作，零 sleep。
+ * evidence（round / pid / exit / job exists / status / attempts / runAt /
+ * task status——仅机器字段，无 payload 用户文本/secret），上界耗尽时随失败
+ * 消息输出，便于定位。进度只来自真实 worker 动作，零 sleep。
  */
 async function driveErrandExpiryToCompletion(errandId: string) {
   const dedupeKey = `ERRAND_DEADLINE_EXPIRE:${errandId}`;
@@ -81,6 +91,10 @@ async function driveErrandExpiryToCompletion(errandId: string) {
 
   for (let round = 1; round <= MAX_WORKER_DRAIN_ROUNDS; round += 1) {
     const result = await runProductionWorkerOnce();
+    console.log(
+      `[rb06-diag][9C02][round ${round}] pid=${result.pid} exit=${result.code} ` +
+        `stdout=${result.stdout.slice(0, 6000)}`,
+    );
     if (result.code !== 0) {
       throw new Error(
         `production async-worker exit=${result.code}（production crash 不属于共享队列竞争）\n` +
@@ -92,6 +106,7 @@ async function driveErrandExpiryToCompletion(errandId: string) {
     const task = await e2eDb().errandTask.findUniqueOrThrow({ where: { id: errandId } });
     rounds.push({
       round,
+      workerPid: result.pid,
       workerExitCode: result.code,
       targetJobExists: job !== null,
       targetJobStatus: job?.status ?? null,
@@ -159,53 +174,66 @@ test("9C02-E2E-01：跑腿任务 deadline 过期 → 公开面立即隐藏 + asy
   await publisher.keyboard.press("Enter");
   await expect(publisher.getByRole("link", { name: new RegExp(title) })).toHaveCount(0);
 
-  // ---------- 4-5. 共享队列 bounded progression → canonical 终态 ----------
-  // 本 subprocess 不拥有 scheduler enqueue（另一个合法 worker 可能已写入
-  // intent），单轮也不保证 claim 到目标 job——以 canonical dedupeKey 为
-  // authority，有界真实 worker 轮次收敛。
-  const { job } = await driveErrandExpiryToCompletion(errandId);
+  // ---------- 4-7. 共享队列 bounded progression → canonical 终态 → replay ----------
+  // RB06：worker protocol 临界区——任何时刻 E2E suite 中至多一个依赖特定
+  // runtime config 的 production async-worker protocol 活跃（尤其避免本
+  // 普通 env worker 抢走 9B 需要 fake Resend env 的 NOTIFICATION_DELIVERY
+  // job，或反向被抢）。锁不是 job ownership：持锁 worker 仍消费真实共享
+  // 队列。public fail-closed 断言已在锁外（上方）完成。
+  const { job } = await withE2EAsyncWorkerProtocolLock("phase9c02-errand-deadline", async () => {
+    // 本 subprocess 不拥有 scheduler enqueue（另一个合法 worker 可能已写入
+    // intent），单轮也不保证 claim 到目标 job——以 canonical dedupeKey 为
+    // authority，有界真实 worker 轮次收敛。
+    const completed = await driveErrandExpiryToCompletion(errandId);
 
-  const task = await e2eDb().errandTask.findUniqueOrThrow({ where: { id: errandId } });
-  expect(task.status).toBe("CANCELLED");
-  expect(task.accepterId).toBeNull();
+    const task = await e2eDb().errandTask.findUniqueOrThrow({ where: { id: errandId } });
+    expect(task.status).toBe("CANCELLED");
+    expect(task.accepterId).toBeNull();
 
-  // exactly-once canonical intent（RB05 §15：不只验证 Task）
-  const jobs = await e2eDb().asyncJob.findMany({
-    where: { dedupeKey: `ERRAND_DEADLINE_EXPIRE:${errandId}` },
+    // exactly-once canonical intent（RB05 §15：不只验证 Task）
+    const jobs = await e2eDb().asyncJob.findMany({
+      where: { dedupeKey: `ERRAND_DEADLINE_EXPIRE:${errandId}` },
+    });
+    expect(jobs).toHaveLength(1);
+    expect(completed.job.id).toBe(jobs[0]!.id);
+    expect(jobs[0]!.kind).toBe("ERRAND_DEADLINE_EXPIRE");
+    expect(jobs[0]!.schemaVersion).toBe(1);
+    expect(jobs[0]!.payload).toEqual({ errandId });
+    expect(jobs[0]!.status).toBe("COMPLETED");
+    expect(jobs[0]!.completedAt).not.toBeNull();
+
+    // 零新义务：expiry 不产生任何 ERRAND Order
+    expect(await e2eDb().order.count({ where: { type: "ERRAND", errandTaskId: errandId } })).toBe(0);
+
+    // replay safety：再跑一次真实 worker（不要求 scheduler log）
+    const replay = await runProductionWorkerOnce();
+    console.log(
+      `[rb06-diag][9C02][replay] pid=${replay.pid} exit=${replay.code} ` +
+        `stdout=${replay.stdout.slice(0, 6000)}`,
+    );
+    expect(replay.code, `stdout=${replay.stdout}\nstderr=${replay.stderr}`).toBe(0);
+
+    const jobsAfterReplay = await e2eDb().asyncJob.findMany({
+      where: { dedupeKey: `ERRAND_DEADLINE_EXPIRE:${errandId}` },
+    });
+    expect(jobsAfterReplay).toHaveLength(1);
+    expect(jobsAfterReplay[0]!.id).toBe(jobs[0]!.id);
+    expect(jobsAfterReplay[0]!.status).toBe("COMPLETED");
+    expect(jobsAfterReplay[0]!.completedAt!.getTime()).toBe(jobs[0]!.completedAt!.getTime());
+    expect(jobsAfterReplay[0]!.attempts).toBe(jobs[0]!.attempts);
+
+    const taskAfterReplay = await e2eDb().errandTask.findUniqueOrThrow({ where: { id: errandId } });
+    expect(taskAfterReplay.status).toBe("CANCELLED");
+    expect(await e2eDb().order.count({ where: { type: "ERRAND", errandTaskId: errandId } })).toBe(0);
+
+    return { job: jobs[0]! };
   });
-  expect(jobs).toHaveLength(1);
-  expect(job.id).toBe(jobs[0]!.id);
-  expect(jobs[0]!.kind).toBe("ERRAND_DEADLINE_EXPIRE");
-  expect(jobs[0]!.schemaVersion).toBe(1);
-  expect(jobs[0]!.payload).toEqual({ errandId });
-  expect(jobs[0]!.status).toBe("COMPLETED");
-  expect(jobs[0]!.completedAt).not.toBeNull();
 
-  // 零新义务：expiry 不产生任何 ERRAND Order
-  expect(await e2eDb().order.count({ where: { type: "ERRAND", errandTaskId: errandId } })).toBe(0);
-
-  // ---------- 6. publisher /my/errands 终局 cancelled state ----------
+  // ---------- 8. publisher /my/errands 终局 cancelled state（queue 无关，锁外）----------
   await publisher.goto("/my/errands");
   const card = publisher.locator("article", { hasText: title }).first();
   await expect(card).toBeVisible();
   await expect(card.getByText("已取消").first()).toBeVisible();
-
-  // ---------- 7. replay safety：再跑一次真实 worker（不要求 scheduler log）----------
-  const replay = await runProductionWorkerOnce();
-  expect(replay.code, `stdout=${replay.stdout}\nstderr=${replay.stderr}`).toBe(0);
-
-  const jobsAfterReplay = await e2eDb().asyncJob.findMany({
-    where: { dedupeKey: `ERRAND_DEADLINE_EXPIRE:${errandId}` },
-  });
-  expect(jobsAfterReplay).toHaveLength(1);
-  expect(jobsAfterReplay[0]!.id).toBe(job.id);
-  expect(jobsAfterReplay[0]!.status).toBe("COMPLETED");
-  expect(jobsAfterReplay[0]!.completedAt!.getTime()).toBe(job.completedAt!.getTime());
-  expect(jobsAfterReplay[0]!.attempts).toBe(job.attempts);
-
-  const taskAfterReplay = await e2eDb().errandTask.findUniqueOrThrow({ where: { id: errandId } });
-  expect(taskAfterReplay.status).toBe("CANCELLED");
-  expect(await e2eDb().order.count({ where: { type: "ERRAND", errandTaskId: errandId } })).toBe(0);
 
   await publisherContext.close();
 });
