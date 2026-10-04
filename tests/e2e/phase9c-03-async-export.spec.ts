@@ -105,6 +105,10 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
   });
 
   // ---------- fixture：订单（导出应含）+ 卖家私密手机号（绝不能含） ----------
+  // FIX05：seller 是全套 E2E 共享 fixture——覆盖 phone 属临时变更，必须
+  // 在 finally 恢复原值（断言/worker/下载中途失败也必须恢复，fixture
+  // teardown 正确性本身属于测试合同；恢复失败必须显式可见，绝不静默吞掉）。
+  const originalSellerPhone = sellerUser.phone;
   const sellerPhone = `137${String(Date.now()).slice(-8)}`;
   await e2eDb().user.update({ where: { id: sellerUser.id }, data: { phone: sellerPhone } });
   const orderNo = `P03-${tag}`;
@@ -268,8 +272,20 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
     expect(await crossUser.text()).toBe(await notFound.text());
     await sellerContext.close();
   } finally {
-    // fixture 清理（对象由 e2e-teardown 按本轮 artifact 行清理）
-    await e2eDb().order.delete({ where: { id: order.id } }).catch(() => undefined);
-    await context.close();
+    // fixture 恢复（独立于断言失败）：先恢复共享 seller 原值，再删订单；
+    // context 关闭放最内层 finally，恢复失败不被吞掉——直接向上抛
+    try {
+      await e2eDb().user.update({
+        where: { id: sellerUser.id },
+        data: { phone: originalSellerPhone },
+      });
+      await e2eDb().order.delete({ where: { id: order.id } });
+    } catch (cleanupError) {
+      throw new Error(
+        `9C03 E2E fixture 恢复失败（共享 seller fixture 可能被污染，需人工核查 seller.phone / 残留订单 ${orderNo}）：${String(cleanupError)}`,
+      );
+    } finally {
+      await context.close();
+    }
   }
 });
