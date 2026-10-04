@@ -1,4 +1,4 @@
-import type { ErrandTaskStatus, Prisma } from "@prisma/client";
+import { type ErrandTaskStatus, Prisma } from "@prisma/client";
 
 import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
@@ -45,11 +45,26 @@ import { ERRAND_TASK_STATUS_CHANGED_KIND } from "@/lib/notifications/notificatio
  * delete / cancel-open 一律拒绝，不得扩大矛盾。
  */
 
-/** 占用 active obligation 的 ERRAND Order 状态（COMPLETED/CANCELLED 不属于）。 */
-export const ACTIVE_ERRAND_ORDER_STATUSES: readonly ["ACCEPTED", "IN_PROGRESS"] = [
+/**
+ * 占用 active obligation 的 ERRAND Order 状态（COMPLETED/CANCELLED/REFUNDED/
+ * CLOSED 不属于）。
+ *
+ * Review Repair RB04（§26）：active/blocking 集合收敛到系统级 Order 语义
+ * —— PENDING / ACCEPTED / IN_PROGRESS / IN_DISPUTE 均属未关闭义务
+ * （与 account-erasure 的 ACTIVE_ORDER_STATUSES、Service 域
+ * ACTIVE_SERVICE_ORDER_STATUSES 同一口径；8C：IN_DISPUTE 仍是治理冻结中的
+ * active obligation）。正常 canonical 流程不会产生 OPEN task + PENDING /
+ * IN_DISPUTE ERRAND Order 的 pair——但这正是 structural fail-closed 的意义：
+ * 出现历史/异常行时 expiry 与 lifecycle 必须 STRUCTURAL_INVALID / 拒绝，
+ * 绝不猜测性 CANCELLED（INV-16）。本常量是唯一 SSOT，
+ * resolveActiveErrandOrderRows 的 SQL 由它参数化，禁止第二套 in-list。
+ */
+export const ACTIVE_ERRAND_ORDER_STATUSES: readonly [
+  "PENDING",
   "ACCEPTED",
   "IN_PROGRESS",
-];
+  "IN_DISPUTE",
+] = ["PENDING", "ACCEPTED", "IN_PROGRESS", "IN_DISPUTE"];
 
 /**
  * seams 仅测试注入（生产一律不传）。beforeLock / afterCheck 与
@@ -130,8 +145,10 @@ async function lockErrandTaskRow(
 }
 
 /** active ERRAND Order 解析（§17/§18）：type=ERRAND + errandTaskId 命中 +
- * status ∈ active，逐行 FOR UPDATE。返回全部匹配行——调用方按状态要求
- * 恰好 0 / 1 个，绝不按 createdAt 猜 latest。 */
+ * status ∈ ACTIVE_ERRAND_ORDER_STATUSES（SSOT 参数化，Review Repair RB04：
+ * PENDING / IN_DISPUTE 一并计入 blocking obligation），逐行 FOR UPDATE。
+ * 返回全部匹配行——调用方按状态要求恰好 0 / 1 个，绝不按 createdAt 猜
+ * latest。 */
 async function resolveActiveErrandOrderRows(
   tx: Prisma.TransactionClient,
   errandTaskId: string,
@@ -141,7 +158,7 @@ async function resolveActiveErrandOrderRows(
     FROM "Order"
     WHERE type = 'ERRAND'
       AND "errandTaskId" = ${errandTaskId}
-      AND status IN ('ACCEPTED', 'IN_PROGRESS')
+      AND status::text IN (${Prisma.join(ACTIVE_ERRAND_ORDER_STATUSES)})
     FOR UPDATE
   `;
 }

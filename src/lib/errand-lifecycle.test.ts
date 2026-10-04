@@ -986,8 +986,13 @@ describe("deleteErrandTx（事务级删除权威）", () => {
 });
 
 describe("ACTIVE_ERRAND_ORDER_STATUSES 冻结值", () => {
-  it("只包含 ACCEPTED / IN_PROGRESS（COMPLETED/CANCELLED 不属于 active obligation）", () => {
-    expect([...ACTIVE_ERRAND_ORDER_STATUSES]).toEqual(["ACCEPTED", "IN_PROGRESS"]);
+  it("只包含 PENDING / ACCEPTED / IN_PROGRESS / IN_DISPUTE（Review Repair RB04：全部未关闭义务；terminal 不属于）", () => {
+    expect([...ACTIVE_ERRAND_ORDER_STATUSES]).toEqual([
+      "PENDING",
+      "ACCEPTED",
+      "IN_PROGRESS",
+      "IN_DISPUTE",
+    ]);
   });
 });
 

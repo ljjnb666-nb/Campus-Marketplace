@@ -103,7 +103,7 @@ async function createErrandOrderFixture(input: {
   publisherId: string;
   accepterId: string;
   errandTaskId: string;
-  status?: "ACCEPTED" | "IN_PROGRESS";
+  status?: "PENDING" | "ACCEPTED" | "IN_PROGRESS" | "IN_DISPUTE";
 }) {
   const order = await rawClient!.order.create({
     data: {
@@ -348,6 +348,70 @@ describe.skipIf(!integrationDatabaseUrl)(
       }
       const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(persistedOrder.status).toBe("ACCEPTED");
+    });
+
+    it("EXP-STRUCTURAL-IN-DISPUTE-01（RB04/§25/§28）：OPEN + IN_DISPUTE ERRAND Order 异常 pair → PERMANENT DEAD_LETTER，domain 零 mutation", async () => {
+      const publisher = await createFixtureUser("RB04DISP发布者");
+      const accepter = await createFixtureUser("RB04DISP接单者");
+
+      const errand = await createErrandFixture({
+        publisherId: publisher.id,
+        title: `RB04争议异常-${RUN_TAG}`,
+        deadlineOffsetMs: -60_000,
+      });
+      const order = await createErrandOrderFixture({
+        publisherId: publisher.id,
+        accepterId: accepter.id,
+        errandTaskId: errand.id,
+        status: "IN_DISPUTE",
+      });
+      const job = await enqueueExpiryJob(errand.id, errand.deadline);
+
+      const summary = await runWorkerBatch();
+      expect(summary.deadLettered).toBeGreaterThanOrEqual(1);
+
+      // fail closed：绝不猜测性 CANCELLED（旧 active set 不含 IN_DISPUTE 时
+      // 会留下 Task CANCELLED + Order IN_DISPUTE 的错误 structural repair）
+      const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
+      expect(task.status).toBe("OPEN");
+      expect(task.accepterId).toBeNull();
+      const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(persistedOrder.status).toBe("IN_DISPUTE");
+
+      const dead = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
+      expect(dead.status).toBe("DEAD_LETTER");
+      expect(dead.lastErrorCode).toBe("ERRAND_DEADLINE_STRUCTURAL_INVALID");
+    });
+
+    it("EXP-STRUCTURAL-PENDING-01（RB04/§26/§28）：OPEN + PENDING ERRAND Order 异常 pair → PERMANENT DEAD_LETTER，domain 零 mutation", async () => {
+      const publisher = await createFixtureUser("RB04PEND发布者");
+      const accepter = await createFixtureUser("RB04PEND接单者");
+
+      const errand = await createErrandFixture({
+        publisherId: publisher.id,
+        title: `RB04待处理异常-${RUN_TAG}`,
+        deadlineOffsetMs: -60_000,
+      });
+      const order = await createErrandOrderFixture({
+        publisherId: publisher.id,
+        accepterId: accepter.id,
+        errandTaskId: errand.id,
+        status: "PENDING",
+      });
+      const job = await enqueueExpiryJob(errand.id, errand.deadline);
+
+      const summary = await runWorkerBatch();
+      expect(summary.deadLettered).toBeGreaterThanOrEqual(1);
+
+      // fail closed：「正常流程不应出现」不等于「expiry 可以忽略」
+      const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
+      expect(task.status).toBe("OPEN");
+      const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
+      expect(persistedOrder.status).toBe("PENDING");
+
+      const dead = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
+      expect(dead.status).toBe("DEAD_LETTER");
+      expect(dead.lastErrorCode).toBe("ERRAND_DEADLINE_STRUCTURAL_INVALID");
     });
 
     it("ERRAND-DEADLINE-RACE-01（§18 Direction A）：expiry wins——expiry 持 publisher 锁 + 行锁，claim 在 participant 锁等待；expiry 提交 CANCELLED 后 claim fresh 非 OPEN → 零新义务", async () => {
