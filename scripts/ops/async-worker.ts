@@ -271,12 +271,15 @@ async function main() {
   do {
     let cycle: CycleSummary;
     try {
-      // Phase 9C-02（§13）：schedule due domain intents 先行——producer 只
-      // enqueue durable intent（非 authority）；失败不伪造 expiry、不阻断
-      // 本周期其余部分（下轮重新 discovery）
+      // Phase 9C-02（§13）+ Review Repair RB03：schedule due domain intents
+      // 先行——producer 只 enqueue durable intent（非 authority）；catch-up
+      // 预算 = config.batchSize（每周期新 intent ≤ 本周期可消费规模，禁止
+      // 结构性 backlog 放大）；失败不伪造 expiry、不阻断本周期其余部分
       let errandDeadlinesScheduled = 0;
       try {
-        const scheduled = await scheduleDueErrandDeadlineJobs();
+        const scheduled = await scheduleDueErrandDeadlineJobs({
+          batchLimit: config.batchSize,
+        });
         errandDeadlinesScheduled = scheduled.enqueued;
       } catch (error) {
         logger.warn("errand deadline scheduler producer 失败，等待下个周期", "async-worker", {

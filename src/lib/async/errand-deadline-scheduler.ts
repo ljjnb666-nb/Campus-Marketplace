@@ -47,14 +47,30 @@ import {
  * 逐条独立事务，crash 后未 enqueue 的候选由下轮重建 intent。
  * 日志只写 machine event + IDs/counts + errorName（§20 禁止 payload /
  * title / description / contactNote 入日志）。
+ *
+ * Review Repair RB03（§17 Constraint A — catch-up bounded）：scheduler 每
+ * cycle 的 enqueue 预算不得超过本 worker 周期的可消费规模——生产 worker
+ * 显式传 batchLimit = config.batchSize；standalone 默认 = 10（与 worker
+ * 默认 batchSize 一致）。禁止结构性 100 enqueue : 10 consume 的 backlog
+ * 放大（多 worker 时总生产/总消费随 N 同比例增长，仍是 1:1）。
+ *
+ * Review Repair RB03（§18 Constraint B — non-retroactive runAt）：对新发现
+ * 的历史 due Errand，job.runAt = 本 cycle 捕获的 schedulerNow，而不是历史
+ * deadline。AsyncJob.runAt 的语义是"queue execution availability"（durable
+ * intent 自 scheduler 发现后已 runnable），不是"假装 intent 三个月前就存在"
+ * ——否则 runAt ASC 的共享队列扫描会给 catch-up jobs 追溯性最高优先级，
+ * 压住既有 due 的 PRODUCT_RESERVATION_EXPIRE / NOTIFICATION_DELIVERY。
+ * 真正的业务 deadline 判定由 handler 在 expireErrandDeadlineTx 锁内 fresh
+ * 完成（NOT_DUE → RESCHEDULE 到 fresh deadline 的 stale-schedule 防御不变）。
  */
 
-const DEFAULT_BATCH_LIMIT = 100;
+const DEFAULT_BATCH_LIMIT = 10;
 
 export type ScheduleDueErrandDeadlinesInput = {
-  /** 单轮 discovery 上限（有界 batch，确定性序 deadline ASC, id ASC）。 */
+  /** 单轮 discovery/enqueue 上限（有界 batch，确定性序 deadline ASC, id ASC）。
+   * 生产 worker 必须传 config.batchSize（catch-up 预算 ≤ 本周期消费规模）。 */
   batchLimit?: number;
-  /** discovery 时钟（仅测试注入；生产不传）。 */
+  /** discovery + runAt 的 schedulerNow 时钟（仅测试注入；生产不传）。 */
   now?: Date;
 };
 
@@ -71,8 +87,9 @@ export async function scheduleDueErrandDeadlineJobs(
 
   // DB-side anti-join（§11）：NOT EXISTS 排除任何已存在 expiry intent 的
   // errand；确定性序（deadline ASC, id ASC）保证多实例扫描行为可预期。
-  const candidates = await prisma.$queryRaw<Array<{ id: string; deadline: Date }>>`
-    SELECT e.id, e."deadline"
+  // （只取 id——runAt 使用 schedulerNow，历史 deadline 不进入 queue 字段。）
+  const candidates = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT e.id
     FROM "ErrandTask" e
     WHERE e."deletedAt" IS NULL
       AND e.status = 'OPEN'
@@ -91,15 +108,18 @@ export async function scheduleDueErrandDeadlineJobs(
 
   for (const candidate of candidates) {
     try {
-      // runAt = errand deadline（此刻已 due）；enqueue 幂等（dedupe 命中
-      // recorded=false 不计入新 intent）
+      // Review Repair RB03：runAt = schedulerNow（queue execution
+      // availability），不是历史 deadline——catch-up jobs 不得借古老
+      // deadline 在共享 AsyncJob 队列获得追溯性最高优先级；业务 deadline
+      // 由 handler 锁内 fresh 判定（NOT_DUE → RESCHEDULE 防御保留）。
+      // enqueue 幂等（dedupe 命中 recorded=false 不计入新 intent）。
       const { recorded } = await withTransaction((tx) =>
         enqueueAsyncJobTx(tx, {
           kind: ERRAND_DEADLINE_EXPIRE_JOB_KIND,
           schemaVersion: ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
           dedupeKey: `${ERRAND_DEADLINE_EXPIRE_JOB_KIND}:${candidate.id}`,
           payload: { errandId: candidate.id },
-          runAt: candidate.deadline,
+          runAt: now,
         }),
       );
       if (recorded) {

@@ -114,9 +114,16 @@ async function enqueueExpiryJob(errandId: string, deadline: Date) {
   return rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey } });
 }
 
-async function runSchedulerOnce(batchLimit?: number) {
+async function runSchedulerOnce(batchLimit?: number, now?: Date) {
   const { scheduleDueErrandDeadlineJobs } = await import("@/lib/async/errand-deadline-scheduler");
-  return scheduleDueErrandDeadlineJobs(batchLimit !== undefined ? { batchLimit } : {});
+  const input: { batchLimit?: number; now?: Date } = {};
+  if (batchLimit !== undefined) {
+    input.batchLimit = batchLimit;
+  }
+  if (now !== undefined) {
+    input.now = now;
+  }
+  return scheduleDueErrandDeadlineJobs(input);
 }
 
 /** 真实生产 worker entrypoint 子进程（compose async-worker 服务同一入口）。 */
@@ -193,7 +200,10 @@ describe.skipIf(!integrationDatabaseUrl)(
         overdueMs: 60_000,
       });
 
-      const first = await runSchedulerOnce();
+      // Review Repair RB03：显式传入 schedulerNow——runAt 必须等于它
+      //（queue execution availability），而不是历史 deadline
+      const schedulerNow = new Date();
+      const first = await runSchedulerOnce(undefined, schedulerNow);
       expect(first.discovered).toBeGreaterThanOrEqual(1);
       expect(first.enqueued).toBeGreaterThanOrEqual(1);
 
@@ -207,7 +217,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(job.schemaVersion).toBe(1);
       expect(job.payload).toEqual({ errandId: errand.id });
       expect(job.status).toBe("PENDING");
-      expect(job.runAt.getTime()).toBe(errand.deadline.getTime());
+      expect(job.runAt.getTime()).toBe(schedulerNow.getTime());
       expect(job.runAt.getTime()).toBeLessThanOrEqual(Date.now());
 
       // 复跑：anti-join 命中既有 intent → zero duplicate
@@ -286,6 +296,112 @@ describe.skipIf(!integrationDatabaseUrl)(
         select: { dedupeKey: true, createdAt: true },
       });
       expect(newlyEnqueued).toHaveLength(4);
+    });
+
+    it("SCHED-CROSS-KIND-FAIRNESS-01（RB03/§22）：历史 overdue catch-up 的 runAt = schedulerNow，共享队列中已 due 的 PRODUCT / NOTIFICATION jobs 不被 retroactive leapfrog 挤出", async () => {
+      const { enqueueAsyncJobTx } = await import("@/lib/async/job-repository");
+      const { claimDueAsyncJobs } = await import("@/lib/async/job-repository");
+      const { withTransaction } = await import("@/lib/prisma");
+
+      const publisher = await createFixtureUser("CROSSKIND发布者");
+
+      // 12 条历史 overdue OPEN Errand（deadline 远早于既有 due jobs）
+      const errands = [];
+      for (let i = 1; i <= 12; i += 1) {
+        errands.push(
+          await createDueErrandFixture({
+            publisherId: publisher.id,
+            title: `CROSSKIND-${i}-${RUN_TAG}`,
+            overdueMs: 10 * 24 * 60 * 60 * 1000, // 10 天前
+          }),
+        );
+      }
+
+      // 共享队列中已 due 的非 Errand jobs（runAt = 数小时前）
+      const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000);
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        enqueueAsyncJobTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRE",
+          schemaVersion: 1,
+          dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`,
+          payload: { orderId: `${RUN_TAG}-crosskind-order` },
+          runAt: hourAgo,
+        }),
+      );
+      jobDedupeKeys.push(`PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`);
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        enqueueAsyncJobTx(tx, {
+          kind: "NOTIFICATION_DELIVERY",
+          schemaVersion: 1,
+          dedupeKey: `NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`,
+          payload: { deliveryId: `${RUN_TAG}-crosskind-delivery` },
+          runAt: halfHourAgo,
+        }),
+      );
+      jobDedupeKeys.push(`NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`);
+
+      // scheduler catch-up：batchLimit = worker batchSize = 10
+      const schedulerNow = new Date();
+      const summary = await runSchedulerOnce(10, schedulerNow);
+      expect(summary.enqueued).toBe(10);
+
+      // 新 Errand jobs 的 runAt 必须 == schedulerNow（不是 10 天前的历史 deadline）
+      const errandJobs = await rawClient!.asyncJob.findMany({
+        where: { dedupeKey: { in: errands.slice(0, 10).map((e) => `${ERRAND_DEDUPE_PREFIX}:${e.id}`) } },
+      });
+      expect(errandJobs).toHaveLength(10);
+      for (const job of errandJobs) {
+        jobDedupeKeys.push(job.dedupeKey);
+        expect(job.runAt.getTime()).toBe(schedulerNow.getTime());
+      }
+
+      // 真实共享队列 claim（repository 层，不执行 handler/provider）：
+      // runAt ASC 下两个早已 due 的 PRODUCT / NOTIFICATION jobs 必须排在
+      // 全部 catch-up Errand jobs 之前，batch=10 内必然包含两者
+      const claimed = await withTransaction((tx: Prisma.TransactionClient) =>
+        claimDueAsyncJobs(tx, {
+          workerId: `crosskind-${RUN_TAG}`,
+          leaseSeconds: 300,
+          batchSize: 10,
+          now: new Date(schedulerNow.getTime() + 1000),
+        }),
+      );
+      const claimedKeys = claimed.map((job) => job.kind);
+      expect(claimedKeys).toContain("PRODUCT_RESERVATION_EXPIRE");
+      expect(claimedKeys).toContain("NOTIFICATION_DELIVERY");
+      // claim 留下的 RUNNING fixture rows 由 afterAll 按 dedupeKey 清理
+    });
+
+    it("SCHED-CATCHUP-01（RB03/§23）：100 条 overdue OPEN、worker batchSize=10 → 生产等价 scheduler cycle 每轮 enqueue ≤ 10（bounded catch-up）", async () => {
+      const publisher = await createFixtureUser("CATCHUP发布者");
+
+      const catchupErrands = [];
+      for (let i = 1; i <= 100; i += 1) {
+        const errand = await createDueErrandFixture({
+          publisherId: publisher.id,
+          title: `CATCHUP-${i}-${RUN_TAG}`,
+          overdueMs: 60 * 60 * 1000,
+        });
+        catchupErrands.push(errand);
+        jobDedupeKeys.push(`${ERRAND_DEDUPE_PREFIX}:${errand.id}`);
+      }
+      const catchupKeys = catchupErrands.map((e) => `${ERRAND_DEDUPE_PREFIX}:${e.id}`);
+      const countMine = () =>
+        rawClient!.asyncJob.count({
+          where: { kind: "ERRAND_DEADLINE_EXPIRE", dedupeKey: { in: catchupKeys } },
+        });
+
+      // 生产等价 cycle：budget = config.batchSize = 10（每轮 discovery 中
+      // 本用例的候选可能只分到部分名额——同文件先前用例遗留的 due 候选
+      // 共享同一 budget，断言用 ≤ 表达结构上界）
+      const first = await runSchedulerOnce(10);
+      expect(first.enqueued).toBeLessThanOrEqual(10);
+      expect(await countMine()).toBeLessThanOrEqual(10);
+
+      // 下轮继续有界推进（不一次性灌入 100）
+      await runSchedulerOnce(10);
+      expect(await countMine()).toBeLessThanOrEqual(20);
     });
 
     it("PRODUCTION-WORKER-ERRAND-DEADLINE-01（§13/§26/INV-18）：真实 production async-worker --run-once 单次 invocation materialize 过期 OPEN 任务；复跑零 duplicate 零二次 mutation", async () => {
