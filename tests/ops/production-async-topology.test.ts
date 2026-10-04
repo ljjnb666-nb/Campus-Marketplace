@@ -218,6 +218,15 @@ function spawnAsyncWorker(extraEnv: Record<string, string>): Promise<SpawnResult
           // 合成不可达占位（端口 9 = discard）：启动日志先于 DB 访问发出，
           // 随后单周期失败 → run-once exit 1。绝不使用真实连接串。
           DATABASE_URL: "postgresql://build-placeholder:build-placeholder@127.0.0.1:9/build",
+          // Phase 9C-03：worker 静态导入链现在含 env.ts（导出 reconciler），
+          // 生产守卫在启动期生效——提供合规占位存储 env（合成主机名/凭据，
+          // 非 minioadmin、非 localhost；本机 .env 的开发配置不得泄漏进
+          // production 子进程）。
+          NEXTAUTH_URL: "https://build-placeholder.example.internal",
+          NEXTAUTH_SECRET: "build-placeholder-secret-not-for-prod",
+          S3_ENDPOINT: "https://storage.build-placeholder.example.internal",
+          S3_ACCESS_KEY_ID: "build-placeholder-access-key",
+          S3_SECRET_ACCESS_KEY: "build-placeholder-secret-key",
           ...extraEnv,
         },
         stdio: ["ignore", "pipe", "pipe"],

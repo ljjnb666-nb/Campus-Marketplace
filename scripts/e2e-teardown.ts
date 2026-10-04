@@ -56,14 +56,19 @@ async function cleanupMinIO(startedAt: Date): Promise<void> {
       where: { createdAt: { gte: startedAt } },
       select: { bucket: true, objectKey: true },
     });
+    // Phase 9C-03：本轮生成的导出 artifact 对象（PII 派生副本）一并清理
+    const exportArtifacts = await prisma.dataExportArtifact.findMany({
+      where: { createdAt: { gte: startedAt }, deletedAt: null },
+      select: { bucket: true, objectKey: true },
+    });
 
-    if (assets.length === 0) {
+    if (assets.length === 0 && exportArtifacts.length === 0) {
       console.log("[e2e-teardown] 本轮无新增对象存储资产");
       return;
     }
 
     const byBucket = new Map<string, string[]>();
-    for (const asset of assets) {
+    for (const asset of [...assets, ...exportArtifacts]) {
       const keys = byBucket.get(asset.bucket) ?? [];
       keys.push(asset.objectKey);
       byBucket.set(asset.bucket, keys);
