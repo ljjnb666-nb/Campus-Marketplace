@@ -77,6 +77,7 @@ const userIds: string[] = [];
 const errandIds: string[] = [];
 const orderIds: string[] = [];
 const favoriteIds: string[] = [];
+const dedicatedCampusIds: string[] = [];
 
 let fixtureSeq = 0;
 
@@ -107,6 +108,8 @@ async function createErrandFixture(input: {
   accepterId?: string | null;
   /** 相对当前的 deadline 偏移毫秒（负 = 过去）。 */
   deadlineOffsetMs?: number;
+  /** 默认使用文件级 campus；homepage cache 隔离用例传专用 campus。 */
+  campusIdOverride?: string;
 }) {
   const errand = await rawClient!.errandTask.create({
     data: {
@@ -117,7 +120,7 @@ async function createErrandFixture(input: {
       deliveryLocation: "西门",
       deadline: new Date(Date.now() + (input.deadlineOffsetMs ?? 60 * 60 * 1000)),
       categoryId: errandCategoryId,
-      campusId,
+      campusId: input.campusIdOverride ?? campusId,
       publisherId: input.publisherId,
       status: input.status ?? "OPEN",
       accepterId: input.accepterId ?? null,
@@ -177,7 +180,7 @@ afterAll(async () => {
   await rawClient.errandCategory.deleteMany({ where: { id: errandCategoryId } });
   await rawClient.campusMembership.deleteMany({ where: { userId: { in: userIds } } });
   await rawClient.user.deleteMany({ where: { id: { in: userIds } } });
-  await rawClient.campus.deleteMany({ where: { id: campusId } });
+  await rawClient.campus.deleteMany({ where: { id: { in: [campusId, ...dedicatedCampusIds] } } });
 
   await rawClient.$disconnect();
 });
@@ -371,6 +374,57 @@ describe.skipIf(!integrationDatabaseUrl)(
       const claimedTask = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: future.id } });
       expect(claimedTask.status).toBe("CLAIMED");
       expect(claimedTask.accepterId).toBe(claimer.id);
+    });
+
+    it("ERRAND-DEADLINE-HOMEPAGE-CACHE-01（RB01）：warm cache → 仅 deadline 跨界（TTL 未过期、无 worker/无失效）→ 首页两榜与 errandCount 立即 fail closed", async () => {
+      // 专用 campus：隔离 homepage cache key（cachedPublicRead 以 campusId 为 key）
+      const dedicatedCampus = await rawClient!.campus.create({
+        data: {
+          name: `9C02 cache 校区 ${randomUUID().slice(0, 6)}`,
+          slug: `p9c02-cache-${randomUUID().slice(0, 8)}`,
+          schoolName: "集成测试大学",
+        },
+      });
+      dedicatedCampusIds.push(dedicatedCampus.id);
+      const publisher = await createFixtureUser("CACHE发布者");
+      await rawClient!.campusMembership.updateMany({
+        where: { userId: publisher.id },
+        data: { campusId: dedicatedCampus.id },
+      });
+      await rawClient!.user.update({
+        where: { id: publisher.id },
+        data: { campusId: dedicatedCampus.id },
+      });
+
+      const errand = await createErrandFixture({
+        publisherId: publisher.id,
+        title: `9C02cache任务-${RUN_TAG}`,
+        deadlineOffsetMs: 60 * 60 * 1000,
+        campusIdOverride: dedicatedCampus.id,
+      });
+
+      const home = await import("@/repositories/home-repository");
+
+      // 1. warm cache（旧实现把两榜与 errandCount 一并写入 30s TTL entry）
+      const warmSections = await home.getHomepageErrands({ campusId: dedicatedCampus.id });
+      expect(
+        [...warmSections.urgentErrands, ...warmSections.highRewardErrands].map((item) => item.id),
+      ).toContain(errand.id);
+      const warmSummary = await home.getHomepageSummary({ campusId: dedicatedCampus.id });
+      expect(warmSummary.errandCount).toBe(1);
+
+      // 2. 仅推进 deadline 到过去：不改 status、不清 cache、不跑 scheduler/worker
+      await rawClient!.errandTask.update({
+        where: { id: errand.id },
+        data: { deadline: new Date(Date.now() - 1000) },
+      });
+
+      // 3. TTL（30s）远未过期时立即复读：deadline 已跨界 ⇒ 必须立即不可见
+      const sections = await home.getHomepageErrands({ campusId: dedicatedCampus.id });
+      expect(sections.urgentErrands.map((item) => item.id)).not.toContain(errand.id);
+      expect(sections.highRewardErrands.map((item) => item.id)).not.toContain(errand.id);
+      const summary = await home.getHomepageSummary({ campusId: dedicatedCampus.id });
+      expect(summary.errandCount).toBe(0);
     });
 
     it("ERRAND-DEADLINE-EDIT-01（§5.1）：current deadline 已过 → DEADLINE_EXPIRED 零写，不得延长复活；未来 deadline 编辑照常", async () => {
