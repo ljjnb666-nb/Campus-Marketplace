@@ -271,6 +271,12 @@ export async function createServiceOrderTx(
  * deadline / UI disable / public query 隐藏都不构成 authority；本判定是
  * deadline 与接单义务之间的唯一线性化点（与 expiry 的 publisher 锁 +
  * 行锁互斥，见 errand-lifecycle.expireErrandDeadlineTx 锁序）。
+ *
+ * Review Repair RB02（§11）：authoritativeNow 捕获于 ErrandTask FOR UPDATE
+ * 之后——participant 锁内、行锁前的时间点不构成 decision time（行锁等待
+ * 期间真实时间可能跨越 deadline）。options?.now seam 语义冻结为
+ * "authoritative decision time override"（测试注入），在生产捕获 new Date()
+ * 的同一逻辑位置消费；生产不传。
  */
 export async function claimErrandTx(
   tx: Prisma.TransactionClient,
@@ -284,7 +290,7 @@ export async function claimErrandTx(
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
   domainRacePoint?: ListingModerationRacePoint,
-  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传）。 */
   options?: { now?: Date },
 ) {
   return withObligationGuard(
@@ -296,9 +302,6 @@ export async function claimErrandTx(
       campusId: input.campusId,
     }),
     async () => {
-      // Phase 9C-02（§19）：本 transition 的全部 deadline 判定共用同一
-      // authoritativeNow（禁止多处 new Date() 边界漂移）。
-      const now = options?.now ?? new Date();
       // Phase 7C（R2-02）：锁内现势行 = 义务权威（amount = fresh.reward）。
       const lockedRows = await tx.$queryRaw<Array<{
         id: string; campusId: string; status: string; reward: string; publisherId: string; accepterId: string | null; deadline: Date; deletedAt: Date | null;
@@ -319,6 +322,9 @@ export async function claimErrandTx(
       ) {
         return null;
       }
+      // Review Repair RB02（§11）：行权威之后捕获 authoritativeNow（§19：
+      // 本 transition 的全部 deadline 判定共用同一 now）。
+      const now = options?.now ?? new Date();
       // Phase 9C-02 红线：锁内 fresh deadline 权威（§2.1 冻结语义——
       // deadline 是"允许该 OPEN 任务继续接受新接单"的截止时刻）。
       // deadline 过期 → return null，zero ErrandTask mutation / Order /

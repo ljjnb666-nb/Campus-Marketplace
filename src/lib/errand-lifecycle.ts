@@ -230,7 +230,9 @@ export async function transitionErrandTx(
   errandId: string,
   requestedStatus: ErrandTaskStatus,
   seams?: ErrandLifecycleSeams,
-  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传；
+   * 在生产捕获 new Date() 的同一逻辑位置——USER 锁 + ErrandTask 行锁之后的
+   * reopen 分支内——消费）。 */
   options?: { now?: Date },
 ): Promise<boolean> {
   // 无任何入口允许把任务写回 CLAIMED（claim 之外的路径一律拒绝）
@@ -632,6 +634,13 @@ export type ErrandContentUpdateOutcome =
  * 编辑（含把 deadline 延长到未来）——即使 row 尚未被 scheduler materialize
  * 成 CANCELLED，edit 也不得复活已过期任务 → DEADLINE_EXPIRED（零写入）。
  * 事务外 deadline 校验只用于 UX；authority 在锁内 fresh row 上。
+ *
+ * Review Repair RB02（§9/§10）：deadline 判定的 authoritativeNow 必须捕获
+ * 于 serialization authority（USER 锁 + ErrandTask FOR UPDATE）之后——
+ * 请求/事务开始时刻 ≠ 获得 authority 时刻（锁等待期间真实时间可能跨越
+ * deadline 边界，旧 now 会复活已到期任务）。options?.now seam 语义冻结为
+ * "authoritative decision time override"（测试注入），在生产捕获 new Date()
+ * 的同一逻辑位置消费；生产不传。
  */
 export async function updateErrandContentTx(
   tx: Prisma.TransactionClient,
@@ -639,11 +648,9 @@ export async function updateErrandContentTx(
   errandId: string,
   content: ErrandContentUpdateInput,
   seams?: ErrandLifecycleSeams,
-  /** Phase 9C-02：deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传）。 */
   options?: { now?: Date },
 ): Promise<ErrandContentUpdateOutcome> {
-  // Phase 9C-02（§19）：本 transition 的全部 deadline 判定共用同一 now。
-  const now = options?.now ?? new Date();
   if (seams?.beforeLock) {
     await seams.beforeLock(tx);
   }
@@ -664,6 +671,10 @@ export async function updateErrandContentTx(
   if (!errand || errand.deletedAt !== null || errand.publisherId !== actorUserId) {
     return "MISSING";
   }
+
+  // Review Repair RB02：authoritativeNow 捕获于 row authority 之后（锁等待
+  // 期间真实时间可能跨越 deadline；§9 时间 authority 冻结）
+  const now = options?.now ?? new Date();
 
   // fresh OPEN 权威（§34）：edit-after-claim 在此被拒，绝不返回成功
   if (errand.status !== "OPEN" || errand.accepterId !== null) {
@@ -857,7 +868,9 @@ export async function expireErrandDeadlineTx(
   tx: Prisma.TransactionClient,
   errandId: string,
   seams?: Pick<ErrandLifecycleSeams, "beforeLock" | "afterErrandRowLock">,
-  /** deadline 判定的可注入时钟（仅测试；生产不传）。 */
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传；
+   * 在生产捕获 new Date() 的同一逻辑位置——publisher 锁 + ErrandTask 行锁
+   * 之后的 fresh 谓词处——消费）。 */
   options?: { now?: Date },
 ): Promise<ErrandDeadlineExpiryOutcome> {
   // candidate pre-read：仅锁键发现（publisherId），不信任 status/deadline

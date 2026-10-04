@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Prisma, PrismaClient } from "@prisma/client";
+import { GOVERNANCE_LOCK_NAMESPACE } from "./helpers/lock-barrier";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // Phase 9C-02（ERRAND DEADLINE AUTHORITY）集成测试（真实 PostgreSQL）。
@@ -150,6 +151,47 @@ async function createErrandOrderFixture(input: {
   });
   orderIds.push(order.id);
   return order;
+}
+
+
+/**
+ * RB02 race fixtures：T1 持锁专用连接（application_name 精确标识）+
+ * pg_blocking_pids barrier——证明 T2 已真实进入 T1 所持锁的等待队列
+ * （零 sleep；不依赖 advisory lock 专属 helper，行锁等待同样覆盖）。
+ */
+const T1_APP_NAME = `p9c02-r1-t1-${RUN_TAG}`;
+
+function createT1Client() {
+  const baseUrl = process.env.DATABASE_URL ?? integrationDatabaseUrl ?? "";
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return new PrismaClient({
+    datasources: { db: { url: `${baseUrl}${separator}application_name=${T1_APP_NAME}` } },
+    log: ["error"],
+  });
+}
+
+async function waitForBlockerBarrier(client: PrismaClient, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await client.$queryRaw<{ blocked: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM pg_stat_activity a
+        WHERE cardinality(pg_blocking_pids(a.pid)) > 0
+          AND EXISTS (
+            SELECT 1
+            FROM unnest(pg_blocking_pids(a.pid)) AS blocker_pid
+            JOIN pg_stat_activity b ON b.pid = blocker_pid
+            WHERE b.application_name = ${T1_APP_NAME}
+          )
+      ) AS blocked
+    `;
+    if (rows[0]?.blocked) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("RB02 barrier 超时：T2 未进入 T1 所持锁的等待队列");
 }
 
 beforeAll(async () => {
@@ -425,6 +467,154 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(sections.highRewardErrands.map((item) => item.id)).not.toContain(errand.id);
       const summary = await home.getHomepageSummary({ campusId: dedicatedCampus.id });
       expect(summary.errandCount).toBe(0);
+    });
+
+    it("ERRAND-DEADLINE-EDIT-RACE-01（RB02/§14）：edit 在 USER 锁上等待期间真实时间跨越 deadline → authority 后判定 DEADLINE_EXPIRED 零写（请求开始 ≠ 获得 authority）", async () => {
+      const { updateErrandContentTx } = await import("@/lib/errand-lifecycle");
+      const { withTransaction } = await import("@/lib/prisma");
+
+      const publisher = await createFixtureUser("RACEEDIT发布者");
+      const errand = await createErrandFixture({
+        publisherId: publisher.id,
+        title: `RB02编辑竞速-${RUN_TAG}`,
+        deadlineOffsetMs: 60 * 60 * 1000,
+      });
+      const t1Client = createT1Client();
+
+      // T1：真实持有 USER:publisher governance lock，保持不提交
+      let signalT1Locked!: () => void;
+      const t1Locked = new Promise<void>((resolve) => {
+        signalT1Locked = resolve;
+      });
+      let releaseT1!: () => void;
+      const t1Gate = new Promise<void>((resolve) => {
+        releaseT1 = resolve;
+      });
+      const t1Promise = t1Client.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(${GOVERNANCE_LOCK_NAMESPACE}::int, hashtext(${`USER:${publisher.id}`}))`;
+        signalT1Locked();
+        await t1Gate;
+        return true;
+      }, { timeout: 60_000 });
+      await t1Locked;
+
+      // T2：生产 updateErrandContentTx（生产路径不传时钟 seam）——被 T1 阻塞
+      const content = {
+        title: `RB02复活尝试-${RUN_TAG}`,
+        description: "锁等待期间 deadline 已真实跨界，仍尝试延长复活。",
+        categoryId: errandCategoryId,
+        reward: errand.reward,
+        pickupLocation: "东门",
+        deliveryLocation: "西门",
+        deadline: new Date(Date.now() + 60 * 60 * 1000),
+        contactNote: null,
+        needsAdvancePay: false,
+        advanceAmount: null,
+      };
+      const t2Promise = withTransaction((tx: Prisma.TransactionClient) =>
+        updateErrandContentTx(tx, publisher.id, errand.id, content),
+      );
+
+      // 真实锁等待证据：T2 已进入 T1 所持锁的等待队列（pg_blocking_pids）
+      await waitForBlockerBarrier(t1Client);
+
+      // barrier 之后取时间戳 D：请求开始时刻（T2 若在锁前捕获 now，必小于 D）。
+      // release 后的任何 authority 时刻 >= D（时钟单调），因此：
+      //   旧实现（锁前捕获 now）→ now0 < D = deadline → 复活成功（旧 HEAD 上本测试失败）
+      //   新实现（row authority 后捕获 now）→ now >= D → DEADLINE_EXPIRED
+      const decisionBoundary = new Date();
+      await rawClient!.errandTask.update({
+        where: { id: errand.id },
+        data: { deadline: decisionBoundary },
+      });
+
+      releaseT1();
+      const [t1Settled, t2Settled] = await Promise.allSettled([t1Promise, t2Promise]);
+      expect(t1Settled.status).toBe("fulfilled");
+      expect(t2Settled.status).toBe("fulfilled");
+      if (t2Settled.status === "fulfilled") {
+        expect(t2Settled.value).toBe("DEADLINE_EXPIRED");
+      }
+
+      // zero revival：行保持 deadline 已过期态 + 原内容 + OPEN
+      const row = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
+      expect(row.title).toBe(`RB02编辑竞速-${RUN_TAG}`);
+      expect(row.deadline.getTime()).toBe(decisionBoundary.getTime());
+      expect(row.deadline.getTime()).toBeLessThanOrEqual(Date.now());
+      expect(row.status).toBe("OPEN");
+      expect(row.accepterId).toBeNull();
+
+      await t1Client.$disconnect();
+    });
+
+    it("ERRAND-DEADLINE-CLAIM-LOCK-CLOCK-01（RB02/§15）：claim 在行锁上等待期间 deadline 跨界（T1 事务内推进）→ row authority 后判定 DENY 零义务", async () => {
+      const { claimErrandTx } = await import("@/lib/order-creation");
+      const { withTransaction } = await import("@/lib/prisma");
+
+      const publisher = await createFixtureUser("RACECLAIM发布者");
+      const claimer = await createFixtureUser("RACECLAIM接单者");
+      const errand = await createErrandFixture({
+        publisherId: publisher.id,
+        title: `RB02接单竞速-${RUN_TAG}`,
+        deadlineOffsetMs: 60 * 60 * 1000,
+      });
+      const t1Client = createT1Client();
+
+      // T1：真实持有 ErrandTask 行锁（FOR UPDATE），保持不提交
+      let signalT1Locked!: () => void;
+      const t1Locked = new Promise<void>((resolve) => {
+        signalT1Locked = resolve;
+      });
+      let releaseT1!: () => void;
+      const t1Gate = new Promise<void>((resolve) => {
+        releaseT1 = resolve;
+      });
+      // 行锁被 T1 持有时外部无法 UPDATE 该行——deadline 跨界由 T1 在自身
+      // 事务内推进（barrier 确认 T2 等待后，取当下时刻写入并提交）
+      const t1Promise = t1Client.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT id FROM "ErrandTask" WHERE id = ${errand.id} FOR UPDATE`;
+        signalT1Locked();
+        await t1Gate;
+        await tx.$executeRaw`UPDATE "ErrandTask" SET "deadline" = ${new Date()} WHERE id = ${errand.id}`;
+        return true;
+      }, { timeout: 60_000 });
+      await t1Locked;
+
+      // T2：生产 claimErrandTx（生产路径不传时钟 seam）——行权威前被 T1 阻塞
+      const t2Promise = withTransaction((tx: Prisma.TransactionClient) =>
+        claimErrandTx(tx, {
+          errandId: errand.id,
+          publisherId: publisher.id,
+          claimerId: claimer.id,
+          campusId,
+          reward: errand.reward,
+        }),
+      );
+
+      // 真实锁等待证据：T2 已进入 T1 行锁的等待队列
+      await waitForBlockerBarrier(t1Client);
+
+      releaseT1();
+      const [t1Settled, t2Settled] = await Promise.allSettled([t1Promise, t2Promise]);
+      expect(t1Settled.status).toBe("fulfilled");
+      expect(t2Settled.status).toBe("fulfilled");
+      if (t2Settled.status === "fulfilled") {
+        expect(t2Settled.value).toBeNull();
+      }
+
+      // zero Order / zero Notification / Task 保持 OPEN + 过期 deadline
+      const row = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
+      expect(row.status).toBe("OPEN");
+      expect(row.accepterId).toBeNull();
+      expect(row.deadline.getTime()).toBeLessThanOrEqual(Date.now());
+      expect(
+        await rawClient!.order.count({ where: { type: "ERRAND", errandTaskId: errand.id } }),
+      ).toBe(0);
+      expect(
+        await rawClient!.notification.count({ where: { userId: { in: [publisher.id, claimer.id] } } }),
+      ).toBe(0);
+
+      await t1Client.$disconnect();
     });
 
     it("ERRAND-DEADLINE-EDIT-01（§5.1）：current deadline 已过 → DEADLINE_EXPIRED 零写，不得延长复活；未来 deadline 编辑照常", async () => {
