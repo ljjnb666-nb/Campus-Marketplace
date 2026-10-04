@@ -1879,8 +1879,14 @@ model DataExportArtifact {
   // 不参与 prisma-soft-delete 拦截）
   deletedAt DateTime?
 
-  request PrivacyRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
-  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // RB03：本行是 S3 external side-effect 的 durable recovery authority
+  // （bucket/objectKey/status = 对象恢复元数据）——parent 物理删除绝不能
+  // 静默 CASCADE 抹掉本行（否则 S3 PII 对象可能成为无主 orphan）。
+  // Restrict：只要存在未收敛 artifact，PrivacyRequest / User 行物理删除
+  // 一律被 DB 拒绝；收敛只能经 cleanup 状态机（PENDING_DELETE → DELETED
+  // tombstone 保留）。
+  request PrivacyRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@index([userId, status])
   // expiry / cleanup 扫描：READY 到期 → PENDING_DELETE；PENDING_DELETE → 物理删除

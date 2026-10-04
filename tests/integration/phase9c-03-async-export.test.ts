@@ -419,6 +419,40 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
     expect(ttlHours).toBeLessThan(24.1);
   });
 
+  it("EXPORT-ARTIFACT-FK-GUARD-01（RB03）：存在未收敛 artifact 时 parent 物理删除被 DB 拒绝（recovery metadata 不得 cascade 消失）", async () => {
+    const userId = await createFixtureUser("fk-guard");
+    const { request } = await createAsyncDataExportRequest(userId);
+    await runExportJobUntil(request.id, (row) => row.status === "COMPLETED");
+
+    const artifact = await artifactRow(request.id);
+    expect(artifact.status).toBe("READY"); // 未收敛 = S3 对象的恢复元数据仍被本行持有
+
+    // DELETE PrivacyRequest → FK Restrict 拒绝（P2003）
+    await expect(
+      rawClient.privacyRequest.delete({ where: { id: request.id } }),
+    ).rejects.toMatchObject({ code: "P2003" });
+
+    // DELETE User → 同样拒绝（对象恢复元数据不得随 parent 消失）
+    await expect(rawClient.user.delete({ where: { id: userId } })).rejects.toMatchObject({
+      code: "P2003",
+    });
+
+    // DB 行确实原样保留（零副作用）
+    expect((await artifactRow(request.id)).status).toBe("READY");
+    expect(await requestRow(request.id)).toMatchObject({ status: "COMPLETED" });
+
+    // 收敛后 tombstone 同样受 FK 保护（DELETED 行仍持有恢复/审计元数据）
+    await rawClient.dataExportArtifact.update({
+      where: { id: artifact.id },
+      data: { status: "PENDING_DELETE", expiresAt: new Date(Date.now() - 1_000) },
+    });
+    await runDataExportArtifactCleanup({ batchLimit: 10 });
+    expect((await artifactRow(request.id)).status).toBe("DELETED");
+    await expect(
+      rawClient.privacyRequest.delete({ where: { id: request.id } }),
+    ).rejects.toMatchObject({ code: "P2003" });
+  });
+
   it("EXPORT-CRASH-01：PUT success → READY commit 前 fail → retry → 同一 objectKey、恰一个对象、COMPLETED", async () => {
     const userId = await createFixtureUser("crash01");
     const { request } = await createAsyncDataExportRequest(userId);

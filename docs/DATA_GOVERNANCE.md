@@ -104,10 +104,11 @@ COMPLETED / CANCELLED / REJECTED 为终态
 `X-Content-Type-Options: nosniff`；限流 3 次/15 分钟（rate limit 不是并发
 锁）；并发重复由 DB partial unique index 收敛为 409
 `DATA_EXPORT_ALREADY_ACTIVE`；每次导出留痕 DATA_EXPORT 请求记录 +
-`DataExportArtifact`（1:0..1，WRITING→READY→PENDING_DELETE→DELETED，
-TTL 默认 24h，到期由 storage cleanup 物理删除；bucket/objectKey 绝不进入
-browser-visible surface；不计入用户 storage quota；注销时原子
-PENDING_DELETE）。
+`DataExportArtifact`（1:0..1，WRITING→READY→PENDING_DELETE→DELETED；
+TTL 默认 24h，到期由 storage cleanup 幂等 DeleteObject——S3 导出文件
+物理删除，DB 行保留 DELETED 机器墓碑（结构性恢复/审计元数据，不含用户
+内容）；bucket/objectKey 绝不进入 browser-visible surface；不计入用户
+storage quota；注销时原子 PENDING_DELETE）。
 
 ## 5. 账号注销 / 匿名化（ACCOUNT_DELETION）
 

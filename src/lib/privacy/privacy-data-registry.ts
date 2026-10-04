@@ -110,8 +110,8 @@ export const FROZEN_PERSONAL_MODELS = [
   "UploadedAsset",
   "PrivacyRequest",
   "PolicyAcceptance",
-  // Phase 9C-03：隐私导出 artifact（system-generated derived copy，
-  // 短 TTL、注销/到期物理删除）
+  // Phase 9C-03：隐私导出 artifact（system-generated derived copy；
+  // 短 TTL，S3 PII 对象到期/注销物理删除，DB 行保留 DELETED 墓碑）
   "DataExportArtifact",
 ] as const;
 
@@ -195,15 +195,19 @@ export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPol
   //   短 TTL 派生副本，ACTIVE hold 不阻断其到期清理）；
   // - selfExport EXCLUDE：artifact 自身绝不进入导出载荷（否则自引用
   //   无穷），bucket/objectKey 属 STORAGE_METADATA 结构性缺席；
-  // - erasure DELETE：注销时全部 WRITING/READY artifact 原子标记
-  //   PENDING_DELETE（运行时在 account-erasure 执行），物理对象与行由
-  //   storage cleanup 收敛删除；
+  // - erasure RETAIN_STRUCTURAL（RB03-B：与 runtime 精确一致）：注销时
+  //   全部 WRITING/READY artifact 原子标记 PENDING_DELETE（account-erasure
+  //   执行），storage cleanup 幂等 DeleteObject 后行转移 DELETED 并保留
+  //   机器墓碑（deletedAt + bucket/objectKey 结构性恢复/审计元数据）——
+  //   用户导出 bytes（S3 对象）已物理删除，行内不含任何用户内容；registry
+  //   的 DELETE（整行删除）语义不适用于本表（FK Restrict 见 schema 注释，
+  //   recovery metadata 不得被 parent cascade 静默抹除）；
   // - secondaryCopyAllowed=true：该模型本身就是用户明确授权的导出副本
   //   （DATA_EXPORT 权利实现），TTL 有界、删除幂等；
   // - 不计入 User.storageUsedBytes（用户导出自身数据绝不被 quota 阻断）。
   DataExportArtifact: {
     model: "DataExportArtifact",
-    ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "DELETE", true, false),
+    ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "RETAIN_STRUCTURAL", true, false),
   },
   PolicyAcceptance: {
     model: "PolicyAcceptance",

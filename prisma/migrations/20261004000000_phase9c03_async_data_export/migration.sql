@@ -52,8 +52,13 @@ CREATE INDEX "DataExportArtifact_status_updatedAt_idx" ON "DataExportArtifact"("
 
 -- AddForeignKeys（request 级联：PrivacyRequest 行不存在时 artifact 失去意义；
 --   物理对象由 cleanup / erasure 收敛，不依赖 DB 级联）
-ALTER TABLE "DataExportArtifact" ADD CONSTRAINT "DataExportArtifact_requestId_fkey" FOREIGN KEY ("requestId") REFERENCES "PrivacyRequest"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-ALTER TABLE "DataExportArtifact" ADD CONSTRAINT "DataExportArtifact_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+-- RB03：artifact 行是 S3 external side-effect 的 durable recovery authority
+-- （bucket/objectKey/status）——parent 物理删除绝不能静默 CASCADE 抹掉本行
+-- （否则 S3 PII 对象可能成为无主 orphan）。RESTRICT：存在未收敛 artifact 时
+-- PrivacyRequest / User 物理删除一律被 DB 拒绝；收敛只能经 cleanup 状态机
+-- （PENDING_DELETE → DELETED tombstone 保留）。
+ALTER TABLE "DataExportArtifact" ADD CONSTRAINT "DataExportArtifact_requestId_fkey" FOREIGN KEY ("requestId") REFERENCES "PrivacyRequest"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "DataExportArtifact" ADD CONSTRAINT "DataExportArtifact_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- Phase 9C-03 active DATA_EXPORT 去重（§7）：同一用户至多一个 active
 -- DATA_EXPORT request。与 ACCOUNT_DELETION partial unique index 同一惯例

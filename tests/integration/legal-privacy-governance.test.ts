@@ -188,6 +188,11 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 5 治理集成测试 + Privacy D
     await rawClient!.errandCategory.deleteMany({ where: { slug: { startsWith: "errand-race-" } } });
     await rawClient!.uploadedAsset.deleteMany({ where: { ownerId: { in: createdUserIds } } });
     await rawClient!.policyAcceptance.deleteMany({ where: { userId: { in: createdUserIds } } });
+    // Phase 9C-03 RB03：artifact FK = Restrict（recovery metadata 不得被
+    // parent cascade 抹除）——必须先删 artifact 再删 parent request/user
+    await rawClient!.dataExportArtifact.deleteMany({
+      where: { userId: { in: createdUserIds } },
+    });
     await rawClient!.privacyRequest.deleteMany({ where: { userId: { in: createdUserIds } } });
     // Phase 9C-03：AsyncJob 与 PrivacyRequest 无 FK——本套件是唯一
     // DATA_EXPORT_GENERATE producer（9C-03 专属套件走隔离库），按 kind 全清
