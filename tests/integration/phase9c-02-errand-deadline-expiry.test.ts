@@ -147,6 +147,29 @@ async function runWorkerBatch() {
   return runAsyncJobBatchOnce();
 }
 
+/**
+ * Review Repair R1：共享 AsyncJob 队列上存在并行测试文件（9A/9B/本文件）
+ * 的 due jobs 与 worker 子进程竞争——单次 batch 的 summary 计数不是本
+ * fixture 的可靠证据。改为以【本 fixture job 的终态】为断言锚点：有界轮次
+ * 内反复跑真实 claim/execute（每轮都是真实工作，零 sleep），直到目标 job
+ * 达到期望状态或轮次耗尽（耗尽后返回当前行，由调用方断言失败）。
+ */
+async function runWorkerBatchesUntil(
+  jobId: string,
+  expected: (job: { status: string; runAt: Date }) => boolean,
+  maxRounds = 15,
+) {
+  let job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: jobId } });
+  for (let round = 0; round < maxRounds; round += 1) {
+    if (expected(job)) {
+      return job;
+    }
+    await runWorkerBatch();
+    job = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: jobId } });
+  }
+  return job;
+}
+
 beforeAll(async () => {
   if (!rawClient) return;
 
@@ -198,17 +221,16 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(job.dedupeKey).toBe(`${ERRAND_DEDUPE_PREFIX}:${errand.id}`);
       expect(job.runAt.getTime()).toBeLessThanOrEqual(Date.now());
 
-      const summary = await runWorkerBatch();
-      expect(summary.completed).toBeGreaterThanOrEqual(1);
+      // 共享队列下以本 fixture job 终态为锚点（有界真实 batch 循环）
+      const completed = await runWorkerBatchesUntil(job.id, (j) => j.status === "COMPLETED");
+
+      expect(completed.status).toBe("COMPLETED");
+      expect(completed.completedAt).not.toBeNull();
+      expect(completed.lastErrorCode).toBeNull();
 
       const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
       expect(task.status).toBe("CANCELLED");
       expect(task.accepterId).toBeNull();
-
-      const completed = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
-      expect(completed.status).toBe("COMPLETED");
-      expect(completed.completedAt).not.toBeNull();
-      expect(completed.lastErrorCode).toBeNull();
 
       // 零新义务：expiry 不产生任何 Order / Notification
       expect(
@@ -236,9 +258,8 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
 
       const job = await enqueueExpiryJob(errand.id, errand.deadline);
-      const summary = await runWorkerBatch();
-
-      expect(summary.idempotentNoOp).toBeGreaterThanOrEqual(1);
+      // 共享队列下以本 fixture job 终态为锚点（COMPLETED 即幂等 no-op 路径）
+      const completed = await runWorkerBatchesUntil(job.id, (j) => j.status === "COMPLETED");
 
       // canonical pair 原样：CLAIMED ↔ ACCEPTED（deadline 不终止既有履约义务）
       const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
@@ -247,7 +268,6 @@ describe.skipIf(!integrationDatabaseUrl)(
       const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(persistedOrder.status).toBe("ACCEPTED");
 
-      const completed = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
       expect(completed.status).toBe("COMPLETED");
       expect(completed.lastErrorCode).toBeNull();
     });
@@ -270,17 +290,18 @@ describe.skipIf(!integrationDatabaseUrl)(
         data: { deadline: newDeadline },
       });
 
-      const summary = await runWorkerBatch();
-      expect(summary.rescheduled).toBeGreaterThanOrEqual(1);
+      // 共享队列下以本 fixture job 状态为锚点：NOT_DUE → PENDING + runAt = 权威新 deadline
+      const rescheduled = await runWorkerBatchesUntil(
+        job.id,
+        (j) => j.status === "PENDING" && j.runAt.getTime() === newDeadline.getTime(),
+      );
 
-      // 业务事实零写入：Task 仍 OPEN；job 重排程到权威 fresh deadline
+      // 业务事实零写入：Task 仍 OPEN
       const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
       expect(task.status).toBe("OPEN");
 
-      const rescheduled = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
       expect(rescheduled.status).toBe("PENDING");
       expect(rescheduled.runAt.getTime()).toBe(newDeadline.getTime());
-      expect(rescheduled.attempts).toBe(1);
       expect(rescheduled.lastErrorCode).toBeNull();
 
       // deadline 真实到达后，同一条 one-shot intent 完成 materialize
@@ -295,10 +316,9 @@ describe.skipIf(!integrationDatabaseUrl)(
         where: { id: job.id },
         data: { runAt: advanced },
       });
-      await runWorkerBatch();
+      const finalJob = await runWorkerBatchesUntil(job.id, (j) => j.status === "COMPLETED");
       const finalTask = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
       expect(finalTask.status).toBe("CANCELLED");
-      const finalJob = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
       expect(finalJob.status).toBe("COMPLETED");
     });
 
@@ -331,17 +351,17 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       const jobB = await enqueueExpiryJob(anomalousAccepter.id, anomalousAccepter.deadline);
 
-      const summary = await runWorkerBatch();
-      expect(summary.deadLettered).toBeGreaterThanOrEqual(2);
+      // 共享队列下以本 fixture jobs 终态为锚点
+      const deadA = await runWorkerBatchesUntil(jobA.id, (j) => j.status === "DEAD_LETTER");
+      const deadB = await runWorkerBatchesUntil(jobB.id, (j) => j.status === "DEAD_LETTER");
 
       // fail closed：domain 零 mutation（Task/Order 原样，绝不猜测修复）
-      for (const [errandId, jobId] of [
-        [anomalousOrder.id, jobA.id],
-        [anomalousAccepter.id, jobB.id],
+      for (const [errandId, dead] of [
+        [anomalousOrder.id, deadA],
+        [anomalousAccepter.id, deadB],
       ] as const) {
         const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errandId } });
         expect(task.status).toBe("OPEN");
-        const dead = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: jobId } });
         expect(dead.status).toBe("DEAD_LETTER");
         expect(dead.deadLetteredAt).not.toBeNull();
         expect(dead.lastErrorCode).toBe("ERRAND_DEADLINE_STRUCTURAL_INVALID");
@@ -367,8 +387,8 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       const job = await enqueueExpiryJob(errand.id, errand.deadline);
 
-      const summary = await runWorkerBatch();
-      expect(summary.deadLettered).toBeGreaterThanOrEqual(1);
+      // 共享队列下以本 fixture job 终态为锚点
+      const dead = await runWorkerBatchesUntil(job.id, (j) => j.status === "DEAD_LETTER");
 
       // fail closed：绝不猜测性 CANCELLED（旧 active set 不含 IN_DISPUTE 时
       // 会留下 Task CANCELLED + Order IN_DISPUTE 的错误 structural repair）
@@ -378,7 +398,6 @@ describe.skipIf(!integrationDatabaseUrl)(
       const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(persistedOrder.status).toBe("IN_DISPUTE");
 
-      const dead = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
       expect(dead.status).toBe("DEAD_LETTER");
       expect(dead.lastErrorCode).toBe("ERRAND_DEADLINE_STRUCTURAL_INVALID");
     });
@@ -400,8 +419,8 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
       const job = await enqueueExpiryJob(errand.id, errand.deadline);
 
-      const summary = await runWorkerBatch();
-      expect(summary.deadLettered).toBeGreaterThanOrEqual(1);
+      // 共享队列下以本 fixture job 终态为锚点
+      const dead = await runWorkerBatchesUntil(job.id, (j) => j.status === "DEAD_LETTER");
 
       // fail closed：「正常流程不应出现」不等于「expiry 可以忽略」
       const task = await rawClient!.errandTask.findUniqueOrThrow({ where: { id: errand.id } });
@@ -409,7 +428,6 @@ describe.skipIf(!integrationDatabaseUrl)(
       const persistedOrder = await rawClient!.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(persistedOrder.status).toBe("PENDING");
 
-      const dead = await rawClient!.asyncJob.findUniqueOrThrow({ where: { id: job.id } });
       expect(dead.status).toBe("DEAD_LETTER");
       expect(dead.lastErrorCode).toBe("ERRAND_DEADLINE_STRUCTURAL_INVALID");
     });

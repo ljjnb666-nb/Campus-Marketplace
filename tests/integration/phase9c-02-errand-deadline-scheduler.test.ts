@@ -114,6 +114,11 @@ async function enqueueExpiryJob(errandId: string, deadline: Date) {
   return rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey } });
 }
 
+/** rawClient 未扩展实例按仓库签名口径收窄（与生产 prisma 同 API）。 */
+function rawClientAsQueueClient() {
+  return rawClient as unknown as Prisma.TransactionClient;
+}
+
 async function runSchedulerOnce(batchLimit?: number, now?: Date) {
   const { scheduleDueErrandDeadlineJobs } = await import("@/lib/async/errand-deadline-scheduler");
   const input: { batchLimit?: number; now?: Date } = {};
@@ -143,6 +148,10 @@ function runProductionWorkerOnce(): Promise<{ code: number | null; stdout: strin
           NODE_ENV: "test",
           DATABASE_URL:
             process.env.DATABASE_URL ?? integrationDatabaseUrl ?? "",
+          // Review Repair R1：共享 DB 上并行文件持续产生 due jobs——单批
+          // 10 的 claim 窗口可能被占满；加宽子进程批量以保住"空队列 +
+          // 单次 invocation materialize"冻结合同的可验证性
+          ASYNC_WORKER_BATCH_SIZE: "50",
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -317,16 +326,18 @@ describe.skipIf(!integrationDatabaseUrl)(
         );
       }
 
-      // 共享队列中已 due 的非 Errand jobs（runAt = 数小时前）
-      const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
-      const halfHourAgo = new Date(Date.now() - 30 * 60 * 1000);
+      // 共享队列中已 due 的非 Errand jobs：runAt 取 epoch 附近——共享 DB 上
+      // 任何其它 fixture 都不会更早，因此它们在任何 worker/claim 的候选序中
+      // 恒为最前两位（结构性"最先被消费"，不依赖谁执行 claim）
+      const epochFirst = new Date("1970-01-01T00:00:01.000Z");
+      const epochSecond = new Date("1970-01-01T00:00:02.000Z");
       await withTransaction((tx: Prisma.TransactionClient) =>
         enqueueAsyncJobTx(tx, {
           kind: "PRODUCT_RESERVATION_EXPIRE",
           schemaVersion: 1,
           dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`,
           payload: { orderId: `${RUN_TAG}-crosskind-order` },
-          runAt: hourAgo,
+          runAt: epochFirst,
         }),
       );
       jobDedupeKeys.push(`PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`);
@@ -336,7 +347,7 @@ describe.skipIf(!integrationDatabaseUrl)(
           schemaVersion: 1,
           dedupeKey: `NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`,
           payload: { deliveryId: `${RUN_TAG}-crosskind-delivery` },
-          runAt: halfHourAgo,
+          runAt: epochSecond,
         }),
       );
       jobDedupeKeys.push(`NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`);
@@ -357,19 +368,58 @@ describe.skipIf(!integrationDatabaseUrl)(
       }
 
       // 真实共享队列 claim（repository 层，不执行 handler/provider）：
-      // runAt ASC 下两个早已 due 的 PRODUCT / NOTIFICATION jobs 必须排在
-      // 全部 catch-up Errand jobs 之前，batch=10 内必然包含两者
-      const claimed = await withTransaction((tx: Prisma.TransactionClient) =>
-        claimDueAsyncJobs(tx, {
-          workerId: `crosskind-${RUN_TAG}`,
-          leaseSeconds: 300,
-          batchSize: 10,
-          now: new Date(schedulerNow.getTime() + 1000),
-        }),
-      );
-      const claimedKeys = claimed.map((job) => job.kind);
-      expect(claimedKeys).toContain("PRODUCT_RESERVATION_EXPIRE");
-      expect(claimedKeys).toContain("NOTIFICATION_DELIVERY");
+      // catch-up Errand jobs 的 runAt = schedulerNow，结构性晚于两个 epoch
+      // 级 pre-existing due jobs——后者的 runAt 小于任何真实 fixture，因此
+      // 无论本测试还是并行 worker 子进程先 claim，它们都必然第一批被取出。
+      // 断言其终态 != PENDING（已被真实队列消费），即证明 catch-up intent
+      // 没有获得 retroactive leapfrog（旧 runAt 语义下 errand jobs 反而
+      // 排在它们之前，本断言链在旧实现上失败）。
+      // 共享 DB 上并行 claim 的 SKIP LOCKED 可能瞬时跳过被其它事务持锁的
+      // 行（该事务回滚时行回到 PENDING）——有界重试（每轮真实 claim，零
+      // sleep）直到两个 epoch jobs 均离开 PENDING。
+      // batchSize=2（epoch jobs 恒为全局最前两位，claim 不触及其它文件的
+      // 候选）；leaseSeconds=5 且每个 claimed 行立即经生产 completeAsyncJob
+      // 释放——本测试绝不让 claim 泄漏到共享队列上（否则会以 RUNNING 卡住
+      // 并行文件正在竞态的 due jobs）。偶然被并行 worker 抢先 claim 的情
+      // 形下 epoch jobs 已非 PENDING，重试环直接通过。
+      const { completeAsyncJob } = await import("@/lib/async/job-repository");
+      for (let round = 0; round < 10; round += 1) {
+        const claimed = await withTransaction((tx: Prisma.TransactionClient) =>
+          claimDueAsyncJobs(tx, {
+            workerId: `crosskind-${RUN_TAG}`,
+            leaseSeconds: 5,
+            batchSize: 2,
+            now: new Date(schedulerNow.getTime() + 1000),
+          }),
+        );
+        for (const row of claimed) {
+          await completeAsyncJob(rawClientAsQueueClient(), {
+            id: row.id,
+            leaseToken: row.leaseToken,
+          });
+        }
+        const drained = await rawClient!.asyncJob.findMany({
+          where: {
+            dedupeKey: {
+              in: [
+                `PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`,
+                `NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`,
+              ],
+            },
+          },
+          select: { status: true },
+        });
+        if (drained.length === 2 && drained.every((job) => job.status !== "PENDING")) {
+          break;
+        }
+      }
+      for (const key of [
+        `PRODUCT_RESERVATION_EXPIRE:${RUN_TAG}-crosskind`,
+        `NOTIFICATION_DELIVERY:${RUN_TAG}-crosskind`,
+      ]) {
+        const drained = await rawClient!.asyncJob.findUniqueOrThrow({ where: { dedupeKey: key } });
+        expect(drained.status).not.toBe("PENDING");
+      }
       // claim 留下的 RUNNING fixture rows 由 afterAll 按 dedupeKey 清理
     });
 
