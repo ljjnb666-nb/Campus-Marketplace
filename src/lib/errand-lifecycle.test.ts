@@ -59,6 +59,9 @@ const ERRAND_ID = "errand-1";
 const ORDER_ID = "order-1";
 const CAMPUS_ID = "campus-1";
 
+/** Phase 9C-02：默认 future deadline（锁内 fresh 谓词的测试时钟基准）。 */
+const FUTURE_DEADLINE = new Date("2026-12-31T00:00:00.000Z");
+
 type TxMocks = {
   tx: Prisma.TransactionClient;
   executeRaw: ReturnType<typeof vi.fn>;
@@ -89,6 +92,8 @@ function makeTx(input: {
     status: "CLAIMED",
     publisherId: PUBLISHER,
     accepterId: ACCEPTER,
+    // Phase 9C-02：锁内 fresh 谓词读取 deadline（revival/reopen/expiry 权威）
+    deadline: FUTURE_DEADLINE,
     deletedAt: null,
   };
   const errandRow = input.errandRow === undefined ? defaultErrand : input.errandRow;
@@ -211,6 +216,29 @@ describe("transitionErrandTx（canonical state pairs）", () => {
       `ERRAND_TASK_STATUS_CHANGED:${ORDER_ID}:OPEN:${ACCEPTER}`,
       `ERRAND_TASK_STATUS_CHANGED:${ORDER_ID}:OPEN:${PUBLISHER}`,
     ]);
+  });
+
+  it("Phase 9C-02 reopen guard：CLAIMED→OPEN + deadline 已过 → false 零写（不得撤销接单后重新暴露）", async () => {
+    const m = makeTx({
+      errandRow: {
+        id: ERRAND_ID,
+        campusId: CAMPUS_ID,
+        status: "CLAIMED",
+        publisherId: PUBLISHER,
+        accepterId: ACCEPTER,
+        deadline: new Date("2026-10-01T00:00:00.000Z"),
+        deletedAt: null,
+      },
+    });
+
+    const ok = await transitionErrandTx(m.tx, PUBLISHER, ERRAND_ID, "OPEN");
+
+    expect(ok).toBe(false);
+    // 既有 CLAIMED obligation 原样保留：Task / Order / Notification 零写
+    expect(requireMarketplaceCapability).not.toHaveBeenCalled();
+    expect(m.taskUpdateMany).not.toHaveBeenCalled();
+    expect(m.orderUpdateMany).not.toHaveBeenCalled();
+    expect(m.notificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("CLAIMED→IN_PROGRESS：accepter → Task IN_PROGRESS + Order IN_PROGRESS（无 capability）", async () => {
@@ -678,6 +706,7 @@ describe("updateErrandContentTx（fresh OPEN 权威）", () => {
         status: "OPEN",
         publisherId: PUBLISHER,
         accepterId: null,
+        deadline: FUTURE_DEADLINE,
         deletedAt: null,
       },
       activeOrderRows: [],
@@ -696,6 +725,50 @@ describe("updateErrandContentTx（fresh OPEN 权威）", () => {
       where: { id: ERRAND_ID },
       data: errandContent,
     });
+  });
+
+  it("Phase 9C-02 revival guard：current deadline 已过（row 尚未 materialize）→ DEADLINE_EXPIRED 零写，不得延长复活", async () => {
+    const m = makeTx({
+      errandRow: {
+        id: ERRAND_ID,
+        campusId: CAMPUS_ID,
+        status: "OPEN",
+        publisherId: PUBLISHER,
+        accepterId: null,
+        deadline: new Date("2026-10-01T00:00:00.000Z"),
+        deletedAt: null,
+      },
+      activeOrderRows: [],
+    });
+
+    const outcome = await updateErrandContentTx(m.tx, PUBLISHER, ERRAND_ID, errandContent);
+
+    expect(outcome).toBe("DEADLINE_EXPIRED");
+    expect(requireMarketplaceCapability).not.toHaveBeenCalled();
+    expect(m.taskUpdate).not.toHaveBeenCalled();
+  });
+
+  it("Phase 9C-02 revival guard：请求的 deadline 是过去时刻 → DEADLINE_EXPIRED 零写（deadline truth > late intent）", async () => {
+    const m = makeTx({
+      errandRow: {
+        id: ERRAND_ID,
+        campusId: CAMPUS_ID,
+        status: "OPEN",
+        publisherId: PUBLISHER,
+        accepterId: null,
+        deadline: FUTURE_DEADLINE,
+        deletedAt: null,
+      },
+      activeOrderRows: [],
+    });
+
+    const outcome = await updateErrandContentTx(m.tx, PUBLISHER, ERRAND_ID, {
+      ...errandContent,
+      deadline: new Date("2020-01-01T00:00:00.000Z"),
+    });
+
+    expect(outcome).toBe("DEADLINE_EXPIRED");
+    expect(m.taskUpdate).not.toHaveBeenCalled();
   });
 
   it("edit-after-claim：事务外看到 OPEN、锁内 fresh CLAIMED → NOT_OPEN 零写（绝不 success）", async () => {
@@ -774,6 +847,7 @@ describe("updateErrandContentTx（fresh OPEN 权威）", () => {
         status: "OPEN",
         publisherId: PUBLISHER,
         accepterId: null,
+        deadline: FUTURE_DEADLINE,
         deletedAt: null,
       },
       activeOrderRows: [],
@@ -912,8 +986,13 @@ describe("deleteErrandTx（事务级删除权威）", () => {
 });
 
 describe("ACTIVE_ERRAND_ORDER_STATUSES 冻结值", () => {
-  it("只包含 ACCEPTED / IN_PROGRESS（COMPLETED/CANCELLED 不属于 active obligation）", () => {
-    expect([...ACTIVE_ERRAND_ORDER_STATUSES]).toEqual(["ACCEPTED", "IN_PROGRESS"]);
+  it("只包含 PENDING / ACCEPTED / IN_PROGRESS / IN_DISPUTE（Review Repair RB04：全部未关闭义务；terminal 不属于）", () => {
+    expect([...ACTIVE_ERRAND_ORDER_STATUSES]).toEqual([
+      "PENDING",
+      "ACCEPTED",
+      "IN_PROGRESS",
+      "IN_DISPUTE",
+    ]);
   });
 });
 

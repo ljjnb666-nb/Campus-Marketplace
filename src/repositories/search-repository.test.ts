@@ -140,8 +140,10 @@ describe("getSearchResults", () => {
     expect(errandFindMany).toHaveBeenCalledWith({
       where: {
         deletedAt: null,
-        // Phase 8F（§56）：search 只暴露 OPEN（exposure state only）
+        // Phase 8F（§56）+ 9C-02：search = canonical exposure contract
+        //（OPEN + deadline 下界）
         status: "OPEN",
+        deadline: { gt: expect.any(Date) },
         moderations: { none: { resolvedAt: null } },
         OR: [
           { title: contains },
@@ -212,6 +214,7 @@ describe("getSearchResults", () => {
         publisherId: { in: ["user-1"] },
         deletedAt: null,
         status: "OPEN",
+        deadline: { gt: expect.any(Date) },
         moderations: { none: { resolvedAt: null } },
       },
       _count: {

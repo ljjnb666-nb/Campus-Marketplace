@@ -5,6 +5,7 @@ import path from "node:path";
 import { test, expect } from "@playwright/test";
 import { storageStatePath, uniqueTag } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
+import { withE2EAsyncWorkerProtocolLock } from "./helpers/async-worker-lock";
 
 /**
  * Phase 9B — 9B-E2E-01：PRODUCT 预留过期 → In-App + EMAIL 双渠道
@@ -75,7 +76,12 @@ function attemptsForKey(key: string): number {
   return fakeRequests.filter((request) => request.key === key).length;
 }
 
-function runProductionWorkerOnce(extraEnv: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runProductionWorkerOnce(extraEnv: Record<string, string> = {}): Promise<{
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  pid: number | undefined;
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -100,7 +106,7 @@ function runProductionWorkerOnce(extraEnv: Record<string, string> = {}): Promise
     child.stdout.on("data", (chunk) => (stdout += String(chunk)));
     child.stderr.on("data", (chunk) => (stderr += String(chunk)));
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+    child.on("close", (code) => resolve({ code, stdout, stderr, pid: child.pid }));
   });
 }
 
@@ -146,104 +152,146 @@ test("9B-E2E-01：商品预留过期 → In-App + EMAIL 双渠道 → fake Resen
     expect(order?.status).toBe("PENDING");
     const orderId = order!.id;
 
-    // ---------- TEST-ONLY DEADLINE ADVANCE ----------
-    const advanced = new Date(Date.now() - 1000);
-    await e2eDb().order.update({
-      where: { id: orderId },
-      data: { productReservationExpiresAt: advanced },
-    });
-    await e2eDb().asyncJob.update({
-      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
-      data: { runAt: advanced },
-    });
-
-    // ---------- worker cycle 1：expire + outbox materialize（通知 + EMAIL 意图）----------
-    const cycle1 = await runProductionWorkerOnce(workerEmailEnv);
-    expect(cycle1.code, `stdout=${cycle1.stdout}\nstderr=${cycle1.stderr}`).toBe(0);
-
-    const outbox = await e2eDb().outboxEvent.findUnique({
-      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}` },
-    });
-    expect(outbox).not.toBeNull();
-    expect(outbox!.status).toBe("PUBLISHED");
-
-    const notifications = await e2eDb().notification.findMany({
-      where: { orderId, title: "商品预留已过期" },
-    });
-    expect(notifications).toHaveLength(2);
-    expect(new Set(notifications.map((n) => n.userId))).toEqual(
-      new Set([order!.buyerId, order!.sellerId]),
-    );
-    for (const notification of notifications) {
-      expect(notification.kind).toBe("PRODUCT_RESERVATION_EXPIRED");
-      expect(notification.schemaVersion).toBe(1);
-      expect(notification.payload).toEqual({
-        orderId,
-        buyerId: order!.buyerId,
-        sellerId: order!.sellerId,
+    // ---------- TEST-ONLY DEADLINE ADVANCE → 3 worker cycles → final assertions ----------
+    // RB06：本 spec 的 worker 持有专属 fake Resend runtime env
+    //（RESEND_API_BASE_URL 指向本 spec 的 fake provider）。一旦 deadline
+    // advance 使 NOTIFICATION_DELIVERY jobs 可被消费，任何普通 env 的并行
+    // worker claim 都会破坏 provider 行为断言——整个 queue protocol 在
+    // E2E async-worker protocol 互斥锁（跨 Playwright worker 进程）内完成，
+    // 锁释放前 EMAIL delivery 全部收敛。
+    console.log(`[rb06-diag][9B][lock] acquire-at=${new Date().toISOString()}`);
+    await withE2EAsyncWorkerProtocolLock("phase9b-email", async () => {
+      const advanced = new Date(Date.now() - 1000);
+      console.log(`[rb06-diag][9B][advance] at=${new Date().toISOString()}`);
+      await e2eDb().order.update({
+        where: { id: orderId },
+        data: { productReservationExpiresAt: advanced },
       });
-    }
+      await e2eDb().asyncJob.update({
+        where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
+        data: { runAt: advanced },
+      });
 
-    // 同事务原子：2 条 EMAIL delivery + 2 个 NOTIFICATION_DELIVERY job
-    const deliveries = await e2eDb().notificationDelivery.findMany({
-      where: { notificationId: { in: notifications.map((n) => n.id) }, channel: "EMAIL" },
-    });
-    expect(deliveries).toHaveLength(2);
-    for (const delivery of deliveries) {
-      expect(delivery.provider).toBe("resend");
-      expect(delivery.providerAcceptedAt).toBeNull();
-      expect(delivery.suppressedAt).toBeNull();
-      expect(delivery.providerIdempotencyKey).toBe(
-        `notification/${delivery.notificationId}/email/v1`,
+      // ---------- worker cycle 1：expire + outbox materialize（通知 + EMAIL 意图）----------
+      const cycle1 = await runProductionWorkerOnce(workerEmailEnv);
+      expect(cycle1.code, `stdout=${cycle1.stdout}\nstderr=${cycle1.stderr}`).toBe(0);
+
+      const outbox = await e2eDb().outboxEvent.findUnique({
+        where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}` },
+      });
+      expect(outbox).not.toBeNull();
+      expect(outbox!.status).toBe("PUBLISHED");
+
+      const notifications = await e2eDb().notification.findMany({
+        where: { orderId, title: "商品预留已过期" },
+      });
+      expect(notifications).toHaveLength(2);
+      expect(new Set(notifications.map((n) => n.userId))).toEqual(
+        new Set([order!.buyerId, order!.sellerId]),
       );
-    }
+      for (const notification of notifications) {
+        expect(notification.kind).toBe("PRODUCT_RESERVATION_EXPIRED");
+        expect(notification.schemaVersion).toBe(1);
+        expect(notification.payload).toEqual({
+          orderId,
+          buyerId: order!.buyerId,
+          sellerId: order!.sellerId,
+        });
+      }
 
-    // ---------- §77 duplicate retry：buyer 的 key 第一次受理但响应丢失 ----------
-    const buyerEmail = (
-      await e2eDb().user.findUniqueOrThrow({ where: { id: order!.buyerId } })
-    ).email;
-    const buyerDelivery = deliveries.find((delivery) => delivery.destination === buyerEmail)!;
-    expect(buyerDelivery).toBeDefined();
-    fakeBehaviors.set(buyerDelivery.providerIdempotencyKey, [
-      { kind: "hang" },
-      { kind: "ok", messageId: "msg-buyer-stable" },
-    ]);
+      // 同事务原子：2 条 EMAIL delivery + 2 个 NOTIFICATION_DELIVERY job
+      const deliveries = await e2eDb().notificationDelivery.findMany({
+        where: { notificationId: { in: notifications.map((n) => n.id) }, channel: "EMAIL" },
+      });
+      expect(deliveries).toHaveLength(2);
+      // RB06 诊断：谁 claim 了本订单的 reservation job（leaseOwner 含 pid）
+      const reservationJobDiag = await e2eDb().asyncJob.findUnique({
+        where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
+        select: { status: true, attempts: true, leaseOwner: true, runAt: true },
+      });
+      for (const delivery of deliveries) {
+        const workerEvents = (stdout: string) =>
+          stdout
+            .split("\n")
+            .filter((line) => line.startsWith("{"))
+            .map((line) => {
+              try {
+                const parsed = JSON.parse(line) as { timestamp?: string; event?: string; kind?: string };
+                return `${parsed.timestamp} ${parsed.event ?? "?"}${parsed.kind ? ":" + parsed.kind : ""}`;
+              } catch {
+                return null;
+              }
+            })
+            .filter(Boolean)
+            .join(" || ");
+        const reservationJob = e2eDb().asyncJob;
+        void reservationJob;
+        expect(
+          delivery.provider,
+          `[rb06-diag] providers=${JSON.stringify(deliveries.map((d) => d.provider))} ` +
+            `cycle1Pid=${cycle1.pid} cycle1Exit=${cycle1.code} cycle1Events=${workerEvents(cycle1.stdout)} ` +
+            `reservationJob=${JSON.stringify(reservationJobDiag)} ` +
+            `outboxPublishedAt=${outbox!.publishedAt?.toISOString()} ` +
+            `notificationCreatedAt=${notifications[0]!.createdAt.toISOString()} ` +
+            `diagNow=${new Date().toISOString()}`,
+        ).toBe("resend");
+        expect(delivery.providerAcceptedAt).toBeNull();
+        expect(delivery.suppressedAt).toBeNull();
+        expect(delivery.providerIdempotencyKey).toBe(
+          `notification/${delivery.notificationId}/email/v1`,
+        );
+      }
 
-    // ---------- worker cycle 2：EMAIL jobs 执行（buyer 超时 → RETRY；seller 完成）----------
-    const cycle2 = await runProductionWorkerOnce(workerEmailEnv);
-    expect(cycle2.code, `stdout=${cycle2.stdout}\nstderr=${cycle2.stderr}`).toBe(0);
+      // ---------- §77 duplicate retry：buyer 的 key 第一次受理但响应丢失 ----------
+      const buyerEmail = (
+        await e2eDb().user.findUniqueOrThrow({ where: { id: order!.buyerId } })
+      ).email;
+      const buyerDelivery = deliveries.find((delivery) => delivery.destination === buyerEmail)!;
+      expect(buyerDelivery).toBeDefined();
+      fakeBehaviors.set(buyerDelivery.providerIdempotencyKey, [
+        { kind: "hang" },
+        { kind: "ok", messageId: "msg-buyer-stable" },
+      ]);
 
-    const sellerDelivery = deliveries.find((delivery) => delivery.id !== buyerDelivery.id)!;
-    await expect
-      .poll(async () => {
-        const row = await e2eDb().notificationDelivery.findUniqueOrThrow({ where: { id: sellerDelivery.id } });
-        return row.providerAcceptedAt === null ? null : row.providerMessageId;
-      })
-      .toMatch(/^msg-/);
+      // ---------- worker cycle 2：EMAIL jobs 执行（buyer 超时 → RETRY；seller 完成）----------
+      const cycle2 = await runProductionWorkerOnce(workerEmailEnv);
+      expect(cycle2.code, `stdout=${cycle2.stdout}\nstderr=${cycle2.stderr}`).toBe(0);
 
-    // ---------- buyer RETRY（9A backoff 5s 后）→ 同 key 重放 → 逻辑邮件仍 1 ----------
-    await new Promise((resolve) => setTimeout(resolve, 6_000));
-    const cycle3 = await runProductionWorkerOnce(workerEmailEnv);
-    expect(cycle3.code, `stdout=${cycle3.stdout}\nstderr=${cycle3.stderr}`).toBe(0);
+      const sellerDelivery = deliveries.find((delivery) => delivery.id !== buyerDelivery.id)!;
+      await expect
+        .poll(async () => {
+          const row = await e2eDb().notificationDelivery.findUniqueOrThrow({ where: { id: sellerDelivery.id } });
+          return row.providerAcceptedAt === null ? null : row.providerMessageId;
+        })
+        .toMatch(/^msg-/);
 
-    const buyerRow = await e2eDb().notificationDelivery.findUniqueOrThrow({
-      where: { id: buyerDelivery.id },
+      // ---------- buyer RETRY（9A backoff 5s 后）→ 同 key 重放 → 逻辑邮件仍 1 ----------
+      await new Promise((resolve) => setTimeout(resolve, 6_000));
+      const cycle3 = await runProductionWorkerOnce(workerEmailEnv);
+      expect(cycle3.code, `stdout=${cycle3.stdout}\nstderr=${cycle3.stderr}`).toBe(0);
+
+      const buyerRow = await e2eDb().notificationDelivery.findUniqueOrThrow({
+        where: { id: buyerDelivery.id },
+      });
+      expect(buyerRow.providerAcceptedAt).not.toBeNull();
+      expect(buyerRow.providerMessageId).toBe("msg-buyer-stable");
+
+      // ---------- 最终状态（§76）----------
+      expect(attemptsForKey(buyerDelivery.providerIdempotencyKey)).toBe(2);
+      expect(attemptsForKey(sellerDelivery.providerIdempotencyKey)).toBe(1);
+      expect(logicalEmailCount()).toBe(2);
+
+      const jobKeys = deliveries.map((delivery) => `NOTIFICATION_DELIVERY:${delivery.id}`);
+      const jobs = await e2eDb().asyncJob.findMany({ where: { dedupeKey: { in: jobKeys } } });
+      expect(jobs).toHaveLength(2);
+      for (const job of jobs) {
+        expect(job.status).toBe("COMPLETED");
+        expect(job.completedAt).not.toBeNull();
+      }
+      console.log(`[rb06-diag][9B][final-assertions] at=${new Date().toISOString()}`);
+    }).finally(() => {
+      console.log(`[rb06-diag][9B][lock] release-at=${new Date().toISOString()}`);
     });
-    expect(buyerRow.providerAcceptedAt).not.toBeNull();
-    expect(buyerRow.providerMessageId).toBe("msg-buyer-stable");
-
-    // ---------- 最终状态（§76）----------
-    expect(attemptsForKey(buyerDelivery.providerIdempotencyKey)).toBe(2);
-    expect(attemptsForKey(sellerDelivery.providerIdempotencyKey)).toBe(1);
-    expect(logicalEmailCount()).toBe(2);
-
-    const jobKeys = deliveries.map((delivery) => `NOTIFICATION_DELIVERY:${delivery.id}`);
-    const jobs = await e2eDb().asyncJob.findMany({ where: { dedupeKey: { in: jobKeys } } });
-    expect(jobs).toHaveLength(2);
-    for (const job of jobs) {
-      expect(job.status).toBe("COMPLETED");
-      expect(job.completedAt).not.toBeNull();
-    }
 
     // ---------- 浏览器：买家/卖家通知中心 ----------
     await buyer.goto("/notifications");

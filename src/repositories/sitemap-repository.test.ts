@@ -72,7 +72,8 @@ describe("sitemap repository", () => {
       take: 500,
     });
     expect(errandTaskFindMany).toHaveBeenCalledWith({
-      where: { deletedAt: null, status: "OPEN", ...listingModerationPublicFilter() },
+      // Phase 9C-02：canonical exposure contract（OPEN + deadline 下界）
+      where: { deletedAt: null, status: "OPEN", deadline: { gt: expect.any(Date) }, ...listingModerationPublicFilter() },
       orderBy: { updatedAt: "desc" },
       select: { id: true, updatedAt: true },
       take: 500,

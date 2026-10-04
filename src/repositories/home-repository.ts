@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { cachedPublicRead, PUBLIC_LISTING_TTL_MS } from "@/lib/public-cache";
 import { getUnreadConversationCount } from "@/repositories/conversation-repository";
@@ -113,13 +114,19 @@ async function getUserSummary(userId: string) {
 
 // FINAL REPAIR A（LR-011）：公开共享读接入进程内 TTL 缓存（key 仅 campusId
 // 低基数维度，SLA 见 src/lib/public-cache.ts）；userSummary 保持每请求实时。
+// Phase 9C-02 RB01 例外：errand deadline 是 time-derived public authorization
+// predicate（PUBLIC_EXPOSED = OPEN AND deadline > now），不是普通 listing
+// mutation 的 eventual consistency——凡 errand 公开曝光投影（首页两榜、
+// errandCount）禁止从 deadline 之前生成的 TTL snapshot 返回，必须每请求
+// fresh（cache 的存在不允许让过期任务在首页多存活一个 TTL 窗口）。
 export async function getHomepageSummary(query: HomepageQuery = {}) {
   const campusId = query.campusId;
 
-  const [summary, userSummary] = await Promise.all([
+  const [summary, errandCount, userSummary] = await Promise.all([
     cachedPublicRead(`homepage-summary:${campusId ?? "all"}`, PUBLIC_LISTING_TTL_MS, async () => {
       const campusWhere = campusId ? { campusId } : {};
-      const [campuses, productCount, errandCount, serviceCount] = await Promise.all([
+      // Phase 9C-02 RB01：errandCount 移出 shared TTL snapshot（见模块头注释）
+      const [campuses, productCount, serviceCount] = await Promise.all([
         prisma.campus.findMany({
           where: { isActive: true },
           orderBy: { createdAt: "asc" },
@@ -130,22 +137,28 @@ export async function getHomepageSummary(query: HomepageQuery = {}) {
           },
         }),
         prisma.product.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
-        prisma.errandTask.count({ where: { deletedAt: null, status: "OPEN", ...campusWhere, ...listingModerationPublicFilter() } }),
         prisma.serviceListing.count({ where: { deletedAt: null, status: "ACTIVE", ...campusWhere, ...listingModerationPublicFilter() } }),
       ]);
       return {
         productCount,
-        errandCount,
         serviceCount,
         campuses,
         selectedCampusId: campuses.some((item) => item.id === campusId) ? campusId ?? null : null,
       };
+    }),
+    // Phase 9C-02 RB01：errandCount 每请求 fresh canonical exposure filter
+    prisma.errandTask.count({
+      where: {
+        ...errandPublicExposureFilter(new Date()),
+        ...(campusId ? { campusId } : {}),
+      },
     }),
     query.userId ? getUserSummary(query.userId) : Promise.resolve(null),
   ]);
 
   return {
     ...summary,
+    errandCount,
     userSummary,
   };
 }
@@ -206,16 +219,18 @@ export async function getHomepageProducts(query: { campusId?: string } = {}) {
 
 async function loadHomepageErrands(query: { campusId?: string } = {}) {
   const campusWhere = query.campusId ? { campusId: query.campusId } : {};
-  const now = new Date();
+  // Phase 9C-02：首页两榜 = 公开 discovery 面，canonical exposure contract
+  //（OPEN + deadline > now）；同一 load 内捕获一次 now。
+  const exposure = errandPublicExposureFilter(new Date());
 
   const [urgentErrands, highRewardErrands] = await Promise.all([
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
+      where: { ...exposure, ...campusWhere },
       orderBy: [{ deadline: "asc" }, { reward: "desc" }],
       take: 6,
     }),
     prisma.errandTask.findMany({
-      where: { deletedAt: null, status: "OPEN", deadline: { gte: now }, ...campusWhere, ...listingModerationPublicFilter() },
+      where: { ...exposure, ...campusWhere },
       orderBy: [{ reward: "desc" }, { deadline: "asc" }],
       take: 6,
     }),
@@ -227,10 +242,13 @@ async function loadHomepageErrands(query: { campusId?: string } = {}) {
   };
 }
 
+// Phase 9C-02 RB01：首页跑腿两榜退出 30s TTL cache——deadline 是
+// time-derived public authorization predicate，warm cache entry 不允许让
+// 过期任务在公开 discovery 多存活一个 TTL 窗口（每请求 fresh canonical
+// exposure filter）。Product / Service homepage cache 与 campus metadata
+// cache 不受影响（其曝光状态无时间维度）。
 export async function getHomepageErrands(query: { campusId?: string } = {}) {
-  return cachedPublicRead(`homepage-errands:${query.campusId ?? "all"}`, PUBLIC_LISTING_TTL_MS, () =>
-    loadHomepageErrands(query),
-  );
+  return loadHomepageErrands(query);
 }
 
 async function loadHomepageServices(query: { campusId?: string } = {}) {

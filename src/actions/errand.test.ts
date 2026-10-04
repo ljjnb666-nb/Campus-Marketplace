@@ -259,6 +259,8 @@ describe("errand actions", () => {
       reward: "10",
       publisherId: "publisher-1",
       accepterId: null,
+      // Phase 9C-02：锁内 fresh deadline 谓词（claim/编辑权威）
+      deadline: new Date(Date.now() + 60 * 60 * 1000),
       deletedAt: null,
     };
     activeOrderRowsHolder.rows = [];
@@ -345,11 +347,13 @@ describe("errand actions", () => {
 
     await claimErrand(formData);
 
+    // Phase 9C-02：claim 安全带含 deadline 下界（锁内 fresh 权威的最终谓词）
     expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
       where: {
         id: "errand-1",
         status: "OPEN",
         accepterId: null,
+        deadline: { gt: expect.any(Date) },
       },
       data: {
         accepterId: "user-1",
@@ -387,6 +391,8 @@ describe("errand actions", () => {
       status: "CLAIMED",
       publisherId: "user-1",
       accepterId: "runner-1",
+      // Phase 9C-02：reopen 要求锁内 fresh deadline > now
+      deadline: new Date(Date.now() + 60 * 60 * 1000),
       deletedAt: null,
     };
     activeOrderRowsHolder.rows = [
@@ -552,8 +558,14 @@ describe("errand actions", () => {
 
     await claimErrand(formData);
 
+    // Phase 9C-02：claim 安全带含 deadline 下界（锁内 fresh 权威的最终谓词）
     expect(txErrandTaskUpdateMany).toHaveBeenCalledWith({
-      where: { id: "errand-1", status: "OPEN", accepterId: null },
+      where: {
+        id: "errand-1",
+        status: "OPEN",
+        accepterId: null,
+        deadline: { gt: expect.any(Date) },
+      },
       data: { accepterId: "user-1", status: "CLAIMED" },
     });
     expect(txOrderCreate).toHaveBeenCalledWith({
@@ -815,6 +827,8 @@ describe("errand actions", () => {
       status: "OPEN",
       publisherId: "user-1",
       accepterId: null,
+      // Phase 9C-02：编辑权威含锁内 fresh deadline（future → 允许）
+      deadline: new Date(Date.now() + 60 * 60 * 1000),
       deletedAt: null,
     };
     errandCategoryFindUnique.mockResolvedValue({
@@ -864,6 +878,34 @@ describe("errand actions", () => {
     expect(result).toEqual({
       success: false,
       message: "只有待接单任务允许编辑",
+    });
+    expect(txErrandTaskUpdate).not.toHaveBeenCalled();
+  });
+
+  it("Phase 9C-02：锁内 fresh current deadline 已过 → 拒绝编辑复活（稳定中文提示，零写）", async () => {
+    errandTaskFindFirst.mockResolvedValue({ id: "errand-1", status: "OPEN" });
+    errandCategoryFindUnique.mockResolvedValue({
+      id: "errand-category-1",
+      isActive: true,
+    });
+    errandRowHolder.row = {
+      id: "errand-1",
+      campusId: "campus-1",
+      status: "OPEN",
+      publisherId: "user-1",
+      accepterId: null,
+      deadline: new Date(Date.now() - 60 * 1000),
+      deletedAt: null,
+    };
+
+    const formData = buildValidErrandFormData();
+    formData.set("errandId", "errand-1");
+
+    const result = await updateErrand({ success: false, message: "" }, formData);
+
+    expect(result).toEqual({
+      success: false,
+      message: "任务截止时间已过，不能再延长，请重新发布任务",
     });
     expect(txErrandTaskUpdate).not.toHaveBeenCalled();
   });

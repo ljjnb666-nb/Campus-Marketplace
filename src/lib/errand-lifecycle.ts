@@ -1,4 +1,4 @@
-import type { ErrandTaskStatus, Prisma } from "@prisma/client";
+import { type ErrandTaskStatus, Prisma } from "@prisma/client";
 
 import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
@@ -45,11 +45,26 @@ import { ERRAND_TASK_STATUS_CHANGED_KIND } from "@/lib/notifications/notificatio
  * delete / cancel-open 一律拒绝，不得扩大矛盾。
  */
 
-/** 占用 active obligation 的 ERRAND Order 状态（COMPLETED/CANCELLED 不属于）。 */
-export const ACTIVE_ERRAND_ORDER_STATUSES: readonly ["ACCEPTED", "IN_PROGRESS"] = [
+/**
+ * 占用 active obligation 的 ERRAND Order 状态（COMPLETED/CANCELLED/REFUNDED/
+ * CLOSED 不属于）。
+ *
+ * Review Repair RB04（§26）：active/blocking 集合收敛到系统级 Order 语义
+ * —— PENDING / ACCEPTED / IN_PROGRESS / IN_DISPUTE 均属未关闭义务
+ * （与 account-erasure 的 ACTIVE_ORDER_STATUSES、Service 域
+ * ACTIVE_SERVICE_ORDER_STATUSES 同一口径；8C：IN_DISPUTE 仍是治理冻结中的
+ * active obligation）。正常 canonical 流程不会产生 OPEN task + PENDING /
+ * IN_DISPUTE ERRAND Order 的 pair——但这正是 structural fail-closed 的意义：
+ * 出现历史/异常行时 expiry 与 lifecycle 必须 STRUCTURAL_INVALID / 拒绝，
+ * 绝不猜测性 CANCELLED（INV-16）。本常量是唯一 SSOT，
+ * resolveActiveErrandOrderRows 的 SQL 由它参数化，禁止第二套 in-list。
+ */
+export const ACTIVE_ERRAND_ORDER_STATUSES: readonly [
+  "PENDING",
   "ACCEPTED",
   "IN_PROGRESS",
-];
+  "IN_DISPUTE",
+] = ["PENDING", "ACCEPTED", "IN_PROGRESS", "IN_DISPUTE"];
 
 /**
  * seams 仅测试注入（生产一律不传）。beforeLock / afterCheck 与
@@ -73,6 +88,7 @@ type LockedErrandRow = {
   status: string;
   publisherId: string;
   accepterId: string | null;
+  deadline: Date;
   deletedAt: Date | null;
 };
 
@@ -112,13 +128,15 @@ function errandParticipantSubjects(
 }
 
 /** ErrandTask 行权威（§16）：锁后 fresh 重验 id/deletedAt/publisherId/
- * accepterId/status/campusId。 */
+ * accepterId/status/campusId。Phase 9C-02：deadline 一并读取——expired
+ * 判定（edit revival guard / CLAIMED→OPEN reopen guard / canonical expiry）
+ * 全部以锁内 fresh deadline 为唯一权威。 */
 async function lockErrandTaskRow(
   tx: Prisma.TransactionClient,
   errandId: string,
 ): Promise<LockedErrandRow | null> {
   const rows = await tx.$queryRaw<LockedErrandRow[]>`
-    SELECT id, "campusId", status, "publisherId", "accepterId", "deletedAt"
+    SELECT id, "campusId", status, "publisherId", "accepterId", "deadline", "deletedAt"
     FROM "ErrandTask"
     WHERE id = ${errandId}
     FOR UPDATE
@@ -127,8 +145,10 @@ async function lockErrandTaskRow(
 }
 
 /** active ERRAND Order 解析（§17/§18）：type=ERRAND + errandTaskId 命中 +
- * status ∈ active，逐行 FOR UPDATE。返回全部匹配行——调用方按状态要求
- * 恰好 0 / 1 个，绝不按 createdAt 猜 latest。 */
+ * status ∈ ACTIVE_ERRAND_ORDER_STATUSES（SSOT 参数化，Review Repair RB04：
+ * PENDING / IN_DISPUTE 一并计入 blocking obligation），逐行 FOR UPDATE。
+ * 返回全部匹配行——调用方按状态要求恰好 0 / 1 个，绝不按 createdAt 猜
+ * latest。 */
 async function resolveActiveErrandOrderRows(
   tx: Prisma.TransactionClient,
   errandTaskId: string,
@@ -138,7 +158,7 @@ async function resolveActiveErrandOrderRows(
     FROM "Order"
     WHERE type = 'ERRAND'
       AND "errandTaskId" = ${errandTaskId}
-      AND status IN ('ACCEPTED', 'IN_PROGRESS')
+      AND status::text IN (${Prisma.join(ACTIVE_ERRAND_ORDER_STATUSES)})
     FOR UPDATE
   `;
 }
@@ -227,6 +247,10 @@ export async function transitionErrandTx(
   errandId: string,
   requestedStatus: ErrandTaskStatus,
   seams?: ErrandLifecycleSeams,
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传；
+   * 在生产捕获 new Date() 的同一逻辑位置——USER 锁 + ErrandTask 行锁之后的
+   * reopen 分支内——消费）。 */
+  options?: { now?: Date },
 ): Promise<boolean> {
   // 无任何入口允许把任务写回 CLAIMED（claim 之外的路径一律拒绝）
   if (requestedStatus === "CLAIMED") {
@@ -290,6 +314,18 @@ export async function transitionErrandTx(
 
   // CLAIMED → OPEN：重新暴露为可接单（EXPOSURE_INCREASING）
   if (requestedStatus === "OPEN") {
+    // Phase 9C-02（§5.2 reopen guard）：重新曝光增加公开面——deadline 已过
+    // 的 CLAIMED 任务不得撤销接单后重新暴露为 OPEN（fresh 锁内判定，不信任
+    // 事务外 snapshot）。仅拒绝 reopen：既有 CLAIMED obligation 原样保留
+    //（deadline 不自动终止履约义务，§2.1），Task/Order 零写入零通知。
+    const reopenNow = options?.now ?? new Date();
+    if (
+      !(errand.deadline instanceof Date) ||
+      errand.deadline.getTime() <= reopenNow.getTime()
+    ) {
+      return false;
+    }
+
     await requireMarketplaceCapability(
       tx,
       actorUserId,
@@ -596,7 +632,11 @@ export type ErrandContentUpdateInput = {
   advanceAmount: Prisma.Decimal | null;
 };
 
-export type ErrandContentUpdateOutcome = "UPDATED" | "MISSING" | "NOT_OPEN";
+export type ErrandContentUpdateOutcome =
+  | "UPDATED"
+  | "MISSING"
+  | "NOT_OPEN"
+  | "DEADLINE_EXPIRED";
 
 /**
  * 编辑跑腿任务内容的唯一权威实现（§32-§34）：关闭 stale OPEN snapshot——
@@ -606,6 +646,18 @@ export type ErrandContentUpdateOutcome = "UPDATED" | "MISSING" | "NOT_OPEN";
  *
  * claim 先提交时 fresh row 已是 CLAIMED → NOT_OPEN（NO WRITE，零内容变更）。
  * MISSING 覆盖缺失 / 软删除 / 非发布者（同形，不泄漏存在性）。
+ *
+ * Phase 9C-02（§5.1 revival guard）：OPEN 且当前 deadline 已过的任务禁止
+ * 编辑（含把 deadline 延长到未来）——即使 row 尚未被 scheduler materialize
+ * 成 CANCELLED，edit 也不得复活已过期任务 → DEADLINE_EXPIRED（零写入）。
+ * 事务外 deadline 校验只用于 UX；authority 在锁内 fresh row 上。
+ *
+ * Review Repair RB02（§9/§10）：deadline 判定的 authoritativeNow 必须捕获
+ * 于 serialization authority（USER 锁 + ErrandTask FOR UPDATE）之后——
+ * 请求/事务开始时刻 ≠ 获得 authority 时刻（锁等待期间真实时间可能跨越
+ * deadline 边界，旧 now 会复活已到期任务）。options?.now seam 语义冻结为
+ * "authoritative decision time override"（测试注入），在生产捕获 new Date()
+ * 的同一逻辑位置消费；生产不传。
  */
 export async function updateErrandContentTx(
   tx: Prisma.TransactionClient,
@@ -613,6 +665,8 @@ export async function updateErrandContentTx(
   errandId: string,
   content: ErrandContentUpdateInput,
   seams?: ErrandLifecycleSeams,
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传）。 */
+  options?: { now?: Date },
 ): Promise<ErrandContentUpdateOutcome> {
   if (seams?.beforeLock) {
     await seams.beforeLock(tx);
@@ -635,6 +689,10 @@ export async function updateErrandContentTx(
     return "MISSING";
   }
 
+  // Review Repair RB02：authoritativeNow 捕获于 row authority 之后（锁等待
+  // 期间真实时间可能跨越 deadline；§9 时间 authority 冻结）
+  const now = options?.now ?? new Date();
+
   // fresh OPEN 权威（§34）：edit-after-claim 在此被拒，绝不返回成功
   if (errand.status !== "OPEN" || errand.accepterId !== null) {
     return "NOT_OPEN";
@@ -644,6 +702,16 @@ export async function updateErrandContentTx(
   const activeOrders = await resolveActiveErrandOrderRows(tx, errand.id);
   if (activeOrders.length > 0) {
     return "NOT_OPEN";
+  }
+
+  // Phase 9C-02 revival guard：当前 deadline 已过（或 corrupt 缺失）→ 拒绝；
+  // 请求的 deadline 也不再接受过去时刻（deadline truth > late user intent）
+  if (
+    !(errand.deadline instanceof Date) ||
+    errand.deadline.getTime() <= now.getTime() ||
+    content.deadline.getTime() <= now.getTime()
+  ) {
+    return "DEADLINE_EXPIRED";
   }
 
   if (seams?.afterOrderRowLock) {
@@ -762,4 +830,132 @@ export async function deleteErrandTx(
   });
 
   return "DELETED";
+}
+
+// ============================================================
+// Phase 9C-02（§14/§15/§16）：Errand deadline 到期的 canonical expiry
+// authority（scheduled materialization 的唯一业务入口）。
+//
+// 与 claim / edit / reopen 的 deadline 判定同一 SSOT：deadline 是"允许该
+// OPEN 任务继续公开曝光并接受新接单"的截止时刻（§2.1）；到期 materialize
+// 结果 = OPEN → CANCELLED（不新增 EXPIRED enum，§3；不为用户取消与系统
+// 到期增加 cancellation reason 字段）。
+//
+// 权威锁序（与 updateErrandContentTx / claimErrandTx 兼容，无环）：
+//   candidate discover publisherId（仅锁键，非权威）
+//   → USER:publisher governance subject lock
+//   → ErrandTask FOR UPDATE（fresh 谓词权威）
+//   → active ERRAND Order FOR UPDATE（OPEN + active order = 结构异常）
+//   → writes
+//
+// expiry 是 system lifecycle materialization：无 user actor——不做
+// assertActiveAccountMutationAllowed / capability 检查，任何参与方账号
+// 状态都不得阻止系统 wind-down（与 expireProductReservationTx 同一语义）。
+// OPEN 任务 accepter 必为 null，publisher 单锁即与 claim（publisher+
+// claimer 排序锁）线性化：claim 先提交 → fresh 非 OPEN → NOT_OPEN；
+// expiry 先提交 → claim fresh 非 OPEN → DENY。deadline 不自动终止既有
+// 履约义务（CLAIMED/IN_PROGRESS 等 workflow 不受影响，§2.1/INV-07）。
+// ============================================================
+
+export type ErrandDeadlineExpiryOutcome =
+  | { kind: "EXPIRED" }
+  | { kind: "NOT_DUE"; deadline: Date }
+  | { kind: "NOT_OPEN" }
+  | { kind: "MISSING" }
+  | { kind: "STRUCTURAL_INVALID" };
+
+/**
+ * Errand deadline 到期 materialize 的唯一权威实现（§14/§15/§16）。
+ *
+ * 返回语义（handler 映射见 async/handlers/errand-deadline-expire.ts）：
+ *   EXPIRED            fresh OPEN + accepterId null + deadline <= now +
+ *                      无 active ERRAND order → CANCELLED
+ *   NOT_DUE            discovery 与锁之间 publisher 合法 edit 延长了
+ *                      deadline（fresh deadline > now）→ 返回权威新
+ *                      deadline（one-shot intent 的 stale-schedule 防御）
+ *   NOT_OPEN           其他合法 lifecycle 已先赢（CLAIMED/CANCELLED/...）
+ *                      → 幂等 no-op
+ *   MISSING            实体不存在 / 软删除 / 锁内 publisherId 漂移
+ *                      → 幂等 no-op
+ *   STRUCTURAL_INVALID OPEN 却有 accepter / OPEN 却存在 active ERRAND
+ *                      order / deadline 字段缺失 → fail closed，绝不猜测
+ *                      修复（handler → PERMANENT → DEAD_LETTER）
+ */
+export async function expireErrandDeadlineTx(
+  tx: Prisma.TransactionClient,
+  errandId: string,
+  seams?: Pick<ErrandLifecycleSeams, "beforeLock" | "afterErrandRowLock">,
+  /** Review Repair RB02：authoritative decision time override（仅测试；生产不传；
+   * 在生产捕获 new Date() 的同一逻辑位置——publisher 锁 + ErrandTask 行锁
+   * 之后的 fresh 谓词处——消费）。 */
+  options?: { now?: Date },
+): Promise<ErrandDeadlineExpiryOutcome> {
+  // candidate pre-read：仅锁键发现（publisherId），不信任 status/deadline
+  const candidate = await discoverErrandCandidate(tx, errandId);
+  if (!candidate) {
+    return { kind: "MISSING" };
+  }
+
+  if (seams?.beforeLock) {
+    await seams.beforeLock(tx);
+  }
+
+  // OPEN 任务 participant = publisher 单锁（§15）：与 claim / edit / cancel
+  // 共享 publisher 锁域；软删 candidate 已被 discovery 排除
+  await acquireGovernanceSubjectLocks(tx, [
+    { subjectType: "USER", subjectId: candidate.publisherId },
+  ]);
+
+  // 刻意不做 assertActiveAccountMutationAllowed：expiry 无 user actor
+
+  const errand = await lockErrandTaskRow(tx, errandId);
+  if (!errand || errand.deletedAt !== null) {
+    return { kind: "MISSING" };
+  }
+  // publisherId 未变化（§15）：锁键失效属 identity drift → 幂等 no-op
+  if (errand.publisherId !== candidate.publisherId) {
+    return { kind: "MISSING" };
+  }
+
+  if (seams?.afterErrandRowLock) {
+    await seams.afterErrandRowLock(tx);
+  }
+
+  // fresh 状态权威（§16）：非 OPEN = 其他合法 lifecycle 已先赢
+  if (errand.status !== "OPEN") {
+    return { kind: "NOT_OPEN" };
+  }
+
+  // 结构异常 fail closed：OPEN + accepter 非 null / OPEN 无 deadline
+  // （DB NOT NULL 合同下不可能）→ 绝不猜测修复
+  if (errand.accepterId !== null || !(errand.deadline instanceof Date)) {
+    return { kind: "STRUCTURAL_INVALID" };
+  }
+
+  // deadline 判定（§19：单一 authoritativeNow）
+  const now = options?.now ?? new Date();
+  if (errand.deadline.getTime() > now.getTime()) {
+    // discovery 与锁之间 publisher 合法 edit 延长了 deadline → 返回权威新
+    // deadline（handler RESCHEDULE 到该时刻；不是 recurrence）
+    return { kind: "NOT_DUE", deadline: errand.deadline };
+  }
+
+  // OPEN 却存在 active ERRAND order = 数据异常（§16）：fail closed
+  const activeOrders = await resolveActiveErrandOrderRows(tx, errand.id);
+  if (activeOrders.length > 0) {
+    return { kind: "STRUCTURAL_INVALID" };
+  }
+
+  // 条件 update 保留为最终谓词安全带（行锁下恒真；并发 winner 仅一路成功）
+  const cancelResult = await tx.errandTask.updateMany({
+    where: { id: errand.id, status: "OPEN" },
+    data: { status: "CANCELLED" },
+  });
+
+  if (cancelResult.count === 0) {
+    // 并发 lifecycle winner（claim / cancel / delete）在安全带处先赢
+    return { kind: "NOT_OPEN" };
+  }
+
+  return { kind: "EXPIRED" };
 }

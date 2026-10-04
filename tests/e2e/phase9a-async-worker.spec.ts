@@ -4,6 +4,7 @@ import path from "node:path";
 import { test, expect } from "@playwright/test";
 import { storageStatePath, uniqueTag } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
+import { withE2EAsyncWorkerProtocolLock } from "./helpers/async-worker-lock";
 
 /**
  * Phase 9A — 9A-E2E-01：reservation expiry 由真实 async-worker 自动 materialize。
@@ -100,65 +101,72 @@ test("9A-E2E-01：商品预留到期 → async-worker 自动过期释放 + outbo
     (await e2eDb().product.findUniqueOrThrow({ where: { id: productId } })).status,
   ).toBe("RESERVED");
 
-  // ---------- TEST-ONLY DEADLINE ADVANCE ----------
-  // 仅推进时间字段（deadline + job.runAt）到过去；Order.status / Product.status /
-  // productReservationResolution / AsyncJob.status 一律不直接修改——业务状态
-  // 只能由 canonical lifecycle（expireProductReservationTx）写入。
-  const advanced = new Date(Date.now() - 1000);
-  await e2eDb().order.update({
-    where: { id: orderId },
-    data: { productReservationExpiresAt: advanced },
+  // ---------- TEST-ONLY DEADLINE ADVANCE → worker → DB final assertions ----------
+  // RB06：本 spec 的 worker runtime 虽为普通 env，但仍可 claim 9B 的专属
+  // email jobs——整个 queue protocol（deadline advance → worker execution →
+  // target AsyncJob/Outbox/Notification 终态断言）纳入同一个 E2E
+  // async-worker protocol 互斥锁（跨 Playwright worker 进程）。
+  await withE2EAsyncWorkerProtocolLock("phase9a-async-worker", async () => {
+    // 仅推进时间字段（deadline + job.runAt）到过去；Order.status / Product.status /
+    // productReservationResolution / AsyncJob.status 一律不直接修改——业务状态
+    // 只能由 canonical lifecycle（expireProductReservationTx）写入。
+    const advanced = new Date(Date.now() - 1000);
+    await e2eDb().order.update({
+      where: { id: orderId },
+      data: { productReservationExpiresAt: advanced },
+    });
+    await e2eDb().asyncJob.update({
+      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
+      data: { runAt: advanced },
+    });
+
+    // ---------- 真实 production worker entrypoint（--run-once）----------
+    const result = await runProductionWorkerOnce();
+    expect(result.code, `stdout=${result.stdout}\nstderr=${result.stderr}`).toBe(0);
+
+    // ---------- DB 最终状态 ----------
+    await expect
+      .poll(async () => {
+        const finalOrder = await e2eDb().order.findUniqueOrThrow({ where: { id: orderId } });
+        return {
+          status: finalOrder.status,
+          resolution: finalOrder.productReservationResolution,
+        };
+      })
+      .toEqual({ status: "CANCELLED", resolution: "EXPIRED" });
+
+    expect(
+      (await e2eDb().product.findUniqueOrThrow({ where: { id: productId } })).status,
+    ).toBe("ACTIVE");
+
+    const completedJob = await e2eDb().asyncJob.findUnique({
+      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
+    });
+    expect(completedJob!.status).toBe("COMPLETED");
+    expect(completedJob!.completedAt).not.toBeNull();
+
+    const outbox = await e2eDb().outboxEvent.findUnique({
+      where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}` },
+    });
+    expect(outbox).not.toBeNull();
+    expect(outbox!.status).toBe("PUBLISHED");
+    expect(outbox!.publishedAt).not.toBeNull();
+
+    // expiry 通知恰好一次（另有下单时 2 条创建通知）
+    const expiryNotifications = await e2eDb().notification.findMany({
+      where: { orderId, title: "商品预留已过期" },
+    });
+    expect(expiryNotifications).toHaveLength(2);
+    expect(new Set(expiryNotifications.map((n) => n.userId))).toEqual(
+      new Set([order!.buyerId, order!.sellerId]),
+    );
+    for (const notification of expiryNotifications) {
+      expect(notification.dedupeKey).toBe(`OUTBOX:${outbox!.id}:IN_APP:${notification.userId}`);
+      expect(notification.sourceEventId).toBe(outbox!.id);
+    }
   });
-  await e2eDb().asyncJob.update({
-    where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
-    data: { runAt: advanced },
-  });
 
-  // ---------- 真实 production worker entrypoint（--run-once）----------
-  const result = await runProductionWorkerOnce();
-  expect(result.code, `stdout=${result.stdout}\nstderr=${result.stderr}`).toBe(0);
-
-  // ---------- DB 最终状态 ----------
-  await expect
-    .poll(async () => {
-      const finalOrder = await e2eDb().order.findUniqueOrThrow({ where: { id: orderId } });
-      return {
-        status: finalOrder.status,
-        resolution: finalOrder.productReservationResolution,
-      };
-    })
-    .toEqual({ status: "CANCELLED", resolution: "EXPIRED" });
-
-  expect(
-    (await e2eDb().product.findUniqueOrThrow({ where: { id: productId } })).status,
-  ).toBe("ACTIVE");
-
-  const completedJob = await e2eDb().asyncJob.findUnique({
-    where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRE:${orderId}` },
-  });
-  expect(completedJob!.status).toBe("COMPLETED");
-  expect(completedJob!.completedAt).not.toBeNull();
-
-  const outbox = await e2eDb().outboxEvent.findUnique({
-    where: { dedupeKey: `PRODUCT_RESERVATION_EXPIRED:${orderId}` },
-  });
-  expect(outbox).not.toBeNull();
-  expect(outbox!.status).toBe("PUBLISHED");
-  expect(outbox!.publishedAt).not.toBeNull();
-
-  // expiry 通知恰好一次（另有下单时 2 条创建通知）
-  const expiryNotifications = await e2eDb().notification.findMany({
-    where: { orderId, title: "商品预留已过期" },
-  });
-  expect(expiryNotifications).toHaveLength(2);
-  expect(new Set(expiryNotifications.map((n) => n.userId))).toEqual(
-    new Set([order!.buyerId, order!.sellerId]),
-  );
-  for (const notification of expiryNotifications) {
-    expect(notification.dedupeKey).toBe(`OUTBOX:${outbox!.id}:IN_APP:${notification.userId}`);
-    expect(notification.sourceEventId).toBe(outbox!.id);
-  }
-
+  // ---------- 浏览器断言（queue 无关，锁外）----------
   // ---------- 浏览器：买家视角 ----------
   await buyer.goto("/my/orders");
   const buyerCard = buyer.locator("article", { hasText: title }).first();

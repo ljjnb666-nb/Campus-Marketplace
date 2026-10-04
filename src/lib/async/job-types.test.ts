@@ -9,6 +9,9 @@ import {
   productReservationExpirePayloadSchema,
   safeAsyncErrorCode,
   validateJobIntent,
+  ERRAND_DEADLINE_EXPIRE_JOB_KIND,
+  ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
+  errandDeadlineExpirePayloadSchema,
   PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
   PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION,
 } from "./job-types";
@@ -93,6 +96,36 @@ describe("Phase 9A job failure 分类与错误消毒（§17/§18）", () => {
     ).toBe(false);
     expect(productReservationExpirePayloadSchema.safeParse({}).success).toBe(false);
     expect(productReservationExpirePayloadSchema.safeParse({ orderId: "" }).success).toBe(false);
+  });
+
+  it("Phase 9C-02 ERRAND_DEADLINE_EXPIRE@1 契约：payload 仅 errandId，strict 拒绝未知键与用户文本", () => {
+    expect(ERRAND_DEADLINE_EXPIRE_JOB_KIND).toBe("ERRAND_DEADLINE_EXPIRE");
+    expect(ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION).toBe(1);
+
+    expect(errandDeadlineExpirePayloadSchema.safeParse({ errandId: "errand-1" }).success).toBe(
+      true,
+    );
+    // 多余键（含用户文本）拒绝
+    expect(
+      errandDeadlineExpirePayloadSchema.safeParse({ errandId: "errand-1", title: "取件" })
+        .success,
+    ).toBe(false);
+    expect(errandDeadlineExpirePayloadSchema.safeParse({}).success).toBe(false);
+    expect(errandDeadlineExpirePayloadSchema.safeParse({ errandId: "" }).success).toBe(false);
+
+    // 写边界契约：canonical 形状通过；未知 version / 非法形状拒绝
+    const canonical = validateJobIntent(
+      ERRAND_DEADLINE_EXPIRE_JOB_KIND,
+      ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
+      { errandId: "errand-1" },
+    );
+    expect(canonical).toEqual({ ok: true, payload: { errandId: "errand-1" } });
+    expect(
+      validateJobIntent(ERRAND_DEADLINE_EXPIRE_JOB_KIND, 999, { errandId: "errand-1" }),
+    ).toEqual({ ok: false, reason: "UNKNOWN_CONTRACT" });
+    expect(
+      validateJobIntent(ERRAND_DEADLINE_EXPIRE_JOB_KIND, 1, { errandId: "errand-1", note: "x" }),
+    ).toEqual({ ok: false, reason: "INVALID_PAYLOAD" });
   });
 
   it("RB04 validateJobIntent：已知契约返回 canonical payload；未知契约/非法形状拒绝", () => {

@@ -1,4 +1,6 @@
 import {
+  ERRAND_DEADLINE_EXPIRE_JOB_KIND,
+  ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
   NOTIFICATION_DELIVERY_JOB_KIND,
   NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION,
   PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
@@ -7,6 +9,7 @@ import {
 } from "@/lib/async/job-types";
 import { productReservationExpireHandler } from "@/lib/async/handlers/product-reservation-expire";
 import { notificationDeliveryHandler } from "@/lib/async/handlers/notification-delivery";
+import { errandDeadlineExpireHandler } from "@/lib/async/handlers/errand-deadline-expire";
 import {
   EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
   EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
@@ -21,9 +24,12 @@ import {
  * 禁止任何猜测执行。
  *
  * 9A 注册 PRODUCT_RESERVATION_EXPIRE@1（§7）；Phase 9B 新增
- * NOTIFICATION_DELIVERY@1（§13：EMAIL 渠道投递，payload 仅 deliveryId）。
- * RETENTION_CLEANUP / STATISTICS_REFRESH 等 9C handler 在各自阶段注册，
- * 不需改 PostgreSQL enum。
+ * NOTIFICATION_DELIVERY@1（§13：EMAIL 渠道投递，payload 仅 deliveryId）；
+ * Phase 9C-02 新增 ERRAND_DEADLINE_EXPIRE@1（§9：errand deadline 到期
+ * scheduler wake-up 意图，payload 仅 errandId，dedupeKey =
+ * ERRAND_DEADLINE_EXPIRE:<errandId>——一个 Errand 生命周期至多一个
+ * canonical expiry intent）。RETENTION_CLEANUP / STATISTICS_REFRESH 等
+ * 9C handler 在各自阶段注册，不需改 PostgreSQL enum。
  */
 
 type JobHandlerRegistry = Map<string, Map<number, JobHandler>>;
@@ -36,6 +42,10 @@ const jobHandlers: JobHandlerRegistry = new Map([
   [
     NOTIFICATION_DELIVERY_JOB_KIND,
     new Map([[NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION, notificationDeliveryHandler]]),
+  ],
+  [
+    ERRAND_DEADLINE_EXPIRE_JOB_KIND,
+    new Map([[ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION, errandDeadlineExpireHandler]]),
   ],
 ]);
 

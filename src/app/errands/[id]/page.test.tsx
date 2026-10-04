@@ -105,7 +105,9 @@ function buildErrandDetail() {
       description: "下午五点前送到宿舍。",
       pickupLocation: "快递站",
       deliveryLocation: "宿舍楼",
-      deadline: new Date("2026-07-20T09:00:00.000Z"),
+      // Phase 9C-02：deadline 进入 public exposure 权威——fixture 必须是
+      // 未来时刻（过期 OPEN 对陌生人 fail closed，页面会 notFound）
+      deadline: new Date(Date.now() + 24 * 60 * 60 * 1000),
       contactNote: "到了先电话联系。",
       needsAdvancePay: true,
       advanceAmount: 20,

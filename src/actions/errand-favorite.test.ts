@@ -199,14 +199,16 @@ describe("errand favorite actions", () => {
       expect(errandFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ userId: "user-1" }) }),
       );
-      // RB01 review repair（Phase 8F §9）：read projection = exposure state only
-      // （OPEN）——wind-down workflow 态不进入收藏发现面
+      // RB01 review repair（Phase 8F §9）+ Phase 9C-02：read projection =
+      // canonical exposure contract（OPEN + deadline 下界）——wind-down
+      // workflow 态与过期任务不进入收藏发现面
       expect(errandFavoriteFindMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
             errandTask: {
               deletedAt: null,
               status: "OPEN",
+              deadline: { gt: expect.any(Date) },
               moderations: { none: { resolvedAt: null } },
             },
           }),

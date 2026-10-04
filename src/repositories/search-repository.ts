@@ -1,4 +1,5 @@
-import { ERRAND_PUBLIC_EXPOSURE_STATUS, PRODUCT_PUBLIC_EXPOSURE_STATUS, SERVICE_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
+import { PRODUCT_PUBLIC_EXPOSURE_STATUS, SERVICE_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
+import { errandPublicExposureFilter } from "@/lib/listings/errand-exposure";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { prisma } from "@/lib/prisma";
 import { getPublishedGeneralReviewStatsBatch } from "@/lib/reviews/review-query";
@@ -16,6 +17,9 @@ export async function getSearchResults(keyword: string) {
   }
 
   const contains = { contains: q, mode: "insensitive" as const };
+  // Phase 9C-02：search = 公开 discovery 面，canonical exposure contract
+  //（OPEN + deadline > now）；同一请求内共享同一 now。
+  const errandExposure = errandPublicExposureFilter(new Date());
 
   const [products, errands, services, users] = await Promise.all([
     prisma.product.findMany({
@@ -36,11 +40,7 @@ export async function getSearchResults(keyword: string) {
     }),
     prisma.errandTask.findMany({
       where: {
-        deletedAt: null,
-        // Phase 8F（§56）：search 只暴露 OPEN（此前的 CLAIMED/IN_PROGRESS/
-        // PENDING_CONFIRMATION 属履约中 workflow 态，不是公开发现面）
-        status: ERRAND_PUBLIC_EXPOSURE_STATUS,
-        ...listingModerationPublicFilter(),
+        ...errandExposure,
         OR: [{ title: contains }, { description: contains }, { pickupLocation: contains }, { deliveryLocation: contains }],
       },
       include: {
@@ -108,9 +108,7 @@ export async function getSearchResults(keyword: string) {
             by: ["publisherId"],
             where: {
               publisherId: { in: userIds },
-              deletedAt: null,
-              status: ERRAND_PUBLIC_EXPOSURE_STATUS,
-              ...listingModerationPublicFilter(),
+              ...errandExposure,
             },
             _count: {
               publisherId: true,

@@ -16,9 +16,10 @@
  *
  * 语义冻结：
  *   PUBLIC_EXPOSED = 陌生用户 / 匿名用户可以在 marketplace discovery
- *   surface 发现。因此 Product ACTIVE / Service ACTIVE / Errand OPEN /
- *   Rental AVAILABLE 是唯一的公开曝光状态；wind-down（RESERVED/SOLD/
- *   OFFLINE/PAUSED/非 OPEN workflow 态）一律不得进入公开发现面。
+ *   surface 发现。因此 Product ACTIVE / Service ACTIVE / Errand OPEN +
+ *   deadline > now（Phase 9C-02）/ Rental AVAILABLE 是唯一的公开曝光
+ *   状态；wind-down（RESERVED/SOLD/OFFLINE/PAUSED/非 OPEN workflow 态）
+ *   一律不得进入公开发现面。
  */
 
 // ── §9 Public Exposure SSOT ─────────────────────────────────────────────
@@ -77,8 +78,36 @@ export function isServicePubliclyExposed(status: string): boolean {
   return status === SERVICE_PUBLIC_EXPOSURE_STATUS;
 }
 
-export function isErrandPubliclyExposed(status: string): boolean {
-  return status === ERRAND_PUBLIC_EXPOSURE_STATUS;
+/**
+ * Phase 9C-02（Errand deadline authority）：Errand 公开曝光的完整口径。
+ *
+ *   PUBLIC_EXPOSED = status OPEN AND deadline > now（deletedAt / moderation
+ *   由调用方按 query helper / detail gate 叠加——本谓词是 deadline 维度的
+ *   唯一判定，禁止各消费方手写 `deadline > new Date()` 漂移）。
+ *
+ * deadline 冻结语义（Phase 9C-02）：允许该 OPEN 任务继续公开曝光并接受
+ * 新接单的截止时刻。deadline <= now 的任务即使 DB 行尚未被 scheduler
+ * materialize 成 CANCELLED，也必须立即退出公开面（public correctness 不
+ * 依赖 worker latency，§21）。deadline 不改变既有履约义务——CLAIMED /
+ * IN_PROGRESS 等 workflow 态的可见性仍由 status 本身裁决（owner /
+ * participant 特权不受影响）。
+ *
+ * now 必须由调用方显式传入（同一 query/request 捕获一次，禁止谓词内部
+ * 多次取时钟造成边界漂移）；deadline 缺失（不可能的 corrupt 行）按未
+ * 曝光 fail closed。
+ */
+export function isErrandPubliclyExposed(
+  status: string,
+  deadline: Date | string | null | undefined,
+  now: Date,
+): boolean {
+  if (status !== ERRAND_PUBLIC_EXPOSURE_STATUS) {
+    return false;
+  }
+  if (deadline === null || deadline === undefined) {
+    return false;
+  }
+  return new Date(deadline).getTime() > now.getTime();
 }
 
 export function isRentalPubliclyExposed(status: string): boolean {

@@ -49,6 +49,23 @@ export const notificationDeliveryPayloadSchema = z
 
 export type NotificationDeliveryPayload = z.infer<typeof notificationDeliveryPayloadSchema>;
 
+/**
+ * Phase 9C-02（§9）：ERRAND deadline 到期 scheduler wake-up 意图。
+ * payload 只允许 errandId（IDs + machine state，§7 红线）；strict——未知键
+ * 即 INVALID。dedupeKey = `ERRAND_DEADLINE_EXPIRE:<errandId>`：一个 Errand
+ * 生命周期至多一个 canonical expiry intent（§10/INV-10）。
+ */
+export const ERRAND_DEADLINE_EXPIRE_JOB_KIND = "ERRAND_DEADLINE_EXPIRE";
+export const ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION = 1;
+
+export const errandDeadlineExpirePayloadSchema = z
+  .object({
+    errandId: z.string().min(1),
+  })
+  .strict();
+
+export type ErrandDeadlineExpirePayload = z.infer<typeof errandDeadlineExpirePayloadSchema>;
+
 // ============================================================
 // RB04 纯契约层（writer 边界 + runtime 双层共用的单一事实源）：
 // 本文件只含 kind / schemaVersion / Zod schema，绝不 import handler——
@@ -63,6 +80,10 @@ const JOB_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>([
   [
     NOTIFICATION_DELIVERY_JOB_KIND,
     new Map([[NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION, notificationDeliveryPayloadSchema]]),
+  ],
+  [
+    ERRAND_DEADLINE_EXPIRE_JOB_KIND,
+    new Map([[ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION, errandDeadlineExpirePayloadSchema]]),
   ],
 ]);
 

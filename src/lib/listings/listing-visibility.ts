@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import {
-  isErrandPubliclyExposed,
+  ERRAND_PUBLIC_EXPOSURE_STATUS,
   isProductPubliclyExposed,
   isRentalPubliclyExposed,
   isServicePubliclyExposed,
@@ -33,7 +33,15 @@ import {
 
 export type ListingDetailAccessRole = "PUBLIC" | "OWNER" | "PARTICIPANT";
 
-/** lifecycle 维度的详情访问裁决（不含 moderation；纯函数，client-safe）。 */
+/**
+ * lifecycle 维度的详情访问裁决（不含 moderation；纯函数，client-safe）。
+ *
+ * Phase 9C-02：本裁决仍是 status-only（Phase 8F 冻结合同不变）。Errand
+ * 调用方必须叠加 deadline 维度——PUBLIC 角色返回前由页面用
+ * isErrandPubliclyExposed(status, deadline, now) 复核（deadline 已过的
+ * OPEN 任务对陌生人不返回 PUBLIC 详情）；OWNER / PARTICIPANT 特权不受
+ * deadline 影响（履约上下文保留）。
+ */
 export function resolveListingLifecycleAccess(input: {
   status: string;
   viewerId: string | null;
@@ -46,10 +54,13 @@ export function resolveListingLifecycleAccess(input: {
   if (input.isParticipant) {
     return "PARTICIPANT";
   }
+  // status-only 裁决（Phase 8F 冻结）：Errand 分支只比较 status 常量——
+  // deadline 维度由 Errand 详情调用方经 isErrandPubliclyExposed 叠加
+  //（见上方 docstring），本函数保持四域对称的纯 status 语义。
   if (
     isProductPubliclyExposed(input.status) ||
     isServicePubliclyExposed(input.status) ||
-    isErrandPubliclyExposed(input.status) ||
+    input.status === ERRAND_PUBLIC_EXPOSURE_STATUS ||
     isRentalPubliclyExposed(input.status)
   ) {
     return "PUBLIC";
