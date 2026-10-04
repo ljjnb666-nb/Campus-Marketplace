@@ -12,9 +12,11 @@ import { withE2EAsyncWorkerProtocolLock } from "./helpers/async-worker-lock";
  * Phase 9C-03 — 9C03-E2E-01：durable async data export 全链
  * （真实 UI + 真实 production async-worker + 真实 MinIO artifact）。
  *
- * 流程（任务书 §56）：
+ * 流程（任务书 §56 + FIX05 fixture ownership）：
  *   新用户正常注册/登录（避免与并行 spec 竞争共享 buyer 的 active 导出）
- *   → fixture：与卖家的 COMPLETED 订单 + 卖家私密手机号（跨用户断言锚点）
+ *   → fixture：本测试私有的 temporary counterparty（唯一 email/phone）+
+ *     与其 COMPLETED 订单——共享 E2E_ACCOUNTS.seller 全程只读（不 update
+ *     任何字段），仅复用其 storageState 作跨用户 anti-oracle actor
  *   → UI 点击"导出我的数据" → POST 202 → UI 显示正在排队/正在生成
  *   → RB06 protocol lock 内：真实 production async-worker（--run-once）有界
  *     多轮驱动（Step A prepare → RESCHEDULE → Step B generate，两轮为常态）
@@ -100,30 +102,51 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
   await loginViaUI(page, email, "P03Pass#2026", nickname);
 
   const user = await e2eDb().user.findUniqueOrThrow({ where: { email } });
-  const sellerUser = await e2eDb().user.findUniqueOrThrow({
+
+  // FIX05（只读锚点）：共享 seller 的基线快照仅用于收尾 defense-in-depth
+  // 断言（本 spec 对共享 fixture 零写入——真实 authority 是下方不存在任何
+  // user.update；全套 E2E 中唯一曾有共享 seller mutation 的就是本 spec）。
+  const sharedSeller = await e2eDb().user.findUniqueOrThrow({
     where: { email: E2E_ACCOUNTS.seller.email },
   });
+  const sharedSellerPhoneAtStart = sharedSeller.phone;
 
-  // ---------- fixture：订单（导出应含）+ 卖家私密手机号（绝不能含） ----------
-  // FIX05：seller 是全套 E2E 共享 fixture——覆盖 phone 属临时变更，必须
-  // 在 finally 恢复原值（断言/worker/下载中途失败也必须恢复，fixture
-  // teardown 正确性本身属于测试合同；恢复失败必须显式可见，绝不静默吞掉）。
-  const originalSellerPhone = sellerUser.phone;
-  const sellerPhone = `137${String(Date.now()).slice(-8)}`;
-  await e2eDb().user.update({ where: { id: sellerUser.id }, data: { phone: sellerPhone } });
-  const orderNo = `P03-${tag}`;
-  const order = await e2eDb().order.create({
-    data: {
-      orderNo,
-      type: "PRODUCT",
-      status: "COMPLETED",
-      amount: "7.77",
-      buyerId: user.id,
-      sellerId: sellerUser.id,
-    },
-  });
+  // FIX05：temporary counterparty 只属于本测试——唯一 email/phone/name，
+  // 订单 counterparty 隐私边界以它为锚点。共享 seller 全程 READ ONLY。
+  let temporaryCounterpartyId: string | undefined;
+  let temporaryOrderId: string | undefined;
+  let sellerContext: Awaited<ReturnType<typeof browser.newContext>> | undefined;
+  const counterpartyEmail = `${tag}-counterparty@e2e.test`;
+  const counterpartyPhone = `138${Date.now().toString().slice(-8)}`;
 
   try {
+    const temporaryCounterparty = await e2eDb().user.create({
+      data: {
+        email: counterpartyEmail,
+        name: `交易对手${tag.slice(-6)}`,
+        passwordHash: "e2e-fixture-not-a-credential",
+        schoolName: "E2E 测试大学",
+        campusId: user.campusId,
+        phone: counterpartyPhone,
+      },
+    });
+    temporaryCounterpartyId = temporaryCounterparty.id;
+
+    // 订单仍为 PRODUCT/COMPLETED，counterparty = temporary user（导出 DTO
+    // 对 counterparty 只读公共子集 id/name/avatarUrl，direct DB fixture
+    // 不需要 membership/role/verification/session）
+    const orderNo = `P03-${tag}`;
+    const order = await e2eDb().order.create({
+      data: {
+        orderNo,
+        type: "PRODUCT",
+        status: "COMPLETED",
+        amount: "7.77",
+        buyerId: user.id,
+        sellerId: temporaryCounterparty.id,
+      },
+    });
+    temporaryOrderId = order.id;
     // ---------- UI 点击：POST 202，HTTP 不执行数据构建 ----------
     const legacyGet = await page.request.get("/api/privacy/export");
     expect(legacyGet.status()).toBe(405);
@@ -139,7 +162,11 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
     });
     expect(requests).toHaveLength(1);
     const request = requests[0]!;
-    expect(request.status).toBe("REQUESTED");
+    // 全量并行 suite 下，其它 spec 的 production async-worker 可能恰在此
+    // 窗口（进入 RB06 锁之前）claim 本 job 并执行 Step A（REQUESTED →
+    // IN_PROGRESS）——exactly-one request/job 契约不受影响，非终态中间态
+    // 两者皆合法。终态推进仍由下方 RB06 锁内断言收口。
+    expect(["REQUESTED", "IN_PROGRESS"]).toContain(request.status);
 
     const jobs = await e2eDb().asyncJob.findMany({
       where: { dedupeKey: `DATA_EXPORT_GENERATE:${request.id}` },
@@ -235,9 +262,10 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
       true,
     );
 
-    // 他人私密字段不在（卖家 email/手机号绝不出现）
-    expect(body).not.toContain(E2E_ACCOUNTS.seller.email);
-    expect(body).not.toContain(sellerPhone);
+    // counterparty 私密字段不在（email/phone 属 DIRECT_IDENTITY，导出
+    // DTO 对 counterparty 只暴露公共子集 id/name/avatarUrl）
+    expect(body).not.toContain(counterpartyEmail);
+    expect(body).not.toContain(counterpartyPhone);
 
     // 内部秘密/存储内部形态不在（对象 key 含 userId+requestId，绝不泄漏）
     for (const forbidden of FORBIDDEN_INTERNAL_KEYS) {
@@ -256,8 +284,9 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
     expect(apiDownload.headers()["cache-control"]).toContain("no-store");
     expect(apiDownload.headers()["x-content-type-options"]).toBe("nosniff");
 
-    // ---------- 跨用户 anti-oracle：seller 会话请求同一下载 → 与不存在同形 ----------
-    const sellerContext = await browser.newContext({
+    // ---------- 跨用户 anti-oracle：共享 seller（只读 fixture actor）会话
+    // 请求同一下载 → 与不存在同形 ----------
+    sellerContext = await browser.newContext({
       storageState: storageStatePath("seller"),
     });
     const sellerPage = await sellerContext.newPage();
@@ -270,21 +299,38 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
     expect(crossUser.status()).toBe(404);
     expect(notFound.status()).toBe(404);
     expect(await crossUser.text()).toBe(await notFound.text());
-    await sellerContext.close();
   } finally {
-    // fixture 恢复（独立于断言失败）：先恢复共享 seller 原值，再删订单；
-    // context 关闭放最内层 finally，恢复失败不被吞掉——直接向上抛
+    // FIX05 teardown（独立于断言失败，全 try 覆盖——从 temporary counterparty
+    // 创建起任何失败都会进入本块）：FK-safe 顺序 Order → temporary User；
+    // 共享 seller 全程零写入（cleanup 面亦无 restore 调用）。清理失败必须
+    // 令测试失败并携带 machine IDs，绝不静默吞掉。
     try {
-      await e2eDb().user.update({
-        where: { id: sellerUser.id },
-        data: { phone: originalSellerPhone },
+      if (temporaryOrderId !== undefined) {
+        await e2eDb().order.delete({ where: { id: temporaryOrderId } });
+        expect(
+          await e2eDb().order.findUnique({ where: { id: temporaryOrderId } }),
+        ).toBeNull();
+      }
+      if (temporaryCounterpartyId !== undefined) {
+        await e2eDb().user.delete({ where: { id: temporaryCounterpartyId } });
+        expect(
+          await e2eDb().user.findUnique({ where: { id: temporaryCounterpartyId } }),
+        ).toBeNull();
+      }
+      // defense-in-depth：共享 seller 全程只读（零 mutation 的运行期证据；
+      // 真实 authority 是本 spec 不存在任何 shared seller user.update）
+      const sharedSellerAfter = await e2eDb().user.findUniqueOrThrow({
+        where: { email: E2E_ACCOUNTS.seller.email },
       });
-      await e2eDb().order.delete({ where: { id: order.id } });
+      expect(sharedSellerAfter.phone).toBe(sharedSellerPhoneAtStart);
     } catch (cleanupError) {
       throw new Error(
-        `9C03 E2E fixture 恢复失败（共享 seller fixture 可能被污染，需人工核查 seller.phone / 残留订单 ${orderNo}）：${String(cleanupError)}`,
+        `9C03 E2E fixture cleanup failed: temporaryCounterpartyId=${temporaryCounterpartyId ?? "unset"} orderId=${temporaryOrderId ?? "unset"}: ${String(cleanupError)}`,
       );
     } finally {
+      if (sellerContext) {
+        await sellerContext.close();
+      }
       await context.close();
     }
   }
