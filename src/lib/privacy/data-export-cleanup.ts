@@ -56,7 +56,14 @@ export async function runDataExportArtifactCleanup(
     failures: 0,
   };
 
-  // 1. 到期 READY → PENDING_DELETE
+  // 1. 到期 READY → PENDING_DELETE（RB01：bounded）
+  // discovery 与 authoritative transition 分离——discovery 只取本周期
+  // batchLimit 个候选（expiresAt ASC, id ASC 确定序），真正的状态推进逐条
+  // 以谓词条件更新执行（status=READY AND expiresAt<=now）。并发 cleanup
+  // worker 可以 discover 同一候选：谓词语义保证恰好一个赢得转移，count
+  // 只计实际转移行——任何单周期内到期推进至多 batchLimit，绝不一次
+  // UPDATE 整个 backlog（backlog 再大也只能按周期分批收敛）。
+  // dryRun 报告的是完整候选数（只读可观测性，不构成转移）。
   const expiryWhere = {
     status: "READY" as const,
     expiresAt: { lte: now },
@@ -65,11 +72,20 @@ export async function runDataExportArtifactCleanup(
   if (dryRun) {
     summary.expiryMarked = await prisma.dataExportArtifact.count({ where: expiryWhere });
   } else {
-    const marked = await prisma.dataExportArtifact.updateMany({
+    const expiryCandidates = await prisma.dataExportArtifact.findMany({
       where: expiryWhere,
-      data: { status: "PENDING_DELETE" },
+      orderBy: [{ expiresAt: "asc" }, { id: "asc" }],
+      take: batchLimit,
+      select: { id: true },
     });
-    summary.expiryMarked = marked.count;
+
+    for (const candidate of expiryCandidates) {
+      const marked = await prisma.dataExportArtifact.updateMany({
+        where: { id: candidate.id, status: "READY", expiresAt: { lte: now } },
+        data: { status: "PENDING_DELETE" },
+      });
+      summary.expiryMarked += marked.count;
+    }
   }
 
   // 2. 孤儿 WRITING sweep（request terminal 但 artifact 仍 WRITING）

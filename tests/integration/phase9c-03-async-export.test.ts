@@ -761,6 +761,72 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
     expect(await withTransaction((tx) => markArtifactDeletedIfPendingDelete(tx, artifact2.id, new Date()))).toBe(false);
   });
 
+  it("EXPORT-CLEANUP-BOUNDED-01：backlog=100、batchLimit=10 → 每轮到期推进 ≤10，分批最终全收敛", async () => {
+    const userId = await createFixtureUser("cleanup-bounded");
+
+    // backlog fixture：100 条 READY + 已到期 artifact（DB 行级，无对象——
+    // 物理阶段 DeleteObject 幂等，对象不存在视为成功）
+    const now = Date.now();
+    const requests = await rawClient.privacyRequest.createManyAndReturn({
+      data: Array.from({ length: 100 }, () => ({
+        userId,
+        type: "DATA_EXPORT" as const,
+        status: "COMPLETED" as const,
+        requestedAt: new Date(now - 3_600_000),
+        completedAt: new Date(now - 3_500_000),
+      })),
+      select: { id: true },
+    });
+    expect(requests).toHaveLength(100);
+
+    const artifactRows = requests.map((request, index) => ({
+      requestId: request.id,
+      userId,
+      status: "READY" as const,
+      bucket: "campus-private",
+      objectKey: `private/data-exports/${userId}/bounded-${String(index).padStart(3, "0")}-${request.id}.json`,
+      mimeType: "application/json; charset=utf-8",
+      sizeBytes: 1024,
+      sha256: "0".repeat(64),
+      expiresAt: new Date(now - 1_000),
+      createdAt: new Date(now - 3_000_000),
+      updatedAt: new Date(now - 3_000_000),
+    }));
+    await rawClient.dataExportArtifact.createMany({ data: artifactRows });
+
+    // 第一轮：到期推进必须 bounded（≤ batchLimit），绝不一次推进整个 backlog
+    const firstRound = await runDataExportArtifactCleanup({ batchLimit: 10 });
+    expect(firstRound.expiryMarked).toBeLessThanOrEqual(10);
+    expect(firstRound.expiryMarked).toBeGreaterThanOrEqual(1);
+
+    const remainingReady = await rawClient.dataExportArtifact.count({
+      where: { userId, status: "READY" },
+    });
+    expect(remainingReady).toBe(100 - firstRound.expiryMarked);
+
+    // 持续执行：每轮 bounded，最终全部收敛 DELETED
+    let rounds = 1;
+    let lastRound = firstRound;
+    let deletedTotal = firstRound.objectsDeleted;
+    while (rounds < 40) {
+      const readyLeft = await rawClient.dataExportArtifact.count({
+        where: { userId, status: "READY" },
+      });
+      if (readyLeft === 0) break;
+      lastRound = await runDataExportArtifactCleanup({ batchLimit: 10 });
+      rounds += 1;
+      expect(lastRound.expiryMarked).toBeLessThanOrEqual(10);
+      expect(lastRound.objectsDeleted).toBeLessThanOrEqual(10);
+      deletedTotal += lastRound.objectsDeleted;
+    }
+
+    expect(await rawClient.dataExportArtifact.count({ where: { userId, status: "READY" } })).toBe(0);
+    expect(await rawClient.dataExportArtifact.count({ where: { userId, status: "PENDING_DELETE" } })).toBe(0);
+    expect(await rawClient.dataExportArtifact.count({ where: { userId, status: "DELETED" } })).toBe(100);
+    expect(deletedTotal).toBe(100);
+    expect(rounds).toBeGreaterThanOrEqual(10); // bounded 分批的真实证据
+  });
+
   it("EXPORT-STALE-WRITING-SWEEP：孤儿 WRITING（request 已 REJECTED）→ cleanup 标记并物理收敛；活跃 WRITING 不动", async () => {
     const userId = await createFixtureUser("stale-writing");
     const { request } = await createAsyncDataExportRequest(userId);
