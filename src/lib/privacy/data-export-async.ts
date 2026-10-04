@@ -31,7 +31,12 @@ import {
   dataExportArtifactExpiresAt,
   dataExportArtifactMaxBytes,
 } from "@/lib/privacy/data-export-contract";
-import { buildUserExport, type UserExportPayload } from "@/lib/privacy/data-export";
+import {
+  assertNoForbiddenExportFields,
+  buildUserExport,
+  DataExportSecurityValidationError,
+  type UserExportPayload,
+} from "@/lib/privacy/data-export";
 import { transitionPrivacyRequest } from "@/lib/privacy/privacy-request-service";
 
 /**
@@ -354,7 +359,25 @@ export async function processDataExportGenerateJob(
   // §42：buildUserExport 是唯一 user-data selection authority（普通 DB 读，
   // best-effort point-in-time snapshot）
   const build = options.builder ?? buildUserExport;
-  const payload = await build(request.userId);
+
+  // RB02：安全/隐私验证在执行边界强制——无论 builder（含未来扩展点）
+  // 返回什么，载荷都必须通过禁止键扫描；违反 = 确定性结构/安全失败 =
+  // PERMANENT fail closed（绝不 RETRY 调度）。keyPath 只存在于进程内异常
+  // 本行被映射为受控 generic message——绝不写入 durable job 行或结构化
+  // 日志。
+  let payload: UserExportPayload;
+  try {
+    payload = await build(request.userId);
+    assertNoForbiddenExportFields(payload);
+  } catch (error) {
+    if (error instanceof DataExportSecurityValidationError) {
+      throw new PermanentJobFailure(
+        "DATA_EXPORT_SECURITY_VALIDATION_FAILED",
+        "导出载荷未通过安全验证",
+      );
+    }
+    throw error;
+  }
 
   // §17：compact JSON（不 pretty print）；v3 format 不变
   const serialized = Buffer.from(JSON.stringify(payload), "utf8");

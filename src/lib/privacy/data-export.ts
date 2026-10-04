@@ -782,6 +782,22 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
  * 泄漏防护扫描（也被测试复用）：递归检查载荷中不出现任何禁止键名。
  * 放在这里而不是只放测试里，是为了让运行时出口同样受保护。
  */
+/**
+ * 导出安全/隐私验证失败（RB02）：确定性结构失败——载荷构成违反禁止键
+ * 契约时，重试不可能改变结果。携带专用类型使 async 执行层可以把它映射为
+ * PERMANENT fail closed（绝不 RETRY 调度），而本模块无需依赖 AsyncJob
+ * 基础设施。
+ *
+ * message 可含 keyPath（仅进程内诊断）；执行层映射为受控 generic code，
+ * keyPath 绝不落 durable job 行或结构化日志。
+ */
+export class DataExportSecurityValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DataExportSecurityValidationError";
+  }
+}
+
 export function assertNoForbiddenExportFields(payload: unknown): void {
   const forbidden = new Set<string>(FORBIDDEN_EXPORT_KEYS);
 
@@ -794,7 +810,7 @@ export function assertNoForbiddenExportFields(payload: unknown): void {
     if (node && typeof node === "object") {
       for (const [key, value] of Object.entries(node)) {
         if (forbidden.has(key)) {
-          throw new Error(`导出载荷出现禁止字段: ${keyPath}.${key}`);
+          throw new DataExportSecurityValidationError(`导出载荷出现禁止字段: ${keyPath}.${key}`);
         }
 
         visit(value, keyPath ? `${keyPath}.${key}` : key);

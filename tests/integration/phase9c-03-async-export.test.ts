@@ -49,6 +49,18 @@ import type { StorageClient } from "@/lib/storage/types";
 
 vi.setConfig({ testTimeout: 120_000, hookTimeout: 240_000 });
 
+// EXPORT-SECURITY-PERMANENT-01 专用 seam：默认透传真实 buildUserExport，
+// 单个测试用 mockImplementationOnce 注入运行时含禁止键的恶意载荷（测试
+// 可绕开 TS 类型构造）。factory 惰性执行——首次动态 import 时才触发，
+// 隔离库 DATABASE_URL 已由 beforeAll 就位。
+vi.mock("@/lib/privacy/data-export", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/privacy/data-export")>();
+  return {
+    ...actual,
+    buildUserExport: vi.fn(actual.buildUserExport),
+  };
+});
+
 const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
 const endpoint = process.env.INTEGRATION_S3_ENDPOINT;
 
@@ -1017,6 +1029,60 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       status: "REJECTED",
       reasonCode: "DATA_EXPORT_GENERATION_FAILED",
     });
+  });
+
+  it("EXPORT-SECURITY-PERMANENT-01（RB02）：载荷含禁止键 → Step B PERMANENT fail closed → DEAD_LETTER（零 RETRY）→ reconciler 收敛 REJECTED", async () => {
+    const userId = await createFixtureUser("security-permanent");
+    const { request } = await createAsyncDataExportRequest(userId);
+
+    // Step A：durable anchor（真实 runner 路径）
+    await runExportJobUntil(request.id, (row) => row.attempts >= 1);
+
+    // Step B：注入运行时含 passwordHash 的恶意载荷（builder seam 绕开 TS
+    // 类型）。真实 runner claim → 执行边界禁止键扫描 → PERMANENT →
+    // DEAD_LETTER（绝不 RETRY 排程）
+    const dataExportModule = await import("@/lib/privacy/data-export");
+    const buildMock = dataExportModule.buildUserExport as unknown as {
+      mockImplementationOnce: (impl: () => Promise<unknown>) => void;
+    };
+    buildMock.mockImplementationOnce(async () => {
+      return {
+        blob: "x",
+        passwordHash: "$2a$10$evil-secret-hash-value",
+      } as never;
+    });
+
+    const job = await runExportJobUntil(request.id, (row) => row.status === "DEAD_LETTER");
+    expect(job.status).toBe("DEAD_LETTER");
+    expect(job.deadLetteredAt).not.toBeNull();
+
+    // attempts = Step A(1) + Step B(2)：Step B 安全失败立即 PERMANENT，
+    // 不产生任何 RETRY 排程（若被误分类为 RETRYABLE，此处会 > 2）
+    expect(job.attempts).toBe(2);
+
+    // durable job 行只含受控 generic 文案——绝不出现禁止键名/键路径/值
+    expect(job.lastErrorCode).toBe("DATA_EXPORT_SECURITY_VALIDATION_FAILED");
+    expect(job.lastErrorMessage).toBe("导出载荷未通过安全验证");
+    expect(job.lastErrorMessage).not.toContain("passwordHash");
+    expect(job.lastErrorMessage).not.toContain("evil");
+
+    // request 未被 runner 终结（REJECTED 收敛属 scoped reconciler 职责）
+    const requestMid = await requestRow(request.id);
+    expect(requestMid.status).toBe("IN_PROGRESS");
+
+    const reconciliation = await reconcileDataExportDeadLetters({ batchLimit: 10 });
+    expect(reconciliation.convergedRequests).toBeGreaterThanOrEqual(1);
+
+    expect(await requestRow(request.id)).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "DATA_EXPORT_GENERATION_FAILED",
+    });
+
+    // artifact（Step A WRITING anchor）→ PENDING_DELETE → 不可下载
+    const artifact = await artifactRow(request.id);
+    expect(artifact.status).toBe("PENDING_DELETE");
+    const denied = await readExportArtifactForDownload(request.id, userId);
+    expect(denied.ok).toBe(false);
   });
 
   it("EXPORT-QUOTA-ISOLATION：artifact 不计入 user storage quota（INV-9C03-12）", async () => {
