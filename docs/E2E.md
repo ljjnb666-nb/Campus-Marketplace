@@ -102,6 +102,17 @@ GF1 的注册/登录/登出用匿名 context 走完整 UI，不依赖 storageSta
 7. **MESSAGING**：私聊建会话 → 双向收发 → 刷新持久（DB 断言消息内容/发送者/参与方）
 8. **REPORT_ADMIN**：举报 → 管理员标记处理中 → 处理完成（DB 断言 RESOLVED + 处理备注）
 
+## Current release-gate baseline
+
+- master：`e497dcde73a138415e5546222ab97c3293813be3`（2026-10-05，Phase 9 Final Closure）
+- CI：GitHub Actions run 37302064162（verify + e2e 双 job 全绿，attempt = 1）
+- Playwright E2E：**93 / 93 全绿，0 flaky / 0 failed**
+
+上方 8 条 Golden Flows 是 Phase 2 建立的 foundational flows；当前 release gate
+已随 Phase 5–9 扩展覆盖 governance / trust / marketplace lifecycle /
+notification 等后续关键链（共 93 条测试），不再只有 8 个 spec / 24 条测试。
+当前权威数字以 [TODO.md](TODO.md)「当前测试基线」为准。
+
 ## 调试方法
 
 - 失败产物在 `tests/e2e/.artifacts/`（screenshot + video + error-context.md，仅失败时保留）

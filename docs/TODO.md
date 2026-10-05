@@ -18,7 +18,7 @@
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**） |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；状态权威见 MASTER_ROADMAP 当前状态表） |
-| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A / 9B / 9C-01 / 9C-02 / 9C-03 = CLOSED；9C-04 retention / tombstones / ops reconcile = IMPLEMENTED / PENDING REVIEW（Draft PR）；Phase 9 CLOSED 需 9C-04 合并 + post-merge master CI green + 独立 Final Acceptance；运维手册见 docs/PHASE9_OPERATIONS.md） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED，PR #57–#62 实施链收口；final master `e497dcde`，post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；closure record 见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.5，运维手册见 [PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)） |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness | NOT_STARTED |
 | **GATE B** | Pilot Ready（通过后重开 Phase 3B） | NOT_REACHED |
@@ -337,26 +337,27 @@ DONE / MERGED / MASTER-GREEN / CLOSED（见 Production 阶段总览）。**
 
 ## 当前测试基线
 
-以 canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`
-（**Phase 7 Final Closure canonical baseline**——PR #27 合并提交，不随 master
-前进改写）对应的成功 master CI 为准（GitHub Actions run
-[35713347538](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/35713347538)，
-2026-09-22，event = push、branch = master，verify + e2e 双 job 全绿，
+以 Phase 9 Final Closure canonical master
+`e497dcde73a138415e5546222ab97c3293813be3`（**Phase 9 Final Closure canonical
+baseline**——PR #62 合并提交，2026-10-05，不随 master 前进改写）对应的成功
+master CI 为准（GitHub Actions run
+[37302064162](https://github.com/ljjnb666-nb/Campus-Marketplace/actions/runs/37302064162)，
+2026-10-05，event = push、branch = master，verify + e2e 双 job 全绿，
 attempt = 1）：
 
-- **353** 个测试文件，**2840** 个测试全部通过、0 failed（CI 中真实 PostgreSQL /
-  Redis / MinIO 集成测试全部真实执行，无环境门控 skip；含 Phase 5–7 全部
+- **444** 个测试文件，**4028** 个测试全部通过、0 failed（CI 中真实 PostgreSQL /
+  Redis / MinIO 集成测试全部真实执行，无环境门控 skip；含 Phase 5–9 全部
   governance / trust / enforcement / moderation / dispute / support /
-  campus administration / operations overview 集成与并发竞态回归、
-  Privacy/Governance Drill）
+  campus administration / operations overview / async-outbox / notification /
+  retention 集成与并发竞态回归、Privacy/Governance Drill）
 - 覆盖率四项硬门槛 lines / branches / functions / statements ≥ 80%
-  （实测 88.94 / 85.57 / 89.44 / 88.94；branches ±0.01 为 V8 measurement
-  jitter，已由 Independent Review 接受）
-- **E2E 基线：72 条关键链路测试** CI 全绿（Phase 7H 九条 governance golden
-  flows 含 streaming settlement 稳定化合同；retries 对 7H 套件 = 0）
-- **真实 PostgreSQL 集成测试：Phase 6A 19 + Phase 6B 27 + Phase 6C/7A–7H
-  全链保留（含 7H 26 条：C-RACE-01..06、P-RACE-01..05、PAGE-01..08、
-  RBAC/campus/policy/settlement 合同）**
+  （实测 89.31 / 86.02 / 90.68 / 89.31）
+- **E2E 基线：93 条关键链路测试** CI 全绿、0 flaky / 0 failed
+- 历史基线：Phase 7 Final Closure canonical merge 时 353 文件 / 2840 用例 /
+  E2E 72 条（master CI 35713347538，`2b8ba766`；coverage 88.94 / 85.57 /
+  89.44 / 88.94；真实 PostgreSQL 集成：Phase 6A 19 + Phase 6B 27 +
+  Phase 6C/7A–7H 全链，含 7H 26 条 C-RACE/P-RACE/PAGE 合同）
+  —— historical baseline，非当前基线
 - 历史基线：Phase 6B Closure Recovery 合并时 243 文件 / 1580 用例 / E2E 36 条
   （master CI 34132745423，`97f53cd3`）
 - 历史基线：Phase 6B core 合并时 243 文件 / 1567 用例 / E2E 36 条

@@ -4,6 +4,8 @@
 > [DATA_GOVERNANCE.md](DATA_GOVERNANCE.md) §2.1，隐私运营见
 > [PRIVACY_OPERATIONS.md](PRIVACY_OPERATIONS.md)，日志红线见
 > [LOG_PRIVACY.md](LOG_PRIVACY.md)。
+>
+> Phase 9 status：**CLOSED**（2026-10-05，final master `e497dcde`，closure record 见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.5）。
 
 ## 1. 运行拓扑与 cadence owner（单实例不变量）
 
