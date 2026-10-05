@@ -33,6 +33,18 @@ export const NOTIFICATION_DELIVERY_SUPPRESSION_INVALID_DESTINATION = "INVALID_DE
 export const NOTIFICATION_DELIVERY_SUPPRESSION_PROVIDER_DISABLED = "PROVIDER_DISABLED";
 
 /**
+ * Phase 9C-04（§13/§14）：NOTIFICATION_DELIVERY AsyncJob DEAD_LETTER 的
+ * bounded reconcile 收敛码（SSOT，选定为更明确的 NOTIFICATION_JOB_DEAD_LETTER）。
+ * job DEAD_LETTER = delivery intent 已无法由 canonical worker 继续发送
+ *（如 EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED / provider permanent failure /
+ * retry budget 耗尽）——9B 已冻结"超过幂等安全窗口或 dead-letter 的投递不得
+ * blind resend"（重发必须显式新 intent，绝不 revive 原 external-delivery
+ * intent），因此 terminal suppression 是正确收敛。
+ */
+export const NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER =
+  "NOTIFICATION_JOB_DEAD_LETTER";
+
+/**
  * destination 的 redacted sentinel（erasure 收敛值）：固定不可反查字符串，
  * 与 ERASED_USER_CONTENT_MARKER 同惯例（DERIVED/CONTACT 面允许牺牲原文）。
  */

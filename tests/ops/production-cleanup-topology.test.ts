@@ -94,6 +94,52 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     expect(worker).toMatch(/NODE_ENV === "production"/);
   });
 
+  // ---- Phase 9C-04（§80）：storage-cleanup 服务 → Phase 9 retention
+  // maintenance wiring 拓扑证明（不只是单测 service function）。生产只有
+  // 一个 periodic cleanup/retention cadence owner（INV-9C04-15）——既有
+  // storage-cleanup 服务承载 Phase 9 retention，不创建第二 container service。
+
+  it("Phase 9C-04：cleanup worker 单周期顺序执行 storage cleanup + Phase 9 retention maintenance", () => {
+    const worker = readFileSync(
+      path.join(repoRoot, "scripts", "ops", "storage-cleanup-worker.ts"),
+      "utf8",
+    );
+    // 同一 runCycle 内先 storage cleanup，后 Phase 9 retention
+    expect(worker).toMatch(/runStorageCleanup\(\{ dryRun \}\)/);
+    expect(worker).toMatch(/runPhase9RetentionMaintenance\(\{ dryRun \}\)/);
+    const storageCall = worker.indexOf("runStorageCleanup({ dryRun })");
+    const phase9Call = worker.indexOf("runPhase9RetentionMaintenance({ dryRun })");
+    expect(phase9Call).toBeGreaterThan(storageCall);
+    // retention 子任务失败 = 整周期 FAIL（§29：不打印成功 summary）
+    expect(worker).toMatch(/phase9_retention_cycle_failed/);
+    expect(worker).toMatch(/phase9Failures > 0/);
+    // --run-once / --dry-run 语义保持（两者同周期执行）
+    expect(worker).toMatch(/--run-once/);
+    expect(worker).toMatch(/--dry-run/);
+    // summary 只含 counts（§28 红线：不得出现 secret-bearing 字段）
+    expect(worker).not.toMatch(/lastErrorMessage|destination|objectKey|bucket/);
+  });
+
+  it("Phase 9C-04：独立 CLI 与 status 命令真实注册（明确操作入口，§33/§34）", () => {
+    const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts["storage:cleanup"]).toBe("tsx scripts/storage-cleanup.ts");
+    expect(pkg.scripts["ops:phase9-status"]).toBe("tsx scripts/ops/phase9-status.ts");
+
+    // 手动 CLI 执行完整周期（storage cleanup + Phase 9 retention）
+    const cli = readFileSync(path.join(repoRoot, "scripts", "storage-cleanup.ts"), "utf8");
+    expect(cli).toMatch(/runPhase9RetentionMaintenance/);
+    // ops status CLI 只读（无 mutation 入口）且支持 --strict 结构检查
+    const statusCli = readFileSync(
+      path.join(repoRoot, "scripts", "ops", "phase9-status.ts"),
+      "utf8",
+    );
+    expect(statusCli).toMatch(/getPhase9OpsSnapshot/);
+    expect(statusCli).toMatch(/--strict/);
+    expect(statusCli).not.toMatch(/updateMany|deleteMany|createMany/);
+  });
+
   it("Dockerfile 存在 cleanup-runner target，entrypoint 指向清理 worker", () => {
     expect(dockerfileContent).toMatch(/FROM node:\$\{NODE_VERSION\}-bookworm-slim AS cleanup-runner/);
     // prisma client 在镜像内生成（运行期不依赖宿主生成产物）

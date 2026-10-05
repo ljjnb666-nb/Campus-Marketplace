@@ -18,11 +18,15 @@
 COMPLETED / CANCELLED / REJECTED；用户可在 `/my/privacy` 看到全部历史与
 BLOCKED 原因（人类可读）。
 
-**导出生命周期（REPAIR 2 后）**：同步导出在一次请求内完成
-REQUESTED→IN_PROGRESS→COMPLETED；失败（超限/执行异常）→ REJECTED+reasonCode
-并**随事务提交持久化**（请求台账里真实可见，绝不回滚消失），之后才向调用方
-返回错误。`POST /api/privacy/requests` 不再接受 DATA_EXPORT（返回
-`USE_EXPORT_ENDPOINT` 指引），不存在永远停在 REQUESTED 的导出记录。
+**导出生命周期（Phase 9C-03 后，durable async export）**：`POST /api/privacy/export`
+立即返回 202 + AsyncJob 入队（REQUESTED）→ worker 分两步生成 artifact
+（WRITING → READY，S3 私有对象 + sha256 + expiresAt）→ request COMPLETED →
+用户在下载窗口内经同源代理下载（READY + COMPLETED 校验）→ TTL 到期由
+storage cleanup 物理删除（PENDING_DELETE → DELETED 墓碑行保留）。失败/超限
+→ REJECTED + reasonCode 并**随事务提交持久化**（请求台账里真实可见，绝不
+回滚消失），重试预算耗尽的生成 job 由 scoped reconciler 收敛 REJECTED——
+不存在永远停在 REQUESTED / IN_PROGRESS 的导出记录。`POST
+/api/privacy/requests` 不再接受 DATA_EXPORT（返回 `USE_EXPORT_ENDPOINT` 指引）。
 
 **交易参与方保护（REPAIR 2 后）**：任何交易/履约义务（商品订单、服务预约、
 跑腿接单、租赁订单）创建时都会在事务内复核全部参与方账号可用性——
@@ -73,6 +77,24 @@ REQUESTED→IN_PROGRESS→COMPLETED；失败（超限/执行异常）→ REJECTE
   出现在任何用户可见面）；到期由 storage cleanup 物理删除——无需人工
   干预，也不要延长保留；
 - 导出响应是 `private, no-store`——不得通过共享缓存/截图工具二次分发。
+
+## 4b. Phase 9 运行面 retention（Phase 9C-04 起，运营可见语义）
+
+Phase 9 的 async/outbox/delivery 运行面进入有界自动 retention（策略表见
+[DATA_GOVERNANCE.md](DATA_GOVERNANCE.md) §2.1，操作手册见
+[PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)）：
+
+- COMPLETED AsyncJob / PUBLISHED OutboxEvent 超 30 天（工程 baseline）→
+  payload 收敛为机器 tombstone marker，**dedupeKey 永久保留**（幂等身份）；
+- EMAIL delivery 的收件地址快照在 terminal（已发送/已抑制）超 30 天后自动
+  redact——投递 provenance（provider/时间戳/抑制码）保留；
+- pending（尚未终态）的 delivery 永不被 retention 触碰；
+- DEAD_LETTER 不是 retention candidate——保留至运维解决；
+  `npm run ops:phase9-status` 查看 counts/ages（`attentionRequired=true`
+  表示需要人看，不代表平台不可运行，也不影响 /api/ready）；
+- PrivacyRequest 台账（GOVERNANCE_AUDIT）不参与自动 purge；
+- **禁止**手工 SQL 删除 AsyncJob/OutboxEvent 或手改 delivery —— 破坏性
+  收敛只走 maintenance service（`storage-cleanup --run-once` / dry-run）。
 
 ## 5. 注销后的数据状态（运营可见语义）
 

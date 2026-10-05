@@ -215,16 +215,32 @@ async function materializeEmailDeliveryTx(
   let destination = recipient.email;
   let suppressedAt: Date | null = null;
   let suppressionCode: string | null = null;
+  // Phase 9C-04 RB03-B（INV-RB03B-01）：redactedAt = 第一次将 destination
+  // 收敛为 redacted sentinel 的时间——【任何】production writer 只要在同一次
+  // authoritative transition 中写 sentinel，就必须同步落 redactedAt
+  //（NULL → timestamp 单向，此后不可覆盖/置 null；creation / retention /
+  // account-erasure 三条 writer 共享同一合同）。
+  let redactedAt: Date | null = null;
 
   if (recipient.erasedAt) {
+    // creation-time redaction：收件人已注销——suppression 与 redaction 是
+    // 同一次 transition，共享同一时间点（suppressedAt === redactedAt）。
+    const now = new Date();
     destination = REDACTED_EMAIL_DESTINATION;
-    suppressedAt = new Date();
+    suppressedAt = now;
+    redactedAt = now;
     suppressionCode = NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED;
   } else if (extractEmailAddress(destination) === null) {
+    // creation-time redaction：目的地缺失/非法——同上，同一 transition 时间。
+    const now = new Date();
     destination = REDACTED_EMAIL_DESTINATION;
-    suppressedAt = new Date();
+    suppressedAt = now;
+    redactedAt = now;
     suppressionCode = NOTIFICATION_DELIVERY_SUPPRESSION_INVALID_DESTINATION;
   } else if (channelConfig.provider === "disabled") {
+    // 仅 suppression，不 redaction：destination 保持真实合法邮箱
+    //（后续首次真正 redaction 属 retention（超窗）或 account-erasure——
+    // 届时由对应 writer 落 redactedAt）。此处 redactedAt 保持 null。
     suppressedAt = new Date();
     suppressionCode = NOTIFICATION_DELIVERY_SUPPRESSION_PROVIDER_DISABLED;
   }
@@ -233,6 +249,9 @@ async function materializeEmailDeliveryTx(
 
   // DB 级 exactly-once：UNIQUE(notificationId, channel) +
   // UNIQUE(providerIdempotencyKey) + skipDuplicates（与 9A 同合同）。
+  // skipDuplicates 命中（并发/重复 emit）时本函数不改写既有行的
+  // redactedAt——creation writer 只对自己成功创建的新行负责，existing
+  // row 的权威状态归既有 lifecycle（retention / erasure / worker）。
   await tx.notificationDelivery.createMany({
     data: [
       {
@@ -245,6 +264,7 @@ async function materializeEmailDeliveryTx(
         providerIdempotencyKey,
         suppressedAt,
         suppressionCode,
+        redactedAt,
       },
     ],
     skipDuplicates: true,
@@ -271,6 +291,13 @@ async function materializeEmailDeliveryTx(
     return { deliveryId: delivery.id, suppressed: true };
   }
 
+  // RB04 写边界（Review R1 RB02 §11 记录）：payload 与 dedupeKey 恒由同一
+  // delivery.id 同时构造（canonical binding by construction：
+  // dedupeKey = buildNotificationDeliveryJobDedupeKey(delivery.id)，
+  // payload = { deliveryId: delivery.id }）。本写边界是 canonical binding
+  // 的唯一 production 来源；但 DB 中仍可能存在 legacy corruption / 手工
+  // 误改 / 未来漂移，reconciler（retention.ts）因此【独立】重新校验
+  // payload↔dedupeKey 一致性，绝不只依赖写边界。
   await enqueueAsyncJobTx(tx, {
     kind: NOTIFICATION_DELIVERY_JOB_KIND,
     schemaVersion: NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION,

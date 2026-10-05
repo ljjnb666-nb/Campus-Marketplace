@@ -1,20 +1,29 @@
 /**
- * 生产存储清理 worker（FINAL REPAIR B 审计修复：LR-071 OPS recovery）。
+ * 生产存储清理 + Phase 9 retention worker（FINAL REPAIR B 审计修复：
+ * LR-071 OPS recovery；Phase 9C-04 §26 升级为 periodic cleanup / retention
+ * cadence owner——不重命名生产服务，避免 topology drift）。
  *
  * 生产拓扑（compose.production.yml `storage-cleanup` 服务，单实例、仅
- * backend 网络、无端口发布）周期执行既有 `runStorageCleanup`：
+ * backend 网络、无端口发布）周期执行：
  *
- *   run cleanup → record result → sleep bounded interval → repeat
+ *   runStorageCleanup()                 → S3 对象 / 上传资源 / 导出 artifact 清理
+ *   runPhase9RetentionMaintenance()     → Phase 9 retention / reconcile（9C-04）
  *
  * 设计约束：
  * - 不引入任何队列/调度框架：单机 compose MVP 的最小方案；
- * - 单周期失败：记日志、等待下个周期重试（cleanup 幂等），不 tight-loop；
+ * - 单周期失败：记日志、等待下个周期重试（cleanup/retention 全部幂等），
+ *   不 tight-loop；
+ * - Phase 9 retention 子任务失败（phase9Failures > 0）= 整周期 FAIL
+ *  （§29）：记 errorName-only 失败日志、不打印成功 summary、run-once
+ *   exit non-zero；各 transition 幂等，部分成功下轮继续安全；
  * - 配置级 fatal（interval 非法 / env 校验失败）：exit non-zero，交给
  *   container restart policy（compose `restart: unless-stopped`）；
- * - 观测：仅在产生实际工作（删除/标记/失败 > 0）时输出 summary，
- *   空转周期不刷 INFO；
- * - 与 /api/ready 完全解耦：cleanup backlog 是后台恢复，不是接流量的
- *   依赖（readiness 仍只看 DB/Redis/Storage）。
+ * - 观测：仅在产生实际工作（删除/标记/tombstone/redact/reconcile/失败 > 0）
+ *   时输出 summary，空转周期不刷 INFO；summary 只含 counts（§28），绝不
+ *   携带任何投递目的地/载荷/存储定位符/provider 原始响应/原始错误文案；
+ * - 与 /api/ready 完全解耦：cleanup/retention backlog 是后台恢复，不是接
+ *   流量的依赖（readiness 仍只看 DB/Redis/Storage；dead letter 不翻转
+ *   readiness，§35）。
  *
  * 手动运维（escape hatch，生产 topology 下通过 ops 镜像执行，无需宿主机
  * 完整 node_modules）：
@@ -47,6 +56,13 @@ interface CycleSummary {
   dataExportArtifactsMarked: number;
   dataExportObjectsDeleted: number;
   dataExportFailures: number;
+  // Phase 9C-04：Phase 9 retention/reconcile 观测（§28，counts only）
+  asyncJobsTombstoned: number;
+  outboxEventsTombstoned: number;
+  notificationDeadLettersReconciled: number;
+  notificationDestinationsRedacted: number;
+  /** retention 子任务失败数（> 0 = 整周期 FAIL，§29） */
+  phase9Failures: number;
 }
 
 /** 解析并校验周期配置；非法配置属进程级 fatal（exit non-zero）。 */
@@ -74,7 +90,32 @@ function resolveIntervalSeconds(): number {
 
 async function runCycle(dryRun: boolean): Promise<CycleSummary> {
   const { runStorageCleanup } = await import("@/lib/asset-cleanup");
-  return runStorageCleanup({ dryRun });
+  const storage = await runStorageCleanup({ dryRun });
+
+  // Phase 9C-04（§26/§61）：同一 cadence owner 顺序执行 Phase 9
+  // retention/reconcile。子任务级失败不抛出（部分成功幂等安全），以
+  // phase9Failures 计数上交——调用方据其判定整周期 FAIL。
+  const { runPhase9RetentionMaintenance } = await import("@/lib/async/retention");
+  const phase9 = await runPhase9RetentionMaintenance({ dryRun });
+
+  return {
+    dryRun: storage.dryRun,
+    orphansMarked: storage.orphansMarked,
+    retentionExpiredMarked: storage.retentionExpiredMarked,
+    retentionHoldBlocked: storage.retentionHoldBlocked,
+    objectsDeleted: storage.objectsDeleted,
+    quotaReleasedBytes: storage.quotaReleasedBytes,
+    purgeHoldBlocked: storage.purgeHoldBlocked,
+    failures: storage.failures,
+    dataExportArtifactsMarked: storage.dataExportArtifactsMarked,
+    dataExportObjectsDeleted: storage.dataExportObjectsDeleted,
+    dataExportFailures: storage.dataExportFailures,
+    asyncJobsTombstoned: phase9.asyncJobsTombstoned,
+    outboxEventsTombstoned: phase9.outboxEventsTombstoned,
+    notificationDeadLettersReconciled: phase9.notificationDeadLettersReconciled,
+    notificationDestinationsRedacted: phase9.notificationDestinationsRedacted,
+    phase9Failures: phase9.phase9Failures,
+  };
 }
 
 /** 仅在产生实际工作时输出 summary（空转周期不刷日志）。
@@ -90,7 +131,12 @@ function logSummaryIfWorked(summary: CycleSummary): void {
     summary.retentionExpiredMarked > 0 ||
     summary.retentionHoldBlocked > 0 ||
     summary.purgeHoldBlocked > 0 ||
-    summary.failures > 0;
+    summary.failures > 0 ||
+    summary.asyncJobsTombstoned > 0 ||
+    summary.outboxEventsTombstoned > 0 ||
+    summary.notificationDeadLettersReconciled > 0 ||
+    summary.notificationDestinationsRedacted > 0 ||
+    summary.phase9Failures > 0;
   if (!didWork) {
     return;
   }
@@ -122,6 +168,22 @@ async function main() {
         event: "storage_cleanup_cycle_failed",
         intervalSeconds,
         errorName: error instanceof Error ? error.name : "unknown",
+      });
+      if (runOnce) {
+        process.exit(1);
+      }
+      await sleep(intervalSeconds * 1000);
+      continue;
+    }
+
+    // Phase 9C-04（§29）：retention 子任务失败 = 整周期 FAIL——绝不打印
+    // 成功 summary；全部 transition 幂等，部分成功下轮继续安全。
+    if (summary.phase9Failures > 0) {
+      logger.error("Phase 9 retention 子任务失败，本周期按失败处理，等待下轮重试", "storage-cleanup-worker", {
+        event: "phase9_retention_cycle_failed",
+        intervalSeconds,
+        errorName: "Phase9RetentionSubtaskFailure",
+        phase9Failures: summary.phase9Failures,
       });
       if (runOnce) {
         process.exit(1);

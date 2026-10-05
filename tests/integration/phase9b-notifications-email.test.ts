@@ -955,6 +955,203 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(job.status).toBe("COMPLETED");
     });
 
+    // ============================================================
+    // Phase 9C-04 RB03-B：creation-time redaction 必须同步落 redactedAt
+    // （INV-RB03B-01：任何 production writer 第一次把 destination 写成
+    // sentinel，就必须在同一 authoritative transition 记录 redactedAt；
+    // creation / retention / erasure 三 writer 共享 NULL→timestamp 单向合同）。
+    // teeth：pre-repair（5f972a0）实现 destination=sentinel 但 redactedAt=null
+    // → RET-CREATE-REDACT-ERASED-01 / RET-CREATE-REDACT-INVALID-01 FAIL。
+    // ============================================================
+
+    it("RET-CREATE-REDACT-ERASED-01（RB03-B）：creation-time RECIPIENT_ERASED → suppressedAt === redactedAt，0 job enqueue", async () => {
+      const buyer = await createFixtureUser("创建脱敏注销买家");
+      const seller = await createFixtureUser("创建脱敏注销卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+      await rawClient!.user.update({ where: { id: buyer.id }, data: { erasedAt: new Date() } });
+
+      const dedupeKey = `${RUN_TAG}:CREATE-REDACT-E:${randomUUID().slice(0, 8)}`;
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        emitNotificationTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRED",
+          recipientUserId: buyer.id,
+          orderId: order.id,
+          dedupeKey,
+          payload: { orderId: order.id, buyerId: buyer.id, sellerId: seller.id },
+        }),
+      );
+
+      const notification = await rawClient!.notification.findUniqueOrThrow({ where: { dedupeKey } });
+      createdNotificationIds.push(notification.id);
+      const delivery = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { notificationId_channel: { notificationId: notification.id, channel: "EMAIL" } },
+      });
+      createdDeliveryIds.push(delivery.id);
+
+      // creation-time redaction：destination sentinel + 同一 transition 时间戳
+      expect(delivery.destination).toBe("");
+      expect(delivery.suppressionCode).toBe("RECIPIENT_ERASED");
+      expect(delivery.suppressedAt).not.toBeNull();
+      expect(delivery.redactedAt).not.toBeNull();
+      expect(delivery.redactedAt!.getTime()).toBe(delivery.suppressedAt!.getTime());
+
+      // suppress-by-construction 保持：0 NOTIFICATION_DELIVERY job enqueue
+      expect(
+        await rawClient!.asyncJob.count({
+          where: { dedupeKey: `NOTIFICATION_DELIVERY:${delivery.id}` },
+        }),
+      ).toBe(0);
+    });
+
+    it("RET-CREATE-REDACT-INVALID-01（RB03-B）：creation-time INVALID_DESTINATION → suppressedAt === redactedAt，0 job enqueue", async () => {
+      const buyer = await createFixtureUser("创建脱敏无效邮箱买家");
+      const seller = await createFixtureUser("创建脱敏无效邮箱卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+      // recipient.email 非法（erasedAt 保持 null）→ 走 INVALID_DESTINATION 分支
+      //（email UNIQUE：每轮唯一，残留行不撞键）
+      await rawClient!.user.update({
+        where: { id: buyer.id },
+        data: { email: `not-an-email-${randomUUID().slice(0, 12)}` },
+      });
+
+      const dedupeKey = `${RUN_TAG}:CREATE-REDACT-I:${randomUUID().slice(0, 8)}`;
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        emitNotificationTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRED",
+          recipientUserId: buyer.id,
+          orderId: order.id,
+          dedupeKey,
+          payload: { orderId: order.id, buyerId: buyer.id, sellerId: seller.id },
+        }),
+      );
+
+      const notification = await rawClient!.notification.findUniqueOrThrow({ where: { dedupeKey } });
+      createdNotificationIds.push(notification.id);
+      const delivery = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { notificationId_channel: { notificationId: notification.id, channel: "EMAIL" } },
+      });
+      createdDeliveryIds.push(delivery.id);
+
+      expect(delivery.destination).toBe("");
+      expect(delivery.suppressionCode).toBe("INVALID_DESTINATION");
+      expect(delivery.suppressedAt).not.toBeNull();
+      expect(delivery.redactedAt).not.toBeNull();
+      expect(delivery.redactedAt!.getTime()).toBe(delivery.suppressedAt!.getTime());
+
+      expect(
+        await rawClient!.asyncJob.count({
+          where: { dedupeKey: `NOTIFICATION_DELIVERY:${delivery.id}` },
+        }),
+      ).toBe(0);
+    });
+
+    it("RET-CREATE-PROVIDER-DISABLED-01（RB03-B）：PROVIDER_DISABLED 仅 suppression 不 redaction → redactedAt 必须 null", async () => {
+      const buyer = await createFixtureUser("禁用供应商买家");
+      const seller = await createFixtureUser("禁用供应商卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+
+      // 临时切 disabled（resolveEmailChannelConfig 按调用读 env；测毕恢复）
+      process.env.EMAIL_PROVIDER = "disabled";
+      try {
+        const dedupeKey = `${RUN_TAG}:CREATE-DISABLED:${randomUUID().slice(0, 8)}`;
+        const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+        const { withTransaction } = await import("@/lib/prisma");
+        await withTransaction((tx: Prisma.TransactionClient) =>
+          emitNotificationTx(tx, {
+            kind: "PRODUCT_RESERVATION_EXPIRED",
+            recipientUserId: buyer.id,
+            orderId: order.id,
+            dedupeKey,
+            payload: { orderId: order.id, buyerId: buyer.id, sellerId: seller.id },
+          }),
+        );
+
+        const notification = await rawClient!.notification.findUniqueOrThrow({ where: { dedupeKey } });
+        createdNotificationIds.push(notification.id);
+        const delivery = await rawClient!.notificationDelivery.findUniqueOrThrow({
+          where: { notificationId_channel: { notificationId: notification.id, channel: "EMAIL" } },
+        });
+        createdDeliveryIds.push(delivery.id);
+
+        // destination 保留真实合法邮箱（绝不在 suppression 时伪称已 redact）
+        expect(delivery.destination).toBe(buyer.email);
+        expect(delivery.suppressionCode).toBe("PROVIDER_DISABLED");
+        expect(delivery.suppressedAt).not.toBeNull();
+        expect(delivery.redactedAt).toBeNull();
+
+        expect(
+          await rawClient!.asyncJob.count({
+            where: { dedupeKey: `NOTIFICATION_DELIVERY:${delivery.id}` },
+          }),
+        ).toBe(0);
+      } finally {
+        applyEmailEnv();
+      }
+    });
+
+    it("RET-CREATE-REDACT-MONOTONIC-01（RB03-B）：creation-time redactedAt=T1 → 后续 erasure/retention 零覆盖", async () => {
+      const buyer = await createFixtureUser("创建脱敏单调买家");
+      const seller = await createFixtureUser("创建脱敏单调卖家");
+      const { order } = await createExpiredOrderFixture(buyer.id, seller.id);
+      await rawClient!.user.update({
+        where: { id: buyer.id },
+        data: { email: `not-an-email-${randomUUID().slice(0, 12)}` },
+      });
+
+      const dedupeKey = `${RUN_TAG}:CREATE-REDACT-M:${randomUUID().slice(0, 8)}`;
+      const { emitNotificationTx } = await import("@/lib/notifications/notification-service");
+      const { withTransaction } = await import("@/lib/prisma");
+      await withTransaction((tx: Prisma.TransactionClient) =>
+        emitNotificationTx(tx, {
+          kind: "PRODUCT_RESERVATION_EXPIRED",
+          recipientUserId: buyer.id,
+          orderId: order.id,
+          dedupeKey,
+          payload: { orderId: order.id, buyerId: buyer.id, sellerId: seller.id },
+        }),
+      );
+
+      const notification = await rawClient!.notification.findUniqueOrThrow({ where: { dedupeKey } });
+      createdNotificationIds.push(notification.id);
+      const delivery = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { notificationId_channel: { notificationId: notification.id, channel: "EMAIL" } },
+      });
+      createdDeliveryIds.push(delivery.id);
+      const t1 = delivery.redactedAt;
+      expect(t1).not.toBeNull();
+
+      // writer #2 = retention（把 now 推到远超窗口的未来——redactedAt IS NULL
+      // 谓词不命中已脱敏行 → 零转移）
+      const { redactTerminalNotificationDestinations } = await import("@/lib/async/retention");
+      const farFuture = new Date(t1!.getTime() + 31 * 24 * 60 * 60 * 1000);
+      await redactTerminalNotificationDestinations({
+        retentionDays: 30,
+        now: farFuture,
+      });
+      const afterRetention = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+      });
+      expect(afterRetention.redactedAt!.getTime()).toBe(t1!.getTime());
+
+      // writer #3 = account erasure（destination 已是 sentinel；redactedAt 不被覆盖）
+      const { eraseAccount } = await import("@/lib/privacy/account-erasure");
+      await eraseAccount(buyer.id);
+
+      const afterErasure = await rawClient!.notificationDelivery.findUniqueOrThrow({
+        where: { id: delivery.id },
+      });
+      expect(afterErasure.destination).toBe("");
+      expect(afterErasure.redactedAt!.getTime()).toBe(t1!.getTime());
+      // INVALID_DESTINATION delivery 在 erasure 中不伪称 RECIPIENT_ERASED
+      //（erasure suppression 只命中真正 unsent——本行已 suppressedAt=T1，
+      // suppressionCode 保持原 creation-time 值）
+      expect(afterErasure.suppressionCode).toBe("INVALID_DESTINATION");
+    });
+
     it("EMAIL-IDEMP-02（RB01）：crash 回滚后 firstAttemptAt 仍 durable；23h+ε 重放 → 0 provider call → DEAD_LETTER", async () => {
       const buyer = await createFixtureUser("锚点买家");
       const seller = await createFixtureUser("锚点卖家");

@@ -60,6 +60,19 @@ const assetPolicyEnvSchema = z.object({
   DATA_EXPORT_ARTIFACT_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 });
 
+// Phase 9C-04：Phase 9 retention 窗口（§20）。两个值是工程治理 baseline
+//（可 env override），不是法律意见，绝不声称等于 GDPR/PIPL 法定期限；
+// 生产法务/隐私政策期限仍需正式 legal review。上限 3650 防误配。
+const phase9RetentionEnvSchema = z.object({
+  // COMPLETED AsyncJob / PUBLISHED OutboxEvent 的 terminal payload
+  // compaction 窗口（天）——anchor 是 completedAt / publishedAt（terminal
+  // 时间，不是 createdAt，§21）。
+  ASYNC_TERMINAL_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+  // NotificationDelivery terminal contact snapshot（收件邮箱）redaction
+  // 窗口（天）——anchor 是 providerAcceptedAt / suppressedAt（§21）。
+  NOTIFICATION_DELIVERY_PII_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+});
+
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   NEXTAUTH_URL: z.string().url(),
@@ -94,6 +107,11 @@ export const env = {
       process.env.VERIFICATION_ASSET_RETENTION_DAYS,
     DATA_EXPORT_ARTIFACT_MAX_BYTES: process.env.DATA_EXPORT_ARTIFACT_MAX_BYTES,
     DATA_EXPORT_ARTIFACT_TTL_HOURS: process.env.DATA_EXPORT_ARTIFACT_TTL_HOURS,
+  }),
+  ...phase9RetentionEnvSchema.parse({
+    ASYNC_TERMINAL_RETENTION_DAYS: process.env.ASYNC_TERMINAL_RETENTION_DAYS,
+    NOTIFICATION_DELIVERY_PII_RETENTION_DAYS:
+      process.env.NOTIFICATION_DELIVERY_PII_RETENTION_DAYS,
   }),
 };
 
