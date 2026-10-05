@@ -10,6 +10,13 @@ permissions:
   contents: read
   packages: read
 
+# CI-OPT-01：同一 PR 的新 HEAD push 自动取消旧 HEAD run（省无效 runner 时间）；
+# master push（github.ref 隔离、cancel-in-progress=false）的 post-merge
+# 完整 CI evidence 绝不自动取消。合同静态 gate：tests/ops/ci-workflow-contract.test.ts
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     name: verify (lint / typecheck / test / build)
@@ -149,7 +156,10 @@ jobs:
   e2e:
     name: e2e (playwright critical paths)
     runs-on: ubuntu-latest
-    needs: verify
+    # CI-OPT-01：与 verify 并行（独立 runner VM + 独立 PG 库 campus_e2e，
+    # 全链路自包含，不消费 verify artifact）——needs: verify 只是 sequencing，
+    # 不是 correctness dependency。两个 gate 都必须 SUCCESS；
+    # verify 失败时不人为取消 e2e（两个独立失败结果提供更完整诊断）。
 
     services:
       postgres:
