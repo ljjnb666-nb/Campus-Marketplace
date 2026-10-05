@@ -12,6 +12,10 @@ const txStub = {
   uploadedAsset: {
     updateMany: vi.fn(),
   },
+  // Phase 9C-03：注销收敛导出 artifact（WRITING/READY → PENDING_DELETE）
+  dataExportArtifact: {
+    updateMany: vi.fn(),
+  },
   product: {
     updateMany: vi.fn(),
   },
@@ -149,6 +153,7 @@ beforeEach(() => {
   txStub.user.update.mockResolvedValue({});
   txStub.userVerification.updateMany.mockResolvedValue({ count: 1 });
   txStub.uploadedAsset.updateMany.mockResolvedValue({ count: 2 });
+  txStub.dataExportArtifact.updateMany.mockResolvedValue({ count: 0 });
   txStub.product.updateMany.mockResolvedValue({ count: 1 });
   txStub.errandTask.updateMany.mockResolvedValue({ count: 0 });
   txStub.serviceListing.updateMany.mockResolvedValue({ count: 0 });

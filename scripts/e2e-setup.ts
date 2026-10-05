@@ -137,6 +137,12 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.adminLog.deleteMany();
   await prisma.blockedUser.deleteMany();
   await prisma.moderationKeyword.deleteMany();
+  // Phase 9C-03 RB05：DataExportArtifact 对 User / PrivacyRequest 均为
+  // ON DELETE RESTRICT（S3 对象的 durable recovery/tombstone 行，不得被
+  // parent 级联静默抹除）——canonical reset 必须先显式删除本表，再删
+  // User / PrivacyRequest parent rows，否则上一轮残留 artifact 会让
+  // user.deleteMany() 确定性 P2003，破坏 run #1/#2/#n 幂等合同。
+  await prisma.dataExportArtifact.deleteMany();
 
   // NextAuth 表 + 全部用户（E2E 库完全由本脚本拥有）
   // Phase 6B/6C/7C 治理表：FK 指向 User/listing（RESTRICT）——先删子表再删用户
@@ -151,6 +157,9 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
 
   // Phase 5 治理表（acceptance 的 FK 指向 legalDocument 为 RESTRICT，先删子表）
   await prisma.policyAcceptance.deleteMany();
+  // DataExportArtifact 已在本函数上方（User / PrivacyRequest 删除之前）
+  // 按 RESTRICT 顺序显式清理——此处不得重复，也不得以 CASCADE 语义假设
+  // 代替显式删除。
   await prisma.privacyRequest.deleteMany();
   await prisma.dataHold.deleteMany();
   await prisma.legalDocument.deleteMany();

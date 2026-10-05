@@ -24,6 +24,13 @@ vi.mock("@/lib/prisma", () => ({
       findMany: assetFindMany,
     },
     dataHold: { findMany: dataHoldFindMany },
+    // Phase 9C-03：导出 artifact 清理面（本套件聚焦 UploadedAsset；
+    // artifact 恒空，断言 dataExport* 计数为 0）
+    dataExportArtifact: {
+      count: vi.fn().mockResolvedValue(0),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
   },
   withTransaction: vi.fn(),
 }));

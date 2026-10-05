@@ -95,17 +95,22 @@ export class S3Storage implements StorageClient {
           CacheControl: input.cacheControl,
         }),
         // 应用级整个操作预算（含 SDK 重试）：超限 AbortError 终止重试链。
-        // abort ≠ 证明远端未提交——失败方（asset-service）仍按 LR-071
-        // 歧义结果安全路径恢复。
-        { abortSignal: AbortSignal.timeout(S3_PUT_OPERATION_TIMEOUT_MS) },
+        // abort ≠ 证明远端未提交——失败方仍按歧义结果安全路径恢复。
+        // MiB 级对象可显式传入更大的有界覆盖（types.ts 契约），默认
+        // 预算按小图片对象调定。
+        {
+          abortSignal: AbortSignal.timeout(
+            input.operationTimeoutMs ?? S3_PUT_OPERATION_TIMEOUT_MS,
+          ),
+        },
       );
     } catch (error) {
-      this.logWriteFailure("putObject", input, error, startedAt);
+      this.logWriteFailure("putObject", input, error, startedAt, input.diagnosticRef);
       throw error;
     }
   }
 
-  async deleteObject(ref: ObjectRef): Promise<void> {
+  async deleteObject(ref: ObjectRef, options?: { diagnosticRef?: string }): Promise<void> {
     this.assertRef(ref);
     const startedAt = Date.now();
     try {
@@ -116,7 +121,7 @@ export class S3Storage implements StorageClient {
         { abortSignal: AbortSignal.timeout(S3_DELETE_OPERATION_TIMEOUT_MS) },
       );
     } catch (error) {
-      this.logWriteFailure("deleteObject", ref, error, startedAt);
+      this.logWriteFailure("deleteObject", ref, error, startedAt, options?.diagnosticRef);
       throw error;
     }
   }
@@ -130,13 +135,20 @@ export class S3Storage implements StorageClient {
     ref: ObjectRef,
     error: unknown,
     startedAt: number,
+    diagnosticRef?: string,
   ): void {
     const classification = classifyStorageWriteError(error);
     logger.warn("对象存储写入失败", "S3Storage", {
       operation,
       event: "storage_write_failure",
-      bucket: ref.bucket,
-      objectKey: ref.objectKey,
+      // RB04：调用方提供 diagnosticRef（opaque 机器标识）时，失败日志绝不
+      // 携带 raw bucket / objectKey——logSafe=false 的私有定位符（如
+      // data-export artifact）不得进入结构化日志；其余机器诊断字段
+      // （errorClass/ambiguous/attempts/errorName/errorCode/durationMs）
+      // 完整保留。缺省 = 既有行为（UploadedAsset 面不变）。
+      ...(diagnosticRef
+        ? { locator: diagnosticRef }
+        : { bucket: ref.bucket, objectKey: ref.objectKey }),
       errorClass: classification.errorClass,
       ambiguous: !classification.definitePreCommitFailure,
       attempts: classification.attempts,

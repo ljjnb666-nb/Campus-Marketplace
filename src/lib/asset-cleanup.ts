@@ -8,6 +8,7 @@ import {
   purgePendingDeleteAsset,
 } from "@/lib/asset-service";
 import { listActiveUserHoldSubjectIds } from "@/lib/privacy/data-hold-service";
+import { runDataExportArtifactCleanup } from "@/lib/privacy/data-export-cleanup";
 
 /**
  * 存储清理任务（可重复执行、幂等、支持 dry-run）：
@@ -47,6 +48,13 @@ export interface CleanupSummary {
   /** PENDING_DELETE 中因 ACTIVE USER hold 被跳过的数量（预过滤 + 锁内复核） */
   purgeHoldBlocked: number;
   failures: number;
+  /** Phase 9C-03：导出 artifact 到期/stale 标记数（derived ephemeral，
+   * 不受 USER hold 阻断——hold 不为用户自生成 JSON 副本提供永久保留） */
+  dataExportArtifactsMarked: number;
+  /** Phase 9C-03：物理删除并收敛 DELETED 的导出对象数 */
+  dataExportObjectsDeleted: number;
+  /** Phase 9C-03：导出 artifact 清理失败数（下轮重试） */
+  dataExportFailures: number;
 }
 
 export interface CleanupOptions {
@@ -72,6 +80,9 @@ export async function runStorageCleanup(options: CleanupOptions = {}): Promise<C
     quotaReleasedBytes: 0,
     purgeHoldBlocked: 0,
     failures: 0,
+    dataExportArtifactsMarked: 0,
+    dataExportObjectsDeleted: 0,
+    dataExportFailures: 0,
   };
 
   // 公平性预过滤：当前被 ACTIVE USER hold 冻结的 owner 集合（discovery-only）
@@ -143,6 +154,24 @@ export async function runStorageCleanup(options: CleanupOptions = {}): Promise<C
         where: { ...expiredWhere, ownerId: { in: heldOwnerIds } },
       });
     }
+  }
+
+  // 2.5 Phase 9C-03：导出 artifact 清理（derived ephemeral；到期/stale
+  //     WRITING 标记 + PENDING_DELETE 物理删除，幂等 bounded crash-safe）。
+  //     接入同一 cleanup topology（§27），不创建第二套 daemon。
+  try {
+    const dataExportCleanup = await runDataExportArtifactCleanup({ dryRun, now, batchLimit });
+    summary.dataExportArtifactsMarked =
+      dataExportCleanup.expiryMarked + dataExportCleanup.staleWritingMarked;
+    summary.dataExportObjectsDeleted = dataExportCleanup.objectsDeleted;
+    summary.dataExportFailures = dataExportCleanup.failures;
+  } catch (error) {
+    // 导出 artifact 清理失败不阻断既有 UploadedAsset 清理（下轮重试）
+    summary.dataExportFailures += 1;
+    logger.error("导出 artifact 清理周期失败，等待下轮重试", "asset-cleanup", {
+      operation: "data-export-cleanup",
+      error,
+    });
   }
 
   // 3. 物理清理 PENDING_DELETE（含本轮与历史失败重试）

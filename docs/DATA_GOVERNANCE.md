@@ -78,9 +78,14 @@ COMPLETED / CANCELLED / REJECTED 为终态
 - 所有权：userId 一律从认证会话解析，API/Action 不接受外部 userId
   （防代他人提交）；用户只能创建/查看/取消自己的请求。
 
-## 4. 数据导出（DATA_EXPORT）
+## 4. 数据导出（DATA_EXPORT，Phase 9C-03 起为 durable async export）
 
-实现：`src/lib/privacy/data-export.ts` + `GET /api/privacy/export`。
+实现：DTO authority `src/lib/privacy/data-export.ts`（buildUserExport）+
+异步生命周期 `src/lib/privacy/data-export-async.ts` / artifact 状态机
+`data-export-artifact.ts` / 下载 `data-export-download.ts` / 清理
+`data-export-cleanup.ts`。入口：`POST /api/privacy/export`（202 异步受理）
+→ production async-worker 生成私有 artifact → 本人经
+`GET /api/privacy/export/<requestId>/download` 同源代理下载。
 
 **边界（NO_CROSS_USER_EXPORT / NO_SECRET_EXPORT / NO_STORAGE_INTERNAL_LEAK）**：
 
@@ -90,12 +95,20 @@ COMPLETED / CANCELLED / REJECTED 为终态
 - 绝不输出：passwordHash、session token、objectKey、bucket、内部端点、
   他人 email/phone/认证材料、内部治理备注；
 - 运行时出口 + 测试共用 `assertNoForbiddenExportFields` 递归扫描禁止键；
-- 体积上限 `EXPORT_MAX_BYTES`（8MB），超限显式 `DATA_EXPORT_TOO_LARGE`
-  （Phase 9 异步导出的边界已在 docs 记录，本阶段不造后台任务系统）。
+- 8 MiB 同步响应保护已随异步化删除；async 层资源上界 =
+  `DATA_EXPORT_ARTIFACT_MAX_BYTES`（env 可配，schema 强制 > 8 MiB，默认
+  32 MiB）——超限明确 REJECTED（`DATA_EXPORT_ARTIFACT_TOO_LARGE`），绝不
+  静默截断；记录为未来 streaming export 扩展点。
 
 响应安全：authenticated + same-user only；`Cache-Control: private, no-store`；
-`X-Content-Type-Options: nosniff`；限流 3 次/15 分钟；每次导出留痕
-DATA_EXPORT 请求记录。
+`X-Content-Type-Options: nosniff`；限流 3 次/15 分钟（rate limit 不是并发
+锁）；并发重复由 DB partial unique index 收敛为 409
+`DATA_EXPORT_ALREADY_ACTIVE`；每次导出留痕 DATA_EXPORT 请求记录 +
+`DataExportArtifact`（1:0..1，WRITING→READY→PENDING_DELETE→DELETED；
+TTL 默认 24h，到期由 storage cleanup 幂等 DeleteObject——S3 导出文件
+物理删除，DB 行保留 DELETED 机器墓碑（结构性恢复/审计元数据，不含用户
+内容）；bucket/objectKey 绝不进入 browser-visible surface；不计入用户
+storage quota；注销时原子 PENDING_DELETE）。
 
 ## 5. 账号注销 / 匿名化（ACCOUNT_DELETION）
 
@@ -180,30 +193,44 @@ Auth.js 策略为 JWT（maxAge 7 天）：`auth()` 只解析令牌，不感知�
 - 注销后残留的旧 JWT：页面重定向 /login；API 返回 401 `ACCOUNT_INACTIVE`；
   E2E（GF-P5/GF-P6）以"保留 cookie → DB 注销 → 旧 cookie 直调边界"的方式回归。
 
-## 8. 数据导出生命周期（REPAIR 2：失败台账持久化）
+## 8. 数据导出生命周期（Phase 9C-03：durable async）
 
-同步导出的唯一执行入口是 `GET /api/privacy/export`
-（服务层 `executeSynchronousDataExport`）：
+唯一创建入口是 `POST /api/privacy/export`
+（服务层 `createAsyncDataExportRequest`）；旧同步入口
+`GET /api/privacy/export` 已退役为 405（绝不产生 mutation）。
 
 ```
-成功：REQUESTED → IN_PROGRESS → 构建 DTO → 禁止键扫描/体积校验
-      → COMPLETED（completedAt）→ 事务 COMMIT → 响应载荷
-失败：REQUESTED → IN_PROGRESS → REJECTED(reasonCode) → 事务 COMMIT
-      → 事务外再向调用方抛出安全错误
-      （reasonCode: DATA_EXPORT_TOO_LARGE / EXPORT_EXECUTION_FAILED）
+HTTP：USER governance lock → fresh active-account check
+      → PrivacyRequest(REQUESTED) + AsyncJob DATA_EXPORT_GENERATE@1
+        {requestId}（同事务原子 COMMIT）→ HTTP 202
+Worker Step A：REQUESTED → IN_PROGRESS + DataExportArtifact WRITING
+      （deterministic object key，任何 S3 PUT 之前的 durable recovery
+      anchor）→ COMMIT → RESCHEDULE 立即
+Worker Step B：USER 锁内 fresh 复核 → buildUserExport（唯一 DTO
+      authority）→ compact JSON → 资源上界检查（超限 REJECTED 不截断）
+      → PUT deterministic object（ambiguous PUT 安全：重试覆盖同一 key）
+      → artifact READY + request COMPLETED（同一事务）
+失败收敛：结构损坏 / owner inactive / 超限 → 事务内 REJECTED(reasonCode)
+      + job 正常 COMPLETED；瞬态（S3/DB）→ AsyncJob RETRY；retry 预算
+      耗尽 → DEAD_LETTER → scoped reconciler（kind=DATA_EXPORT_GENERATE
+      专用，幂等 bounded）收敛 REJECTED——绝不永久 IN_PROGRESS
+Expiry：READY + expiresAt（READY 起算，默认 24h）→ PENDING_DELETE
+      → S3 DeleteObject（幂等）→ DELETED
 ```
 
-- 一次导出 = **恰好一条** PrivacyRequest；失败路径在事务 callback 内
-  **return** 失败结果，使 REJECTED 台账随事务提交持久化，错误在提交之后
-  才上抛（此前"catch 内 REJECTED 再 throw"会被 interactive transaction
-  整体 rollback 吞掉——真实 PG 测试
-  SYNC_EXPORT_FAILURE_PERSISTS_REJECTED_TEST 以新连接查库锁定该语义）；
-- snapshot 语义（准确表述）：request lifecycle 在单一事务内提交；
-  DTO 构建使用普通 DB 读（独立快照），不声称与 lifecycle 同一快照；
+- 一次导出 = **恰好一条** PrivacyRequest + **恰好一条** durable job
+  （同事务原子落盘；request committed + job missing 不可能）；
+- erasure race 语义：export completion wins（READY/COMPLETED 先提交，
+  注销后 artifact 原子 PENDING_DELETE + 下载即刻拒绝）；erasure wins
+  （worker 锁内 fresh 复核见 erased/inactive → REJECTED，绝不复活
+  artifact）——erased account 绝不留下可下载的旧 PII export；
+- snapshot 语义（准确表述）：export 是生成期间的 best-effort
+  point-in-time logical snapshot；request lifecycle 与 artifact
+  finalization 有明确事务边界，业务表不承诺单一 DB snapshot；
 - `POST /api/privacy/requests` 对 DATA_EXPORT 返回 400 `USE_EXPORT_ENDPOINT`
-  （指引唯一入口）；"只创建 REQUESTED 不执行"的低层入口
-  （createDataExportRequest）已删除，防止孤儿请求回归；
-- 速率限制在同一执行入口内完成（3 次/15 分钟）。
+  （指引唯一创建入口）；"只创建 REQUESTED 不执行"的低层入口
+  （createDataExportRequest）保持删除，防止孤儿请求回归；
+- 速率限制在创建入口内完成（3 次/15 分钟；DB 唯一索引才是并发权威）。
 
 ## 8b. 交易义务创建的 participant guard（REPAIR 2）
 

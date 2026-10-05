@@ -44,6 +44,20 @@ const assetPolicyEnvSchema = z.object({
     .min(1)
     .max(3650)
     .default(30),
+  // Phase 9C-03：async 导出 artifact 的 worker 资源安全上限（字节）。
+  // 这是 async operational limit，不是旧同步 HTTP 响应保护（8 MiB sync
+  // guard 已随 executeSynchronousDataExport 退出产品契约）。下限必须
+  // 显著高于 8 MiB（>8 MiB 导出是本阶段验收红线）；超限明确 REJECTED，
+  // 不静默截断。上限 512 MiB（防误配成无界内存）。
+  DATA_EXPORT_ARTIFACT_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .min(9 * 1024 * 1024)
+    .max(512 * 1024 * 1024)
+    .default(32 * 1024 * 1024),
+  // Phase 9C-03：导出 artifact 下载窗口（小时）。从 artifact READY /
+  // request COMPLETED 起算；到期由 storage cleanup 物理删除。
+  DATA_EXPORT_ARTIFACT_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
 });
 
 const envSchema = z.object({
@@ -78,6 +92,8 @@ export const env = {
     ASSET_ORPHAN_TTL_HOURS: process.env.ASSET_ORPHAN_TTL_HOURS,
     VERIFICATION_ASSET_RETENTION_DAYS:
       process.env.VERIFICATION_ASSET_RETENTION_DAYS,
+    DATA_EXPORT_ARTIFACT_MAX_BYTES: process.env.DATA_EXPORT_ARTIFACT_MAX_BYTES,
+    DATA_EXPORT_ARTIFACT_TTL_HOURS: process.env.DATA_EXPORT_ARTIFACT_TTL_HOURS,
   }),
 };
 

@@ -289,6 +289,9 @@ model User {
   rentalFavorites         RentalFavorite[]
   policyAcceptances       PolicyAcceptance[]
   privacyRequests         PrivacyRequest[]
+  // Phase 9C-03：本人隐私导出 artifact（derived ephemeral，短 TTL，
+  // 不计入 storageUsedBytes）
+  dataExportArtifacts     DataExportArtifact[]
   // Phase 6A：身份 / RBAC 关联
   memberships             CampusMembership[]
   userRoles               UserRoleAssignment[]
@@ -1825,9 +1828,70 @@ model PrivacyRequest {
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
   user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Phase 9C-03：一个 DATA_EXPORT 请求至多一个 canonical 导出 artifact。
+  artifact    DataExportArtifact?
 
   @@index([userId, type, status])
   @@index([status, requestedAt])
+}
+
+// Phase 9C-03：隐私数据导出 artifact（durable async export）。
+// system-generated derived privacy artifact——绝不复用 UploadedAsset：
+// 不参与 AssetCategory / 用户 storage quota / upload lifecycle。
+// bucket/objectKey 是内部秘密（STORAGE_METADATA），绝不进入任何
+// browser-visible surface（list DTO / download 响应 / 前端 props）。
+// objectKey deterministic：requestId → exactly one object key（retry /
+// ambiguous PUT 重放安全，见 data-export-contract.ts 注释）。
+// artifact 不计入 User.storageUsedBytes（用户导出自身隐私数据绝不被
+// 存储 quota 阻断）。
+enum DataExportArtifactStatus {
+  // 生成中：Step A（prepare）提交的 durable recovery anchor——在任何
+  // S3 PUT 之前落库，保证 ambiguous PUT / crash 后对象 key 始终可追踪。
+  WRITING
+  // 可下载（request COMPLETED；expiresAt 起算点）。
+  READY
+  // 待物理删除（到期 / 注销 / 请求收敛失败）。cleanup 负责 DeleteObject。
+  PENDING_DELETE
+  // 对象已物理删除（S3 delete 幂等 + 条件转移 exactly-once）。
+  DELETED
+}
+
+model DataExportArtifact {
+  id        String                   @id @default(cuid())
+  // 1:0..1 PrivacyRequest（requestId UNIQUE = canonical artifact 不变量）
+  requestId String                   @unique
+  userId    String
+  status    DataExportArtifactStatus @default(WRITING)
+  // 内部存储定位符（STORAGE_METADATA）：只存 DB 与 server storage 层，
+  // 绝不出现在任何用户可见面
+  bucket    String
+  objectKey String                   @unique
+  mimeType  String                   @default("application/json")
+  sizeBytes Int                      @default(0)
+  // 完整性摘要（READY 时写入；下载时复核，损坏不向用户返回）
+  sha256    String?
+  // 下载窗口截止（TTL 从 artifact READY / request COMPLETED 起算，
+  // 绝不从 REQUESTED 起算——排队时间不得吞掉下载窗口）
+  expiresAt DateTime?
+  createdAt DateTime                 @default(now())
+  updatedAt DateTime                 @updatedAt
+  // 物理删除完成时间（status=DELETED 时写入；语义与 soft-delete 无关，
+  // 不参与 prisma-soft-delete 拦截）
+  deletedAt DateTime?
+
+  // RB03：本行是 S3 external side-effect 的 durable recovery authority
+  // （bucket/objectKey/status = 对象恢复元数据）——parent 物理删除绝不能
+  // 静默 CASCADE 抹掉本行（否则 S3 PII 对象可能成为无主 orphan）。
+  // Restrict：只要存在未收敛 artifact，PrivacyRequest / User 行物理删除
+  // 一律被 DB 拒绝；收敛只能经 cleanup 状态机（PENDING_DELETE → DELETED
+  // tombstone 保留）。
+  request PrivacyRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, status])
+  // expiry / cleanup 扫描：READY 到期 → PENDING_DELETE；PENDING_DELETE → 物理删除
+  @@index([status, expiresAt])
+  @@index([status, updatedAt])
 }
 
 // 数据保留 / 纠纷冻结（Legal Hold / Dispute Hold）。

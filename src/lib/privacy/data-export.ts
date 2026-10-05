@@ -1,16 +1,23 @@
-import { governanceError, isGovernanceError } from "@/lib/governance/domain-errors";
-import { logger } from "@/lib/logger";
-import { prisma, withTransaction } from "@/lib/prisma";
-import {
-  prepareActiveAccountMutation,
-  type ActiveAccountMutationSeams,
-} from "@/lib/governance/active-account-mutation";
+import { governanceError } from "@/lib/governance/domain-errors";
+import { prisma } from "@/lib/prisma";
 import { ERASED_USER_DISPLAY_NAME } from "@/lib/privacy/account-erasure";
-import { transitionPrivacyRequest } from "@/lib/privacy/privacy-request-service";
 import { parseAssetReference } from "@/lib/asset-ref";
 
 /**
- * 用户数据导出（Phase 5 同步实现；Phase 9 异步化）。
+ * 用户数据导出 DTO 构建（唯一 user-data selection authority，§42）。
+ *
+ * Phase 5 引入、Phase 9C-03 异步化后职责收窄：本模块只负责
+ * - 显式 DTO 白名单构建（NO_CROSS_USER_EXPORT / NO_SECRET_EXPORT /
+ *   NO_STORAGE_INTERNAL_LEAK）
+ * - 禁止字段扫描（assertNoForbiddenExportFields）
+ *
+ * 生命周期 / 序列化 / 存储 / 下载 / 清理全部属于 async 层
+ * （data-export-async.ts / data-export-artifact.ts / data-export-download.ts /
+ * data-export-cleanup.ts）。旧同步执行入口 executeSynchronousDataExport 与
+ * 8 MiB 同步响应保护（EXPORT_MAX_BYTES / DATA_EXPORT_TOO_LARGE）已删除：
+ * HTTP 请求不再承担数据构建与大 JSON delivery；async 层的
+ * DATA_EXPORT_ARTIFACT_MAX_BYTES（见 data-export-contract.ts）是独立的
+ * worker 资源安全上界。
  *
  * 隐私边界（NO_CROSS_USER_EXPORT / NO_SECRET_EXPORT / NO_STORAGE_INTERNAL_LEAK）：
  * - 显式 DTO 白名单，绝不 SELECT * 后直接序列化
@@ -19,9 +26,6 @@ import { parseAssetReference } from "@/lib/asset-ref";
  * - 绝不输出 passwordHash / session token / objectKey / bucket / 内部端点
  * - 软删除扩展自动过滤已删除行；对已注销用户仅展示公共占位表示
  */
-
-/** 导出 payload 的硬性体积上限（同步响应保护；超限显式失败，不静默截断） */
-export const EXPORT_MAX_BYTES = 8 * 1024 * 1024;
 
 /** 任何导出载荷都不得出现的键名（测试扫描锁定；新增须先过安全评审） */
 export const FORBIDDEN_EXPORT_KEYS = [
@@ -771,12 +775,6 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
 
   assertNoForbiddenExportFields(payload);
 
-  const serialized = JSON.stringify(payload);
-
-  if (Buffer.byteLength(serialized, "utf8") > EXPORT_MAX_BYTES) {
-    throw governanceError("DATA_EXPORT_TOO_LARGE");
-  }
-
   return payload;
 }
 
@@ -784,6 +782,22 @@ export async function buildUserExport(userId: string): Promise<UserExportPayload
  * 泄漏防护扫描（也被测试复用）：递归检查载荷中不出现任何禁止键名。
  * 放在这里而不是只放测试里，是为了让运行时出口同样受保护。
  */
+/**
+ * 导出安全/隐私验证失败（RB02）：确定性结构失败——载荷构成违反禁止键
+ * 契约时，重试不可能改变结果。携带专用类型使 async 执行层可以把它映射为
+ * PERMANENT fail closed（绝不 RETRY 调度），而本模块无需依赖 AsyncJob
+ * 基础设施。
+ *
+ * message 可含 keyPath（仅进程内诊断）；执行层映射为受控 generic code，
+ * keyPath 绝不落 durable job 行或结构化日志。
+ */
+export class DataExportSecurityValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DataExportSecurityValidationError";
+  }
+}
+
 export function assertNoForbiddenExportFields(payload: unknown): void {
   const forbidden = new Set<string>(FORBIDDEN_EXPORT_KEYS);
 
@@ -796,7 +810,7 @@ export function assertNoForbiddenExportFields(payload: unknown): void {
     if (node && typeof node === "object") {
       for (const [key, value] of Object.entries(node)) {
         if (forbidden.has(key)) {
-          throw new Error(`导出载荷出现禁止字段: ${keyPath}.${key}`);
+          throw new DataExportSecurityValidationError(`导出载荷出现禁止字段: ${keyPath}.${key}`);
         }
 
         visit(value, keyPath ? `${keyPath}.${key}` : key);
@@ -805,134 +819,4 @@ export function assertNoForbiddenExportFields(payload: unknown): void {
   };
 
   visit(payload, "");
-}
-
-export type SynchronousExportResult = {
-  payload: UserExportPayload;
-  request: {
-    id: string;
-    status: "COMPLETED";
-    completedAt: string;
-  };
-};
-
-export type ExportExecutionErrorCode = "DATA_EXPORT_TOO_LARGE" | "EXPORT_EXECUTION_FAILED";
-
-export type ExportExecutionResult =
-  | SynchronousExportResult
-  | {
-      ok: false;
-      request: {
-        id: string;
-        status: "REJECTED";
-        reasonCode: ExportExecutionErrorCode;
-      };
-      errorCode: ExportExecutionErrorCode;
-      /** 原始构建错误（非 too-large 失败向调用方原样上抛，保留日志/分类语义） */
-      originalError: unknown;
-    };
-
-/**
- * 同步数据导出的唯一执行入口（Phase 5 REPAIR 2：失败台账必须持久化）。
- *
- * 一次真实导出形成且仅形成一条 PrivacyRequest：
- *   成功：REQUESTED → IN_PROGRESS → build → validate → COMPLETED → COMMIT → 响应载荷
- *   失败：REQUESTED → IN_PROGRESS → REJECTED(reasonCode) → COMMIT → 事务外抛错
- *
- * REPAIR 2 关键语义：失败路径在事务 callback 内 **return**（而不是 throw），
- * 因此 REJECTED 台账随事务 COMMIT 持久化；错误在事务提交之后才向调用方抛出。
- * （此前"catch 内 REJECTED 再 throw"会被 interactive transaction 的整体
- * rollback 吞掉，台账从未落库。）
- *
- * snapshot 语义（准确表述）：request lifecycle 在单一事务内提交；
- * DTO 构建使用普通 DB 读（独立快照），不声称与 lifecycle 同一快照。
- *
- * @param builder 构建函数注入点：仅测试 seam 使用（真实 PG 失败持久化测试），
- *                生产路径使用默认 buildUserExport。
- */
-export async function executeSynchronousDataExport(
-  userId: string,
-  builder: (userId: string) => Promise<UserExportPayload> = buildUserExport,
-  activeAccountSeams?: ActiveAccountMutationSeams,
-): Promise<SynchronousExportResult> {
-  const result = await withTransaction(async (tx) => {
-    // RB-03 REVIEW FIX：guard 在 PrivacyRequest.create 之前——race-loss
-    // 时零新 PrivacyRequest。builder 普通 DB 读不是同一 DB snapshot；
-    // USER advisory lock 提供的是 account lifecycle linearization。
-    await prepareActiveAccountMutation(tx, userId, activeAccountSeams);
-
-    const created = await tx.privacyRequest.create({
-      data: { userId, type: "DATA_EXPORT", status: "REQUESTED" },
-    });
-
-    logger.info("privacy_request_created", "privacy", {
-      requestId: created.id,
-      requestType: created.type,
-    });
-
-    const inProgress = await transitionPrivacyRequest(created.id, "IN_PROGRESS", undefined, tx);
-
-    try {
-      const payload = await builder(userId);
-
-      const completed = await transitionPrivacyRequest(inProgress.id, "COMPLETED", undefined, tx);
-
-      logger.info("privacy_request_completed", "privacy", {
-        requestId: completed.id,
-        requestType: completed.type,
-      });
-
-      return {
-        ok: true as const,
-        payload,
-        request: {
-          id: completed.id,
-          status: "COMPLETED" as const,
-          completedAt: (completed.completedAt ?? new Date()).toISOString(),
-        },
-      };
-    } catch (error) {
-      // 失败不得留下虚假 COMPLETED，也不得让 REJECTED 被 rollback 吞掉：
-      // 在 callback 内 return 失败结果，让事务以 REJECTED 提交。
-      const tooLarge = isGovernanceError(error) && error.code === "DATA_EXPORT_TOO_LARGE";
-      const errorCode: ExportExecutionErrorCode = tooLarge
-        ? "DATA_EXPORT_TOO_LARGE"
-        : "EXPORT_EXECUTION_FAILED";
-
-      const rejected = await transitionPrivacyRequest(inProgress.id, "REJECTED", { reasonCode: errorCode }, tx);
-
-      if (!tooLarge) {
-        // 非预期失败保留原始错误证据（日志），事务外再原样上抛
-        logger.error("privacy_export_execution_failed", "privacy", {
-          requestId: rejected.id,
-          userId,
-          error,
-        });
-      }
-
-      return {
-        ok: false as const,
-        request: {
-          id: rejected.id,
-          status: "REJECTED" as const,
-          reasonCode: errorCode,
-        },
-        errorCode,
-        originalError: error,
-      };
-    }
-  });
-
-  if (!result.ok) {
-    // 事务已 COMMIT（REJECTED 已持久化），现在才向调用方抛安全错误
-    if (result.errorCode === "DATA_EXPORT_TOO_LARGE") {
-      throw governanceError("DATA_EXPORT_TOO_LARGE");
-    }
-
-    throw result.originalError;
-  }
-
-  logger.info("privacy_export_served", "privacy", { userId });
-
-  return result;
 }

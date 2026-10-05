@@ -6,11 +6,11 @@ import {
   getUserAcceptanceHistory,
   getUserPolicyStatus,
 } from "@/repositories/legal-repository";
-import { listUserPrivacyRequests, describeBlockedReason } from "@/lib/privacy/privacy-request-service";
+import { listUserPrivacyRequestDtos, describeBlockedReason } from "@/lib/privacy/privacy-request-service";
 import {
+  AsyncExportPanel,
   CancelRequestForm,
   DeleteAccountForm,
-  ExportDataButton,
 } from "@/components/privacy/privacy-settings-forms";
 
 export const metadata: Metadata = {
@@ -20,12 +20,12 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 const REQUEST_STATUS_LABELS: Record<string, string> = {
-  REQUESTED: "已提交",
-  IN_PROGRESS: "处理中",
+  REQUESTED: "正在排队",
+  IN_PROGRESS: "正在生成",
   BLOCKED: "已阻止",
   COMPLETED: "已完成",
   CANCELLED: "已取消",
-  REJECTED: "已拒绝",
+  REJECTED: "生成失败",
 };
 
 const REQUEST_TYPE_LABELS: Record<string, string> = {
@@ -39,6 +39,12 @@ const SOURCE_LABELS: Record<string, string> = {
   SETTINGS: "设置页",
 };
 
+function formatRequestDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
 export default async function PrivacySettingsPage() {
   // 隐私自助页不过 consent gate：退出权优先（见 server-auth.requireVerifiedPageUser）
   const user = await requireVerifiedPageUser();
@@ -46,7 +52,7 @@ export default async function PrivacySettingsPage() {
   const [policyStatus, acceptanceHistory, requests, currentDocuments] = await Promise.all([
     getUserPolicyStatus(user.id),
     getUserAcceptanceHistory(user.id),
-    listUserPrivacyRequests(user.id),
+    listUserPrivacyRequestDtos(user.id),
     getCurrentLegalDocuments().catch(() => []),
   ]);
 
@@ -125,14 +131,14 @@ export default async function PrivacySettingsPage() {
         )}
       </section>
 
-      {/* ---- 数据导出 ---- */}
+      {/* ---- 数据导出（Phase 9C-03：异步生成 + 本人授权下载） ---- */}
       <section className="mt-6 rounded-[28px] border border-slate-200 bg-white p-6">
         <h2 className="text-lg font-semibold text-slate-950">导出我的数据</h2>
         <p className="mt-2 text-sm leading-6 text-slate-600">
           导出内容仅包含你本人的数据与必要的公共信息，不包含他人私密数据或平台内部凭据。
         </p>
         <div className="mt-4">
-          <ExportDataButton />
+          <AsyncExportPanel />
         </div>
       </section>
 
@@ -169,9 +175,18 @@ export default async function PrivacySettingsPage() {
                   >
                     {REQUEST_STATUS_LABELS[request.status] ?? request.status}
                   </span>
-                  {request.requestedAt.toLocaleString("zh-CN")}
+                  {formatRequestDate(request.requestedAt)}
                   {request.status === "REQUESTED" ? (
                     <CancelRequestForm requestId={request.id} />
+                  ) : null}
+                  {request.downloadAvailable && request.downloadPath ? (
+                    <a
+                      href={request.downloadPath}
+                      data-testid="privacy-request-download"
+                      className="text-emerald-700 underline-offset-2 transition hover:underline"
+                    >
+                      下载
+                    </a>
                   ) : null}
                 </span>
               </li>

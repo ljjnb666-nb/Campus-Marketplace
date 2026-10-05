@@ -66,6 +66,26 @@ export const errandDeadlineExpirePayloadSchema = z
 
 export type ErrandDeadlineExpirePayload = z.infer<typeof errandDeadlineExpirePayloadSchema>;
 
+/**
+ * Phase 9C-03（§5）：durable async data export 生成意图。
+ * payload 只允许 requestId（IDs + 机器状态，§7 红线）——禁止 user email /
+ * name / export JSON / object key / bucket / URL / 任何 user-authored
+ * text。strict——未知键即 INVALID。dedupeKey =
+ * `DATA_EXPORT_GENERATE:<requestId>`：一个 PrivacyRequest 生命周期恰好
+ * 一个 canonical generation intent（与 request 同事务原子落盘，见
+ * createAsyncDataExportRequest）。
+ */
+export const DATA_EXPORT_GENERATE_JOB_KIND = "DATA_EXPORT_GENERATE";
+export const DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION = 1;
+
+export const dataExportGeneratePayloadSchema = z
+  .object({
+    requestId: z.string().min(1),
+  })
+  .strict();
+
+export type DataExportGeneratePayload = z.infer<typeof dataExportGeneratePayloadSchema>;
+
 // ============================================================
 // RB04 纯契约层（writer 边界 + runtime 双层共用的单一事实源）：
 // 本文件只含 kind / schemaVersion / Zod schema，绝不 import handler——
@@ -84,6 +104,10 @@ const JOB_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>([
   [
     ERRAND_DEADLINE_EXPIRE_JOB_KIND,
     new Map([[ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION, errandDeadlineExpirePayloadSchema]]),
+  ],
+  [
+    DATA_EXPORT_GENERATE_JOB_KIND,
+    new Map([[DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION, dataExportGeneratePayloadSchema]]),
   ],
 ]);
 

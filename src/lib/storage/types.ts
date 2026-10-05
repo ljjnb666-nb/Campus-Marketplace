@@ -17,6 +17,21 @@ export interface PutObjectInput extends ObjectRef {
    * 存储层不做任何猜测，避免私有对象被公开缓存策略污染。
    */
   cacheControl: string;
+  /**
+   * 可选的有界操作预算覆盖（毫秒）。默认 = S3_PUT_OPERATION_TIMEOUT_MS
+   * （按小图片对象调定）。MiB 级对象（如隐私导出 artifact，Phase 9C-03）
+   * 必须显式传入更大的【有界】预算——绝不无界；覆盖仍由存储层统一执行
+   * （业务层不得自行包装 timeout race，LR-R3 契约不变）。
+   */
+  operationTimeoutMs?: number;
+  /**
+   * RB04：覆盖写入失败日志中的存储定位符输出（logWriteFailure）。
+   * 提供时（应为 opaque 机器标识，如 "data-export:<artifactId>"）日志只含
+   * 该标识——绝不输出 raw bucket / objectKey / endpoint / userId-derived
+   * 路径。缺省 = 保持既有行为（raw locator 进日志，UploadedAsset 面
+   * 不变）。安全责任由本策略在代码内保证，不依赖日志平台脱敏。
+   */
+  diagnosticRef?: string;
 }
 
 export interface ObjectMetadata {
@@ -42,8 +57,12 @@ export interface StorageClient {
   /** 上传对象（服务端凭据，浏览器不持有任何 S3 密钥） */
   putObject(input: PutObjectInput): Promise<void>;
 
-  /** 删除对象；对象不存在视为成功（幂等） */
-  deleteObject(ref: ObjectRef): Promise<void>;
+  /**
+   * 删除对象；对象不存在视为成功（幂等）。
+   * options.diagnosticRef 语义同 PutObjectInput.diagnosticRef（RB04）：
+   * 提供时失败日志只输出 opaque 标识，绝不输出 raw locator。
+   */
+  deleteObject(ref: ObjectRef, options?: { diagnosticRef?: string }): Promise<void>;
 
   /** 查询对象元数据；对象不存在返回 null */
   headObject(ref: ObjectRef): Promise<ObjectMetadata | null>;

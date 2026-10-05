@@ -1220,12 +1220,16 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     expect(orderNotifications).toBe(0);
   }, 30_000);
 
-  it("EXPORT-RACE-01 erase wins：beforeLock 挂起 → erase 提交 → 拒绝，零 DATA_EXPORT PrivacyRequest，builder 未调用", async () => {
-    const { executeSynchronousDataExport } = await import("@/lib/privacy/data-export");
+  it("EXPORT-RACE-01 erase wins：beforeLock 挂起 → erase 提交 → 创建拒绝，零 DATA_EXPORT PrivacyRequest + 零 AsyncJob（原子落盘）", async () => {
+    const { createAsyncDataExportRequest } = await import("@/lib/privacy/data-export-async");
     const { eraseAccount } = await import("@/lib/privacy/account-erasure");
 
     const user = await createFixtureUser("RB03 导出竞态用户");
-    const builder = vi.fn().mockResolvedValue({ profile: {} });
+
+    // 共享库：以计数快照证明 race-loss 零新增（不假设库内无其它 9C-03 行）
+    const jobsBefore = await rawClient!.asyncJob.count({
+      where: { kind: "DATA_EXPORT_GENERATE" },
+    });
 
     let signalEntered!: () => void;
     const entered = new Promise<void>((resolve) => {
@@ -1236,7 +1240,7 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
       releaseT1 = resolve;
     });
 
-    const t1 = executeSynchronousDataExport(user.id, builder, {
+    const t1 = createAsyncDataExportRequest(user.id, {
       beforeLock: async () => {
         signalEntered();
         await t1Gate;
@@ -1249,11 +1253,20 @@ describe.skipIf(!integrationDatabaseUrl)("active account mutation serialization 
     releaseT1();
     await expect(t1).rejects.toMatchObject({ code: "AUTH_ACCOUNT_INACTIVE" });
 
-    expect(builder).not.toHaveBeenCalled();
+    // race-loss：零 request 且零 job（request + job 同事务原子落盘，
+    // guard 在 create 之前 → race-loss 零新行，§6/RB-03）
     const exportRequests = await rawClient!.privacyRequest.count({
       where: { userId: user.id, type: "DATA_EXPORT" },
     });
     expect(exportRequests).toBe(0);
+    const exportJobs = await rawClient!.asyncJob.count({
+      where: { kind: "DATA_EXPORT_GENERATE" },
+    });
+    expect(exportJobs).toBe(jobsBefore);
+    const exportArtifacts = await rawClient!.dataExportArtifact.count({
+      where: { userId: user.id },
+    });
+    expect(exportArtifacts).toBe(0);
   }, 30_000);
 
   it("DELETION-RACE-01 suspend wins：beforeLock 挂起 → suspend 提交 → 拒绝，零 ACCOUNT_DELETION request，零部分擦除", async () => {

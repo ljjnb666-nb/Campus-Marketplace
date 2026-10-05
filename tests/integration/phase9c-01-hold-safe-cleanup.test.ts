@@ -421,10 +421,18 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       });
       setStorageForTests(seam);
 
+      // DB 时钟锚点（PG vs PG）：hold 的 INSERT 在锁释放后才执行，其
+      // createdAt（PG now()）必然晚于 purge 开始前的 DB 时间戳。锁序证明
+      // 本身由上方 barrier 确定性给出（holdSettled === false while lock
+      // held）；此前的 JS 时钟对比（purgeDoneAt = new Date()）跨时钟源
+      // 粒度在 CI 上会随机 ±2ms 误报，已替换为本锚点。
+      const [dbBeforePurge] = await rawClient!.$queryRaw<{ ts: Date }[]>`
+        SELECT now() AS ts
+      `;
+
       const purge = await purgePendingDeleteAsset(assetId);
       expect(purge.outcome).toBe("PURGED");
       expect(purge.releasedQuotaBytes).toBe(SIZE_BYTES);
-      const purgeDoneAt = new Date();
 
       expect(await objectExists(PUBLIC_BUCKET, objectKey)).toBe(false);
       const row = await readRow(assetId);
@@ -437,7 +445,7 @@ describe.skipIf(!integrationDatabaseUrl || !endpoint || !s3)(
       const hold = await prisma.dataHold.findUnique({ where: { id: holdId } });
       expect(hold).toBeTruthy();
       expect(hold!.status).toBe("ACTIVE");
-      expect(hold!.createdAt.getTime()).toBeGreaterThanOrEqual(purgeDoneAt.getTime());
+      expect(hold!.createdAt.getTime()).toBeGreaterThanOrEqual(dbBeforePurge!.ts.getTime());
     });
 
     it("HOLD-RACE-02（hold wins）：hold 先持 serialization 锁并提交，cleanup 阻塞后锁内 fresh check 看到 ACTIVE hold", async () => {

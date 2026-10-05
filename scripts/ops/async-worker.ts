@@ -58,6 +58,7 @@ import { logger } from "@/lib/logger";
 import { runAsyncJobBatchOnce } from "@/lib/async/job-runner";
 import { runOutboxBatchOnce } from "@/lib/async/outbox-dispatcher";
 import { scheduleDueErrandDeadlineJobs } from "@/lib/async/errand-deadline-scheduler";
+import { reconcileDataExportDeadLetters } from "@/lib/privacy/data-export-async";
 import { getQueueStatsSnapshot } from "@/lib/async/queue-stats";
 
 const DEFAULT_POLL_MS = 1000;
@@ -185,6 +186,8 @@ function emitSyncShutdownLog(
 interface CycleSummary {
   /** Phase 9C-02：本轮 scheduler producer 新 enqueue 的 errand expiry intent 数。 */
   errandDeadlinesScheduled: number;
+  /** Phase 9C-03（§21）：本轮 scoped dead-letter reconciler 收敛的导出请求数。 */
+  dataExportDeadLettersReconciled: number;
   jobsClaimed: number;
   jobsCompleted: number;
   jobsRetried: number;
@@ -198,7 +201,7 @@ interface CycleSummary {
 function summarize(
   jobSummary: Awaited<ReturnType<typeof runAsyncJobBatchOnce>>,
   outboxSummary: Awaited<ReturnType<typeof runOutboxBatchOnce>>,
-): Omit<CycleSummary, "errandDeadlinesScheduled"> {
+): Omit<CycleSummary, "errandDeadlinesScheduled" | "dataExportDeadLettersReconciled"> {
   return {
     jobsClaimed: jobSummary.claimed,
     jobsCompleted: jobSummary.completed + jobSummary.idempotentNoOp,
@@ -288,6 +291,23 @@ async function main() {
         });
       }
 
+      // Phase 9C-03（§20/§21）：scoped dead-letter reconciler——job 终局
+      // 失败（DEAD_LETTER）不得留下永久 IN_PROGRESS 的 DATA_EXPORT 请求。
+      // 只扫描 kind=DATA_EXPORT_GENERATE，幂等、bounded；失败只记日志，
+      // 不阻断本周期其余部分。
+      let dataExportDeadLettersReconciled = 0;
+      try {
+        const reconciliation = await reconcileDataExportDeadLetters({
+          batchLimit: config.batchSize,
+        });
+        dataExportDeadLettersReconciled = reconciliation.convergedRequests;
+      } catch (error) {
+        logger.warn("data export dead-letter reconciler 失败，等待下个周期", "async-worker", {
+          event: "async_worker_data_export_reconciler_failed",
+          errorName: error instanceof Error ? error.name : "unknown",
+        });
+      }
+
       // jobs 在前：本轮执行的 domain transition（如 reservation/errand
       // expiry）产生的 outbox event 在同周期即可被派发（run-once 语义对
       // 测试/运维可预期）
@@ -299,7 +319,11 @@ async function main() {
         leaseSeconds: config.leaseSeconds,
         batchSize: config.batchSize,
       });
-      cycle = { errandDeadlinesScheduled, ...summarize(jobSummary, outboxSummary) };
+      cycle = {
+        errandDeadlinesScheduled,
+        dataExportDeadLettersReconciled,
+        ...summarize(jobSummary, outboxSummary),
+      };
     } catch (error) {
       // 单周期失败（如 DB 闪断）：记录后等待下个周期重试（claim 幂等）
       logger.error("async worker 周期执行失败，等待下个周期重试", "async-worker", {
