@@ -12,9 +12,11 @@ const repoRoot = process.cwd();
  * 本仓库无 administration 权限读取其配置，故按 name 精确锁定）：
  *
  * - OPT-A stale run cancellation：workflow 级 concurrency 存在；
- *   group 以 pull_request.number（PR 间互不取消）或 github.ref
- *   （master / 分支 push 隔离）为隔离键；cancel-in-progress 仅在
- *   pull_request 事件为真 —— master post-merge run 绝不自动取消。
+ *   group 以 pull_request.number 为 PR fallback（同一 PR successive HEAD
+ *   共享 group，stale run 可被新 HEAD run 取消）、以 github.run_id 为
+ *   非 PR fallback（master 每次 push 独立 group：既不 cancel running，
+ *   也不 replace pending，每个 merge commit 保留独立 exact-master
+ *   post-merge evidence）；cancel-in-progress 仅在 pull_request 事件为真。
  * - OPT-B 并行 gate：e2e 不再 needs: verify；两个 job 各自自包含
  *   （独立 runner VM、独立 PG 库 campus / campus_e2e），均为
  *   required-capable gate。
@@ -99,16 +101,26 @@ describe("CI 调度合同：OPT-A stale PR run cancellation（CI-OPT-01）", () 
     expect(e2eText).not.toMatch(/^\s*concurrency:/m);
   });
 
-  it("group 隔离键：PR 按 pull_request.number，非 PR 按 github.ref（PR 间互不取消）", () => {
-    // pull_request.number → PR #A / PR #B 各自独立 group；
-    // github.ref → master push 与分支 push 按 ref 隔离
+  it("group PR fallback = pull_request.number：同 PR successive HEAD 共享 group，stale 可取消（INV-CI-01）", () => {
+    // 同一 PR 的 HEAD A / HEAD B 落入同一 group → push B 时 A 可被 cancel；
+    // 不同 PR number 各自独立 group → PR #A / PR #B 互不取消
     expect(concurrencyText).toMatch(/group:.*github\.event\.pull_request\.number/);
-    expect(concurrencyText).toMatch(/group:.*\|\|\s*github\.ref/);
   });
 
-  it("cancel-in-progress 仅对 pull_request 为真（INV-CI-01 / INV-CI-02）", () => {
-    // master push 时 github.event_name == 'pull_request' 恒为 false：
-    // post-merge master CI evidence 绝不因 concurrency 被自动取消
+  it("group 非 PR fallback = github.run_id：master 每次 run 独立 group（INV-CI-02）", () => {
+    // 同 group 且 cancel-in-progress=false 时，GitHub 默认每个 group 只保留
+    // 一个 pending run——连续 master pushes 会用新 pending 替换旧 pending。
+    // run_id 唯一 group 使 M1/M2/M3 互不干扰：既不 cancel running，
+    // 也不 replace pending，每个 merge commit 保留 exact-master evidence。
+    expect(concurrencyText).toMatch(/group:.*\|\|\s*github\.run_id/);
+    // 禁止退回 github.ref fallback（R1 review blocker：ref 共享 group 的
+    // pending replacement 会丢失旧 merge commit 的 post-merge evidence）
+    expect(concurrencyText).not.toMatch(/\|\|\s*github\.ref\b/);
+  });
+
+  it("cancel-in-progress 仅对 pull_request 为真（running master run 不被取消）", () => {
+    // 注意：这只是 master evidence 保护的必要条件之一（不 cancel running），
+    // 不是充分条件——pending 保护由 github.run_id 唯一 group 提供（见上）。
     expect(concurrencyText).toMatch(
       /cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}/,
     );

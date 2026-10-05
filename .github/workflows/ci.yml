@@ -10,11 +10,15 @@ permissions:
   contents: read
   packages: read
 
-# CI-OPT-01：同一 PR 的新 HEAD push 自动取消旧 HEAD run（省无效 runner 时间）；
-# master push（github.ref 隔离、cancel-in-progress=false）的 post-merge
-# 完整 CI evidence 绝不自动取消。合同静态 gate：tests/ops/ci-workflow-contract.test.ts
+# CI-OPT-01：同一 PR 的新 HEAD push 自动取消旧 HEAD run（省无效 runner 时间）。
+# 非 PR（master push）的 group fallback 用 github.run_id（每次 run 唯一）：
+# 同 group 且 cancel-in-progress=false 时，GitHub 默认每个 group 只保留一个
+# pending run——连续 master pushes 会让旧 pending run 被新 pending run 替换。
+# run_id 隔离使每个 merge commit 都保留独立 exact-master post-merge CI
+# evidence（既不 cancel running，也不 replace pending）。
+# 合同静态 gate：tests/ops/ci-workflow-contract.test.ts
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

@@ -33,16 +33,22 @@ PR / master ───┤                                              ├── 
 
 ```yaml
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
 
-- **同一 PR**：push 新 HEAD 后，旧 HEAD 的 CI run 自动取消，新 HEAD 是
-  authoritative run。review → repair → push 循环不再堆积无效 runner 消耗。
+- **同一 PR**：group fallback = `pull_request.number`。push 新 HEAD 后，
+  旧 HEAD 的 CI run 自动取消，新 HEAD 是 authoritative run。review →
+  repair → push 循环不再堆积无效 runner 消耗。
 - **不同 PR 之间**：group 按_pull_request number_ 隔离，互不取消。
-- **master push**：group 按 `refs/heads/master` 隔离，且
-  `cancel-in-progress` 恒为 false——**post-merge master 的完整 CI
-  evidence 绝不因 concurrency 自动取消**。工程流程依赖
+- **master / 非 PR push**：group fallback = `github.run_id`（每次 run 唯一）。
+  同 group 且 `cancel-in-progress=false` 时，GitHub 默认每个 group 只保留
+  一个 pending run——连续 master pushes 会把旧 pending run 替换掉，
+  丢失该 merge commit 的 evidence。run_id 唯一 group 使每个 merge commit
+  的 post-merge CI 都有独立 group：**不仅保护 running 的 master run
+  （不被 cancel），也保护尚未开始的 pending master run（不被 replace），
+  每个 merge commit 都保留独立 exact-master post-merge CI evidence**。
+  工程流程依赖
   `PR exact-head green → merge → exact-master post-merge CI → CLOSED`，
   master evidence 不可省略。
 
@@ -92,18 +98,30 @@ on:
 
 ## 基线与实测耗时（CI-OPT-01）
 
-所有时间取自 GitHub Actions metadata（job/step 的 started_at /
-completed_at），非估算。
+所有时间取自 GitHub Actions metadata（run/job/step 的 started_at /
+completed_at，workflow 墙钟 = createdAt → updatedAt），非估算。
 
 基线（串行 topology，`e2e` 等待 `verify` 完成后才启动）：
 
 | Run | 触发 | workflow 墙钟 | verify | e2e | 关键步骤 |
 | --- | --- | --- | --- | --- | --- |
-| 37310521724 | master push (2721084) | 15m39s | 9m55s | 5m42s | test:coverage 6m33s;Playwright 2m43s |
-| 37307656636 | PR #63 (21b07d6) | 15m22s | 9m56s | 5m24s | test:coverage 6m32s;Playwright 2m37s |
+| 37310521724 | master push (2721084) | 15m41s(941s;12:34:57 → 12:50:38) | 9m55s | 5m42s | test:coverage 6m33s;Playwright 2m43s |
+| 37307656636 | PR #63 (21b07d6) | 15m24s(924s;12:10:05 → 12:25:29) | 9m56s | 5m24s | test:coverage 6m32s;Playwright 2m37s |
 
-并行化后（新 PR run 实测）healthy 墙钟应 ≈ max(verify, e2e) ≈ 10 分钟
-量级，而非 verify + e2e；以 GitHub Actions 实测为准。
+并行化后实测（PR run 37316790078）：
+
+| Run | 触发 | workflow 墙钟 | verify | e2e | overlap |
+| --- | --- | --- | --- | --- | --- |
+| 37316790078 | PR #64 (030fa8c) | 7m18s(438s;13:26:20 → 13:33:38) | 7m15s | 5m36s | YES(两 job 同秒启动；e2e 完成时 verify 仍在运行) |
+
+节省（saved seconds，不是 optimized duration）：
+
+- 对 master 基线：941 − 438 = **503s(53.5%)**
+- PR 基线对比：924 − 438 = **486s(52.6%)**
+
+healthy 墙钟 ≈ max(verify, e2e)，而非 verify + e2e；verify 单 job
+时长的 run 间差异（如 9m55s → 7m15s）含 runner 波动成分，本阶段的
+结构性主张由同秒启动的 overlap 直接证实。
 
 ## Runner 成本权衡
 
