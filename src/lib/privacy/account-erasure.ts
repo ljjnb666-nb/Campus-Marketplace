@@ -288,7 +288,10 @@ export async function eraseAccount(
     // AsyncJob 重放见到 suppressed → 0 次 provider call 幂等完成）；
     // 已 provider-accepted 的 delivery 仅清空 destination、保持
     // suppressedAt = NULL（邮件已发出，不得伪称 suppressed；不永久保留
-    // 真实邮箱；时间型 retention 属 9C）。
+    // 真实邮箱；时间型 retention 属 9C）。Phase 9C-04（§19）：两条路径
+    // 同步设置 redactedAt——erasure 的 immediate redaction 与 time-based
+    // retention 共享同一转移标记（redactedAt IS NULL 谓词，幂等互斥），
+    // erasure race authority 不变。
     // delivery 行刻意无 FK 级联（见 schema NotificationDelivery 注释），
     // 随后的 notification.deleteMany 不触碰它们。同一事务内先收敛、后删除，
     // 不存在"未抑制 delivery 失去父通知"的中间态。
@@ -312,6 +315,7 @@ export async function eraseAccount(
           suppressedAt: erasedEmailAt,
           suppressionCode: NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
           destination: REDACTED_EMAIL_DESTINATION,
+          redactedAt: erasedEmailAt,
         },
       });
       await client.notificationDelivery.updateMany({
@@ -320,7 +324,7 @@ export async function eraseAccount(
           notificationId: { in: erasedNotificationIds },
           providerAcceptedAt: { not: null },
         },
-        data: { destination: REDACTED_EMAIL_DESTINATION },
+        data: { destination: REDACTED_EMAIL_DESTINATION, redactedAt: erasedEmailAt },
       });
 
       // TEST-ONLY barrier（RB02）：此处 erasure 事务持有 delivery 行锁——

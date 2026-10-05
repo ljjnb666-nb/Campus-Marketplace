@@ -191,3 +191,87 @@ export async function tombstonePublishedOutboxEvents(
 
   return { dryRun, tombstoned };
 }
+
+// ============================================================
+// NotificationDelivery PII redaction（§16/§17）
+// ============================================================
+
+export interface NotificationRedactionSummary {
+  dryRun: boolean;
+  /** 实际 redaction 转移数；dryRun 时 = 完整 candidate 数（只读计划） */
+  redacted: number;
+}
+
+/**
+ * terminal EMAIL delivery contact snapshot retention：
+ * destination（收件邮箱快照，DIRECT_IDENTITY / CONTACT_INFO）在 terminal
+ * （providerAcceptedAt 或 suppressedAt）超过 cutoff 后收敛为
+ * REDACTED_EMAIL_DESTINATION 哨兵 + redactedAt = now——PII 消失，delivery
+ * provenance（provider / providerIdempotencyKey / providerMessageId /
+ * firstAttemptAt / providerAcceptedAt / suppressedAt / suppressionCode）
+ * 保留（§17：PII 消失，delivery provenance 保留）。
+ *
+ * pending 保护（§18/INV-9C04-06）：providerAcceptedAt 与 suppressedAt 皆空
+ * 的行（无论 createdAt 多老）绝不是 candidate——worker 仍需要 destination
+ * 发送。terminal anchor 是 providerAcceptedAt / suppressedAt，绝不是
+ * createdAt（§21）。
+ *
+ * erasure interaction（§19/INV-9C04-08）：account erasure 的 immediate
+ * redaction 同步设置 redactedAt（见 account-erasure.ts）——erasure race
+ * authority 不变；本函数与 erasure 写同一谓词族（redactedAt IS NULL 条件
+ * 转移），并发时恰好一个赢得转移，二者天然幂等。
+ */
+export async function redactTerminalNotificationDestinations(
+  options: RetentionMaintenanceOptions = {},
+): Promise<NotificationRedactionSummary> {
+  const dryRun = options.dryRun ?? false;
+  const now = options.now ?? new Date();
+  const batchLimit = options.batchLimit ?? DEFAULT_RETENTION_BATCH_LIMIT;
+  const retentionDays =
+    options.retentionDays ?? env.NOTIFICATION_DELIVERY_PII_RETENTION_DAYS;
+  const cutoff = new Date(now.getTime() - retentionDays * DAY_MS);
+
+  const candidateWhere = {
+    channel: NOTIFICATION_CHANNEL_EMAIL,
+    redactedAt: null,
+    OR: [{ providerAcceptedAt: { lte: cutoff } }, { suppressedAt: { lte: cutoff } }],
+  };
+
+  if (dryRun) {
+    return {
+      dryRun,
+      redacted: await prisma.notificationDelivery.count({ where: candidateWhere }),
+    };
+  }
+
+  const candidates = await prisma.notificationDelivery.findMany({
+    where: candidateWhere,
+    orderBy: [{ providerAcceptedAt: "asc" }, { id: "asc" }],
+    take: batchLimit,
+    select: { id: true },
+  });
+
+  let redacted = 0;
+  for (const candidate of candidates) {
+    // fresh predicate（§23）：redactedAt IS NULL + terminal-past-cutoff——
+    // 并发 retention worker / erasure 路径同时命中时恰好一个赢得转移
+    const result = await prisma.notificationDelivery.updateMany({
+      where: {
+        id: candidate.id,
+        channel: NOTIFICATION_CHANNEL_EMAIL,
+        redactedAt: null,
+        OR: [
+          { providerAcceptedAt: { lte: cutoff } },
+          { suppressedAt: { lte: cutoff } },
+        ],
+      },
+      data: {
+        destination: REDACTED_EMAIL_DESTINATION,
+        redactedAt: now,
+      },
+    });
+    redacted += result.count;
+  }
+
+  return { dryRun, redacted };
+}

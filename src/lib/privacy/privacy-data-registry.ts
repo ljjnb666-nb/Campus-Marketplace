@@ -322,6 +322,11 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("NotificationDelivery", "providerMessageId", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
   field("NotificationDelivery", "providerIdempotencyKey", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
   field("NotificationDelivery", "suppressionCode", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
+  // Phase 9C-04（§41）：redactedAt 是 PII retention 转移标记（机器时间戳，
+  // operational metadata）——terminal contact snapshot 超过 retention 窗口
+  // 后 destination 收敛为哨兵并落本列（retention.ts redactTerminal...），
+  // account erasure 的 immediate redaction 同步设置（account-erasure.ts）。
+  field("NotificationDelivery", "redactedAt", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
   // ---- Phase 9A：async 基础设施错误诊断元数据 ----
   // 声明与代码事实一致（RB02/RB04/RB05 修复后）：
   // - payload：只允许 IDs + 机器状态，由 zod strict schema 在【生产写边界】
@@ -544,6 +549,12 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
   //   绝不入库。
   { model: "AsyncJob", field: "leaseToken", because: "worker lease fencing token（机器 UUID，非用户数据）" },
   { model: "OutboxEvent", field: "leaseToken", because: "dispatcher lease fencing token（机器 UUID，非用户数据）" },
+  // Phase 9C-04（§41 审计记录）：NotificationDelivery 的 sender/replyTo
+  // 快照只来自 platform EMAIL 配置（EMAIL_FROM / EMAIL_REPLY_TO env，见
+  // notification-service materializeEmailDeliveryTx / email-config 解析），
+  // 绝不来自用户身份——记录事实，不误标用户 PII。
+  { model: "NotificationDelivery", field: "senderSnapshot", because: "platform EMAIL_FROM env 配置快照（非用户身份数据）" },
+  { model: "NotificationDelivery", field: "replyToSnapshot", because: "platform EMAIL_REPLY_TO env 配置快照（非用户身份数据）" },
 ];
 
 // ============================================================
