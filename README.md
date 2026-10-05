@@ -103,6 +103,12 @@ npm run storage:cleanup
 npm run storage:cleanup -- --dry-run
 ```
 
+Phase 9 异步任务 / 通知 / 保留运维状态快照（只读，详见 [docs/PHASE9_OPERATIONS.md](docs/PHASE9_OPERATIONS.md)）：
+
+```bash
+npm run ops:phase9-status
+```
+
 可选：检查源码、文档和脚本里是否出现常见中文乱码片段
 
 ```bash
@@ -135,6 +141,7 @@ npm run db:verify
 npm run app:smoke
 npm run app:smoke:auth
 npm run text:verify
+npm run ops:phase9-status
 ```
 
 ## 文档
@@ -165,11 +172,12 @@ npm run text:verify
 - 本地开发用 `npm install`（宽松）即可，无需 `npm ci`；重装 node_modules 后记得 `npx prisma generate`。
 
 当前测试基线（来源：master 最近一次成功的 GitHub Actions verify + e2e run，
-2026-09-02 @ `be0fd94c`，不以本地估算为准）：
+2026-10-05 @ `e497dcde73a138415e5546222ab97c3293813be3`，GitHub Actions run
+37302064162，不以本地估算为准）：
 
-- 全量测试 `215` 个测试文件 / `1216` 个用例通过（CI 中真实数据库 / Redis / MinIO 集成测试全部真实执行），覆盖单元、组件与 API 路由层
-- 覆盖率门槛 lines / branches / functions / statements ≥ 80%（本轮 CI 实测 88.23 / 81.84 / 84.06 / 88.23）
-- E2E 基线：Playwright `24` 条关键链路测试（8 条 Golden Flow + 权限/并发/可观测性负例）CI 全绿
+- 全量测试 `444` 个测试文件 / `4028` 个用例通过、0 failed（CI 中真实 PostgreSQL / Redis / MinIO 集成测试全部真实执行），覆盖单元、组件与 API 路由层
+- 覆盖率硬门槛 lines / branches / functions / statements ≥ 80%（本轮 CI 实测 89.31 / 86.02 / 90.68 / 89.31）
+- E2E 基线：Playwright `93` 条关键链路测试 CI 全绿（0 flaky / 0 failed），详见 [docs/E2E.md](docs/E2E.md)
 - 另有真实数据库 / Redis / MinIO 集成测试，需分别设置 `INTEGRATION_DATABASE_URL`、`INTEGRATION_REDIS_URL`、`INTEGRATION_S3_ENDPOINT` 时才运行（CI 中全部真实执行）
 - 生产化存储专项：S3 兼容对象存储 + 公私隔离 + 上传配额 + 敏感文件生命周期（详见 [docs/STORAGE.md](docs/STORAGE.md)）；以及可靠性专项：数据库连接池治理、结构化日志、统一错误处理、请求计时中间件、会话搜索下推数据库的查询优化；安全专项：Redis 限流外部化、CSP nonce 收紧（script-src 每请求 nonce + strict-dynamic）、软删除统一拦截（详见 [docs/SECURITY.md](docs/SECURITY.md)）
 

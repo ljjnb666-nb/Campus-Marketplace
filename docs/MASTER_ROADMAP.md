@@ -56,6 +56,7 @@ ROADMAP STRUCTURE FREEZE != PHASE STATUS FREEZE）：
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，Phase 6A/6B/6C 全部关闭） |
 | Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿；权威状态行见下方当前状态表） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED；final master `e497dcde`，PR #62 merge 后 post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；Independent Final Acceptance PASS；closure record 见 §5.5） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
@@ -83,15 +84,16 @@ Phase 6B Closure Recovery current master reference：`97f53cd3494b24854a56b19e04
 不是"已具备公开生产运营资格"（见 §9）。
 
 当前测试基线（来自最近一次成功的 master CI，非本地估算；source = master CI
-35713347538，Phase 7 Final Closure canonical merge
-`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`）：
-353 个测试文件 / 2840 个测试全部通过（CI 中真实 PostgreSQL / Redis / MinIO
-集成测试全部真实执行，无环境门控 skip），覆盖率 lines 88.94% / branches 85.57% /
-functions 89.44% / statements 88.94%；Playwright E2E 关键链路 72 条全绿；
-真实 PostgreSQL 集成测试：Phase 6A/6B/6C + Phase 7A–7H 全链保留
-（含 Phase 7H 26 条：C-RACE-01..06、P-RACE-01..05、PAGE-01..08、
-RBAC/campus/policy/settlement 合同）。
-历史基线：Closure Recovery 时点 243 文件 / 1580 tests / E2E 36 /
+37302064162，Phase 9 Final Closure merge
+`e497dcde73a138415e5546222ab97c3293813be3`，2026-10-05，attempt = 1）：
+444 个测试文件 / 4028 个测试全部通过、0 failed（CI 中真实 PostgreSQL / Redis / MinIO
+集成测试全部真实执行，无环境门控 skip），覆盖率 lines 89.31% / branches 86.02% /
+functions 90.68% / statements 89.31%（四项 ≥ 80% 硬门槛 PASS）；
+Playwright E2E 关键链路 93/93 全绿、0 flaky / 0 failed。
+历史基线：Phase 7 Final Closure 时点 353 文件 / 2840 tests / E2E 72 条 /
+coverage 88.94 / 85.57 / 89.44 / 88.94（master CI 35713347538，merge
+`2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`）——仅作历史记录，非当前基线；
+Closure Recovery 时点 243 文件 / 1580 tests / E2E 36 /
 coverage 85.72 / 83.50 / 84.76 / 85.72（master CI 34132745423，merge
 `97f53cd3494b24854a56b19e0418d50a5b5efeb6`）——仅作历史记录，非当前基线。
 最新数字始终以最近一次成功的 master CI 为准（见 docs/TODO.md「当前测试基线」）。
@@ -178,7 +180,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿） |
-| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A async core / outbox / reservation scheduler = CLOSED，PR #57 merged + exact-master CI green；9B unified notifications / transactional email = CLOSED，merged + post-merge master CI green；9C-01 hold-safe cleanup = CLOSED；9C-02 errand deadline scheduler = CLOSED；9C-03 durable async data export = CLOSED（merge commit `0d07514`，post-merge master CI run 37266497901 双绿）；9C-04 retention / tombstones / ops reconcile = **IMPLEMENTED / PENDING REVIEW**（Draft PR，branch `feat/phase-9c-04-retention-ops-closure`，禁止 merge）；Phase 9 = CLOSED 需 9C-04 reviewed + merged + post-merge master CI green + 独立 Final Acceptance——**在上述全部达成前不得提前声称 Phase 9 CLOSED**） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED，PR #57–#62 实施链收口；final master `e497dcde`，post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；Independent Final Acceptance PASS；closure record 见 §5.5） |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
 | **GATE B** | Pilot Ready | NOT_REACHED（通过后才重开 Phase 3B） |
@@ -506,6 +508,55 @@ Phase 11A 的邮箱所有权验证、密码重置、安全事件提醒等账号�
 临时旁路出第二套不可审计的邮件发送路径。营销邮件不属于该硬前置范围。
 
 **架构约束：不引入 Kafka，不引入不必要的微服务。**
+
+**Closure record（2026-10-05）**：
+
+- Status：**DONE / MERGED / MASTER-GREEN / CLOSED**
+- 实施链（六段拆分，全部经独立验收 + exact-head CI 后合并）：
+
+  | 切片 | PR | Merge commit |
+  | --- | --- | --- |
+  | 9A Async core / Outbox | #57 | `8752a248be9dc99d300a54ec8110d22e10e644e7` |
+  | 9B Unified notifications / transactional email | #58 | `e774e1c2b79b4948f6181bfbf53d0d7580851133` |
+  | 9C-01 Hold-safe cleanup | #59 | `0818c9a0f53924ee2ee6b9f5bd3ecdcbdcee9551` |
+  | 9C-02 Errand deadline scheduler | #60 | `b870c0c0f7a5075ea702ada2f0ede4765046a5c6` |
+  | 9C-03 Durable async data export | #61 | `0d075141e6d373d82f1149b8f398e4c0f5b3dda6` |
+  | 9C-04 Retention / tombstones / ops reconcile | #62 | `e497dcde73a138415e5546222ab97c3293813be3`（Phase 9 final master） |
+
+- Post-merge master CI：run 37302064162 —— event = push、branch = master、
+  **attempt = 1**、verify = SUCCESS（444 files / 4028 tests）、
+  e2e = SUCCESS（93 passed）
+- Final baseline：**444 test files / 4028 tests**、Playwright E2E **93/93**、
+  **0 flaky / 0 failed**
+- Independent Final Acceptance：**PASS**
+  （`ENGINEERING_BLOCKERS = 0`、`TEST_BLOCKERS = 0`、`RUNTIME_BLOCKERS = 0`、
+  `REPO_SIDE_ACCEPTED = YES`）
+- Closure scope summary（精炼记录，非实现文档复制）：
+  - 9A：durable PostgreSQL AsyncJob、lease / fencing、retry / backoff、
+    DEAD_LETTER、transactional Outbox、reservation expiry
+  - 9B：canonical Notification domain、In-App + EMAIL、transactional delivery、
+    provider idempotency、crash/retry safety、erasure race safety
+  - 9C-01：DataHold-aware cleanup
+  - 9C-02：errand deadline scheduler、durable one-shot intents
+  - 9C-03：durable async DATA_EXPORT、private artifact、
+    same-origin authorized download、TTL cleanup、dead-letter convergence
+  - 9C-04：dedupe-safe terminal tombstones、NotificationDelivery PII retention、
+    dead-letter reconcile、ops snapshot、single maintenance cadence owner
+- Final invariants（closure 时最终合同）：
+  `DURABLE_QUEUE_AUTHORITY = POSTGRESQL`、`TRANSACTIONAL_OUTBOX = PASS`、
+  `ASYNC_JOB_DEDUPE_IDENTITY_PRESERVED = PASS`、
+  `NOTIFICATION_SINGLE_WRITE_AUTHORITY = PASS`、
+  `EMAIL_DELIVERY_IDEMPOTENCY = PASS`、
+  `SCHEDULED_DOMAIN_INTENT_DURABLE = PASS`、
+  `DATA_EXPORT_ASYNC_DURABLE = PASS`、`DATA_HOLD_SAFE_CLEANUP = PASS`、
+  `TERMINAL_RETENTION_BOUNDED = PASS`、
+  `DEAD_LETTER_NOT_SILENTLY_DELETED = PASS`、
+  `OPS_SURFACE_NO_SECRET = PASS`、`SINGLE_MAINTENANCE_CADENCE_OWNER = PASS`
+- 权威细节文档：[PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)（运行合同 / 运维手册）、
+  [DATA_GOVERNANCE.md](DATA_GOVERNANCE.md)、[PRIVACY_OPERATIONS.md](PRIVACY_OPERATIONS.md)
+- 边界（不变）：Phase 9 CLOSED **不代表生产上线**——
+  `PHASE_3B_REAL_DEPLOYMENT = DEFERRED`、`PRODUCTION_LAUNCH_BLOCKED = TRUE`、
+  Phase 10 = NOT_STARTED 均保持不变
 
 ### 5.6 Phase 10 — Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags
 
