@@ -271,6 +271,13 @@ async function materializeEmailDeliveryTx(
     return { deliveryId: delivery.id, suppressed: true };
   }
 
+  // RB04 写边界（Review R1 RB02 §11 记录）：payload 与 dedupeKey 恒由同一
+  // delivery.id 同时构造（canonical binding by construction：
+  // dedupeKey = buildNotificationDeliveryJobDedupeKey(delivery.id)，
+  // payload = { deliveryId: delivery.id }）。本写边界是 canonical binding
+  // 的唯一 production 来源；但 DB 中仍可能存在 legacy corruption / 手工
+  // 误改 / 未来漂移，reconciler（retention.ts）因此【独立】重新校验
+  // payload↔dedupeKey 一致性，绝不只依赖写边界。
   await enqueueAsyncJobTx(tx, {
     kind: NOTIFICATION_DELIVERY_JOB_KIND,
     schemaVersion: NOTIFICATION_DELIVERY_JOB_SCHEMA_VERSION,
