@@ -3,7 +3,15 @@ import type { Prisma } from "@prisma/client";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { NOTIFICATION_CHANNEL_EMAIL, REDACTED_EMAIL_DESTINATION } from "@/lib/notifications/notification-delivery";
+import {
+  NOTIFICATION_DELIVERY_JOB_KIND,
+  notificationDeliveryPayloadSchema,
+} from "@/lib/async/job-types";
+import {
+  NOTIFICATION_CHANNEL_EMAIL,
+  NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER,
+  REDACTED_EMAIL_DESTINATION,
+} from "@/lib/notifications/notification-delivery";
 
 /**
  * Phase 9C-04：Phase 9 bounded retention maintenance（§3/§4/§22/§23/§24）。
@@ -274,4 +282,144 @@ export async function redactTerminalNotificationDestinations(
   }
 
   return { dryRun, redacted };
+}
+
+// ============================================================
+// NOTIFICATION_DELIVERY dead-letter reconcile（§12/§13/§14/§15）
+// ============================================================
+
+export interface NotificationDeadLetterReconciliationSummary {
+  dryRun: boolean;
+  /** 本周期进入 reconcile 的 DEAD_LETTER job 数（bounded） */
+  scannedJobs: number;
+  /** 实际 suppression 转移数；dryRun 时 = 候选转移数（只读计划） */
+  reconciled: number;
+  /** delivery 已 terminal（suppressed/accepted）的幂等跳过数 */
+  alreadyResolved: number;
+  /** 结构异常：job DEAD_LETTER 但 delivery 已 provider-accepted（§50，
+   * 只报告计数，绝不改写 accepted provenance） */
+  acceptedAnomalies: number;
+  /** 结构异常：payload/dedupeKey 无法解析 deliveryId、或引用的 delivery
+   * 缺失（§37 invariant violation，只报告计数，绝不猜测修复，§38） */
+  unresolvedAnomalies: number;
+}
+
+/** NOTIFICATION_DELIVERY dedupeKey 前缀（写边界 buildNotificationDeliveryJobDedupeKey 契约）。 */
+const NOTIFICATION_DELIVERY_DEDUPE_PREFIX = `${NOTIFICATION_DELIVERY_JOB_KIND}:`;
+
+/**
+ * 从 DEAD_LETTER job 解析 deliveryId：
+ * 1. strict parse payload（§13 主路径）；
+ * 2. fallback = dedupeKey 绑定（payload 损坏正是 DEAD_LETTER 成因之一，
+ *    恰恰最需要收敛的 job 不能因解析失败被跳过——与 9C-03 导出 reconciler
+ *    同一依据：dedupeKey 是写边界 enqueueAsyncJobTx 契约强制的权威绑定，
+ *    不是猜测）；
+ * 3. 两者皆不可解析 → null（调用方计 structural anomaly，绝不猜 id）。
+ */
+function resolveNotificationDeliveryId(
+  payload: Prisma.JsonValue,
+  dedupeKey: string,
+): string | null {
+  const parsed = notificationDeliveryPayloadSchema.safeParse(payload);
+  if (parsed.success) {
+    return parsed.data.deliveryId;
+  }
+  if (dedupeKey.startsWith(NOTIFICATION_DELIVERY_DEDUPE_PREFIX)) {
+    const deliveryId = dedupeKey.slice(NOTIFICATION_DELIVERY_DEDUPE_PREFIX.length);
+    if (deliveryId.length > 0) {
+      return deliveryId;
+    }
+  }
+  return null;
+}
+
+/**
+ * bounded reconcile（§13）：只处理 AsyncJob.kind = NOTIFICATION_DELIVERY 且
+ * status = DEAD_LETTER 的 job（generic DEAD_LETTER 不受影响；generic
+ * requeueDeadLetterJobTx seam 保留，但 NOTIFICATION_DELIVERY 禁止经它盲目
+ * 重发——§15，ops 文档明确）。对 delivery 的确定性收敛：
+ *
+ * - providerAcceptedAt != null → 不得 suppression（§50：accepted provenance
+ *   是外部投递事实，reconcile 绝不改写；计 acceptedAnomalies 供 ops 关注）；
+ * - suppressedAt != null → 幂等 no-op；
+ * - 两者皆 null → suppressedAt = now + suppressionCode =
+ *   NOTIFICATION_JOB_DEAD_LETTER（§14：dead-letter 投递不得 blind resend，
+ *   terminal suppression 是正确收敛；重发必须显式新 intent）。
+ *
+ * 转移是 { id, providerAcceptedAt IS NULL, suppressedAt IS NULL } 条件更新
+ *（§23 同款）：并发 reconcile / EMAIL worker 重放竞争时恰好一个赢家；
+ * 重放的 job 见 suppressed → COMPLETED_IDEMPOTENT（0 provider call）。
+ *
+ * 未知结构异常（§38）只报告（unresolvedAnomalies），绝不自作主张修复。
+ */
+export async function reconcileDeadLetterNotificationDeliveries(
+  options: Pick<RetentionMaintenanceOptions, "dryRun" | "now" | "batchLimit"> = {},
+): Promise<NotificationDeadLetterReconciliationSummary> {
+  const dryRun = options.dryRun ?? false;
+  const now = options.now ?? new Date();
+  const batchLimit = options.batchLimit ?? DEFAULT_RETENTION_BATCH_LIMIT;
+
+  const summary: NotificationDeadLetterReconciliationSummary = {
+    dryRun,
+    scannedJobs: 0,
+    reconciled: 0,
+    alreadyResolved: 0,
+    acceptedAnomalies: 0,
+    unresolvedAnomalies: 0,
+  };
+
+  const deadLetterJobs = await prisma.asyncJob.findMany({
+    where: { kind: NOTIFICATION_DELIVERY_JOB_KIND, status: "DEAD_LETTER" },
+    orderBy: [{ deadLetteredAt: "asc" }, { id: "asc" }],
+    take: batchLimit,
+    select: { id: true, payload: true, dedupeKey: true },
+  });
+  summary.scannedJobs = deadLetterJobs.length;
+
+  for (const job of deadLetterJobs) {
+    const deliveryId = resolveNotificationDeliveryId(job.payload, job.dedupeKey);
+    if (!deliveryId) {
+      summary.unresolvedAnomalies += 1;
+      continue;
+    }
+
+    const delivery = await prisma.notificationDelivery.findUnique({
+      where: { id: deliveryId },
+      select: { id: true, providerAcceptedAt: true, suppressedAt: true },
+    });
+    if (!delivery) {
+      // §37：unresolved DEAD_LETTER 引用缺失 delivery = invariant violation
+      // ——report + fail strict（ops surface），绝不猜测修复（§38）
+      summary.unresolvedAnomalies += 1;
+      continue;
+    }
+
+    if (delivery.providerAcceptedAt !== null) {
+      // §50：provider-accepted 的 dead-letter 异常——保留 accepted
+      // provenance，绝不改写为 suppressed
+      summary.acceptedAnomalies += 1;
+      continue;
+    }
+
+    if (delivery.suppressedAt !== null) {
+      summary.alreadyResolved += 1;
+      continue;
+    }
+
+    if (dryRun) {
+      summary.reconciled += 1;
+      continue;
+    }
+
+    const updated = await prisma.notificationDelivery.updateMany({
+      where: { id: delivery.id, providerAcceptedAt: null, suppressedAt: null },
+      data: {
+        suppressedAt: now,
+        suppressionCode: NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER,
+      },
+    });
+    summary.reconciled += updated.count;
+  }
+
+  return summary;
 }
