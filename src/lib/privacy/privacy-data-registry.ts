@@ -113,6 +113,11 @@ export const FROZEN_PERSONAL_MODELS = [
   // Phase 9C-03：隐私导出 artifact（system-generated derived copy；
   // 短 TTL，S3 PII 对象到期/注销物理删除，DB 行保留 DELETED 墓碑）
   "DataExportArtifact",
+  // Phase 9C-04：async/outbox 基础设施模型正式登记（§39）——payload 由
+  // zod strict 契约在写边界强制（只允许 IDs + 机器状态），retention 时
+  // COMPLETED/PUBLISHED 行 in-place compaction 为机器 tombstone marker
+  "AsyncJob",
+  "OutboxEvent",
 ] as const;
 
 export type FrozenPersonalModel = (typeof FROZEN_PERSONAL_MODELS)[number];
@@ -212,6 +217,26 @@ export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPol
   PolicyAcceptance: {
     model: "PolicyAcceptance",
     ...entry("GOVERNANCE_AUDIT", "INCLUDE", "RETAIN_GOVERNANCE", false, false),
+  },
+  // Phase 9C-04（§39）：async/outbox 基础设施 = DERIVED_EPHEMERAL 运行时面。
+  // payload 只允许 IDs + 机器状态（zod strict 写边界 + 执行边界双层强制，
+  // RB04）；绝不为 legal hold 永久保留——terminal retention 的正确收敛是
+  // in-place compaction tombstone（payload → 机器 marker，dedupeKey UNIQUE
+  // 作为 exactly-once / replay suppression authority 永久保留，绝不 DELETE
+  // 行）；DEAD_LETTER 保留至运维解决（未决事件，非 retention candidate）。
+  // - selfExport EXCLUDE：job/event intent 不是用户数据副本；
+  // - erasure RETAIN_STRUCTURAL：行保留（幂等身份 + 执行 provenance），
+  //   注销用户产生的 job 行随 retention 窗口 compaction，与用户注销无关；
+  // - secondaryCopyAllowed=false：payload 绝不复制进派生面；
+  // - logSafe=false：payload / dedupeKey / lastErrorMessage 绝不进入日志
+  //  （kind / schemaVersion / 安全 errorCode 允许，§80 观测白名单）。
+  AsyncJob: {
+    model: "AsyncJob",
+    ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "RETAIN_STRUCTURAL", false, false),
+  },
+  OutboxEvent: {
+    model: "OutboxEvent",
+    ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "RETAIN_STRUCTURAL", false, false),
   },
 };
 
@@ -314,6 +339,11 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   field("AsyncJob", "lastErrorMessage", OPERATOR_ONLY_FIELD),
   field("OutboxEvent", "lastErrorCode", OPERATOR_ONLY_FIELD),
   field("OutboxEvent", "lastErrorMessage", OPERATOR_ONLY_FIELD),
+  // ---- Phase 9C-04：retention tombstone 标记（operational structural
+  //      metadata，§40）——tombstonedAt 是机器 retention 转移时间戳，与
+  //      terminal timestamps 同类；行保留语义见 model 级 policy 注释。
+  field("AsyncJob", "tombstonedAt", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
+  field("OutboxEvent", "tombstonedAt", entry("STORAGE_METADATA", "EXCLUDE", "RETAIN_STRUCTURAL", false, true)),
   // ---- Order ----
   field("Order", "note", USER_CONTENT_FIELD),
   field("Order", "cancelReason", USER_CONTENT_FIELD),
@@ -502,7 +532,8 @@ export const DECLARED_NON_PERSONAL_FIELDS: Array<{ model: string; field: string;
   { model: "MeetupPoint", field: "name", because: "见面点公开名称（平台参考数据）" },
   { model: "MeetupPoint", field: "locationText", because: "见面点公开位置描述（平台参考数据）" },
   // Phase 9A：async infra 的 lease fencing token（每次 claim 重新生成的机器
-  // UUID，fencing authority）。两张表整体非 personal-bearing：
+  // UUID，fencing authority）。两张表已在 Phase 9C-04 正式登记为
+  // DERIVED_EPHEMERAL model 级 policy（见 MODEL_PRIVACY_POLICIES）：
   //   AsyncJob.payload / OutboxEvent.payload 只允许 IDs + 机器状态——由 zod
   //   strict schema 在生产写边界强制（enqueueAsyncJobTx /
   //   recordOutboxEventTx 校验失败即事务回滚零落库）并在执行边界二次校验
