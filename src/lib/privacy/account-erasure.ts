@@ -282,19 +282,27 @@ export async function eraseAccount(
     // 保留必要，整表删除（在 erasure 事务内）。
     //
     // Phase 9B（§35/§71 + Review RB02 §10）：删除前先收敛 EMAIL delivery
-    // provenance——【真正 unsent】（suppressedAt IS NULL AND
-    // providerAcceptedAt IS NULL）的 EMAIL delivery 置 suppressedAt =
-    // RECIPIENT_ERASED 并清空 destination（对应 NOTIFICATION_DELIVERY
-    // AsyncJob 重放见到 suppressed → 0 次 provider call 幂等完成）；
-    // 已 provider-accepted 的 delivery 仅清空 destination、保持
-    // suppressedAt = NULL（邮件已发出，不得伪称 suppressed；不永久保留
-    // 真实邮箱；时间型 retention 属 9C）。Phase 9C-04（§19）：两条路径
-    // 同步设置 redactedAt——erasure 的 immediate redaction 与 time-based
-    // retention 共享同一转移标记（redactedAt IS NULL 谓词，幂等互斥），
-    // erasure race authority 不变。
+    // provenance。Phase 9C-04 Review R1（RB03）修复后合同：
+    //
+    // Step 1（无条件 redact，目标 A）：该用户全部 EMAIL delivery 的
+    //   destination 一律收敛为 redacted sentinel——无论 terminal 与否、无论
+    //   redactedAt 是否已存在（INV-R1-06：注销后 destination 必须立即
+    //   redacted，绝不因 redactedAt 已存在而跳过）。
+    // Step 2（unsent suppression，语义不变）：真正 unsent（suppressedAt IS
+    //   NULL AND providerAcceptedAt IS NULL）置 suppressedAt = RECIPIENT_
+    //   ERASED——对应 NOTIFICATION_DELIVERY AsyncJob 重放见到 suppressed →
+    //   0 次 provider call 幂等完成。已 provider-accepted 的 delivery 保持
+    //   suppressedAt/suppressionCode = NULL（邮件已发出，不得伪称 suppressed）。
+    // Step 3（redactedAt 单向回填，目标 B）：仅 redactedAt IS NULL 的行落
+    //   erasedEmailAt（INV-R1-05：redactedAt = 第一次将 destination 收敛为
+    //   redacted sentinel 的时间，NULL → timestamp 单向迁移，绝不覆盖既有
+    //   值——retention 与 erasure 并发时，无论谁先完成第一次 transition，
+    //   首次时间戳保留，后到路径不得覆写，INV-R1-07）。
+    //
     // delivery 行刻意无 FK 级联（见 schema NotificationDelivery 注释），
-    // 随后的 notification.deleteMany 不触碰它们。同一事务内先收敛、后删除，
-    // 不存在"未抑制 delivery 失去父通知"的中间态。
+    // 随后的 notification.deleteMany 不触碰它们。三步同在 erasure 事务内
+    // （对外原子），先收敛、后删除，不存在"未抑制 delivery 失去父通知"
+    // 的中间态。
     const erasedNotificationIds = (
       await client.notification.findMany({
         where: { userId },
@@ -304,6 +312,15 @@ export async function eraseAccount(
 
     if (erasedNotificationIds.length > 0) {
       const erasedEmailAt = new Date();
+      // Step 1：destination 无条件 redact（accepted 与 unsent 都收敛）
+      await client.notificationDelivery.updateMany({
+        where: {
+          channel: "EMAIL",
+          notificationId: { in: erasedNotificationIds },
+        },
+        data: { destination: REDACTED_EMAIL_DESTINATION },
+      });
+      // Step 2：unsent suppression（既有 9B 语义，不伪称已发送行为被抑制）
       await client.notificationDelivery.updateMany({
         where: {
           channel: "EMAIL",
@@ -314,17 +331,16 @@ export async function eraseAccount(
         data: {
           suppressedAt: erasedEmailAt,
           suppressionCode: NOTIFICATION_DELIVERY_SUPPRESSION_RECIPIENT_ERASED,
-          destination: REDACTED_EMAIL_DESTINATION,
-          redactedAt: erasedEmailAt,
         },
       });
+      // Step 3：redactedAt 只做 NULL → timestamp 单向迁移（RB03/INV-R1-05）
       await client.notificationDelivery.updateMany({
         where: {
           channel: "EMAIL",
           notificationId: { in: erasedNotificationIds },
-          providerAcceptedAt: { not: null },
+          redactedAt: null,
         },
-        data: { destination: REDACTED_EMAIL_DESTINATION, redactedAt: erasedEmailAt },
+        data: { redactedAt: erasedEmailAt },
       });
 
       // TEST-ONLY barrier（RB02）：此处 erasure 事务持有 delivery 行锁——
