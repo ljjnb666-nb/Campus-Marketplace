@@ -17,8 +17,8 @@
 | Phase 5 | Privacy / Agreements / Platform Rules / Data Governance | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #8 经多轮独立验收合并，post-merge master CI 双绿） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**） |
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`） |
-| Phase 8 | Marketplace Lifecycle Hardening | NOT_STARTED |
-| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | NOT_STARTED |
+| Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；状态权威见 MASTER_ROADMAP 当前状态表） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A / 9B / 9C-01 / 9C-02 / 9C-03 = CLOSED；9C-04 retention / tombstones / ops reconcile = IMPLEMENTED / PENDING REVIEW（Draft PR）；Phase 9 CLOSED 需 9C-04 合并 + post-merge master CI green + 独立 Final Acceptance；运维手册见 docs/PHASE9_OPERATIONS.md） |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness | NOT_STARTED |
 | **GATE B** | Pilot Ready（通过后重开 Phase 3B） | NOT_REACHED |

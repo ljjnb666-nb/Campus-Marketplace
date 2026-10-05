@@ -55,7 +55,7 @@ ROADMAP STRUCTURE FREEZE != PHASE STATUS FREEZE）：
 | Phase 6C | Appeal Lifecycle / Enforcement Completion / Safety Hardening（Phase 6 第三实施阶段） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链收口，经独立验收 + post-merge master CI run 34673546585 attempt=1 收口；closure record 见 §5.2） |
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit（整体） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，Phase 6A/6B/6C 全部关闭） |
 | Phase 7 | Operations Admin Foundation（支付无关运营后台） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`，post-merge master CI run 35713347538 attempt=1 双绿；closure record 见 §5.3） |
-| Phase 8 | Marketplace Lifecycle Hardening | **IN_PROGRESS**（8A–8C CLOSED；8D-01 Meetup / No-show Domain Foundation 已于 PR #52 合并并经 post-merge master CI run 36755621679 双绿关闭；NEXT = 8D-02 Meetup User Surface & End-to-End Closure） |
+| Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿；权威状态行见下方当前状态表） |
 
 Phase 5 code merge reference：`dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`
 （PR #8 合并提交——Phase 5 代码范围的固定引用点，**不随 master 前进而改写**，
@@ -178,7 +178,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 6 | Identity / Trust / Safety / RBAC / Audit | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，6A/6B/6C 全部关闭，见 §5.2） |
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿） |
-| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A async core / outbox / reservation scheduler = CLOSED，PR #57 merged + exact-master CI green；9B unified notifications / transactional email = IN_PROGRESS——canonical notification domain + NotificationDelivery + Resend via 9A queue；9C retention 未开始；Phase 9 = CLOSED 需 9A/9B/9C 全部 reviewed + merged + exact-master CI green） |
+| Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **IN_PROGRESS**（9A async core / outbox / reservation scheduler = CLOSED，PR #57 merged + exact-master CI green；9B unified notifications / transactional email = CLOSED，merged + post-merge master CI green；9C-01 hold-safe cleanup = CLOSED；9C-02 errand deadline scheduler = CLOSED；9C-03 durable async data export = CLOSED（merge commit `0d07514`，post-merge master CI run 37266497901 双绿）；9C-04 retention / tombstones / ops reconcile = **IMPLEMENTED / PENDING REVIEW**（Draft PR，branch `feat/phase-9c-04-retention-ops-closure`，禁止 merge）；Phase 9 = CLOSED 需 9C-04 reviewed + merged + post-merge master CI green + 独立 Final Acceptance——**在上述全部达成前不得提前声称 Phase 9 CLOSED**） |
 | Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
 | Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
 | **GATE B** | Pilot Ready | NOT_REACHED（通过后才重开 Phase 3B） |

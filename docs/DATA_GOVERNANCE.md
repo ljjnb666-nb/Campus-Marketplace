@@ -56,6 +56,31 @@ Phase 5 定义 **WHAT**（决策），Phase 9 实现 **WHEN/HOW**（调度）：
 - Phase 5 **不建**：cron、background worker、transactional outbox、
   dead-letter queue、通用 job scheduler。
 
+### 2.1 Phase 9 运行面 retention policy（Phase 9C-04 冻结合同）
+
+Phase 9A/9B/9C 建立的 durable async/outbox/notification/export 基础设施
+由 Phase 9C-04 起进入有界 retention（执行细节与操作入口见
+[PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)）：
+
+| 模型 | retention 候选 | anchor（绝不使用 createdAt） | 窗口（工程 baseline） | 收敛 |
+| --- | --- | --- | --- | --- |
+| `AsyncJob` | `status=COMPLETED` | `completedAt` | `ASYNC_TERMINAL_RETENTION_DAYS`（默认 30） | in-place compaction tombstone：payload → 机器 marker，诊断/lease 字段清空，`tombstonedAt` 落值；**dedupeKey UNIQUE 永久保留**（exactly-once / replay suppression authority，绝不 DELETE 行） |
+| `OutboxEvent` | `status=PUBLISHED` | `publishedAt` | 同上 | 同构 tombstone（`tombstonedAt`） |
+| `NotificationDelivery` | terminal（`providerAcceptedAt` 或 `suppressedAt` 非空） | providerAcceptedAt / suppressedAt | `NOTIFICATION_DELIVERY_PII_RETENTION_DAYS`（默认 30） | `destination` → redacted 哨兵 + `redactedAt`；delivery provenance（provider/幂等键/message id/时间戳/抑制码）保留；pending（双 anchor 皆空）永不触碰 |
+| `DataExportArtifact` | 9C-03 合同不变 | expiresAt / PENDING_DELETE | 24h TTL | S3 物理删除 + DELETED 墓碑行保留 |
+| `AsyncJob`/`OutboxEvent` `DEAD_LETTER` | **不是 retention candidate** | — | — | 保留至运维解决；`NOTIFICATION_DELIVERY` dead-letter 经 bounded reconciler 对 delivery 做 canonical suppression（重发必须显式新 intent） |
+| `PrivacyRequest` | **不做自动 purge** | — | — | GOVERNANCE_AUDIT 台账永久保留 |
+
+不变量（§86 全文见 PR 描述）：COMPLETED/PUBLISHED tombstone 行永不再次
+claim/dispatch；retention 单周期 bounded（batchLimit 默认 200）；并发
+maintenance worker 条件转移恰好一次；dry-run 零 mutation；ops surface
+（`npm run ops:phase9-status`）只输出 counts/ages，绝不输出 payload/
+contact/storage 秘密。
+
+**LEGAL_REVIEW_REQUIRED = TRUE 仍然成立**：上表 30 天窗口是当前工程治理
+baseline（可 env override，min 1 / max 3650），不是法律意见，绝不声称等于
+GDPR/PIPL 法定期限；生产法务/隐私政策期限仍需正式 legal review。
+
 ## 3. 隐私请求域（PrivacyRequest）
 
 | type | 说明 |
