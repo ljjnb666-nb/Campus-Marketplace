@@ -423,3 +423,102 @@ export async function reconcileDeadLetterNotificationDeliveries(
 
   return summary;
 }
+
+// ============================================================
+// 单周期 maintenance orchestrator（§26/§28/§29）
+// ============================================================
+
+export interface Phase9RetentionSummary {
+  dryRun: boolean;
+  asyncJobsTombstoned: number;
+  outboxEventsTombstoned: number;
+  notificationDeadLettersReconciled: number;
+  notificationDestinationsRedacted: number;
+  /** 本周期失败的 retention 子任务数（§29：> 0 时调用方必须把整周期
+   * 视为 FAIL——绝不打印成功 summary；全部转移幂等，下轮继续安全） */
+  phase9Failures: number;
+}
+
+/**
+ * Phase 9 retention/reconcile 单周期入口（storage cleanup worker 的周期
+ * cadence owner 调用；§26：不创建第二套 daemon，storage-cleanup 服务升级
+ * 为 periodic cleanup / retention cadence owner）。四个 bounded 子任务
+ * 顺序执行；单子任务失败计入 phase9Failures 并继续其余子任务（全部转移
+ * 幂等，部分成功 → 下轮继续安全），观测只在实际 work > 0 时 INFO
+ *（summary 只含 counts；失败日志只含 errorName，§63）。
+ */
+export async function runPhase9RetentionMaintenance(
+  options: RetentionMaintenanceOptions = {},
+): Promise<Phase9RetentionSummary> {
+  const dryRun = options.dryRun ?? false;
+  const now = options.now ?? new Date();
+
+  const summary: Phase9RetentionSummary = {
+    dryRun,
+    asyncJobsTombstoned: 0,
+    outboxEventsTombstoned: 0,
+    notificationDeadLettersReconciled: 0,
+    notificationDestinationsRedacted: 0,
+    phase9Failures: 0,
+  };
+
+  const subtasks: Array<{ name: string; run: () => Promise<void> }> = [
+    {
+      name: "async-job-tombstone",
+      run: async () => {
+        summary.asyncJobsTombstoned = (await tombstoneCompletedAsyncJobs({ ...options, now })).tombstoned;
+      },
+    },
+    {
+      name: "outbox-event-tombstone",
+      run: async () => {
+        summary.outboxEventsTombstoned = (await tombstonePublishedOutboxEvents({ ...options, now })).tombstoned;
+      },
+    },
+    {
+      name: "notification-dead-letter-reconcile",
+      run: async () => {
+        summary.notificationDeadLettersReconciled = (
+          await reconcileDeadLetterNotificationDeliveries({ dryRun, now, batchLimit: options.batchLimit })
+        ).reconciled;
+      },
+    },
+    {
+      name: "notification-destination-redaction",
+      run: async () => {
+        summary.notificationDestinationsRedacted = (
+          await redactTerminalNotificationDestinations({ ...options, now })
+        ).redacted;
+      },
+    },
+  ];
+
+  for (const subtask of subtasks) {
+    try {
+      await subtask.run();
+    } catch (error) {
+      summary.phase9Failures += 1;
+      logger.error("Phase 9 retention 子任务失败，等待下轮重试", "phase9-retention", {
+        event: "phase9_retention_subtask_failed",
+        subtask: subtask.name,
+        errorName: error instanceof Error ? error.name : "unknown",
+      });
+    }
+  }
+
+  const didWork =
+    summary.asyncJobsTombstoned > 0 ||
+    summary.outboxEventsTombstoned > 0 ||
+    summary.notificationDeadLettersReconciled > 0 ||
+    summary.notificationDestinationsRedacted > 0 ||
+    summary.phase9Failures > 0;
+
+  if (didWork && summary.phase9Failures === 0) {
+    logger.info("Phase 9 retention 周期完成", "phase9-retention", {
+      event: "phase9_retention_cycle_completed",
+      ...summary,
+    });
+  }
+
+  return summary;
+}
