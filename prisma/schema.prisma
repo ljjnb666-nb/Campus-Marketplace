@@ -935,6 +935,16 @@ model NotificationDelivery {
   suppressedAt       DateTime?
   suppressionCode    String?
 
+  // Phase 9C-04：PII retention（§16/§17）。destination 是收件邮箱快照
+  //（DIRECT_IDENTITY / CONTACT_INFO）——terminal（providerAcceptedAt 或
+  // suppressedAt 非空）超过 retention cutoff 后自动收敛为
+  // REDACTED_EMAIL_DESTINATION 哨兵并落 redactedAt：PII 消失，delivery
+  // provenance（provider / 幂等键 / message id / 时间戳 / 抑制码）保留。
+  // pending（两列皆空）的行绝不被 retention 触碰——worker 仍需要
+  // destination 发送（§18）；erasure 路径的 immediate redaction 同步设置
+  // 本列（§19，erasure race authority 不变）。
+  redactedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -944,6 +954,10 @@ model NotificationDelivery {
   // ops/observability seam：按渠道扫描 suppressed / accepted 状态
   @@index([channel, suppressedAt])
   @@index([channel, providerAcceptedAt])
+  // Phase 9C-04：PII retention candidate 扫描（terminal + redactedAt IS NULL，
+  // §45）——避免 retention 周期全表扫
+  @@index([providerAcceptedAt, redactedAt])
+  @@index([suppressedAt, redactedAt])
 }
 
 model BlockedUser {
@@ -2419,6 +2433,17 @@ model AsyncJob {
   completedAt    DateTime?
   deadLetteredAt DateTime?
 
+  // Phase 9C-04：dedupe-safe terminal tombstone（§4/§5）。retention 对
+  // COMPLETED 行执行 in-place payload compaction——状态保持 COMPLETED，
+  // 绝不新增第二套终态状态机，绝不 DELETE 行（dedupeKey UNIQUE 是
+  // exactly-once / replay suppression authority，删行 = 释放幂等身份，
+  // stale replay 会重新 enqueue 同一意图 → duplicate side effect）。
+  // tombstonedAt != null 的行永远不会再次 claim（claim candidate 只含
+  // PENDING/RETRY/RUNNING），payload 收敛为固定机器 marker
+  //（retention.ts TOMBSTONE marker，故意不符合任何 job payload schema）。
+  // DEAD_LETTER 绝不是 retention candidate（未决运维事件，保留诊断面）。
+  tombstonedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2427,6 +2452,10 @@ model AsyncJob {
   @@index([status, runAt, createdAt])
   @@index([status, leaseExpiresAt])
   @@index([kind, status, runAt])
+  // Phase 9C-04：retention candidate 扫描（COMPLETED, completedAt <= cutoff,
+  // tombstonedAt IS NULL）——terminal anchor 是 completedAt（§21：排队/重试
+  // 时间不得吞掉 terminal retention）
+  @@index([status, completedAt, tombstonedAt])
 }
 
 model OutboxEvent {
@@ -2455,10 +2484,20 @@ model OutboxEvent {
   publishedAt    DateTime?
   deadLetteredAt DateTime?
 
+  // Phase 9C-04：dedupe-safe terminal tombstone（与 AsyncJob 同构，§8）。
+  // PUBLISHED 行 retention 时 in-place compaction payload → 机器 marker，
+  // 状态保持 PUBLISHED、dedupeKey UNIQUE 永不释放（replay suppression
+  // authority）；tombstoned 行永远不会再次 dispatch（claim candidate 只含
+  // PENDING/PROCESSING）。DEAD_LETTER 保留（未决运维事件）。
+  tombstonedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([status, availableAt, createdAt])
   @@index([status, leaseExpiresAt])
   @@index([eventType, status, availableAt])
+  // Phase 9C-04：retention candidate 扫描（PUBLISHED, publishedAt <= cutoff,
+  // tombstonedAt IS NULL）——terminal anchor 是 publishedAt（§21）
+  @@index([status, publishedAt, tombstonedAt])
 }
