@@ -42,6 +42,14 @@ Terminal anchor（排队/重试时间绝不吞掉 terminal retention）：
 - NotificationDelivery → `providerAcceptedAt` 或 `suppressedAt`（先到者）；
 - **绝不使用 `createdAt`**。
 
+redactedAt 单向性（Review R1 RB03 冻结）：`redactedAt` = **第一次**将
+destination 收敛为 redacted sentinel 的时间——只允许 `NULL → timestamp`
+单向迁移，一旦非空永不被覆盖（retention 与 account erasure 并发时，无论
+谁先完成第一次 transition，首次时间戳保留，后到路径条件谓词不命中）。
+account erasure 的 destination 写入是**无条件**的（注销后 destination 必须
+立即 redacted，即便 redactedAt 已存在）——两个目标同时满足：立即 redact +
+不覆盖首次时间戳。
+
 ## 3. Tombstone 语义（dedupe-safe，绝不 DELETE）
 
 COMPLETED AsyncJob / PUBLISHED OutboxEvent 达到 retention cutoff 后做
@@ -85,12 +93,25 @@ EMAIL 投递 job 因幂等安全窗口过期 / provider permanent failure / retr
 预算耗尽进入 DEAD_LETTER 后，delivery intent 已无法由 canonical worker
 继续发送。maintenance 每周期 bounded 扫描并收敛：
 
-- delivery 未收敛（accepted/suppressed 皆空）→ `suppressedAt=now` +
+- **candidate discovery 只选择 canonical actionable 行**（Review R1 RB01/
+  RB02 冻结合同）：payload strict-parseable（`{ deliveryId }` 单键对象）
+  **且** `dedupeKey == NOTIFICATION_DELIVERY:<payload.deliveryId>` **且**
+  delivery 存在 **且** delivery 未收敛（accepted/suppressed 皆空）——
+  已 suppressed、provider-accepted 异常、invalid payload、binding mismatch、
+  missing delivery 全部不占 batch（resolved/anomaly 行永久存在也不会
+  阻塞真正 actionable backlog 的公平进展）；
+- 未收敛 delivery → `suppressedAt=now` +
   `suppressionCode=NOTIFICATION_JOB_DEAD_LETTER`；
-- delivery 已 provider-accepted → **绝不改写**（accepted provenance 是外部
-  投递事实；计入 structural anomaly 供 ops 关注）；
-- 引用缺失 delivery / payload 不可解析 → 只报告（structural anomaly），
-  绝不猜测修复。
+- provider-accepted 的 DEAD_LETTER → **绝不改写**（accepted provenance 是
+  外部投递事实；与 DEAD_LETTER 是矛盾 terminal provenance）；
+- **structural corruption 只报告、绝不自动 mutation**（Review R1 RB02：
+  payload 与 dedupeKey 不一致时不同代码路径会认不同 delivery，自动
+  suppress 任一方都是正确性错误；dedupeKey 只用于与 payload 的一致性
+  校验，绝不在 payload invalid 时充当 replacement authority）；
+- 结构异常分类（machine counts，ops snapshot 的
+  `notificationDeadLetterAnomalies`）：`invalidPayload` / `bindingMismatch`
+  / `missingDelivery` / `acceptedAnomaly`——与 reconcile discovery 使用
+  同一 canonical binding 谓词，互斥分类。
 
 **禁止 blind resend**：超过幂等安全窗口或 dead-letter 的投递不得通过
 generic requeue 直接重用原 delivery（`requeueNotificationDelivery` 这类
@@ -122,8 +143,10 @@ docker compose --env-file .env.production -f compose.production.yml \
 
 - `--strict` 只对 structural inconsistency FAIL（如 COMPLETED 但
   completedAt 为空、PUBLISHED 但 publishedAt 为空、redactedAt 已设但
-  destination 未收敛、DEAD_LETTER 引用缺失 delivery、READY artifact 缺
-  expiresAt）；仅存在 dead letter 时 result 仍 PASS（attentionRequired=true）；
+  destination 未收敛、NOTIFICATION_DELIVERY dead-letter 的 invalid payload /
+  binding mismatch / missing delivery / provider-accepted 矛盾 provenance、
+  READY artifact 缺 expiresAt）；仅存在 dead letter 时 result 仍 PASS
+ （attentionRequired=true）；
 - ops 输出是 machine-only（counts/ages/status）——绝不包含 payload、
   收件目的地、存储定位符、providerMessageId、dedupeKey raw、原始错误文案、
   连接串（CI 以 stdout 全量捕获锁定：`PHASE9-OPS-NO-SECRET-01`）；
