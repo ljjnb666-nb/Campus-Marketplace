@@ -27,16 +27,27 @@ import { runPrismaCommand } from "../../scripts/resilience/spawn-worker.mjs";
  *   RET-RACE-JOB-01 / RET-RACE-OUTBOX-01 / RET-RACE-DELIVERY-01
  *                           两个并发 maintenance worker → 逻辑转移恰好一次
  *
- * notification（§13/§18/§49/§50/INV-9C04-05/06/07）：
+ * notification（§13/§18/§49/§50/INV-9C04-05/06/07 + Review R1）：
  *   RECON-NOTIFICATION-DL-01       未收敛 DEAD_LETTER → canonical suppression，
  *                                  幂等重放 0 mutation
  *   RECON-NOTIFICATION-ACCEPTED-01 provider-accepted 的 DEAD_LETTER 异常 →
- *                                  绝不改写 accepted provenance（§50）
+ *                                  绝不改写 accepted provenance（§50）；
+ *                                  anomaly 行不占 actionable batch
+ *   RECON-NOTIFICATION-FAIRNESS-01（RB01）resolved/anomaly 不占 batch——
+ *                                  unresolved 有限轮次内必然收敛
+ *   RECON-NOTIFICATION-INVALID-PAYLOAD-01（RB02）payload 非 strict →
+ *                                  0 mutation，只报告 structural anomaly
+ *   RECON-NOTIFICATION-BINDING-MISMATCH-01（RB02）payload/dedupeKey 不一致
+ *                                  → A、B 都不动 + ops strict FAIL
  *   RET-NOTIFICATION-PII-01        terminal 超窗 → destination redacted，
  *                                  provenance 保留
  *   RET-NOTIFICATION-SUPPRESSED-01 / RET-NOTIFICATION-RECENT-01 /
  *   RET-NOTIFICATION-PENDING-01    suppressed 超窗 redact / 近期 terminal
  *                                  不动 / pending 永不动
+ *   RET-ERASURE-REDACT-01（RB03）  retention 先 redact → erasure 不得覆盖
+ *                                  redactedAt（首次脱敏时间权威）
+ *   RET-ERASURE-REDACT-RACE-01（RB03）erasure 持行锁在先 → retention 后到
+ *                                  零覆盖（真实 PG 行锁 barrier，零 sleep）
  *
  * dry-run（§25/§59/INV-9C04-11）：
  *   RET-DRY-RUN-01           backlog 存在 → planned > 0 且零 mutation
@@ -100,6 +111,8 @@ describe.skipIf(!integrationDatabaseUrl)(
   let claimDueOutboxEvents: OutboxModule["claimDueOutboxEvents"];
   let REDACTED_EMAIL_DESTINATION: DeliveryModule["REDACTED_EMAIL_DESTINATION"];
   let NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER: DeliveryModule["NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER"];
+  type ErasureModule = typeof import("@/lib/privacy/account-erasure");
+  let eraseAccount: ErasureModule["eraseAccount"];
 
   let rawClient: PrismaClient;
   let isolatedUrl: string;
@@ -199,7 +212,11 @@ describe.skipIf(!integrationDatabaseUrl)(
 
   /** 直接落一行 NOTIFICATION_DELIVERY DEAD_LETTER job（payload = {deliveryId}，
    * 与 9B 写边界 payload 契约同形） */
-  async function seedNotificationDeadLetterJob(deliveryId: string, payload?: unknown) {
+  async function seedNotificationDeadLetterJob(
+    deliveryId: string,
+    payload?: unknown,
+    deadLetteredAt: Date = OLD,
+  ) {
     return rawClient.asyncJob.create({
       data: {
         kind: "NOTIFICATION_DELIVERY",
@@ -208,9 +225,56 @@ describe.skipIf(!integrationDatabaseUrl)(
         payload: (payload ?? { deliveryId }) as object,
         status: "DEAD_LETTER",
         runAt: OLD,
-        deadLetteredAt: OLD,
+        deadLetteredAt,
         lastErrorCode: "EMAIL_PROVIDER_IDEMPOTENCY_WINDOW_EXPIRED",
         lastErrorMessage: "EMAIL 幂等安全窗口（23h）已过期",
+      },
+    });
+  }
+
+  /** 直接落一行任意 ND DEAD_LETTER job（structural corruption fixtures 用：
+   * dedupeKey/payload 完全由调用方指定） */
+  async function seedRawNotificationDeadLetterJob(input: {
+    dedupeKey: string;
+    payload: unknown;
+    deadLetteredAt?: Date;
+  }) {
+    return rawClient.asyncJob.create({
+      data: {
+        kind: "NOTIFICATION_DELIVERY",
+        schemaVersion: 1,
+        dedupeKey: input.dedupeKey,
+        payload: input.payload as object,
+        status: "DEAD_LETTER",
+        runAt: OLD,
+        deadLetteredAt: input.deadLetteredAt ?? OLD,
+      },
+    });
+  }
+
+  /** 注销测试夹具用户（裸 User 行即满足 eraseAccount 前置检查） */
+  let campusId: string;
+  async function createErasureFixtureUser(label: string) {
+    return rawClient.user.create({
+      data: {
+        name: `9c04-${label}`,
+        email: `9c04-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@campus.local`,
+        passwordHash: "test-only",
+        schoolName: "集成测试大学",
+        campusId,
+      },
+    });
+  }
+
+
+  /** 注销测试夹具：用户 + canonical In-App 通知 */
+  async function seedNotificationForUser(userId: string) {
+    return rawClient.notification.create({
+      data: {
+        userId,
+        type: "SYSTEM",
+        title: "9C-04 erasure fixture",
+        content: "fixture notification",
       },
     });
   }
@@ -253,12 +317,22 @@ describe.skipIf(!integrationDatabaseUrl)(
       claimDueAsyncJobs,
     } = await import("@/lib/async/job-repository"));
     ({ recordOutboxEventTx, claimDueOutboxEvents } = await import("@/lib/async/outbox"));
+    ({ eraseAccount } = await import("@/lib/privacy/account-erasure"));
     const delivery = await import("@/lib/notifications/notification-delivery");
     REDACTED_EMAIL_DESTINATION = delivery.REDACTED_EMAIL_DESTINATION;
     NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER =
       delivery.NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER;
 
     rawClient = new PrismaClient({ datasources: { db: { url: isolatedUrl } }, log: ["error"] });
+
+    const campus = await rawClient.campus.create({
+      data: {
+        name: "9C-04 retention 集成测试校区",
+        slug: `it-9c04-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        schoolName: "集成测试大学",
+      },
+    });
+    campusId = campus.id;
   }, 240_000);
 
   afterAll(async () => {
@@ -569,18 +643,17 @@ describe.skipIf(!integrationDatabaseUrl)(
     await seedNotificationDeadLetterJob(delivery.id);
 
     const first = await reconcileDeadLetterNotificationDeliveries({ now: NOW });
-    expect(first.scannedJobs).toBeGreaterThanOrEqual(1);
+    expect(first.scannedCanonical).toBeGreaterThanOrEqual(1);
     expect(first.reconciled).toBe(1);
-    expect(first.acceptedAnomalies).toBe(0);
 
     const row = await rawClient.notificationDelivery.findUniqueOrThrow({ where: { id: delivery.id } });
     expect(row.suppressedAt).not.toBeNull();
     expect(row.suppressionCode).toBe(NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER);
 
-    // 幂等：再次 reconcile → 0 mutation（转为 alreadyResolved）
+    // 幂等：再次 reconcile → canonical 已收敛的行退出 discovery → 0 mutation
     const second = await reconcileDeadLetterNotificationDeliveries({ now: NOW });
+    expect(second.scannedCanonical).toBe(0);
     expect(second.reconciled).toBe(0);
-    expect(second.alreadyResolved).toBeGreaterThanOrEqual(1);
     const rowAfter = await rawClient.notificationDelivery.findUniqueOrThrow({
       where: { id: delivery.id },
     });
@@ -589,21 +662,30 @@ describe.skipIf(!integrationDatabaseUrl)(
   });
 
   it("RECON-NOTIFICATION-ACCEPTED-01：provider-accepted 的 DEAD_LETTER 异常 → 绝不改写 accepted provenance", async () => {
-    // §50：accepted provenance 是外部投递事实——reconcile 不得伪称 suppressed
+    // §50/§15：accepted provenance 是外部投递事实——reconcile 不得伪称
+    // suppressed；且 anomaly 行不进入 actionable batch（RB01，不阻塞别人）
     const acceptedDelivery = await seedDelivery({
       destination: "recon-accepted-student@campus.edu",
       providerAcceptedAt: OLD,
     });
-    await seedNotificationDeadLetterJob(acceptedDelivery.id);
+    const acceptedJob = await seedNotificationDeadLetterJob(acceptedDelivery.id);
 
-    // §37/§38：引用缺失 delivery 的 unresolved DEAD_LETTER = structural
+    // §37/§38：引用缺失 delivery 的 canonical DEAD_LETTER = structural
     // anomaly——只报告，绝不猜测修复（用后清理：不污染后续 strict 检查）
     const missingDeliveryId = unique("missing-delivery");
     const missingDeliveryJob = await seedNotificationDeadLetterJob(missingDeliveryId);
 
     const summary = await reconcileDeadLetterNotificationDeliveries({ now: NOW });
-    expect(summary.acceptedAnomalies).toBeGreaterThanOrEqual(1);
-    expect(summary.unresolvedAnomalies).toBeGreaterThanOrEqual(1);
+    // anomaly 行不进入 canonical actionable discovery（RB01/RB02）
+    expect(summary.scannedCanonical).toBe(0);
+    expect(summary.reconciled).toBe(0);
+
+    // structural counts（ops strict path，RB02 §12）：accepted anomaly 与
+    // missing delivery 各自可见
+    const { getPhase9StructuralInconsistencies } = await import("@/lib/async/phase9-ops");
+    const inconsistencies = await getPhase9StructuralInconsistencies();
+    expect(inconsistencies.notificationDeadLetterAcceptedAnomaly).toBeGreaterThanOrEqual(1);
+    expect(inconsistencies.notificationDeadLetterMissingDelivery).toBeGreaterThanOrEqual(1);
 
     const row = await rawClient.notificationDelivery.findUniqueOrThrow({
       where: { id: acceptedDelivery.id },
@@ -613,9 +695,238 @@ describe.skipIf(!integrationDatabaseUrl)(
     expect(row.providerAcceptedAt).toEqual(OLD);
     expect(row.destination).toBe("recon-accepted-student@campus.edu");
 
-    // 清理 structural-violation fixture（accepted-anomaly job 保留——它不是
-    // §37 strict invariant，只影响 attentionRequired）
+    // 清理 structural-violation fixtures（不污染后续 strict 检查；
+    // anomaly 行为只报告不修复——这里是测试夹具自身的回收）
     await rawClient.asyncJob.delete({ where: { id: missingDeliveryJob.id } });
+    await rawClient.asyncJob.delete({ where: { id: acceptedJob.id } });
+  });
+
+  it("RECON-NOTIFICATION-FAIRNESS-01（RB01）：resolved/anomaly 不占 batch——unresolved 有限轮次内必然收敛", async () => {
+    // 构造：10 条更老的 resolved（canonical binding + delivery 已 suppressed）
+    // DEAD_LETTER job + 1 条较新的 canonical unresolved。旧实现 discovery
+    // 不过滤 resolved/anomaly，batchLimit=10 时较新 unresolved 永久饥饿
+    //（本测试在旧实现上第一轮 reconciled=0 → FAIL）；新实现 discovery 在
+    // SQL 层只选 canonical actionable 候选 → 第一轮即收敛。
+    const batchLimit = 10;
+    for (let i = 0; i < batchLimit; i += 1) {
+      // suppressedAt 用近期时间：resolved 行不成为 PII redaction 候选，
+      // 保持本用例对 reconcile 行为的断言纯净
+      const resolvedDelivery = await seedDelivery({
+        destination: `fair-resolved-${i}@campus.edu`,
+        suppressedAt: NOW,
+        suppressionCode: "PROVIDER_DISABLED",
+      });
+      await seedNotificationDeadLetterJob(resolvedDelivery.id, undefined, OLD);
+    }
+    const target = await seedDelivery({
+      destination: "fair-target@campus.edu",
+      providerAcceptedAt: null,
+      suppressedAt: null,
+    });
+    await seedNotificationDeadLetterJob(target.id, undefined, NOW);
+
+    const first = await reconcileDeadLetterNotificationDeliveries({
+      now: NOW,
+      batchLimit,
+    });
+
+    // 第一轮即收敛（旧实现：scanned 全为 resolved → reconciled=0 → FAIL）
+    expect(first.scannedCanonical).toBe(1);
+    expect(first.reconciled).toBe(1);
+
+    const row = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: target.id },
+    });
+    expect(row.suppressedAt).not.toBeNull();
+    expect(row.suppressionCode).toBe(NOTIFICATION_DELIVERY_SUPPRESSION_JOB_DEAD_LETTER);
+    // 更老的 resolved 行不被重复触碰（幂等收敛状态保持）
+    const resolvedStill = await rawClient.notificationDelivery.findFirstOrThrow({
+      where: { destination: "fair-resolved-0@campus.edu" },
+    });
+    expect(resolvedStill.suppressionCode).toBe("PROVIDER_DISABLED");
+  });
+
+  it("RECON-NOTIFICATION-INVALID-PAYLOAD-01（RB02）：payload 非 strict {deliveryId} → 0 mutation，只报告", async () => {
+    // 构造：delivery A unresolved + DEAD_LETTER job 的 payload 带 extra 键
+    //（zod .strict() 拒绝）但 dedupeKey 与 payload.deliveryId 一致。
+    // 旧实现：payload parse 失败 → fallback dedupeKey → 自动 suppress A
+    //（structural corruption 经未证明字段猜测修复——本测试在旧实现 FAIL）；
+    // 新实现：invalid payload 不进 actionable batch，A 保持原状，仅计数。
+    const deliveryA = await seedDelivery({
+      destination: "invalid-payload-a@campus.edu",
+      providerAcceptedAt: null,
+      suppressedAt: null,
+    });
+    const badJob = await seedRawNotificationDeadLetterJob({
+      dedupeKey: `NOTIFICATION_DELIVERY:${deliveryA.id}`,
+      payload: { deliveryId: deliveryA.id, extra: true },
+    });
+
+    const summary = await reconcileDeadLetterNotificationDeliveries({ now: NOW, batchLimit: 10 });
+    expect(summary.scannedCanonical).toBe(0);
+    expect(summary.reconciled).toBe(0);
+
+    const row = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: deliveryA.id },
+    });
+    expect(row.suppressedAt).toBeNull();
+    expect(row.suppressionCode).toBeNull();
+    expect(row.destination).toBe("invalid-payload-a@campus.edu");
+
+    const { getPhase9StructuralInconsistencies } = await import("@/lib/async/phase9-ops");
+    const inconsistencies = await getPhase9StructuralInconsistencies();
+    expect(inconsistencies.notificationDeadLetterInvalidPayload).toBeGreaterThanOrEqual(1);
+
+    // fixture 回收（structural corruption 只报告不修复；测试自清不污染后续）
+    await rawClient.asyncJob.delete({ where: { id: badJob.id } });
+  });
+
+  it("RECON-NOTIFICATION-BINDING-MISMATCH-01（RB02）：payload B / dedupeKey A → A、B 都不动 + strict FAIL", async () => {
+    // 构造：payload.deliveryId = B，dedupeKey = NOTIFICATION_DELIVERY:A。
+    // 旧实现：payload parse 成功 → 自动 suppress B（不同代码路径认不同
+    // delivery——本测试在旧实现 FAIL）；新实现：binding 不一致 = structural
+    // anomaly，0 automatic reconciliation。
+    const deliveryA = await seedDelivery({
+      destination: "mismatch-a@campus.edu",
+      providerAcceptedAt: null,
+      suppressedAt: null,
+    });
+    const deliveryB = await seedDelivery({
+      destination: "mismatch-b@campus.edu",
+      providerAcceptedAt: null,
+      suppressedAt: null,
+    });
+    const mismatchJob = await seedRawNotificationDeadLetterJob({
+      dedupeKey: `NOTIFICATION_DELIVERY:${deliveryA.id}`,
+      payload: { deliveryId: deliveryB.id },
+    });
+
+    const summary = await reconcileDeadLetterNotificationDeliveries({ now: NOW, batchLimit: 10 });
+    expect(summary.scannedCanonical).toBe(0);
+    expect(summary.reconciled).toBe(0);
+
+    const rowA = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: deliveryA.id },
+    });
+    const rowB = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: deliveryB.id },
+    });
+    for (const row of [rowA, rowB]) {
+      expect(row.suppressedAt).toBeNull();
+      expect(row.suppressionCode).toBeNull();
+    }
+    expect(rowA.destination).toBe("mismatch-a@campus.edu");
+    expect(rowB.destination).toBe("mismatch-b@campus.edu");
+
+    const { getPhase9StructuralInconsistencies } = await import("@/lib/async/phase9-ops");
+    const inconsistencies = await getPhase9StructuralInconsistencies();
+    expect(inconsistencies.notificationDeadLetterBindingMismatch).toBeGreaterThanOrEqual(1);
+    expect(inconsistencies.any).toBe(true);
+
+    // §13/§14：strict CLI 对 binding mismatch → FAIL + exit 1（非 strict
+    // 仍 exit 0，attentionRequired 表达）
+    const strict = await runPhase9StatusCli(["--strict"], { DATABASE_URL: isolatedUrl });
+    expect(strict.code).toBe(1);
+    const failPayload = JSON.parse(strict.stdout) as {
+      result: string;
+      structuralInconsistencies: { notificationDeadLetterBindingMismatch: number };
+    };
+    expect(failPayload.result).toBe("FAIL");
+    expect(failPayload.structuralInconsistencies.notificationDeadLetterBindingMismatch).toBeGreaterThanOrEqual(1);
+    const nonStrict = await runPhase9StatusCli([], { DATABASE_URL: isolatedUrl });
+    expect(nonStrict.code).toBe(0);
+
+    // fixture 回收
+    await rawClient.asyncJob.delete({ where: { id: mismatchJob.id } });
+  });
+
+  it("RET-ERASURE-REDACT-01（RB03）：retention 先 redact → erasure 不得覆盖 redactedAt", async () => {
+    // 旧实现：erasure 无条件 redactedAt = erasedEmailAt（覆盖 T1）→ 本测试
+    // FAIL；新实现：redactedAt 只 NULL → timestamp 单向迁移（INV-R1-05），
+    // 但 destination 仍无条件收敛（INV-R1-06）。
+    const user = await createErasureFixtureUser("redact-monotonic");
+    const notification = await seedNotificationForUser(user.id);
+    const delivery = await seedDelivery({
+      destination: "erasure-redact-student@campus.edu",
+      providerAcceptedAt: OLD,
+      providerMessageId: "msg-redact-monotonic",
+    });
+    await rawClient.notificationDelivery.update({
+      where: { id: delivery.id },
+      data: { notificationId: notification.id },
+    });
+
+    // Step 1：retention 先完成第一次 redaction（T1 = retentionNow）
+    const retentionNow = new Date(Date.now() - 5_000);
+    const summary = await redactTerminalNotificationDestinations({
+      retentionDays: RETENTION_DAYS,
+      now: retentionNow,
+    });
+    expect(summary.redacted).toBeGreaterThanOrEqual(1);
+    const afterRetention = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: delivery.id },
+    });
+    expect(afterRetention.destination).toBe(REDACTED_EMAIL_DESTINATION);
+    expect(afterRetention.redactedAt).toEqual(retentionNow);
+
+    // Step 2：account erasure 后到——destination 保持 sentinel（目标 A），
+    // redactedAt 保持 T1（目标 B）
+    await eraseAccount(user.id);
+
+    const row = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: delivery.id },
+    });
+    expect(row.destination).toBe(REDACTED_EMAIL_DESTINATION);
+    expect(row.redactedAt).toEqual(retentionNow);
+    expect(row.suppressedAt).toBeNull();
+    expect(row.suppressionCode).toBeNull();
+    expect(row.providerAcceptedAt).toEqual(OLD);
+    expect(row.providerMessageId).toBe("msg-redact-monotonic");
+  });
+
+  it("RET-ERASURE-REDACT-RACE-01（RB03）：erasure 持行锁在先 → retention 后到零覆盖，首次时间戳保留", async () => {
+    // 受控 barrier（真实 PG 行锁，零 sleep）：erasure 事务在 racePoint 时
+    // 已写入 destination + redactedAt（未提交、持行锁）；racePoint 中发射
+    // retention（不 await——await 会形成应用层死锁）。retention 的
+    // updateMany 阻塞至 erasure 提交，随后按 READ COMMITTED 重评谓词
+    //（redactedAt IS NULL 已不成立）→ 0 转移。最终：destination sentinel +
+    // redactedAt = erasure 首次 transition 时间（INV-R1-07；retention-first
+    // ordering 的 teeth 见 RET-ERASURE-REDACT-01）。
+    const user = await createErasureFixtureUser("redact-race");
+    const notification = await seedNotificationForUser(user.id);
+    const delivery = await seedDelivery({
+      destination: "erasure-race-student@campus.edu",
+      providerAcceptedAt: OLD,
+    });
+    await rawClient.notificationDelivery.update({
+      where: { id: delivery.id },
+      data: { notificationId: notification.id },
+    });
+
+    const retentionNow = new Date();
+    let retentionPromise: Promise<{ redacted: number }> | null = null;
+    await eraseAccount(user.id, undefined, undefined, async () => {
+      retentionPromise = redactTerminalNotificationDestinations({
+        retentionDays: RETENTION_DAYS,
+        now: retentionNow,
+      });
+    });
+    expect(retentionPromise).not.toBeNull();
+    const summary = await retentionPromise!;
+
+    // retention 后到：零转移（erasure 的 redactedAt 已占位）
+    expect(summary.redacted).toBe(0);
+
+    const row = await rawClient.notificationDelivery.findUniqueOrThrow({
+      where: { id: delivery.id },
+    });
+    expect(row.destination).toBe(REDACTED_EMAIL_DESTINATION);
+    expect(row.redactedAt).not.toBeNull();
+    // 首次 transition 决定时间戳：不是 retention 的 now（retention 0 转移）
+    expect(row.redactedAt!.getTime()).not.toBe(retentionNow.getTime());
+    expect(row.suppressedAt).toBeNull();
+    expect(row.suppressionCode).toBeNull();
+    expect(row.providerAcceptedAt).toEqual(OLD);
   });
 
   it("RET-DRY-RUN-01：retention backlog 存在 → planned > 0 且零 mutation", async () => {
