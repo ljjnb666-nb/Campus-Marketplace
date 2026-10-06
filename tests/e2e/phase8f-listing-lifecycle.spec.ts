@@ -135,6 +135,16 @@ test("8F-E2E-01 商品生命周期：RESERVED 系统权威 + 公开曝光收敛 
   const buyerOrderCard = buyer.locator("article", { hasText: title }).first();
   await buyerOrderCard.getByRole("button", { name: "取消订单" }).click();
   await buyer.getByRole("button", { name: "确认取消" }).click();
+  // OrderCancelDialog 成功后会 window.location.reload() 整页刷新 /my/orders。
+  // 先等 reload 后的 DOM 呈现 CANCELLED 徽标（应用自身导航 settle），再发起
+  // 下一条 goto——否则该 reload 会打断 safeGoto（CI run 37316790078 的 flaky）。
+  await expect(
+    buyer
+      .locator("article", { hasText: title })
+      .first()
+      .getByText("订单已取消")
+      .first(),
+  ).toBeVisible({ timeout: 20_000 });
   await expect
     .poll(async () => {
       const order = await e2eDb().order.findFirst({ where: { productId } });
