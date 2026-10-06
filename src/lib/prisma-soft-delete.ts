@@ -13,6 +13,11 @@ import { Prisma } from "@prisma/client";
  *
  * 已知边界（均与改造前行为一致，无回退）：
  * - include 嵌套关联读取（如 product.include.owner）不被拦截；
+ * - 软删除模型的 delete/deleteMany 改写经 base client delegate 执行，该 delegate
+ *   绑定 defineExtension 闭包捕获的 root client：在 interactive transaction 内
+ *   使用会逃逸事务（LATENT_ARCHITECTURE_RISK，当前生产零事务内调用方，
+ *   完整设计留给 PRISMA-SOFT-DELETE-ARCH-01）；非软删除/豁免路径恒走
+ *   query(args) 续传，事务上下文得以保留（CI-FLAKE-01 修复）。
  */
 
 const SOFT_DELETE_MODELS = new Set([
@@ -225,7 +230,9 @@ export const softDeleteExtension = Prisma.defineExtension((client) =>
         // 删除一律降级为软删除；显式以 deletedAt 为条件时豁免（物理清理）。
         // query 组件无法改写操作类型（deleteMany 钩子下 query 仍执行 deleteMany，
         // 传入带 data 的 updateMany 形状参数会 PrismaClientValidationError），
-        // 因此改写路径与 delete 一致：走 base client 的 updateMany 委托；
+        // 因此改写路径走 base client 的 updateMany 委托（LATENT：该委托闭包绑定
+        // root client——事务内对软删除模型 deleteMany 会逃逸事务；当前生产
+        // 零调用方，完整设计见 LATENT_ARCHITECTURE_RISK / PRISMA-SOFT-DELETE-ARCH-01）；
         // 豁免/非软删除模型保持 query(args) 原生硬删除透传。
         deleteMany: async ({ model, args, query }) => {
           const softArgs = buildSoftDeleteUpdateArgs(model, args);
@@ -243,17 +250,30 @@ export const softDeleteExtension = Prisma.defineExtension((client) =>
             "updateMany",
           )(softArgs)) as never;
         },
-        delete: async ({ model, args }) => {
+        delete: async ({ model, args, query }) => {
           const modelName = model ?? "";
-          const delegates = resolveDelegates(client, modelName);
           const softArgs = buildSoftDeleteUpdateArgs(modelName, args);
 
-          // 软删除模型 → update 打标记；豁免场景 → 原生硬删除
-          return (
-            softArgs
-              ? requireDelegateOperation(delegates.update, modelName, "update")(softArgs)
-              : requireDelegateOperation(delegates.delete, modelName, "delete")(args)
-          ) as never;
+          // 豁免/非软删除模型 → query(args) 续传：query 绑定当前查询执行上下文，
+          // 在 interactive transaction 内即事务客户端。绝不经 defineExtension
+          // 闭包解析 delegate——该闭包持有 root client，会使 delete 以
+          // autocommit 逃逸事务（CI-FLAKE-01：ROLE_REVOKED 审计与 assignment
+          // 删除因此失去原子性）。
+          if (!softArgs) {
+            return query(args);
+          }
+
+          // 软删除模型 → update 打标记。query 组件无法改写操作类型（delete 钩子
+          // 下 query 仍是 delete，传入 update 形状参数会 PrismaClientValidationError），
+          // 只能走 base client 的 update 委托——LATENT：事务内使用会逃逸
+          // （LATENT_ARCHITECTURE_RISK，当前生产零事务内调用方）。
+          const delegates = resolveDelegates(client, modelName);
+
+          return (await requireDelegateOperation(
+            delegates.update,
+            modelName,
+            "update",
+          )(softArgs)) as never;
         },
       },
     },
