@@ -8,6 +8,8 @@ import http from "node:http";
 import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { purgeUserFixture } from "./helpers/raw-cleanup";
+
 /**
  * 真实 MinIO 集成测试（S3 兼容 API 全链路）。
  *
@@ -340,9 +342,9 @@ describe.skipIf(!endpoint)("S3 对象存储集成测试 (MinIO)", () => {
       ).toBe("DELETED");
     } finally {
       setStorageForTests(null);
-      // 物理清理测试数据（User 显式 deletedAt 条件豁免软删除拦截 → 硬删除）
       await prisma.uploadedAsset.deleteMany({ where: { ownerId: user.id } });
-      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      // fail-closed 后扩展客户端不提供软模型删除：fixture 清理走裸客户端 seam（IMPL-01）
+      await purgeUserFixture(process.env.INTEGRATION_DATABASE_URL!, user.id);
       await prisma.campus.deleteMany({ where: { id: campus.id } });
       await prisma.$disconnect();
     }

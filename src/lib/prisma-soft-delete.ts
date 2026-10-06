@@ -7,17 +7,43 @@ import { Prisma } from "@prisma/client";
  * 顶层查询中自动注入 `deletedAt: null` 过滤，业务代码不再需要逐查询手写，
  * 消除"某条查询忘记过滤已删除数据"这类遗漏。
  *
- * 显式豁免规则：若 where 顶层或 AND/OR/NOT 分支中已显式声明 deletedAt
- * （例如管理端列出已删除数据、物理清理已删除行），则视为调用方自行管理
- * 软删除可见性，本扩展不做任何注入或改写。
+ * 显式豁免规则（仅 read side）：若 where 顶层或 AND/OR/NOT 分支中已显式声明
+ * deletedAt（例如管理端列出已删除数据、检查软删除可见性），则视为调用方自行
+ * 管理软删除可见性，读取注入不做任何改写。
+ *
+ * ============================================================
+ * Mutation contract（PRISMA-SOFT-DELETE-IMPL-01，fail closed）
+ * ============================================================
+ * 软删除是显式的 domain lifecycle mutation，不是数据库通用操作：
+ *   Product/ServiceListing/RentalListing → status=OFFLINE + deletedAt=now()
+ *   ErrandTask → status=CANCELLED + accepterId=null + deletedAt=now()
+ *
+ * 权威 mutation owner 是 canonical domain lifecycle services：
+ *   deleteProductListingTx / deleteServiceListingTx / deleteRentalListingTx
+ *   （src/lib/listings/listing-lifecycle-service.ts）
+ *   deleteErrandTx（src/lib/errand-lifecycle.ts）
+ * 它们在同一事务内完成 lock → authority predicates → active obligation 检查
+ * → 状态归一化 → deletedAt，不能被通用 delete 语义替代。
+ *
+ * 因此经扩展业务客户端对软删除模型调用 delete/deleteMany 一律 fail closed：
+ *   - 不再做 delete → update / deleteMany → updateMany 透明改写（query 组件
+ *     无公开操作改写 API，改写须经 defineExtension 闭包捕获的 root client，
+ *     在 interactive transaction 内会以 autocommit 逃逸事务）；
+ *   - 即使 where 显式包含 deletedAt 也拒绝（豁免路径会被 dynamic alias +
+ *     deletedAt predicate 组合绕过 ownership guard，PRISMA-SOFT-DELETE-ARCH-01
+ *     / Controller 修正）。
+ *   物理清理不属于业务扩展客户端（当前生产 PHYSICAL_PURGE_CALLERS = 0）；
+ *   测试基建的裸 PrismaClient 清理不走本 extension；未来生产 purge 由
+ *   SOFT_DELETE_PURGE_01 以 dedicated raw/base client 单独设计。
+ *
+ * 非软删除模型的 delete/deleteMany 保持 query(args) 原生硬删除透传：query
+ * 绑定当前查询执行上下文，在 interactive transaction 内即事务客户端（
+ * CI-FLAKE-01 修复，TX-ESCAPE-01/02 门禁覆盖），绝不经 root client delegate。
  *
  * 已知边界（均与改造前行为一致，无回退）：
  * - include 嵌套关联读取（如 product.include.owner）不被拦截；
- * - 软删除模型的 delete/deleteMany 改写经 base client delegate 执行，该 delegate
- *   绑定 defineExtension 闭包捕获的 root client：在 interactive transaction 内
- *   使用会逃逸事务（LATENT_ARCHITECTURE_RISK，当前生产零事务内调用方，
- *   完整设计留给 PRISMA-SOFT-DELETE-ARCH-01）；非软删除/豁免路径恒走
- *   query(args) 续传，事务上下文得以保留（CI-FLAKE-01 修复）。
+ * - 单行 update 不注入 deletedAt 过滤（unique where 无法注入），软删除行的
+ *   更新防护由 domain lifecycle services 的前置谓词承担。
  */
 
 const SOFT_DELETE_MODELS = new Set([
@@ -30,6 +56,27 @@ const SOFT_DELETE_MODELS = new Set([
 
 /** 与数据库列名解耦的软删除模型名单，供测试快照使用 */
 export const SOFT_DELETE_MODEL_NAMES = [...SOFT_DELETE_MODELS];
+
+/** 软删除模型隐式删除拒绝的稳定错误码（运行时 fail-closed 合同） */
+export const SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED =
+  "SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED";
+
+/**
+ * 经扩展业务客户端对软删除模型调用 delete/deleteMany 时抛出。
+ * 软删除必须走对应 domain lifecycle mutation（带权威谓词与状态归一化）。
+ */
+export class SoftDeleteExplicitDomainMutationRequiredError extends Error {
+  readonly code = SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED;
+
+  constructor(model: string, operation: "delete" | "deleteMany") {
+    super(
+      `${SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED}: 软删除模型 ${model} 禁止通过 ` +
+        `Prisma ${operation} 修改；请调用对应 domain lifecycle mutation（` +
+        `deleteProductListingTx / deleteServiceListingTx / deleteRentalListingTx / deleteErrandTx）`,
+    );
+    this.name = "SoftDeleteExplicitDomainMutationRequiredError";
+  }
+}
 
 function isSoftDeleteModel(model: string | undefined): boolean {
   return model !== undefined && SOFT_DELETE_MODELS.has(model);
@@ -94,27 +141,6 @@ export function findUniqueResultHiddenBySoftDelete(
   return isSoftDeleteModel(model) && readDeletedAt(row) != null;
 }
 
-/**
- * 构造软删除 update 参数（delete/deleteMany 的改写目标）。
- * 豁免场景返回 null 表示仍应执行原始硬删除。
- */
-export function buildSoftDeleteUpdateArgs(
-  model: string | undefined,
-  args: Record<string, unknown> | undefined,
-): Record<string, unknown> | null {
-  const where = readWhere(args);
-
-  if (!isSoftDeleteModel(model) || explicitlyFiltersDeleted(where)) {
-    return null;
-  }
-
-  return {
-    ...args,
-    where: { ...(where ?? {}), deletedAt: null },
-    data: { deletedAt: new Date() },
-  };
-}
-
 function readWhere(args: Record<string, unknown> | undefined) {
   return args?.where as Record<string, unknown> | undefined;
 }
@@ -128,42 +154,6 @@ function withWhere(
 
 function readDeletedAt(row: unknown): Date | null | undefined {
   return (row as { deletedAt?: Date | null }).deletedAt;
-}
-
-/**
- * 解析模型的委托（delete→update、deleteMany→updateMany 改写与原生硬删回退共用）。
- * 模型名来自 Prisma 查询组件的 PascalCase（如 "Product"），
- * 而客户端委托属性为 camelCase（client.product），此处完成转换。
- */
-function resolveDelegates(
-  client: unknown,
-  model: string,
-): {
-  update?: (args: unknown) => Promise<unknown>;
-  delete?: (args: unknown) => Promise<unknown>;
-  updateMany?: (args: unknown) => Promise<unknown>;
-  deleteMany?: (args: unknown) => Promise<unknown>;
-} {
-  const delegateKey = `${model[0]?.toLowerCase() ?? ""}${model.slice(1)}`;
-
-  return ((client as Record<string, unknown>)[delegateKey] ?? {}) as {
-    update?: (args: unknown) => Promise<unknown>;
-    delete?: (args: unknown) => Promise<unknown>;
-    updateMany?: (args: unknown) => Promise<unknown>;
-    deleteMany?: (args: unknown) => Promise<unknown>;
-  };
-}
-
-function requireDelegateOperation<T>(
-  operation: T | undefined,
-  model: string,
-  name: string,
-): T {
-  if (!operation) {
-    throw new Error(`软删除映射失败：模型 ${model} 缺少 ${name} 委托`);
-  }
-
-  return operation;
 }
 
 function throwAsNotFound(): never {
@@ -189,6 +179,14 @@ function filteredListQuery<A extends Record<string, unknown> | undefined, R>(
   }
 
   return query(next as A);
+}
+
+/**
+ * 软删除模型 delete/deleteMany 的统一 fail-closed 边界。
+ * 软删除的权威入口是 domain lifecycle services；此处拒绝一切隐式删除路径。
+ */
+function failClosed(model: string | undefined, operation: "delete" | "deleteMany"): never {
+  throw new SoftDeleteExplicitDomainMutationRequiredError(model ?? "", operation);
 }
 
 export const softDeleteExtension = Prisma.defineExtension((client) =>
@@ -227,53 +225,22 @@ export const softDeleteExtension = Prisma.defineExtension((client) =>
           return row;
         },
 
-        // 删除一律降级为软删除；显式以 deletedAt 为条件时豁免（物理清理）。
-        // query 组件无法改写操作类型（deleteMany 钩子下 query 仍执行 deleteMany，
-        // 传入带 data 的 updateMany 形状参数会 PrismaClientValidationError），
-        // 因此改写路径走 base client 的 updateMany 委托（LATENT：该委托闭包绑定
-        // root client——事务内对软删除模型 deleteMany 会逃逸事务；当前生产
-        // 零调用方，完整设计见 LATENT_ARCHITECTURE_RISK / PRISMA-SOFT-DELETE-ARCH-01）；
-        // 豁免/非软删除模型保持 query(args) 原生硬删除透传。
-        deleteMany: async ({ model, args, query }) => {
-          const softArgs = buildSoftDeleteUpdateArgs(model, args);
-
-          if (!softArgs) {
-            return query(args);
-          }
-
-          const modelName = model ?? "";
-          const delegates = resolveDelegates(client, modelName);
-
-          return (await requireDelegateOperation(
-            delegates.updateMany,
-            modelName,
-            "updateMany",
-          )(softArgs)) as never;
-        },
+        // 软删除模型：一律 fail closed（含显式 deletedAt 条件——不保留物理豁免 bypass，
+        // dynamic alias + deletedAt predicate 不能绕过 ownership guard）。
+        // 非软删除模型：query(args) 原生硬删除透传，事务上下文得以保留（CI-FLAKE-01）。
         delete: async ({ model, args, query }) => {
-          const modelName = model ?? "";
-          const softArgs = buildSoftDeleteUpdateArgs(modelName, args);
-
-          // 豁免/非软删除模型 → query(args) 续传：query 绑定当前查询执行上下文，
-          // 在 interactive transaction 内即事务客户端。绝不经 defineExtension
-          // 闭包解析 delegate——该闭包持有 root client，会使 delete 以
-          // autocommit 逃逸事务（CI-FLAKE-01：ROLE_REVOKED 审计与 assignment
-          // 删除因此失去原子性）。
-          if (!softArgs) {
-            return query(args);
+          if (isSoftDeleteModel(model)) {
+            failClosed(model, "delete");
           }
 
-          // 软删除模型 → update 打标记。query 组件无法改写操作类型（delete 钩子
-          // 下 query 仍是 delete，传入 update 形状参数会 PrismaClientValidationError），
-          // 只能走 base client 的 update 委托——LATENT：事务内使用会逃逸
-          // （LATENT_ARCHITECTURE_RISK，当前生产零事务内调用方）。
-          const delegates = resolveDelegates(client, modelName);
+          return query(args);
+        },
+        deleteMany: async ({ model, args, query }) => {
+          if (isSoftDeleteModel(model)) {
+            failClosed(model, "deleteMany");
+          }
 
-          return (await requireDelegateOperation(
-            delegates.update,
-            modelName,
-            "update",
-          )(softArgs)) as never;
+          return query(args);
         },
       },
     },

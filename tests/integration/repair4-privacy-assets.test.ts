@@ -250,7 +250,8 @@ describe.skipIf(!runAssets)("Repair 4 asset durable deletion (real PostgreSQL + 
     } finally {
       await prisma.uploadedAsset.deleteMany({ where: { ownerId: user.id } });
       await prisma.campusMembership.deleteMany({ where: { userId: user.id } });
-      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      // fail-closed 后扩展客户端不提供软模型删除：清理走本文件裸 rawClient（IMPL-01）
+      await rawClient!.user.deleteMany({ where: { id: user.id } });
       await prisma.campus.deleteMany({ where: { id: campus.id } });
     }
   });
@@ -319,7 +320,8 @@ describe.skipIf(!runAssets)("Repair 4 asset durable deletion (real PostgreSQL + 
     } finally {
       await prisma.uploadedAsset.deleteMany({ where: { ownerId: user.id } });
       await prisma.campusMembership.deleteMany({ where: { userId: user.id } });
-      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      // fail-closed 后扩展客户端不提供软模型删除：清理走本文件裸 rawClient（IMPL-01）
+      await rawClient!.user.deleteMany({ where: { id: user.id } });
       await prisma.campus.deleteMany({ where: { id: campus.id } });
     }
   });
@@ -400,7 +402,8 @@ describe.skipIf(!runAssets)("Repair 4 asset durable deletion (real PostgreSQL + 
       await prisma.privacyRequest.deleteMany({ where: { userId: user.id } });
       await prisma.campusMembership.deleteMany({ where: { userId: user.id } });
       await prisma.session.deleteMany({ where: { userId: user.id } });
-      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      // fail-closed 后扩展客户端不提供软模型删除：清理走本文件裸 rawClient（IMPL-01）
+      await rawClient!.user.deleteMany({ where: { id: user.id } });
       await prisma.campus.deleteMany({ where: { id: campus.id } });
     }
   });
@@ -503,9 +506,10 @@ describe.skipIf(!runAssets)("Repair 4 asset durable deletion (real PostgreSQL + 
       await prisma.privacyRequest.deleteMany({ where: { userId: user.id } });
       await prisma.campusMembership.deleteMany({ where: { userId: user.id } });
       await prisma.session.deleteMany({ where: { userId: user.id } });
-      // 测试清理：rawClient 硬删除 fixture User（生产代码红线 = 绝不删 User 行，
-      // 此处仅为测试库不留残留）；显式 deletedAt 条件豁免软删除拦截
-      await prisma.user.deleteMany({ where: { id: user.id, deletedAt: null } });
+      // 测试清理：裸客户端硬删除 fixture User（生产代码红线 = 绝不删 User 行，
+      // 此处仅为测试库不留残留；fail-closed 后扩展客户端不提供软模型删除，IMPL-01）
+      // fail-closed 后扩展客户端不提供软模型删除：清理走本文件裸 rawClient（IMPL-01）
+      await rawClient!.user.deleteMany({ where: { id: user.id } });
       await prisma.campus.deleteMany({ where: { id: campus.id } });
     }
   });

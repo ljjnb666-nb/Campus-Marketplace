@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { purgeUserFixture } from "./helpers/raw-cleanup";
+
 /**
  * 真实数据库配额与崩溃恢复集成测试。
  *
@@ -109,7 +111,8 @@ describe.skipIf(!integrationDatabaseUrl)("上传配额并发与崩溃恢复集�
     if (prisma) {
       // UploadedAsset 对 ownerId 是 RESTRICT：先物理删除资源行（含 DELETED 审计行）
       await prisma.uploadedAsset.deleteMany({ where: { ownerId: userId } });
-      await prisma.user.deleteMany({ where: { id: userId, deletedAt: null } });
+      // fail-closed 后扩展客户端不提供软模型删除：fixture 清理走裸客户端 seam（IMPL-01）
+      await purgeUserFixture(integrationDatabaseUrl!, userId);
       await prisma.campus.deleteMany({ where: { id: campusId } });
       await prisma.$disconnect();
     }

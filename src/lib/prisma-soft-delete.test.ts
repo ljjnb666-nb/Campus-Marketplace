@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED,
   SOFT_DELETE_MODEL_NAMES,
+  SoftDeleteExplicitDomainMutationRequiredError,
   buildFilteredListArgs,
-  buildSoftDeleteUpdateArgs,
   explicitlyFiltersDeleted,
   findUniqueResultHiddenBySoftDelete,
   softDeleteExtension,
@@ -87,38 +88,13 @@ describe("findUniqueResultHiddenBySoftDelete", () => {
   });
 });
 
-describe("buildSoftDeleteUpdateArgs", () => {
-  it("rewrites delete into a soft-delete update with a fresh timestamp", () => {
-    const result = buildSoftDeleteUpdateArgs("Product", { where: { ownerId: "u1" } });
-
-    expect(result).toEqual({
-      where: { ownerId: "u1", deletedAt: null },
-      data: { deletedAt: expect.any(Date) },
-    });
-  });
-
-  it("returns null to keep the native hard delete when deletedAt is targeted", () => {
-    const args = { where: { deletedAt: { not: null } } };
-
-    expect(buildSoftDeleteUpdateArgs("Product", args)).toBeNull();
-  });
-
-  it("returns null for non soft-delete models", () => {
-    expect(buildSoftDeleteUpdateArgs("Order", { where: { buyerId: "u1" } })).toBeNull();
-  });
-});
-
 describe("softDeleteExtension 挂载与查询拦截", () => {
   type Handlers = Record<string, (params: Record<string, unknown>) => unknown>;
 
-  /**
-   * 应用扩展并捕获 $allModels 处理器。额外字段（如各模型委托）保留在
-   * 客户端上——delete 处理器正是通过闭包引用该客户端解析委托的。
-   */
-  function captureHandlers(extraClient: Record<string, unknown> = {}) {
+  /** 应用扩展并捕获 $allModels 处理器（fail-closed 后不再依赖 client 上的委托）。 */
+  function captureHandlers() {
     let captured: Handlers | undefined;
     const client = {
-      ...extraClient,
       $extends: (config: { query: { $allModels: Handlers } }) => {
         captured = config.query.$allModels;
         return { extended: true };
@@ -232,136 +208,101 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
     ).rejects.toMatchObject({ code: "P2025" });
   });
 
-  it("deleteMany rewrites to soft deletion via the model delegate while explicit deletedAt stays hard", async () => {
-    const delegateUpdateMany = vi.fn().mockResolvedValue({ count: 3 });
-    const delegateDeleteMany = vi.fn().mockResolvedValue({ count: 9 });
-    const handlers = captureHandlers({
-      errandTask: { updateMany: delegateUpdateMany, deleteMany: delegateDeleteMany },
-    })();
+  // ============================================================
+  // SD-GUARD-U01..U06：fail-closed mutation 边界（PRISMA-SOFT-DELETE-IMPL-01）
+  // ============================================================
 
-    // 软删除模型：改写为 base client 的 updateMany 打标记（query 组件无法改操作类型，
-    // 直接在 deleteMany 钩子里传 data 会 PrismaClientValidationError）
-    await handlers.deleteMany({
-      model: "ErrandTask",
-      args: { where: { publisherId: "u1" } },
-      query: makeQuery({ count: 0 }),
-    });
-    expect(delegateUpdateMany).toHaveBeenCalledWith({
-      where: { publisherId: "u1", deletedAt: null },
-      data: { deletedAt: expect.any(Date) },
-    });
-
-    // 显式以 deletedAt 为条件：豁免改写，query(args) 原生硬删除透传
-    const hardQuery = makeQuery({ count: 9 });
-    await handlers.deleteMany({
-      model: "ErrandTask",
-      args: { where: { deletedAt: { not: null } } },
-      query: hardQuery,
-    });
-    expect(hardQuery).toHaveBeenCalledWith({ where: { deletedAt: { not: null } } });
-    expect(delegateDeleteMany).not.toHaveBeenCalled();
-  });
-
-  it("deleteMany fails fast when a soft-delete model delegate cannot be resolved; non soft-delete models pass through", async () => {
+  it("SD-GUARD-U01: Product.delete rejects with the stable error code and query is never called", async () => {
     const handlers = captureHandlers()();
+    const query = makeQuery({ id: "p1", deletedAt: new Date() });
 
     await expect(
-      handlers.deleteMany({
-        model: "NonexistentModel",
-        args: { where: { id: "x" } },
-        query: makeQuery({ count: 0 }),
-      }),
-    ).resolves.toEqual({ count: 0 });
+      handlers.delete({ model: "Product", args: { where: { id: "p1" } }, query }),
+    ).rejects.toMatchObject({ code: SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED });
 
-    await expect(
-      handlers.deleteMany({
-        model: "Product",
-        args: { where: { id: "x" } },
-        query: makeQuery({ count: 0 }),
-      }),
-    ).rejects.toThrow("软删除映射失败");
+    // fail closed：底层 delete 查询绝不执行（不再改写为 update，也不透传）
+    expect(query).not.toHaveBeenCalled();
   });
 
-  it("single delete maps onto a soft-delete update through the model delegate", async () => {
-    const delegateUpdate = vi.fn().mockResolvedValue({ id: "p1", deletedAt: new Date() });
-    const handlers = captureHandlers({ product: { update: delegateUpdate } })();
+  it("SD-GUARD-U02: Product.delete with an explicit deletedAt condition still rejects", async () => {
+    const handlers = captureHandlers()();
+    const query = makeQuery({ id: "p1", deletedAt: new Date() });
 
-    await expect(
-      handlers.delete({
-        model: "Product",
-        args: { where: { id: "p1" } },
-      }),
-    ).resolves.toEqual({ id: "p1", deletedAt: expect.any(Date) });
-
-    expect(delegateUpdate).toHaveBeenCalledWith({
-      where: { id: "p1", deletedAt: null },
-      data: { deletedAt: expect.any(Date) },
-    });
-  });
-
-  it("single delete falls back to query(args) for non soft-delete models (transaction context preserved)", async () => {
-    // CI-FLAKE-01 回归：非软删除模型的硬删除必须经 query(args) 续传（绑定当前
-    // 执行上下文——interactive transaction 内即事务客户端），绝不经 defineExtension
-    // 闭包解析的 root delegate（那会使 delete 以 autocommit 逃逸事务）。
-    const delegateDelete = vi.fn().mockResolvedValue({ id: "w1" });
-    const hardQuery = makeQuery({ id: "w1" });
-    const handlers = captureHandlers({
-      userRoleAssignment: { update: vi.fn(), delete: delegateDelete },
-    })();
-
-    await expect(
-      handlers.delete({
-        model: "UserRoleAssignment",
-        args: { where: { id: "w1" } },
-        query: hardQuery,
-      }),
-    ).resolves.toEqual({ id: "w1" });
-
-    expect(hardQuery).toHaveBeenCalledWith({ where: { id: "w1" } });
-    expect(delegateDelete).not.toHaveBeenCalled();
-  });
-
-  it("single delete keeps query(args) passthrough for explicit physical delete exemption", async () => {
-    const delegateUpdate = vi.fn();
-    const delegateDelete = vi.fn();
-    const hardQuery = makeQuery({ id: "p1", deletedAt: new Date() });
-    const handlers = captureHandlers({
-      product: { update: delegateUpdate, delete: delegateDelete },
-    })();
-
-    // 显式以 deletedAt 为条件：调用方自行管理物理删除语义 → query(args) 原生透传
+    // 旧物理豁免 bypass 已关闭：dynamic alias + deletedAt predicate 不能绕过 ownership guard
     await expect(
       handlers.delete({
         model: "Product",
         args: { where: { id: "p1", deletedAt: { not: null } } },
-        query: hardQuery,
+        query,
       }),
-    ).resolves.toEqual({ id: "p1", deletedAt: expect.any(Date) });
+    ).rejects.toMatchObject({ code: SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED });
 
-    expect(hardQuery).toHaveBeenCalledWith({ where: { id: "p1", deletedAt: { not: null } } });
-    expect(delegateUpdate).not.toHaveBeenCalled();
-    expect(delegateDelete).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
   });
 
-  it("fails fast only on the soft-delete rewrite path when a model delegate cannot be resolved", async () => {
+  it("SD-GUARD-U03: User.deleteMany rejects with the stable error code", async () => {
+    const handlers = captureHandlers()();
+    const query = makeQuery({ count: 3 });
+
+    await expect(
+      handlers.deleteMany({ model: "User", args: { where: { id: "u1" } }, query }),
+    ).rejects.toMatchObject({ code: SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED });
+
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("SD-GUARD-U04: User.deleteMany with a deletedAt condition still rejects", async () => {
+    const handlers = captureHandlers()();
+    const query = makeQuery({ count: 3 });
+
+    await expect(
+      handlers.deleteMany({
+        model: "User",
+        args: { where: { deletedAt: { not: null } } },
+        query,
+      }),
+    ).rejects.toMatchObject({ code: SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED });
+
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("SD-GUARD-U05: non soft-delete UserRoleAssignment.delete keeps query(args) hard-delete passthrough", async () => {
+    // CI-FLAKE-01 回归：非软删除模型的硬删除必须经 query(args) 续传（绑定当前
+    // 执行上下文——interactive transaction 内即事务客户端）。
+    const handlers = captureHandlers()();
+    const hardQuery = makeQuery({ id: "w1" });
+
+    await expect(
+      handlers.delete({ model: "UserRoleAssignment", args: { where: { id: "w1" } }, query: hardQuery }),
+    ).resolves.toEqual({ id: "w1" });
+
+    expect(hardQuery).toHaveBeenCalledWith({ where: { id: "w1" } });
+  });
+
+  it("SD-GUARD-U06: non soft-delete Favorite.deleteMany keeps query(args) passthrough", async () => {
+    const handlers = captureHandlers()();
+    const hardQuery = makeQuery({ count: 2 });
+
+    await expect(
+      handlers.deleteMany({
+        model: "Favorite",
+        args: { where: { userId: "u1" } },
+        query: hardQuery,
+      }),
+    ).resolves.toEqual({ count: 2 });
+
+    expect(hardQuery).toHaveBeenCalledWith({ where: { userId: "u1" } });
+  });
+
+  it("fail-closed error names the owning domain lifecycle mutations", async () => {
     const handlers = captureHandlers()();
 
-    // 非软删除模型：query(args) 透传，不依赖 delegate 解析
     await expect(
-      handlers.delete({
-        model: "NonexistentModel",
-        args: { where: { id: "x" } },
-        query: makeQuery({ id: "x" }),
-      }),
-    ).resolves.toEqual({ id: "x" });
+      handlers.delete({ model: "Product", args: { where: { id: "p1" } }, query: makeQuery({}) }),
+    ).rejects.toThrow(SoftDeleteExplicitDomainMutationRequiredError);
 
-    // 软删除模型改写路径需要 base client 的 update 委托：无法解析时 fail fast
     await expect(
-      handlers.delete({
-        model: "Product",
-        args: { where: { id: "x" } },
-        query: makeQuery({ id: "x" }),
-      }),
-    ).rejects.toThrow("软删除映射失败");
+      handlers.delete({ model: "Product", args: { where: { id: "p1" } }, query: makeQuery({}) }),
+    ).rejects.toThrow(/deleteProductListingTx[\s\S]*deleteErrandTx/);
   });
 });
