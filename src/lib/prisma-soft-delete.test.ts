@@ -299,27 +299,68 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
     });
   });
 
-  it("single delete falls back to native hard delete when exempted", async () => {
+  it("single delete falls back to query(args) for non soft-delete models (transaction context preserved)", async () => {
+    // CI-FLAKE-01 回归：非软删除模型的硬删除必须经 query(args) 续传（绑定当前
+    // 执行上下文——interactive transaction 内即事务客户端），绝不经 defineExtension
+    // 闭包解析的 root delegate（那会使 delete 以 autocommit 逃逸事务）。
     const delegateDelete = vi.fn().mockResolvedValue({ id: "w1" });
-    const handlers = captureHandlers({ orderItem: { update: vi.fn(), delete: delegateDelete } })();
+    const hardQuery = makeQuery({ id: "w1" });
+    const handlers = captureHandlers({
+      userRoleAssignment: { update: vi.fn(), delete: delegateDelete },
+    })();
 
     await expect(
       handlers.delete({
-        model: "OrderItem",
+        model: "UserRoleAssignment",
         args: { where: { id: "w1" } },
+        query: hardQuery,
       }),
     ).resolves.toEqual({ id: "w1" });
 
-    expect(delegateDelete).toHaveBeenCalledWith({ where: { id: "w1" } });
+    expect(hardQuery).toHaveBeenCalledWith({ where: { id: "w1" } });
+    expect(delegateDelete).not.toHaveBeenCalled();
   });
 
-  it("fails fast when a model delegate cannot be resolved", async () => {
+  it("single delete keeps query(args) passthrough for explicit physical delete exemption", async () => {
+    const delegateUpdate = vi.fn();
+    const delegateDelete = vi.fn();
+    const hardQuery = makeQuery({ id: "p1", deletedAt: new Date() });
+    const handlers = captureHandlers({
+      product: { update: delegateUpdate, delete: delegateDelete },
+    })();
+
+    // 显式以 deletedAt 为条件：调用方自行管理物理删除语义 → query(args) 原生透传
+    await expect(
+      handlers.delete({
+        model: "Product",
+        args: { where: { id: "p1", deletedAt: { not: null } } },
+        query: hardQuery,
+      }),
+    ).resolves.toEqual({ id: "p1", deletedAt: expect.any(Date) });
+
+    expect(hardQuery).toHaveBeenCalledWith({ where: { id: "p1", deletedAt: { not: null } } });
+    expect(delegateUpdate).not.toHaveBeenCalled();
+    expect(delegateDelete).not.toHaveBeenCalled();
+  });
+
+  it("fails fast only on the soft-delete rewrite path when a model delegate cannot be resolved", async () => {
     const handlers = captureHandlers()();
 
+    // 非软删除模型：query(args) 透传，不依赖 delegate 解析
     await expect(
       handlers.delete({
         model: "NonexistentModel",
         args: { where: { id: "x" } },
+        query: makeQuery({ id: "x" }),
+      }),
+    ).resolves.toEqual({ id: "x" });
+
+    // 软删除模型改写路径需要 base client 的 update 委托：无法解析时 fail fast
+    await expect(
+      handlers.delete({
+        model: "Product",
+        args: { where: { id: "x" } },
+        query: makeQuery({ id: "x" }),
       }),
     ).rejects.toThrow("软删除映射失败");
   });
