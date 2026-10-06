@@ -370,6 +370,12 @@ test("8F-E2E-04 跑腿生命周期：CLAIMED 后公开消失、参与方上下�
     await expect(accepter.getByRole("button", { name: "确认接单" })).toBeVisible({ timeout: 5_000 });
   }).toPass({ timeout: 30_000 });
   await accepter.getByRole("button", { name: "确认接单" }).first().click();
+  // ErrandClaimDialog 成功后 ~1.2s 才执行 document 级硬导航
+  // window.location.href = "/my/orders?type=errand"（claimErrand 成功返回
+  // void，走 dialog 的 fallback href）。必须先消费这条应用自有导航再发起
+  // 后续 goto——否则它会打断 safeGoto（master run 37417037693：
+  // /errands/<id> 被 /my/orders?type=errand 打断，retry 转绿的编排竞态）。
+  await accepter.waitForURL(/\/my\/orders\?type=errand$/, { timeout: 20_000 });
   await expect
     .poll(async () => (await e2eDb().errandTask.findUnique({ where: { id: errandId } }))?.status)
     .toBe("CLAIMED");
