@@ -12,7 +12,7 @@ describe("Phase 10C-2 CTV authority guards", () => {
     const text = source("src/lib/analytics/transaction-value-backfill.ts");
     const query = text.slice(
       text.indexOf("const rows ="),
-      text.indexOf("let backfilled"),
+      text.indexOf("const diagnosticsRows"),
     );
 
     expect(query).toContain('o.amount AS "bookedValue"');
