@@ -62,6 +62,7 @@ import { reconcileDataExportDeadLetters } from "@/lib/privacy/data-export-async"
 import { getQueueStatsSnapshot } from "@/lib/async/queue-stats";
 import { backfillCanonicalErrandCompletionEvents } from "@/lib/analytics/errand-completion-backfill";
 import { backfillCanonicalLiquidityFacts } from "@/lib/analytics/liquidity-backfill";
+import { backfillCanonicalTransactionValues } from "@/lib/analytics/transaction-value-backfill";
 import { scheduleUnprojectedDomainEventJobs } from "@/lib/analytics/projection-scheduler";
 
 const DEFAULT_POLL_MS = 1000;
@@ -193,6 +194,8 @@ interface CycleSummary {
   domainEventsBackfilled: number;
   /** Phase 10C-1：canonical liquidity facts backfill 数（每条会产生一个 projection intent）。 */
   liquidityFactsBackfilled: number;
+  /** Phase 10C-2：canonical CTV value facts backfill 数。 */
+  transactionValuesBackfilled: number;
   /** Phase 10B：为 current-version receipt 缺失事件新 enqueue 数。 */
   projectionJobsScheduled: number;
   /** Phase 10B：projection DEAD_LETTER 显式观测，不自动无限 requeue。 */
@@ -219,6 +222,7 @@ function summarize(
   | "errandDeadlinesScheduled"
   | "domainEventsBackfilled"
   | "liquidityFactsBackfilled"
+  | "transactionValuesBackfilled"
   | "projectionJobsScheduled"
   | "projectionDeadLetters"
   | "projectionStructuralGaps"
@@ -241,6 +245,7 @@ function didWork(summary: CycleSummary): boolean {
     summary.errandDeadlinesScheduled > 0 ||
     summary.domainEventsBackfilled > 0 ||
     summary.liquidityFactsBackfilled > 0 ||
+    summary.transactionValuesBackfilled > 0 ||
     summary.projectionJobsScheduled > 0 ||
     summary.jobsClaimed > 0 ||
     summary.outboxClaimed > 0 ||
@@ -354,6 +359,24 @@ async function main() {
         }
       }
 
+      // Phase 10C-2 CTV historical value facts：继续共享同一 producer
+      // budget。每条 value DomainEvent 在同事务 enqueue 一个 projection intent。
+      let transactionValuesBackfilled = 0;
+      if (producerBudget > 0) {
+        try {
+          const backfill = await backfillCanonicalTransactionValues({
+            batchLimit: producerBudget,
+          });
+          transactionValuesBackfilled = backfill.backfilled;
+          producerBudget = Math.max(0, producerBudget - backfill.backfilled);
+        } catch (error) {
+          logger.warn("CTV canonical backfill 失败，等待下个周期", "async-worker", {
+            event: "async_worker_ctv_backfill_failed",
+            errorName: error instanceof Error ? error.name : "unknown",
+          });
+        }
+      }
+
       let projectionJobsScheduled = 0;
       let projectionDeadLetters = 0;
       let projectionStructuralGaps = 0;
@@ -412,6 +435,7 @@ async function main() {
         errandDeadlinesScheduled,
         domainEventsBackfilled,
         liquidityFactsBackfilled,
+        transactionValuesBackfilled,
         projectionJobsScheduled,
         projectionDeadLetters,
         projectionStructuralGaps,
