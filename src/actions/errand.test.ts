@@ -13,10 +13,14 @@ const {
   transactionMock,
   txErrandTaskUpdate,
   txErrandTaskUpdateMany,
+  txErrandTaskFindUnique,
   txOrderCreate,
   txOrderFindFirst,
+  txOrderFindUnique,
   txOrderUpdate,
   txOrderUpdateMany,
+  txDomainEventCreateMany,
+  txDomainEventFindUnique,
   txUserUpdate,
   txExecuteRaw,
   txUserFindMany,
@@ -29,10 +33,14 @@ const {
   const txUserFindMany = vi.fn();
   const txErrandTaskUpdate = vi.fn();
   const txErrandTaskUpdateMany = vi.fn();
+  const txErrandTaskFindUnique = vi.fn();
   const txOrderCreate = vi.fn();
   const txOrderFindFirst = vi.fn();
+  const txOrderFindUnique = vi.fn();
   const txOrderUpdate = vi.fn();
   const txOrderUpdateMany = vi.fn();
+  const txDomainEventCreateMany = vi.fn();
+  const txDomainEventFindUnique = vi.fn();
   const txUserUpdate = vi.fn();
   const txErrandTaskCreate = vi.fn();
   const errandTaskFindFirst = vi.fn();
@@ -61,6 +69,8 @@ const {
       create: txErrandTaskCreate,
       // RB-03 REVIEW FIX：updateErrandStatusTx 的 fresh read 在 tx 内
       findFirst: errandTaskFindFirst,
+      // Phase 10A：completion authority 的 aggregate/tenant binding safety belt
+      findUnique: txErrandTaskFindUnique,
       update: txErrandTaskUpdate,
       updateMany: txErrandTaskUpdateMany,
     },
@@ -73,8 +83,15 @@ const {
     order: {
       create: txOrderCreate,
       findFirst: txOrderFindFirst,
+      // Phase 10A：completion authority 复核 Order↔ErrandTask↔participants
+      findUnique: txOrderFindUnique,
       update: txOrderUpdate,
       updateMany: txOrderUpdateMany,
+    },
+    domainEvent: {
+      // Phase 10A：recordDomainEventTx 写边界（occurrence dedupe）
+      createMany: txDomainEventCreateMany,
+      findUnique: txDomainEventFindUnique,
     },
     user: {
       update: txUserUpdate,
@@ -124,10 +141,14 @@ const {
     ),
     txErrandTaskUpdate,
     txErrandTaskUpdateMany,
+    txErrandTaskFindUnique,
     txOrderCreate,
     txOrderFindFirst,
+    txOrderFindUnique,
     txOrderUpdate,
     txOrderUpdateMany,
+    txDomainEventCreateMany,
+    txDomainEventFindUnique,
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
@@ -235,10 +256,14 @@ describe("errand actions", () => {
     transactionMock.mockClear();
     txErrandTaskUpdate.mockReset();
     txErrandTaskUpdateMany.mockReset();
+    txErrandTaskFindUnique.mockReset();
     txOrderCreate.mockReset();
     txOrderFindFirst.mockReset();
+    txOrderFindUnique.mockReset();
     txOrderUpdate.mockReset();
     txOrderUpdateMany.mockReset();
+    txDomainEventCreateMany.mockReset();
+    txDomainEventFindUnique.mockReset();
     txUserUpdate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
@@ -246,6 +271,33 @@ describe("errand actions", () => {
     userFindUnique.mockResolvedValue({ campusId: "campus-1" });
     txErrandTaskUpdateMany.mockResolvedValue({ count: 1 });
     txOrderUpdateMany.mockResolvedValue({ count: 1 });
+
+    // Phase 10A：completion authority 读取当前 holder 的 canonical aggregate。
+    // 非 completion 测试即使未触发这些 seam，也保持与真实 tx client 同形。
+    txErrandTaskFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      const row = errandRowHolder.row;
+      if (!row || row.id !== where.id) {
+        return null;
+      }
+      return {
+        campusId: row.campusId,
+        publisherId: row.publisherId,
+        accepterId: row.accepterId,
+      };
+    });
+    txOrderFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
+      const row = activeOrderRowsHolder.rows.find((candidate) => candidate.id === where.id);
+      if (!row) {
+        return null;
+      }
+      return {
+        errandTaskId: row.errandTaskId ?? "errand-1",
+        buyerId: row.buyerId,
+        sellerId: row.sellerId,
+      };
+    });
+    txDomainEventCreateMany.mockResolvedValue({ count: 1 });
+    txDomainEventFindUnique.mockResolvedValue(null);
 
     // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
     txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
@@ -677,7 +729,13 @@ describe("errand actions", () => {
       deletedAt: null,
     };
     activeOrderRowsHolder.rows = [
-      { id: "order-1", status: "IN_PROGRESS", buyerId: "user-1", sellerId: "runner-1" },
+      {
+        id: "order-1",
+        status: "IN_PROGRESS",
+        buyerId: "user-1",
+        sellerId: "runner-1",
+        errandTaskId: "errand-1",
+      },
     ];
 
     await updateErrandStatus(buildErrandStatusFormData("COMPLETED"));
@@ -692,6 +750,37 @@ describe("errand actions", () => {
       data: { status: "COMPLETED", completedAt: expect.any(Date) },
     });
     expect(txOrderUpdate).not.toHaveBeenCalled();
+
+    // Phase 10A：action 路径必须真正经过 authoritative DomainEvent 写边界。
+    const completedAt = txOrderUpdateMany.mock.calls[0]![0].data.completedAt as Date;
+    expect(txErrandTaskFindUnique).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      select: { campusId: true, publisherId: true, accepterId: true },
+    });
+    expect(txOrderFindUnique).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      select: { errandTaskId: true, buyerId: true, sellerId: true },
+    });
+    expect(txDomainEventCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          eventType: "ERRAND_ORDER_COMPLETED",
+          schemaVersion: 1,
+          aggregateType: "ORDER",
+          aggregateId: "order-1",
+          campusId: "campus-1",
+          occurrenceKey: "ERRAND_ORDER_COMPLETED:order-1",
+          payload: { orderId: "order-1", errandTaskId: "errand-1" },
+          occurredAt: completedAt,
+          sourceType: "DOMAIN_TX",
+          actorUserId: null,
+          subjectUserId: null,
+          sourceId: null,
+        }),
+      ],
+      skipDuplicates: true,
+    });
+
     // 双方完成计数恰好各 +1
     expect(txUserUpdate).toHaveBeenNthCalledWith(1, {
       where: { id: "user-1" },
