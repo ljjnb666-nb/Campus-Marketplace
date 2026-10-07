@@ -86,6 +86,24 @@ export const dataExportGeneratePayloadSchema = z
 
 export type DataExportGeneratePayload = z.infer<typeof dataExportGeneratePayloadSchema>;
 
+/**
+ * Phase 10B：DomainEvent analytics projection durable intent。
+ * payload 只允许 eventId；projectionKey/version 属部署期 metric registry
+ * authority，不接受 caller 输入，避免 stale/forged projection contract。
+ */
+export const ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND = "ANALYTICS_PROJECT_DOMAIN_EVENT";
+export const ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION = 1;
+
+export const analyticsProjectDomainEventPayloadSchema = z
+  .object({
+    eventId: z.string().min(1),
+  })
+  .strict();
+
+export type AnalyticsProjectDomainEventPayload = z.infer<
+  typeof analyticsProjectDomainEventPayloadSchema
+>;
+
 // ============================================================
 // RB04 纯契约层（writer 边界 + runtime 双层共用的单一事实源）：
 // 本文件只含 kind / schemaVersion / Zod schema，绝不 import handler——
@@ -108,6 +126,15 @@ const JOB_PAYLOAD_CONTRACTS = new Map<string, Map<number, z.ZodType>>([
   [
     DATA_EXPORT_GENERATE_JOB_KIND,
     new Map([[DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION, dataExportGeneratePayloadSchema]]),
+  ],
+  [
+    ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+    new Map([
+      [
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+        analyticsProjectDomainEventPayloadSchema,
+      ],
+    ]),
   ],
 ]);
 

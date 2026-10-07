@@ -2508,7 +2508,56 @@ model DomainEvent {
   @@index([eventType, occurredAt, id])
   @@index([aggregateType, aggregateId, occurredAt])
   @@index([campusId, occurredAt, id])
+  projectionReceipts  ProjectionReceipt[]
+  metricContributions MetricContribution[]
+
   @@index([recordedAt, id])
+}
+
+
+// ============================================================
+// Phase 10B — Rebuildable Analytics Projection Foundation
+// ============================================================
+//
+// ProjectionReceipt = projection correctness authority:
+// (projectionKey, eventId, projectionVersion) 恰好一条，和派生 projection
+// effect 在同一事务提交。AsyncJob 的 COMPLETED 不是 projection correctness
+// authority；worker crash after tx commit 时 receipt 让重放成为 no-op。
+model ProjectionReceipt {
+  id                String   @id @default(cuid())
+  projectionKey     String
+  projectionVersion Int
+  eventId           String
+  event             DomainEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+  projectedAt       DateTime @default(now())
+
+  @@unique([projectionKey, eventId, projectionVersion])
+  @@index([eventId, projectionKey, projectionVersion])
+  @@index([projectionKey, projectionVersion, projectedAt])
+}
+
+// Event-level metric contribution：故意不在 10B 固化 campus-local day bucket。
+// occurredAt 保留真实业务时间，10C+ 可按指标定义/业务时区聚合；本表完全
+// derived + rebuildable，绝不能反向驱动订单状态、权限、RiskState 或 enforcement。
+model MetricContribution {
+  id                String   @id @default(cuid())
+  projectionKey     String
+  projectionVersion Int
+  eventId           String
+  event             DomainEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+
+  metricKey     String
+  metricVersion Int
+  campusId      String
+  occurredAt    DateTime
+  dimensionKey  String
+  value         Decimal  @db.Decimal(24, 6)
+
+  createdAt DateTime @default(now())
+
+  @@unique([projectionKey, projectionVersion, eventId, metricKey, metricVersion, dimensionKey])
+  @@index([metricKey, metricVersion, campusId, occurredAt])
+  @@index([eventId, projectionKey, projectionVersion])
 }
 
 model OutboxEvent {

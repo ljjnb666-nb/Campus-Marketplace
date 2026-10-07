@@ -4,6 +4,12 @@ import {
   DomainEventIntentContractError,
   validateDomainEventIntent,
 } from "@/lib/domain-events/domain-event-registry";
+import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
+import {
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+} from "@/lib/async/job-types";
+import { buildLiveDomainEventProjectionDedupeKey } from "@/lib/analytics/projection-contract";
 
 const MACHINE_SOURCE_TYPE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
@@ -186,13 +192,13 @@ export async function recordDomainEventTx(
     data: [row],
     skipDuplicates: true,
   });
-  if (inserted.count > 0) {
-    return { recorded: true, occurrenceKey: validated.occurrenceKey };
-  }
 
+  // 10B 起即使 first insert 也必须读回 eventId：projection AsyncJob payload
+  // 只携带 eventId。读回仍在当前 domain transaction 内，不跨 authority。
   const existing = await tx.domainEvent.findUnique({
     where: { occurrenceKey: validated.occurrenceKey },
     select: {
+      id: true,
       eventType: true,
       schemaVersion: true,
       aggregateType: true,
@@ -221,9 +227,23 @@ export async function recordDomainEventTx(
     existing.sourceId === row.sourceId &&
     stableJson(existing.payload) === stableJson(row.payload);
 
-  if (!semanticallyIdentical) {
+  if (!semanticallyIdentical || !existing) {
     throw new DomainEventOccurrenceConflictError(validated.occurrenceKey);
   }
 
-  return { recorded: false, occurrenceKey: validated.occurrenceKey };
+  // Phase 10B realtime chain：domain mutation + DomainEvent + projection intent
+  // 同事务原子落盘。AsyncJob 只是 future-action intent；projection effect 的
+  // exactly-once authority 仍是 ProjectionReceipt。
+  await enqueueAsyncJobTx(tx, {
+    kind: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+    schemaVersion: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+    dedupeKey: buildLiveDomainEventProjectionDedupeKey(existing.id),
+    payload: { eventId: existing.id },
+    runAt: new Date(),
+  });
+
+  return {
+    recorded: inserted.count > 0,
+    occurrenceKey: validated.occurrenceKey,
+  };
 }
