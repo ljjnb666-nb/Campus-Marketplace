@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+}));
+
 const {
   revalidatePath,
   requireUser,
@@ -255,7 +261,7 @@ describe("order actions", () => {
     txOrderUpdate.mockReset();
     txOrderUpdateMany.mockReset();
     txOrderFindFirst.mockReset().mockResolvedValue(null);
-    txProductUpdate.mockReset();
+    txProductUpdate.mockReset().mockResolvedValue({ campusId: "campus-1" });
     setProductLockRow({
       id: "product-1",
       campusId: "campus-1",
@@ -276,7 +282,7 @@ describe("order actions", () => {
       productReservationExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
     };
     txProductUpdateMany.mockReset();
-    txServiceListingUpdate.mockReset();
+    txServiceListingUpdate.mockReset().mockResolvedValue({ campusId: "campus-1" });
     txUserUpdate.mockReset();
     txErrandTaskUpdateMany.mockReset().mockResolvedValue({ count: 1 });
     txAsyncJobCreateMany.mockReset().mockResolvedValue({ count: 1 });
@@ -816,6 +822,7 @@ describe("order actions", () => {
       expect(txProductUpdate).toHaveBeenCalledWith({
         where: { id: "product-1" },
         data: { status: "SOLD" },
+        select: { campusId: true },
       });
       expect(txUserUpdate).toHaveBeenCalledTimes(2);
       expect(txUserUpdate).toHaveBeenNthCalledWith(1, {
@@ -843,6 +850,7 @@ describe("order actions", () => {
       expect(txServiceListingUpdate).toHaveBeenCalledWith({
         where: { id: "service-1" },
         data: { completedOrderCount: { increment: 1 } },
+        select: { campusId: true },
       });
       expect(txProductUpdate).not.toHaveBeenCalled();
     });
