@@ -75,6 +75,20 @@ describe("Phase 10C liquidity DomainEvent contracts", () => {
         bookedValue: "15.001",
       },
     )).toEqual({ ok: false, reason: "PAYLOAD_INVALID" });
+
+    // SERVICE completion count remains supported, but historical/live value
+    // authority is intentionally deferred until an immutable agreed total exists.
+    expect(validateDomainEventIntent(
+      "LIQUIDITY_TRANSACTION_VALUE_RECORDED",
+      1,
+      "TRANSACTION",
+      "tx-service",
+      {
+        transactionId: "tx-service",
+        transactionType: "SERVICE",
+        bookedValue: "15.00",
+      },
+    )).toEqual({ ok: false, reason: "PAYLOAD_INVALID" });
   });
 
   it("P10C2-EVENT-02: booked value canonicalization never rounds or accepts invalid money", () => {

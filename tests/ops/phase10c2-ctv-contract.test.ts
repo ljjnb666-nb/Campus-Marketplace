@@ -17,6 +17,7 @@ describe("Phase 10C-2 CTV authority guards", () => {
 
     expect(query).toContain('o.amount AS "bookedValue"');
     expect(query).toContain('ro."rentalAmount"');
+    expect(query).not.toContain("'SERVICE'");
     expect(query).toContain('o."completedAt"');
     expect(query).toContain('ro."completedAt"');
 
@@ -59,11 +60,30 @@ describe("Phase 10C-2 CTV authority guards", () => {
     expect(text).toContain("ext.newEndTime,\n    order.quantity,");
   });
 
-  it("P10C2-ARCH-03: ordinary/errand completion uses canonical Order.amount", () => {
-    expect(source("src/lib/order-status-service.ts"))
-      .toContain("bookedValue: order.amount");
+  it("P10C2-ARCH-03: PRODUCT/ERRAND use Order.amount while SERVICE is count-only", () => {
+    const orderStatus = source("src/lib/order-status-service.ts");
+    expect(orderStatus).toContain("bookedValue: order.amount");
+
+    const serviceBlock = orderStatus.slice(
+      orderStatus.indexOf('order.type === "SERVICE"'),
+      orderStatus.indexOf("const actorRole"),
+    );
+    expect(serviceBlock).toContain("recordLiquidityTransactionCompletedTx");
+    expect(serviceBlock).not.toContain("recordLiquidityTransactionCompletionFactsTx");
+    expect(serviceBlock).not.toContain("bookedValue");
+
     expect(source("src/lib/errand-completion.ts"))
       .toContain("bookedValue: orderScope.amount");
+
+    const registry = source("src/lib/domain-events/domain-event-registry.ts");
+    const valueTypes = registry.slice(
+      registry.indexOf("LIQUIDITY_TRANSACTION_VALUE_TYPES"),
+      registry.indexOf("const boundedId"),
+    );
+    expect(valueTypes).toContain('"PRODUCT"');
+    expect(valueTypes).toContain('"ERRAND"');
+    expect(valueTypes).toContain('"RENTAL"');
+    expect(valueTypes).not.toContain('"SERVICE"');
   });
 
   it("P10C2-ARCH-04: CTV is explicit and GMV remains absent as a metric key", () => {
@@ -84,5 +104,17 @@ describe("Phase 10C-2 CTV authority guards", () => {
     );
     expect(migration).toContain('CHECK (quantity >= 1)');
     expect(migration).toContain("PHASE10C2_RENTAL_VALUE_REPAIR_OVERFLOW");
+    expect(migration).toContain("BEGIN;");
+    expect(migration).toContain("COMMIT;");
+    expect(migration).toContain("PHASE10C2_RENTAL_QUANTITY_REPAIR_ALREADY_APPLIED");
+  });
+
+  it("P10C2-ARCH-06: unsupported/corrupt history is explicitly partial, never silently complete", () => {
+    const backfill = source("src/lib/analytics/transaction-value-backfill.ts");
+    expect(backfill).toContain('"CTV_BACKFILL_PARTIAL"');
+    expect(backfill).toContain("unsupportedServiceRows");
+    expect(backfill).toContain("corruptRows");
+    expect(backfill).toContain("o.amount >= 0");
+    expect(backfill).toContain('ro."rentalAmount" >= 0');
   });
 });

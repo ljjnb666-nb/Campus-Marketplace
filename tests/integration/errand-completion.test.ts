@@ -6,6 +6,7 @@ import {
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
 } from "@/lib/domain-events/domain-event-registry";
+import { buildLiveDomainEventProjectionDedupeKey } from "@/lib/analytics/projection-contract";
 
 /**
  * ERRAND 完成 exactly-once 真实数据库集成测试。
@@ -117,9 +118,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
         select: { id: true },
       })
     ).map((event) => event.id);
-    const projectionDedupeKeys = eventIds.map(
-      (eventId) => `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${eventId}`,
-    );
+    const projectionDedupeKeys = eventIds.map(buildLiveDomainEventProjectionDedupeKey);
     await prisma.metricContribution.deleteMany({
       where: { eventId: { in: eventIds } },
     });
@@ -220,7 +219,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     }
     await tx.asyncJob.updateMany({
       where: {
-        dedupeKey: `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${event.id}`,
+        dedupeKey: buildLiveDomainEventProjectionDedupeKey(event.id),
       },
       data: { runAt: TEST_ONLY_PARKED_PROJECTION_RUN_AT },
     });
@@ -337,6 +336,27 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     });
     expect(events[0]!.occurredAt.getTime()).toBe(orderAfter!.completedAt!.getTime());
     expect(events[0]!.recordedAt.getTime()).toBeGreaterThanOrEqual(events[0]!.occurredAt.getTime());
+
+    const valueEvents = await prisma.domainEvent.findMany({
+      where: {
+        eventType: "LIQUIDITY_TRANSACTION_VALUE_RECORDED",
+        aggregateId: order.id,
+      },
+    });
+    expect(valueEvents).toHaveLength(1);
+    expect(valueEvents[0]).toMatchObject({
+      aggregateType: "TRANSACTION",
+      aggregateId: order.id,
+      campusId,
+      occurrenceKey: `LIQUIDITY_TRANSACTION_VALUE_RECORDED:ERRAND:${order.id}`,
+      payload: {
+        transactionId: order.id,
+        transactionType: "ERRAND",
+        bookedValue: "8.00",
+      },
+      sourceType: "DOMAIN_TX",
+    });
+    expect(valueEvents[0]!.occurredAt.getTime()).toBe(orderAfter!.completedAt!.getTime());
 
     // 计数恰好各 +1，不能 +2
     const after = await readCounts();
