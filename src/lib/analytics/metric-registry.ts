@@ -5,6 +5,8 @@ import {
   LIQUIDITY_LISTING_CREATED_EVENT_TYPE,
   LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION,
   LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
+  LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_SCHEMA_VERSION,
+  LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE,
 } from "@/lib/domain-events/domain-event-registry";
 
 export const NEW_LISTING_COUNT_METRIC_KEY = "NEW_LISTING_COUNT";
@@ -16,6 +18,9 @@ export const DEMAND_CREATED_COUNT_METRIC_VERSION = 1;
 export const COMPLETED_TRANSACTION_COUNT_METRIC_KEY = "COMPLETED_TRANSACTION_COUNT";
 // v2：统一 PRODUCT/SERVICE/ERRAND/RENTAL completion fact；v1 仅有 ERRAND。
 export const COMPLETED_TRANSACTION_COUNT_METRIC_VERSION = 2;
+
+export const COMPLETED_TRANSACTION_VALUE_METRIC_KEY = "COMPLETED_TRANSACTION_VALUE";
+export const COMPLETED_TRANSACTION_VALUE_METRIC_VERSION = 1;
 
 export type MetricDefinition = {
   metricKey: string;
@@ -61,6 +66,17 @@ const METRIC_DEFINITIONS = new Map<string, MetricDefinition>([
       valueType: "COUNT",
       authority: "DOMAIN_EVENT",
       description: "已完成交易事实计数；不是付款、结算或平台收入。",
+    },
+  ],
+  [
+    COMPLETED_TRANSACTION_VALUE_METRIC_KEY,
+    {
+      metricKey: COMPLETED_TRANSACTION_VALUE_METRIC_KEY,
+      metricVersion: COMPLETED_TRANSACTION_VALUE_METRIC_VERSION,
+      valueType: "DECIMAL",
+      authority: "DOMAIN_EVENT",
+      description:
+        "CTV：平台记录的已完成交易核心记账金额；不是支付实收、结算、平台收入或 GMV。Rental 仅计 rentalAmount。",
     },
   ],
 ]);
@@ -115,6 +131,22 @@ const EVENT_METRIC_PROJECTORS = new Map<string, Map<number, EventMetricProjector
             metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
             dimensionKey: `TRANSACTION_TYPE:${String(payload.transactionType)}`,
             value: "1",
+          },
+        ],
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_SCHEMA_VERSION,
+        ({ payload }) => [
+          {
+            metricKey: COMPLETED_TRANSACTION_VALUE_METRIC_KEY,
+            metricVersion: COMPLETED_TRANSACTION_VALUE_METRIC_VERSION,
+            dimensionKey: `TRANSACTION_TYPE:${String(payload.transactionType)}`,
+            value: String(payload.bookedValue),
           },
         ],
       ],
