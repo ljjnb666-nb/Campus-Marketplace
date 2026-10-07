@@ -228,6 +228,11 @@ export type ClaimedAsyncJob = {
   id: string;
   kind: string;
   schemaVersion: number;
+  /**
+   * Claim-time durable intent identity. Optional only for backward-compatible
+   * unit fixtures; production claimDueAsyncJobs always populates it.
+   */
+  dedupeKey?: string;
   payload: Prisma.JsonValue;
   attempts: number;
   maxAttempts: number;

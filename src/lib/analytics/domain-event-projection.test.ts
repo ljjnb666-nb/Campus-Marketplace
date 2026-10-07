@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Prisma } from "@prisma/client";
 
 import { projectDomainEventTx } from "@/lib/analytics/domain-event-projection";
+import { analyticsProjectDomainEventHandler } from "@/lib/async/handlers/analytics-project-domain-event";
 import {
   ANALYTICS_METRIC_PROJECTION_KEY,
   ANALYTICS_METRIC_PROJECTION_VERSION,
@@ -113,5 +114,27 @@ describe("Phase 10B receipt-backed projection", () => {
     expect(buildLiveDomainEventProjectionDedupeKey("event-1")).toBe(
       "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
     );
+  });
+
+  it("PROJECTION-06: stale-version durable intent is a no-op under newer runtime semantics", async () => {
+    const tx = buildTx();
+
+    await expect(
+      analyticsProjectDomainEventHandler(asTx(tx), {
+        id: "job-v0",
+        kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+        schemaVersion: 1,
+        dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection0:event-1",
+        payload: { eventId: "event-1" },
+        attempts: 1,
+        maxAttempts: 5,
+        leaseToken: "lease-1",
+        previousStatus: "PENDING",
+      }),
+    ).resolves.toEqual({ kind: "COMPLETED_IDEMPOTENT" });
+
+    expect(tx.domainEvent.findUnique).not.toHaveBeenCalled();
+    expect(tx.projectionReceipt.createMany).not.toHaveBeenCalled();
+    expect(tx.metricContribution.createMany).not.toHaveBeenCalled();
   });
 });

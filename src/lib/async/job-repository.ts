@@ -126,6 +126,7 @@ export async function claimDueAsyncJobs(
       id: string;
       kind: string;
       schemaVersion: number;
+      dedupeKey: string;
       payload: Prisma.JsonValue;
       attempts: number;
       maxAttempts: number;
@@ -163,6 +164,7 @@ export async function claimDueAsyncJobs(
       j.id,
       j.kind,
       j."schemaVersion",
+      j."dedupeKey",
       j.payload,
       j.attempts,
       j."maxAttempts",
@@ -174,6 +176,7 @@ export async function claimDueAsyncJobs(
     id: row.id,
     kind: row.kind,
     schemaVersion: row.schemaVersion,
+    dedupeKey: row.dedupeKey,
     payload: row.payload,
     attempts: row.attempts,
     maxAttempts: row.maxAttempts,
