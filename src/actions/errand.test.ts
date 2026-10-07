@@ -21,6 +21,7 @@ const {
   txOrderUpdateMany,
   txDomainEventCreateMany,
   txDomainEventFindUnique,
+  txAsyncJobCreateMany,
   txUserUpdate,
   txExecuteRaw,
   txUserFindMany,
@@ -41,6 +42,7 @@ const {
   const txOrderUpdateMany = vi.fn();
   const txDomainEventCreateMany = vi.fn();
   const txDomainEventFindUnique = vi.fn();
+  const txAsyncJobCreateMany = vi.fn();
   const txUserUpdate = vi.fn();
   const txErrandTaskCreate = vi.fn();
   const errandTaskFindFirst = vi.fn();
@@ -92,6 +94,10 @@ const {
       // Phase 10A：recordDomainEventTx 写边界（occurrence dedupe）
       createMany: txDomainEventCreateMany,
       findUnique: txDomainEventFindUnique,
+    },
+    asyncJob: {
+      // Phase 10B：DomainEvent 与 projection intent 同事务。
+      createMany: txAsyncJobCreateMany,
     },
     user: {
       update: txUserUpdate,
@@ -149,6 +155,7 @@ const {
     txOrderUpdateMany,
     txDomainEventCreateMany,
     txDomainEventFindUnique,
+    txAsyncJobCreateMany,
     txUserUpdate,
     txExecuteRaw,
     txUserFindMany,
@@ -264,6 +271,7 @@ describe("errand actions", () => {
     txOrderUpdateMany.mockReset();
     txDomainEventCreateMany.mockReset();
     txDomainEventFindUnique.mockReset();
+    txAsyncJobCreateMany.mockReset();
     txUserUpdate.mockReset();
 
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });
@@ -297,7 +305,23 @@ describe("errand actions", () => {
       };
     });
     txDomainEventCreateMany.mockResolvedValue({ count: 1 });
-    txDomainEventFindUnique.mockResolvedValue(null);
+    txDomainEventFindUnique.mockImplementation(async () => ({
+      id: "event-1",
+      eventType: "ERRAND_ORDER_COMPLETED",
+      schemaVersion: 1,
+      aggregateType: "ORDER",
+      aggregateId: "order-1",
+      campusId: "campus-1",
+      actorUserId: null,
+      subjectUserId: null,
+      payload: { orderId: "order-1", errandTaskId: "errand-1" },
+      occurredAt:
+        (txOrderUpdateMany.mock.calls[0]?.[0]?.data?.completedAt as Date | undefined) ??
+        new Date(0),
+      sourceType: "DOMAIN_TX",
+      sourceId: null,
+    }));
+    txAsyncJobCreateMany.mockResolvedValue({ count: 1 });
 
     // Phase 9B：emitNotificationTx 写边界（createMany + dedupe winner 读回）
     txNotificationCreateMany.mockReset().mockResolvedValue({ count: 1 });
@@ -776,6 +800,18 @@ describe("errand actions", () => {
           actorUserId: null,
           subjectUserId: null,
           sourceId: null,
+        }),
+      ],
+      skipDuplicates: true,
+    });
+    expect(txAsyncJobCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+          schemaVersion: 1,
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          payload: { eventId: "event-1" },
+          runAt: expect.any(Date),
         }),
       ],
       skipDuplicates: true,
