@@ -4,7 +4,7 @@ import type {
   RiskFlagSeverity,
 } from "@prisma/client";
 
-import type { EnforcementReadAccess } from "@/lib/enforcement/enforcement-read-access";
+import type { RiskReadAccess } from "@/lib/risk/risk-read-access";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -274,13 +274,13 @@ type AuthorizedRiskScope = {
 /**
  * Authorization happens before the query shape is built.
  *
- * - GLOBAL enforcement.read: may evaluate ALL_SCOPES, or request one exact campus.
- * - campus-only enforcement.read: MUST name one campus already present in access.
+ * - GLOBAL risk.read: may evaluate ALL_SCOPES, or request one exact campus.
+ * - campus-only risk.read: MUST name one campus already present in access.
  * - campus evaluation uses exact campusId only. GLOBAL/unscoped and other-campus
  *   RiskFlag rows are structurally excluded in SQL and never fetched then filtered.
  */
 export function resolveAuthorizedRiskScope(
-  access: EnforcementReadAccess,
+  access: RiskReadAccess,
   campusId?: string,
 ): AuthorizedRiskScope {
   if (campusId !== undefined && campusId.length === 0) {
@@ -318,7 +318,7 @@ export function resolveAuthorizedRiskScope(
  * at RISK_SIGNAL_EVIDENCE_LIMIT and excludes note/reason/sourceId/actor identity.
  */
 export async function loadAuthorizedRiskIntelligence(input: {
-  access: EnforcementReadAccess;
+  access: RiskReadAccess;
   targetUserId: string;
   campusId?: string;
   evaluatedAt?: Date;

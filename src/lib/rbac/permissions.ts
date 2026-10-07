@@ -27,6 +27,11 @@ export const PERMISSIONS = {
   // 新增 read capability 绝不允许静默改变 legacy /admin 资格或
   // privileged-target 分类。
   "enforcement.read": "读取执法记录与账户限制状态（治理运营可见性）",
+  // Phase 10D：风险情报窄读取。独立于 enforcement.read——后者的 7D
+  // 冻结合同只覆盖 EnforcementAction + RiskState，禁止静默扩权到 RiskFlag。
+  // risk.read 只授权规则化风险信号/建议读取，不授予 RiskState mutation /
+  // EnforcementAction / audit.read，也不进入 legacy full-admin 等价集合。
+  "risk.read": "读取风险信号与规则化风险建议（治理运营可见性）",
   // Phase 7F：认证证据窄读取（纯 read capability）。语义严格限定为
   // "仅访问 verification-bound private evidence"（UploadedAsset.category ==
   // VERIFICATION 且 campus 精确匹配；其它 category 一律 NO ACCESS）——
