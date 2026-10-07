@@ -60,6 +60,17 @@ describe("Phase 10D explainable risk rules", () => {
     expect(result).not.toHaveProperty("trustScore");
   });
 
+  it("keeps low-severity manual context at OBSERVE with an explicit context rule", () => {
+    const result = evaluateRiskSignalBuckets([
+      { kind: "MANUAL_FLAG", severity: "LOW", count: 1 },
+    ]);
+    expect(result.attentionLevel).toBe("OBSERVE");
+    expect(result.recommendedAction).toBe("MONITOR");
+    expect(result.matchedRules).toEqual([
+      { ruleId: "MANUAL_CONTEXT_SIGNAL", signalCount: 1 },
+    ]);
+  });
+
   it("returns CLEAR for no active signal", () => {
     expect(evaluateRiskSignalBuckets([])).toEqual({
       attentionLevel: "CLEAR",

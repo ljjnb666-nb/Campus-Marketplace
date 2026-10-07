@@ -38,6 +38,7 @@ export type RiskRuleId =
   | "CONFIRMED_HIGH_SIGNAL"
   | "CONFIRMED_REPORT_PRESENT"
   | "MANUAL_REVIEW_SIGNAL"
+  | "MANUAL_CONTEXT_SIGNAL"
   | "UNCONFIRMED_REPORT_CONTEXT"
   | "DISPUTE_CONTEXT_ONLY";
 
@@ -248,10 +249,8 @@ export function evaluateRiskSignalBuckets(
       (bucket.severity === "INFO" || bucket.severity === "LOW"),
   );
   if (lowManual > 0) {
-    // Reuse the explicit manual-review signal rule id while preserving the
-    // lower OBSERVE semantics for low-severity human context.
     matchedRules.push({
-      ruleId: "MANUAL_REVIEW_SIGNAL",
+      ruleId: "MANUAL_CONTEXT_SIGNAL",
       signalCount: lowManual,
     });
     attentionLevel = maxAttention(attentionLevel, "OBSERVE");
