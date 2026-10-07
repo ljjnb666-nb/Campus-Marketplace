@@ -30,8 +30,13 @@ function resolveBatchLimit(value: number | undefined): number {
  */
 export async function backfillCanonicalErrandCompletionEvents(input: {
   batchLimit?: number;
+  campusId?: string;
 } = {}): Promise<{ scanned: number; backfilled: number; racedWithExisting: number }> {
   const batchLimit = resolveBatchLimit(input.batchLimit);
+  const campusId = input.campusId ?? null;
+  if (campusId !== null && campusId.length === 0) {
+    throw new Error("ANALYTICS_BACKFILL_CAMPUS_SCOPE_INVALID");
+  }
 
   return withTransaction(async (tx) => {
     const rows = await tx.$queryRaw<CanonicalErrandCompletionRow[]>`
@@ -52,6 +57,7 @@ export async function backfillCanonicalErrandCompletionEvents(input: {
         AND t."publisherId" = o."buyerId"
         AND t."accepterId" = o."sellerId"
         AND d.id IS NULL
+        AND (${campusId}::text IS NULL OR t."campusId" = ${campusId})
       ORDER BY o."completedAt" ASC, o.id ASC
       LIMIT ${batchLimit}
       FOR UPDATE OF o SKIP LOCKED

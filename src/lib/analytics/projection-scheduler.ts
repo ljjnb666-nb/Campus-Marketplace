@@ -47,8 +47,13 @@ function resolveBatchLimit(value: number | undefined): number {
  */
 export async function scheduleUnprojectedDomainEventJobs(input: {
   batchLimit?: number;
+  campusId?: string;
 } = {}): Promise<ProjectionScheduleSummary> {
   const batchLimit = resolveBatchLimit(input.batchLimit);
+  const campusId = input.campusId ?? null;
+  if (campusId !== null && campusId.length === 0) {
+    throw new Error("ANALYTICS_PROJECTION_CAMPUS_SCOPE_INVALID");
+  }
   const dedupePrefix = [
     ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
     `schema${ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION}`,
@@ -71,6 +76,7 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
         ON j."dedupeKey" = ${dedupePrefix} || d.id
       WHERE r.id IS NULL
         AND j.id IS NULL
+        AND (${campusId}::text IS NULL OR d."campusId" = ${campusId})
       ORDER BY d."recordedAt" ASC, d.id ASC
       LIMIT ${batchLimit}
       FOR UPDATE OF d SKIP LOCKED
@@ -100,6 +106,7 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
        AND r."projectionKey" = ${ANALYTICS_METRIC_PROJECTION_KEY}
        AND r."projectionVersion" = ${ANALYTICS_METRIC_PROJECTION_VERSION}
       WHERE r.id IS NULL
+        AND (${campusId}::text IS NULL OR d."campusId" = ${campusId})
       ORDER BY d."recordedAt" ASC, d.id ASC
       LIMIT ${batchLimit}
     `;
