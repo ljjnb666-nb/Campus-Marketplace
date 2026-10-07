@@ -49,6 +49,16 @@ export const LIQUIDITY_TRANSACTION_TYPES = [
   "RENTAL",
 ] as const;
 
+// Phase 10C-2 value authority is intentionally narrower than completion-count
+// authority. SERVICE price may be PER_HOUR / PER_SESSION / NEGOTIABLE and Order
+// does not snapshot the pricing unit or an agreed final total, so SERVICE cannot
+// safely produce a completed-value fact yet.
+export const LIQUIDITY_TRANSACTION_VALUE_TYPES = [
+  "PRODUCT",
+  "ERRAND",
+  "RENTAL",
+] as const;
+
 const boundedId = z.string().min(1).max(191);
 
 const errandOrderCompletedPayloadSchema = z
@@ -89,7 +99,7 @@ const bookedValueSchema = z
 const liquidityTransactionValueRecordedPayloadSchema = z
   .object({
     transactionId: boundedId,
-    transactionType: z.enum(LIQUIDITY_TRANSACTION_TYPES),
+    transactionType: z.enum(LIQUIDITY_TRANSACTION_VALUE_TYPES),
     bookedValue: bookedValueSchema,
   })
   .strict();

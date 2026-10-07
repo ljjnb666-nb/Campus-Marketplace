@@ -17,6 +17,7 @@ import {
   type LIQUIDITY_DEMAND_TYPES,
   type LIQUIDITY_LISTING_TYPES,
   type LIQUIDITY_TRANSACTION_TYPES,
+  LIQUIDITY_TRANSACTION_VALUE_TYPES,
 } from "@/lib/domain-events/domain-event-registry";
 
 type Source = {
@@ -27,6 +28,8 @@ type Source = {
 export type LiquidityListingType = (typeof LIQUIDITY_LISTING_TYPES)[number];
 export type LiquidityDemandType = (typeof LIQUIDITY_DEMAND_TYPES)[number];
 export type LiquidityTransactionType = (typeof LIQUIDITY_TRANSACTION_TYPES)[number];
+export type LiquidityTransactionValueType =
+  (typeof LIQUIDITY_TRANSACTION_VALUE_TYPES)[number];
 
 type RentalCompletedBookedValueInput = {
   rentalAmount: Prisma.Decimal | string | number;
@@ -148,8 +151,12 @@ export function canonicalizeBookedValue(
  *
  * bookedValue is the platform-recorded non-refundable obligation value of a
  * COMPLETED transaction:
- * - PRODUCT / SERVICE / ERRAND: Order.amount
+ * - PRODUCT / ERRAND: Order.amount
  * - RENTAL: RentalOrder.rentalAmount only
+ *
+ * SERVICE is deliberately excluded until the domain has an immutable completed
+ * total: ServiceListing.price can mean per-hour/per-session/per-order/negotiable,
+ * while Order does not snapshot that pricing semantic or a negotiated total.
  *
  * It is NOT settlement, cash collected, platform revenue, GMV, refundable
  * deposit principal, finalAmount, service/overdue/cancellation fees or
@@ -159,7 +166,7 @@ export function recordLiquidityTransactionValueRecordedTx(
   tx: Prisma.TransactionClient,
   input: {
     transactionId: string;
-    transactionType: LiquidityTransactionType;
+    transactionType: LiquidityTransactionValueType;
     campusId: string;
     occurredAt: Date;
     bookedValue: Prisma.Decimal | string | number;
@@ -186,7 +193,7 @@ export async function recordLiquidityTransactionCompletionFactsTx(
   tx: Prisma.TransactionClient,
   input: {
     transactionId: string;
-    transactionType: LiquidityTransactionType;
+    transactionType: LiquidityTransactionValueType;
     campusId: string;
     occurredAt: Date;
     bookedValue: Prisma.Decimal | string | number;

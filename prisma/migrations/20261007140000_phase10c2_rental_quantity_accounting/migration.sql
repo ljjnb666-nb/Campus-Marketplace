@@ -12,10 +12,34 @@
 -- Deposit principal is intentionally NOT multiplied: its per-order/per-unit
 -- semantics are not frozen here and it is excluded from CTV.
 --
--- Fail closed on impossible/overflowing history instead of silently truncating.
+-- Failure model:
+-- - explicit transaction: value rewrite + DB safety belt are atomic;
+-- - the constraint name is also the committed repair marker. If the SQL is
+--   replayed after a commit-but-before-migration-ledger acknowledgement window,
+--   the data rewrite is skipped, preventing a second multiplication.
+-- - impossible/overflowing history aborts before any value rewrite.
+
+BEGIN;
 
 DO $$
+DECLARE
+  repair_already_applied boolean;
 BEGIN
+  SELECT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    WHERE c.conname = 'RentalOrder_quantity_positive_chk'
+      AND t.relname = 'RentalOrder'
+      AND t.relnamespace = 'public'::regnamespace
+  )
+  INTO repair_already_applied;
+
+  IF repair_already_applied THEN
+    RAISE NOTICE 'PHASE10C2_RENTAL_QUANTITY_REPAIR_ALREADY_APPLIED';
+    RETURN;
+  END IF;
+
   IF EXISTS (
     SELECT 1
     FROM "RentalOrder"
@@ -35,15 +59,17 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'PHASE10C2_RENTAL_VALUE_REPAIR_OVERFLOW';
   END IF;
+
+  UPDATE "RentalOrder"
+  SET
+    "finalAmount" = "finalAmount" + ("rentalAmount" * (quantity - 1)),
+    "rentalAmount" = "rentalAmount" * quantity
+  WHERE quantity > 1;
+
+  EXECUTE 'ALTER TABLE "RentalOrder"
+    ADD CONSTRAINT "RentalOrder_quantity_positive_chk"
+    CHECK (quantity >= 1)';
 END
 $$;
 
-UPDATE "RentalOrder"
-SET
-  "finalAmount" = "finalAmount" + ("rentalAmount" * (quantity - 1)),
-  "rentalAmount" = "rentalAmount" * quantity
-WHERE quantity > 1;
-
-ALTER TABLE "RentalOrder"
-ADD CONSTRAINT "RentalOrder_quantity_positive_chk"
-CHECK (quantity >= 1);
+COMMIT;

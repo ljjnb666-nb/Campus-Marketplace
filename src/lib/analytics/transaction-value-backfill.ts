@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import {
   recordLiquidityTransactionValueRecordedTx,
-  type LiquidityTransactionType,
+  type LiquidityTransactionValueType,
 } from "@/lib/analytics/liquidity-domain-events";
 import { withTransaction } from "@/lib/prisma";
 
@@ -10,17 +10,29 @@ const DEFAULT_BATCH_LIMIT = 10;
 
 type TransactionValueCandidate = {
   transactionId: string;
-  transactionType: LiquidityTransactionType;
+  transactionType: LiquidityTransactionValueType;
   campusId: string;
   occurredAt: Date;
   bookedValue: unknown;
   occurrenceKey: string;
 };
 
+type TransactionValueBackfillDiagnostics = {
+  unsupportedServiceRows: number;
+  corruptRows: number;
+};
+
+export type TransactionValueBackfillStatus =
+  | "COMPLETE"
+  | "CTV_BACKFILL_PARTIAL";
+
 export type TransactionValueBackfillSummary = {
   scanned: number;
   backfilled: number;
   racedWithExisting: number;
+  status: TransactionValueBackfillStatus;
+  unsupportedServiceRows: number;
+  corruptRows: number;
 };
 
 function resolveBatchLimit(value: number | undefined): number {
@@ -34,14 +46,23 @@ function resolveBatchLimit(value: number | undefined): number {
 /**
  * Phase 10C-2 canonical CTV backfill.
  *
- * Authority:
- * - PRODUCT / SERVICE / ERRAND => completed Order.amount
- * - RENTAL => completed RentalOrder.rentalAmount only
+ * Safe historical authority:
+ * - PRODUCT => completed Order.amount
+ * - ERRAND  => completed Order.amount
+ * - RENTAL  => completed RentalOrder.rentalAmount only
+ *
+ * SERVICE is deliberately partial/unsupported: ServiceListing.price may be
+ * PER_HOUR / PER_SESSION / PER_ORDER / NEGOTIABLE, while historical Order rows
+ * do not snapshot pricingUnit or an agreed final total. We report this as
+ * CTV_BACKFILL_PARTIAL instead of inventing history.
  *
  * Explicit exclusions: finalAmount, refundable deposit principal,
  * damage/deposit deduction, service/overdue/cancellation fees and
- * payment/settlement state.
- * Historical occurredAt is completedAt only; updatedAt is forbidden.
+ * payment/settlement state. Historical occurredAt is completedAt only;
+ * updatedAt is forbidden.
+ *
+ * Corrupt rows are excluded from the bounded candidate window and counted
+ * separately, so one bad historical record cannot poison every later safe row.
  */
 export async function backfillCanonicalTransactionValuesTx(
   tx: Prisma.TransactionClient,
@@ -71,21 +92,7 @@ export async function backfillCanonicalTransactionValuesTx(
         AND o."completedAt" IS NOT NULL
         AND o."sellerId" = p."sellerId"
         AND o."buyerId" <> p."sellerId"
-        AND d.id IS NULL
-
-      UNION ALL
-      SELECT
-        o.id, 'SERVICE', s."campusId", o."completedAt", o.amount,
-        'LIQUIDITY_TRANSACTION_VALUE_RECORDED:SERVICE:' || o.id
-      FROM "Order" o
-      JOIN "ServiceListing" s ON s.id = o."serviceListingId"
-      LEFT JOIN "DomainEvent" d
-        ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:SERVICE:' || o.id
-      WHERE o.type = 'SERVICE'
-        AND o.status = 'COMPLETED'
-        AND o."completedAt" IS NOT NULL
-        AND o."sellerId" = s."providerId"
-        AND o."buyerId" <> s."providerId"
+        AND o.amount >= 0
         AND d.id IS NULL
 
       UNION ALL
@@ -103,6 +110,7 @@ export async function backfillCanonicalTransactionValuesTx(
         AND e."publisherId" = o."buyerId"
         AND e."accepterId" = o."sellerId"
         AND o."buyerId" <> o."sellerId"
+        AND o.amount >= 0
         AND d.id IS NULL
 
       UNION ALL
@@ -118,6 +126,7 @@ export async function backfillCanonicalTransactionValuesTx(
         AND ro."completedAt" IS NOT NULL
         AND ro."ownerId" = rl."ownerId"
         AND ro."renterId" <> rl."ownerId"
+        AND ro."rentalAmount" >= 0
         AND d.id IS NULL
     )
     SELECT
@@ -132,6 +141,93 @@ export async function backfillCanonicalTransactionValuesTx(
     ORDER BY "occurredAt" ASC, "transactionType" ASC, "transactionId" ASC
     LIMIT ${batchLimit}
   `;
+
+  // Diagnostics are intentionally outside the candidate LIMIT. Unsupported or
+  // corrupt earlier rows therefore remain visible without consuming progress
+  // capacity that belongs to safe, repairable history.
+  const diagnosticsRows = await tx.$queryRaw<TransactionValueBackfillDiagnostics[]>`
+    WITH unsupported_service AS (
+      SELECT s."campusId" AS "campusId"
+      FROM "Order" o
+      JOIN "ServiceListing" s ON s.id = o."serviceListingId"
+      LEFT JOIN "DomainEvent" d
+        ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:SERVICE:' || o.id
+      WHERE o.type = 'SERVICE'
+        AND o.status = 'COMPLETED'
+        AND o."completedAt" IS NOT NULL
+        AND d.id IS NULL
+    ),
+    corrupt AS (
+      SELECT p."campusId" AS "campusId"
+      FROM "Order" o
+      LEFT JOIN "Product" p ON p.id = o."productId"
+      LEFT JOIN "DomainEvent" d
+        ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:PRODUCT:' || o.id
+      WHERE o.type = 'PRODUCT'
+        AND o.status = 'COMPLETED'
+        AND o."completedAt" IS NOT NULL
+        AND d.id IS NULL
+        AND (
+          p.id IS NULL
+          OR o."sellerId" <> p."sellerId"
+          OR o."buyerId" = p."sellerId"
+          OR o.amount < 0
+        )
+
+      UNION ALL
+      SELECT e."campusId"
+      FROM "Order" o
+      LEFT JOIN "ErrandTask" e ON e.id = o."errandTaskId"
+      LEFT JOIN "DomainEvent" d
+        ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:ERRAND:' || o.id
+      WHERE o.type = 'ERRAND'
+        AND o.status = 'COMPLETED'
+        AND o."completedAt" IS NOT NULL
+        AND d.id IS NULL
+        AND (
+          e.id IS NULL
+          OR e.status <> 'COMPLETED'
+          OR e."publisherId" <> o."buyerId"
+          OR e."accepterId" IS DISTINCT FROM o."sellerId"
+          OR o."buyerId" = o."sellerId"
+          OR o.amount < 0
+        )
+
+      UNION ALL
+      SELECT rl."campusId"
+      FROM "RentalOrder" ro
+      LEFT JOIN "RentalListing" rl ON rl.id = ro."rentalListingId"
+      LEFT JOIN "DomainEvent" d
+        ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:RENTAL:' || ro.id
+      WHERE ro.status = 'COMPLETED'
+        AND ro."completedAt" IS NOT NULL
+        AND d.id IS NULL
+        AND (
+          rl.id IS NULL
+          OR ro."ownerId" <> rl."ownerId"
+          OR ro."renterId" = rl."ownerId"
+          OR ro."rentalAmount" < 0
+        )
+    )
+    SELECT
+      (
+        SELECT COUNT(*)::int
+        FROM unsupported_service
+        WHERE (${campusId}::text IS NULL OR "campusId" = ${campusId})
+      ) AS "unsupportedServiceRows",
+      (
+        SELECT COUNT(*)::int
+        FROM corrupt
+        WHERE (
+          ${campusId}::text IS NULL
+          OR "campusId" = ${campusId}
+        )
+      ) AS "corruptRows"
+  `;
+  const diagnostics = diagnosticsRows[0] ?? {
+    unsupportedServiceRows: 0,
+    corruptRows: 0,
+  };
 
   let backfilled = 0;
   let racedWithExisting = 0;
@@ -158,7 +254,21 @@ export async function backfillCanonicalTransactionValuesTx(
     backfilled += result.recorded ? 1 : 0;
   }
 
-  return { scanned: rows.length, backfilled, racedWithExisting };
+  const unsupportedServiceRows = Number(diagnostics.unsupportedServiceRows);
+  const corruptRows = Number(diagnostics.corruptRows);
+  const status: TransactionValueBackfillStatus =
+    unsupportedServiceRows > 0 || corruptRows > 0
+      ? "CTV_BACKFILL_PARTIAL"
+      : "COMPLETE";
+
+  return {
+    scanned: rows.length,
+    backfilled,
+    racedWithExisting,
+    status,
+    unsupportedServiceRows,
+    corruptRows,
+  };
 }
 
 export function backfillCanonicalTransactionValues(
