@@ -117,3 +117,28 @@ describe("Phase 7H：operations.overview（运营级系统概览）", () => {
     }
   });
 });
+
+
+describe("Phase 10D：risk.read（风险情报窄读取）", () => {
+  it("risk.read 是已知 permission，且不扩大 legacy full-admin 等价集合", () => {
+    expect(asPermissionKey("risk.read")).toBe("risk.read");
+    expect(PERMISSIONS["risk.read"]).toBe(
+      "读取风险信号与规则化风险建议（治理运营可见性）",
+    );
+    expect(PERMISSION_KEYS).toContain("risk.read");
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS).not.toContain("risk.read");
+    expect(LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS).toHaveLength(11);
+  });
+
+  it("PLATFORM_ADMIN 自然获得 risk.read；既有 CAMPUS 系统角色零扩权", () => {
+    const platformAdmin = SYSTEM_ROLES.find(
+      (role) => role.key === PLATFORM_ADMIN_ROLE_KEY,
+    );
+    expect(platformAdmin!.permissionKeys).toContain("risk.read");
+    for (const role of SYSTEM_ROLES) {
+      if (role.scope === "CAMPUS") {
+        expect(role.permissionKeys).not.toContain("risk.read");
+      }
+    }
+  });
+});
