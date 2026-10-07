@@ -521,7 +521,10 @@ export async function confirmReturnTx(
   const { orderId, userId, role, photos, hasDamage, needsCleaning, accessoriesComplete } = input;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: { in: ['PENDING_RETURN', 'PENDING_INSPECTION'] } },
-    include: { returnRecord: true },
+    include: {
+      returnRecord: true,
+      rentalListing: { select: { campusId: true } },
+    },
   });
   if (!order) return { error: "订单状态错误" };
   if (!isRentalOrderRoleParticipant(order, role, userId)) return { error: "无权操作" };
@@ -578,6 +581,12 @@ export async function confirmReturnTx(
     });
 
     if (nextStatus === 'COMPLETED') {
+      await recordLiquidityTransactionCompletedTx(tx, {
+        transactionId: order.id,
+        transactionType: "RENTAL",
+        campusId: order.rentalListing.campusId,
+        occurredAt: now,
+      });
       await incrementRentalCompletionCounters(tx, order);
     }
 
@@ -1141,7 +1150,13 @@ export async function respondDamageClaimTx(
 
   const claim = await tx.rentalDamageClaim.findFirst({
     where: { id: input.claimId, resolvedAt: null },
-    include: { order: true },
+    include: {
+      order: {
+        include: {
+          rentalListing: { select: { campusId: true } },
+        },
+      },
+    },
   });
   if (!claim || claim.order.renterId !== input.userId) return { error: "无效请求" };
 
@@ -1181,6 +1196,12 @@ export async function respondDamageClaimTx(
       toStatus: 'COMPLETED',
       operatorId: input.userId,
       note: input.agreed ? '租客同意损坏索赔，订单完成' : '租客拒绝损坏索赔，订单完成',
+    });
+    await recordLiquidityTransactionCompletedTx(tx, {
+      transactionId: claim.orderId,
+      transactionType: "RENTAL",
+      campusId: claim.order.rentalListing.campusId,
+      occurredAt: now,
     });
     await incrementRentalCompletionCounters(tx, claim.order);
   }

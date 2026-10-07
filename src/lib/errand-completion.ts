@@ -8,6 +8,7 @@ import {
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
 } from "@/lib/domain-events/domain-event-registry";
+import { recordLiquidityTransactionCompletedTx } from "@/lib/analytics/liquidity-domain-events";
 
 /**
  * ERRAND 订单完成的唯一权威实现（exactly-once）。
@@ -104,6 +105,15 @@ export async function completeErrandOrderTx(
       orderId: input.orderId,
       errandTaskId: input.errandTaskId,
     },
+  });
+
+  // 10C-1 unified liquidity fact。旧 10A ERRAND_ORDER_COMPLETED 继续保留
+  // 作为历史兼容事实；projection v2 只消费本统一事件，避免双计。
+  await recordLiquidityTransactionCompletedTx(tx, {
+    transactionId: input.orderId,
+    transactionType: "ERRAND",
+    campusId: taskScope.campusId,
+    occurredAt,
   });
 
   // 5) 副作用仅由胜者事务执行：完成计数 + 完成通知（每个接收者恰好一条）
