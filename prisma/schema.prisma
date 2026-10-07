@@ -2505,12 +2505,12 @@ model DomainEvent {
   sourceType String @default("DOMAIN_TX")
   sourceId   String?
 
-  @@index([eventType, occurredAt, id])
-  @@index([aggregateType, aggregateId, occurredAt])
-  @@index([campusId, occurredAt, id])
   projectionReceipts  ProjectionReceipt[]
   metricContributions MetricContribution[]
 
+  @@index([eventType, occurredAt, id])
+  @@index([aggregateType, aggregateId, occurredAt])
+  @@index([campusId, occurredAt, id])
   @@index([recordedAt, id])
 }
 

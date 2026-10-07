@@ -57,4 +57,20 @@ describe("Phase 10B architecture invariants", () => {
     expect(worker).toContain("runAsyncJobBatchOnce({");
     expect(worker).toContain("let producerBudget = config.batchSize");
   });
+
+  it("P10B-ARCH-05: Prisma client composition cannot depend on the queue-backed DomainEvent writer", () => {
+    const prismaSource = read("src/lib/prisma.ts");
+    const extensionSource = read(
+      "src/lib/domain-events/domain-event-ledger-extension.ts",
+    );
+
+    expect(prismaSource).toContain(
+      '@/lib/domain-events/domain-event-ledger-extension',
+    );
+    expect(prismaSource).not.toContain(
+      'from "@/lib/domain-events/domain-event"',
+    );
+    expect(extensionSource).not.toContain("@/lib/async/job-repository");
+    expect(extensionSource).not.toContain('from "@/lib/prisma"');
+  });
 });
