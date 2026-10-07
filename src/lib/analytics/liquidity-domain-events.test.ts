@@ -92,11 +92,8 @@ describe("Phase 10C liquidity DomainEvent contracts", () => {
     expect(
       computeRentalCompletedBookedValue({
         rentalAmount: "15.00",
-        serviceFee: "7.00",
-        overdueFee: "3.00",
-        depositDeduction: "5.00",
       }).toFixed(2),
-    ).toBe("30.00");
+    ).toBe("15.00");
     expect(() =>
       computeRentalCompletedBookedValue({
         rentalAmount: "15.00",

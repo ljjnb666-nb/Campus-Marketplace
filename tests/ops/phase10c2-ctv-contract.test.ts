@@ -17,15 +17,15 @@ describe("Phase 10C-2 CTV authority guards", () => {
 
     expect(query).toContain('o.amount AS "bookedValue"');
     expect(query).toContain('ro."rentalAmount"');
-    expect(query).toContain('ro."serviceFee"');
-    expect(query).toContain('ro."overdueFee"');
-    expect(query).toContain('ro."depositDeduction"');
     expect(query).toContain('o."completedAt"');
     expect(query).toContain('ro."completedAt"');
 
     for (const forbidden of [
       '"finalAmount"',
       '"depositAmount"',
+      '"depositDeduction"',
+      '"serviceFee"',
+      '"overdueFee"',
       '"cancellationFee"',
       '"updatedAt"',
     ]) {
@@ -37,7 +37,7 @@ describe("Phase 10C-2 CTV authority guards", () => {
     const text = source("src/lib/rental-order-machine.ts");
     expect(text).toContain("computeRentalCompletedBookedValue(order)");
     expect(text).toContain("computeRentalCompletedBookedValue({");
-    expect(text).toContain("depositDeduction: input.agreed");
+    expect(text).not.toContain("depositDeduction: input.agreed");
     expect(text).not.toContain("bookedValue: order.finalAmount");
     expect(text).not.toContain("bookedValue: claim.order.finalAmount");
   });

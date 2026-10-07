@@ -145,7 +145,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       await prisma.$disconnect();
     });
 
-    it("P10C2-PG-01: completed canonical rows converge to 10/20/8/15 CTV, excluding rental deposit", async () => {
+    it("P10C2-PG-01: completed canonical rows converge to 10/20/8/15 CTV, excluding rental non-consideration amounts", async () => {
       const suffix = randomUUID().slice(0, 8);
       const t = (minute: number) => new Date(Date.UTC(2026, 9, 2, 9, minute, 0));
 
@@ -316,7 +316,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       )?.payload).toMatchObject({ bookedValue: "8.00" });
       expect(byKey.get(
         `LIQUIDITY_TRANSACTION_VALUE_RECORDED:RENTAL:${rentalOrder.id}`,
-      )?.payload).toMatchObject({ bookedValue: "30.00" });
+      )?.payload).toMatchObject({ bookedValue: "15.00" });
 
       for (const event of events) {
         await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
@@ -336,19 +336,19 @@ describe.skipIf(!integrationDatabaseUrl)(
       ).toEqual([
         ["TRANSACTION_TYPE:ERRAND", "8.00"],
         ["TRANSACTION_TYPE:PRODUCT", "10.00"],
-        ["TRANSACTION_TYPE:RENTAL", "30.00"],
+        ["TRANSACTION_TYPE:RENTAL", "15.00"],
         ["TRANSACTION_TYPE:SERVICE", "20.00"],
       ]);
 
-      // Rental CTV includes non-refundable completed obligations but excludes
-      // refundable deposit principal, finalAmount and cancellationFee.
+      // Rental CTV is rental consideration only. Deposit principal, damage
+      // deduction and service/overdue/cancellation fees do not inflate liquidity.
       expect(rentalOrder.finalAmount.toFixed(2)).toBe("65.00");
       expect(rentalOrder.depositAmount.toFixed(2)).toBe("50.00");
       expect(rentalOrder.depositDeduction.toFixed(2)).toBe("5.00");
       const rentalContribution = contributions.find(
         (row) => row.dimensionKey === "TRANSACTION_TYPE:RENTAL",
       );
-      expect(rentalContribution?.value.toFixed(2)).toBe("30.00");
+      expect(rentalContribution?.value.toFixed(2)).toBe("15.00");
 
       const second = await prisma.$transaction((tx) =>
         backfillCanonicalTransactionValuesTx(tx, {

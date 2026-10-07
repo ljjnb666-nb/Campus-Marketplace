@@ -36,10 +36,11 @@ function resolveBatchLimit(value: number | undefined): number {
  *
  * Authority:
  * - PRODUCT / SERVICE / ERRAND => completed Order.amount
- * - RENTAL => completed (rentalAmount + serviceFee + overdueFee + depositDeduction)
+ * - RENTAL => completed RentalOrder.rentalAmount only
  *
  * Explicit exclusions: finalAmount, refundable deposit principal,
- * cancellationFee and payment/settlement state.
+ * damage/deposit deduction, service/overdue/cancellation fees and
+ * payment/settlement state.
  * Historical occurredAt is completedAt only; updatedAt is forbidden.
  */
 export async function backfillCanonicalTransactionValuesTx(
@@ -107,7 +108,7 @@ export async function backfillCanonicalTransactionValuesTx(
       UNION ALL
       SELECT
         ro.id, 'RENTAL', rl."campusId", ro."completedAt",
-        (ro."rentalAmount" + ro."serviceFee" + ro."overdueFee" + ro."depositDeduction"),
+        ro."rentalAmount",
         'LIQUIDITY_TRANSACTION_VALUE_RECORDED:RENTAL:' || ro.id
       FROM "RentalOrder" ro
       JOIN "RentalListing" rl ON rl.id = ro."rentalListingId"

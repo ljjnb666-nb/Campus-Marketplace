@@ -1223,12 +1223,7 @@ export async function respondDamageClaimTx(
       transactionType: "RENTAL",
       campusId: claim.order.rentalListing.campusId,
       occurredAt: now,
-      bookedValue: computeRentalCompletedBookedValue({
-        ...claim.order,
-        depositDeduction: input.agreed
-          ? claim.requestedDeduction
-          : claim.order.depositDeduction,
-      }),
+      bookedValue: computeRentalCompletedBookedValue(claim.order),
     });
     await incrementRentalCompletionCounters(tx, claim.order);
   }

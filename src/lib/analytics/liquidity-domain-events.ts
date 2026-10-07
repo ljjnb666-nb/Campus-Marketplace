@@ -30,36 +30,27 @@ export type LiquidityTransactionType = (typeof LIQUIDITY_TRANSACTION_TYPES)[numb
 
 type RentalCompletedBookedValueInput = {
   rentalAmount: Prisma.Decimal | string | number;
-  serviceFee?: Prisma.Decimal | string | number | null;
-  overdueFee?: Prisma.Decimal | string | number | null;
-  depositDeduction?: Prisma.Decimal | string | number | null;
 };
 
-function nonNegativeMoneyPart(
-  value: Prisma.Decimal | string | number | null | undefined,
-  field: string,
-): Prisma.Decimal {
-  const decimal = new Prisma.Decimal(value ?? 0);
-  if (!decimal.isFinite() || decimal.isNegative() || decimal.decimalPlaces() > 2) {
-    throw new Error(`LIQUIDITY_RENTAL_VALUE_PART_INVALID:${field}`);
-  }
-  return decimal;
-}
-
 /**
- * Rental CTV = completed non-refundable booked obligation:
- * rental consideration + service fee + overdue fee + accepted deposit deduction.
+ * Rental CTV = canonical completed rental consideration only.
  *
- * Explicit exclusions: refundable deposit principal, finalAmount,
- * cancellationFee and payment/settlement/payout state.
+ * rentalAmount is the frozen rental obligation and already includes approved
+ * extension increments and authoritative quantity accounting. Explicitly exclude:
+ * refundable deposit principal, damage/deposit deduction, service fee,
+ * overdue/cancellation fees, finalAmount and payment/settlement/payout state.
+ *
+ * Those amounts may deserve separate fee/compensation metrics later, but mixing
+ * them into CTV would distort marketplace liquidity / transaction-value analysis.
  */
 export function computeRentalCompletedBookedValue(
   input: RentalCompletedBookedValueInput,
 ): Prisma.Decimal {
-  return nonNegativeMoneyPart(input.rentalAmount, "rentalAmount")
-    .add(nonNegativeMoneyPart(input.serviceFee, "serviceFee"))
-    .add(nonNegativeMoneyPart(input.overdueFee, "overdueFee"))
-    .add(nonNegativeMoneyPart(input.depositDeduction, "depositDeduction"));
+  const value = new Prisma.Decimal(input.rentalAmount);
+  if (!value.isFinite() || value.isNegative() || value.decimalPlaces() > 2) {
+    throw new Error("LIQUIDITY_RENTAL_AMOUNT_INVALID");
+  }
+  return value;
 }
 
 export function recordLiquidityListingCreatedTx(
@@ -158,10 +149,11 @@ export function canonicalizeBookedValue(
  * bookedValue is the platform-recorded non-refundable obligation value of a
  * COMPLETED transaction:
  * - PRODUCT / SERVICE / ERRAND: Order.amount
- * - RENTAL: rentalAmount + serviceFee + overdueFee + depositDeduction
+ * - RENTAL: RentalOrder.rentalAmount only
  *
  * It is NOT settlement, cash collected, platform revenue, GMV, refundable
- * deposit principal, finalAmount or cancellationFee.
+ * deposit principal, finalAmount, service/overdue/cancellation fees or
+ * damage/deposit deduction.
  */
 export function recordLiquidityTransactionValueRecordedTx(
   tx: Prisma.TransactionClient,
