@@ -152,7 +152,10 @@ describe.skipIf(!integrationDatabaseUrl)(
       });
     }
 
-    async function createCompletedErrandOrder(validBinding: boolean) {
+    async function createCompletedErrandOrder(
+      validBinding: boolean,
+      taskStatus: "COMPLETED" | "PENDING_CONFIRMATION" = "COMPLETED",
+    ) {
       seq += 1;
       const completedAt = new Date(Date.UTC(2026, 9, 1, 8, seq, 0));
       const task = await prisma.errandTask.create({
@@ -164,7 +167,7 @@ describe.skipIf(!integrationDatabaseUrl)(
           pickupLocation: "A",
           deliveryLocation: "B",
           deadline: new Date(Date.UTC(2026, 9, 2, 8, seq, 0)),
-          status: "COMPLETED",
+          status: taskStatus,
           publisherId: buyerId,
           accepterId: sellerId,
           campusId,
@@ -332,6 +335,10 @@ describe.skipIf(!integrationDatabaseUrl)(
     it("P10B-BACKFILL-01: only truthful canonical ERRAND completion is backfilled", async () => {
       const valid = await createCompletedErrandOrder(true);
       const invalid = await createCompletedErrandOrder(false);
+      const inconsistentState = await createCompletedErrandOrder(
+        true,
+        "PENDING_CONFIRMATION",
+      );
 
       const first = await prisma.$transaction(async (tx) => {
         const result = await backfillCanonicalErrandCompletionEventsTx(tx, {
@@ -375,6 +382,13 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(
         await prisma.domainEvent.count({
           where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${invalid.order.id}` },
+        }),
+      ).toBe(0);
+      expect(
+        await prisma.domainEvent.count({
+          where: {
+            occurrenceKey: `ERRAND_ORDER_COMPLETED:${inconsistentState.order.id}`,
+          },
         }),
       ).toBe(0);
 

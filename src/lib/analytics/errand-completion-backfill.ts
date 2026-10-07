@@ -54,6 +54,8 @@ export async function backfillCanonicalErrandCompletionEventsTx(
         AND o.status = 'COMPLETED'
         AND o."completedAt" IS NOT NULL
         AND o."errandTaskId" IS NOT NULL
+        AND t.status = 'COMPLETED'
+        AND t."deletedAt" IS NULL
         AND t."publisherId" = o."buyerId"
         AND t."accepterId" = o."sellerId"
         AND d.id IS NULL
