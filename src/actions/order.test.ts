@@ -4,6 +4,10 @@ vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletionFactsTx: vi.fn().mockResolvedValue({
+    completion: { recorded: true },
+    value: { recorded: true },
+  }),
 }));
 
 const {
