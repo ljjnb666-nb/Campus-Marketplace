@@ -41,7 +41,14 @@ export const rentalOrderCreateSchema = z.object({
   rentalListingId: z.string().trim().min(1),
   startTime: z.string().trim().min(1, "请选择开始时间"),
   endTime: z.string().trim().min(1, "请选择结束时间"),
-  quantity: z.string().trim().default("1"),
+  quantity: z
+    .string()
+    .trim()
+    .default("1")
+    .refine(
+      (value) => Number.isSafeInteger(Number(value)) && Number(value) >= 1,
+      { message: "租赁数量至少为1" },
+    ),
   renterNote: z.string().trim().max(200).optional(),
 });
 

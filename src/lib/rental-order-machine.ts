@@ -153,6 +153,12 @@ export async function createRentalOrderTx(
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
+  // CTV/accounting authority safety belt：quantity participates in price and
+  // inventory. Reject malformed direct/forged calls before any row/lock work.
+  if (!Number.isSafeInteger(quantity) || quantity < 1) {
+    return { error: "租赁数量至少为1" };
+  }
+
   // ⚠️ 锁序契约（Phase 5 REPAIR 3，防死锁）：
   //   governance subject locks（renter + owner advisory）
   //   → business/domain row locks（RentalListing FOR UPDATE）
