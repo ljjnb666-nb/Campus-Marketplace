@@ -11,7 +11,7 @@ import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import {
   recordLiquidityDemandCreatedTx,
-  recordLiquidityTransactionCompletedTx,
+  recordLiquidityTransactionCompletionFactsTx,
 } from "@/lib/analytics/liquidity-domain-events";
 import {
   RENTAL_DAMAGE_CLAIM_FILED_KIND,
@@ -581,11 +581,12 @@ export async function confirmReturnTx(
     });
 
     if (nextStatus === 'COMPLETED') {
-      await recordLiquidityTransactionCompletedTx(tx, {
+      await recordLiquidityTransactionCompletionFactsTx(tx, {
         transactionId: order.id,
         transactionType: "RENTAL",
         campusId: order.rentalListing.campusId,
         occurredAt: now,
+        bookedValue: order.rentalAmount,
       });
       await incrementRentalCompletionCounters(tx, order);
     }
@@ -1197,11 +1198,12 @@ export async function respondDamageClaimTx(
       operatorId: input.userId,
       note: input.agreed ? '租客同意损坏索赔，订单完成' : '租客拒绝损坏索赔，订单完成',
     });
-    await recordLiquidityTransactionCompletedTx(tx, {
+    await recordLiquidityTransactionCompletionFactsTx(tx, {
       transactionId: claim.orderId,
       transactionType: "RENTAL",
       campusId: claim.order.rentalListing.campusId,
       occurredAt: now,
+      bookedValue: claim.order.rentalAmount,
     });
     await incrementRentalCompletionCounters(tx, claim.order);
   }
