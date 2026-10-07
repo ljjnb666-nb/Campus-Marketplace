@@ -122,7 +122,12 @@ describe.skipIf(!integrationDatabaseUrl)(
         },
       });
       await prisma.order.deleteMany({
-        where: { OR: [{ buyerId }, { sellerId }] },
+        where: {
+          OR: [
+            { buyerId: { in: [buyerId, sellerId] } },
+            { sellerId: { in: [buyerId, sellerId] } },
+          ],
+        },
       });
       await prisma.errandTask.deleteMany({ where: { campusId } });
       await prisma.product.deleteMany({ where: { campusId } });
