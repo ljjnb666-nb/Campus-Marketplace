@@ -673,6 +673,5 @@ describe.skipIf(!integrationDatabaseUrl)(
         payload: expect.objectContaining({ bookedValue: "7.00" }),
       });
     });
-);
   },
 );
