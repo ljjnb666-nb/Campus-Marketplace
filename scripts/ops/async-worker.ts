@@ -196,6 +196,10 @@ interface CycleSummary {
   liquidityFactsBackfilled: number;
   /** Phase 10C-2：canonical CTV value facts backfill 数。 */
   transactionValuesBackfilled: number;
+  /** 10C-2 bounded authority diagnostic；不参与 didWork / producer capacity。 */
+  transactionValueBackfillStatus: "NOT_CHECKED" | "COMPLETE" | "CTV_BACKFILL_PARTIAL";
+  transactionValueUnsupportedServiceRows: number;
+  transactionValueCorruptRows: number;
   /** Phase 10B：为 current-version receipt 缺失事件新 enqueue 数。 */
   projectionJobsScheduled: number;
   /** Phase 10B：projection DEAD_LETTER 显式观测，不自动无限 requeue。 */
@@ -223,6 +227,9 @@ function summarize(
   | "domainEventsBackfilled"
   | "liquidityFactsBackfilled"
   | "transactionValuesBackfilled"
+  | "transactionValueBackfillStatus"
+  | "transactionValueUnsupportedServiceRows"
+  | "transactionValueCorruptRows"
   | "projectionJobsScheduled"
   | "projectionDeadLetters"
   | "projectionStructuralGaps"
@@ -362,12 +369,19 @@ async function main() {
       // Phase 10C-2 CTV historical value facts：继续共享同一 producer
       // budget。每条 value DomainEvent 在同事务 enqueue 一个 projection intent。
       let transactionValuesBackfilled = 0;
+      let transactionValueBackfillStatus: CycleSummary["transactionValueBackfillStatus"] =
+        "NOT_CHECKED";
+      let transactionValueUnsupportedServiceRows = 0;
+      let transactionValueCorruptRows = 0;
       if (producerBudget > 0) {
         try {
           const backfill = await backfillCanonicalTransactionValues({
             batchLimit: producerBudget,
           });
           transactionValuesBackfilled = backfill.backfilled;
+          transactionValueBackfillStatus = backfill.status;
+          transactionValueUnsupportedServiceRows = backfill.unsupportedServiceRows;
+          transactionValueCorruptRows = backfill.corruptRows;
           producerBudget = Math.max(0, producerBudget - backfill.backfilled);
         } catch (error) {
           logger.warn("CTV canonical backfill 失败，等待下个周期", "async-worker", {
@@ -436,6 +450,9 @@ async function main() {
         domainEventsBackfilled,
         liquidityFactsBackfilled,
         transactionValuesBackfilled,
+        transactionValueBackfillStatus,
+        transactionValueUnsupportedServiceRows,
+        transactionValueCorruptRows,
         projectionJobsScheduled,
         projectionDeadLetters,
         projectionStructuralGaps,

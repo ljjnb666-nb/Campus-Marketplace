@@ -116,5 +116,12 @@ describe("Phase 10C-2 CTV authority guards", () => {
     expect(backfill).toContain("corruptRows");
     expect(backfill).toContain("o.amount >= 0");
     expect(backfill).toContain('ro."rentalAmount" >= 0');
+    expect(backfill).toContain("unsupported_service_bounded");
+    expect(backfill).toContain("corrupt_bounded");
+
+    const worker = source("scripts/ops/async-worker.ts");
+    expect(worker).toContain("transactionValueBackfillStatus");
+    expect(worker).toContain("transactionValueUnsupportedServiceRows");
+    expect(worker).toContain("transactionValueCorruptRows");
   });
 });

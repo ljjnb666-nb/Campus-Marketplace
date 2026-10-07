@@ -209,20 +209,26 @@ export async function backfillCanonicalTransactionValuesTx(
           OR ro."rentalAmount" < 0
         )
     )
+    , unsupported_service_bounded AS (
+      SELECT "campusId"
+      FROM unsupported_service
+      WHERE (${campusId}::text IS NULL OR "campusId" = ${campusId})
+      LIMIT ${batchLimit}
+    ),
+    corrupt_bounded AS (
+      SELECT "campusId"
+      FROM corrupt
+      WHERE (
+        ${campusId}::text IS NULL
+        OR "campusId" = ${campusId}
+      )
+      LIMIT ${batchLimit}
+    )
     SELECT
-      (
-        SELECT COUNT(*)::int
-        FROM unsupported_service
-        WHERE (${campusId}::text IS NULL OR "campusId" = ${campusId})
-      ) AS "unsupportedServiceRows",
-      (
-        SELECT COUNT(*)::int
-        FROM corrupt
-        WHERE (
-          ${campusId}::text IS NULL
-          OR "campusId" = ${campusId}
-        )
-      ) AS "corruptRows"
+      (SELECT COUNT(*)::int FROM unsupported_service_bounded)
+        AS "unsupportedServiceRows",
+      (SELECT COUNT(*)::int FROM corrupt_bounded)
+        AS "corruptRows"
   `;
   const diagnostics = diagnosticsRows[0] ?? {
     unsupportedServiceRows: 0,
@@ -254,6 +260,10 @@ export async function backfillCanonicalTransactionValuesTx(
     backfilled += result.recorded ? 1 : 0;
   }
 
+  // These are bounded observed rows (<= batchLimit), intentionally not global
+  // cardinalities. The correctness signal is status=CTV_BACKFILL_PARTIAL; keeping
+  // diagnostics bounded prevents a permanent unsupported SERVICE population from
+  // turning every worker cycle into an unbounded historical COUNT scan.
   const unsupportedServiceRows = Number(diagnostics.unsupportedServiceRows);
   const corruptRows = Number(diagnostics.corruptRows);
   const status: TransactionValueBackfillStatus =
