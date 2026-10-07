@@ -100,7 +100,10 @@ export async function backfillCanonicalLiquidityFactsTx(
       JOIN "Product" p ON p.id = o."productId"
       LEFT JOIN "DomainEvent" d
         ON d."occurrenceKey" = 'LIQUIDITY_DEMAND_CREATED:PRODUCT_ORDER:' || o.id
-      WHERE o.type = 'PRODUCT' AND d.id IS NULL
+      WHERE o.type = 'PRODUCT'
+        AND o."sellerId" = p."sellerId"
+        AND o."buyerId" <> p."sellerId"
+        AND d.id IS NULL
 
       UNION ALL
       SELECT 'DEMAND', o.id, 'SERVICE_ORDER', s."campusId", o."createdAt",
@@ -109,7 +112,10 @@ export async function backfillCanonicalLiquidityFactsTx(
       JOIN "ServiceListing" s ON s.id = o."serviceListingId"
       LEFT JOIN "DomainEvent" d
         ON d."occurrenceKey" = 'LIQUIDITY_DEMAND_CREATED:SERVICE_ORDER:' || o.id
-      WHERE o.type = 'SERVICE' AND d.id IS NULL
+      WHERE o.type = 'SERVICE'
+        AND o."sellerId" = s."providerId"
+        AND o."buyerId" <> s."providerId"
+        AND d.id IS NULL
 
       UNION ALL
       SELECT 'DEMAND', ro.id, 'RENTAL_ORDER', rl."campusId", ro."createdAt",
@@ -118,7 +124,9 @@ export async function backfillCanonicalLiquidityFactsTx(
       JOIN "RentalListing" rl ON rl.id = ro."rentalListingId"
       LEFT JOIN "DomainEvent" d
         ON d."occurrenceKey" = 'LIQUIDITY_DEMAND_CREATED:RENTAL_ORDER:' || ro.id
-      WHERE d.id IS NULL
+      WHERE ro."ownerId" = rl."ownerId"
+        AND ro."renterId" <> rl."ownerId"
+        AND d.id IS NULL
 
       UNION ALL
       SELECT 'COMPLETION', o.id, 'PRODUCT', p."campusId", o."completedAt",
@@ -130,6 +138,8 @@ export async function backfillCanonicalLiquidityFactsTx(
       WHERE o.type = 'PRODUCT'
         AND o.status = 'COMPLETED'
         AND o."completedAt" IS NOT NULL
+        AND o."sellerId" = p."sellerId"
+        AND o."buyerId" <> p."sellerId"
         AND d.id IS NULL
 
       UNION ALL
@@ -142,6 +152,8 @@ export async function backfillCanonicalLiquidityFactsTx(
       WHERE o.type = 'SERVICE'
         AND o.status = 'COMPLETED'
         AND o."completedAt" IS NOT NULL
+        AND o."sellerId" = s."providerId"
+        AND o."buyerId" <> s."providerId"
         AND d.id IS NULL
 
       UNION ALL
@@ -157,6 +169,7 @@ export async function backfillCanonicalLiquidityFactsTx(
         AND e.status = 'COMPLETED'
         AND e."publisherId" = o."buyerId"
         AND e."accepterId" = o."sellerId"
+        AND o."buyerId" <> o."sellerId"
         AND d.id IS NULL
 
       UNION ALL
@@ -168,6 +181,8 @@ export async function backfillCanonicalLiquidityFactsTx(
         ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_COMPLETED:RENTAL:' || ro.id
       WHERE ro.status = 'COMPLETED'
         AND ro."completedAt" IS NOT NULL
+        AND ro."ownerId" = rl."ownerId"
+        AND ro."renterId" <> rl."ownerId"
         AND d.id IS NULL
     )
     SELECT "factKind", "entityId", subtype, "campusId", "occurredAt", "occurrenceKey"

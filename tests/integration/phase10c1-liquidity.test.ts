@@ -265,6 +265,59 @@ describe.skipIf(!integrationDatabaseUrl)(
         },
       });
 
+      // Corrupt historical participant bindings must fail closed instead of
+      // becoming permanent analytics facts.
+      const corruptProductOrder = await prisma.order.create({
+        data: {
+          orderNo: `P10C1-CP-${suffix}`,
+          type: "PRODUCT",
+          status: "COMPLETED",
+          paymentStatus: "OFFLINE_PENDING",
+          amount: "10.00",
+          completedAt: t(13),
+          buyerId: sellerId,
+          sellerId: buyerId,
+          productId: product.id,
+          createdAt: t(13),
+        },
+      });
+      const corruptServiceOrder = await prisma.order.create({
+        data: {
+          orderNo: `P10C1-CS-${suffix}`,
+          type: "SERVICE",
+          status: "COMPLETED",
+          paymentStatus: "OFFLINE_PENDING",
+          amount: "20.00",
+          completedAt: t(14),
+          buyerId: sellerId,
+          sellerId: buyerId,
+          serviceListingId: service.id,
+          createdAt: t(14),
+        },
+      });
+      const corruptRentalOrder = await prisma.rentalOrder.create({
+        data: {
+          orderNumber: `P10C1-CR-${suffix}`,
+          rentalListingId: rental.id,
+          ownerId: buyerId,
+          renterId: sellerId,
+          startTime: t(15),
+          endTime: new Date(Date.UTC(2026, 9, 2, 9, 15, 0)),
+          quantity: 1,
+          unitPriceSnapshot: "15.00",
+          pricingUnitSnapshot: "PER_DAY",
+          rentalDuration: 1,
+          rentalAmount: "15.00",
+          depositAmount: "50.00",
+          finalAmount: "65.00",
+          pickupLocationSnapshot: "C",
+          returnLocationSnapshot: "C",
+          status: "COMPLETED",
+          completedAt: t(16),
+          createdAt: t(15),
+        },
+      });
+
       // Historical creation/completion facts survive later soft deletion.
       await prisma.product.update({
         where: { id: product.id },
@@ -312,6 +365,22 @@ describe.skipIf(!integrationDatabaseUrl)(
             `LIQUIDITY_DEMAND_CREATED:ERRAND_ORDER:${errandOrder.id}`,
         ),
       ).toBe(false);
+
+      for (const corrupt of [
+        { id: corruptProductOrder.id, demand: "PRODUCT_ORDER", tx: "PRODUCT" },
+        { id: corruptServiceOrder.id, demand: "SERVICE_ORDER", tx: "SERVICE" },
+        { id: corruptRentalOrder.id, demand: "RENTAL_ORDER", tx: "RENTAL" },
+      ]) {
+        expect(
+          events.some(
+            (event) =>
+              event.occurrenceKey ===
+                `LIQUIDITY_DEMAND_CREATED:${corrupt.demand}:${corrupt.id}` ||
+              event.occurrenceKey ===
+                `LIQUIDITY_TRANSACTION_COMPLETED:${corrupt.tx}:${corrupt.id}`,
+          ),
+        ).toBe(false);
+      }
 
       for (const event of events) {
         await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
