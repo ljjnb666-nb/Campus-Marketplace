@@ -304,6 +304,7 @@ const pendingInspectionClaim = {
     renterId: "user-renter",
     depositAmount: new Prisma.Decimal("50"),
     depositStatus: "PAID",
+    rentalListing: { campusId: "campus-1" },
   },
 };
 
