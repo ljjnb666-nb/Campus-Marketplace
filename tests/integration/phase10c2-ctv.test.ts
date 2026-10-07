@@ -23,7 +23,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       typeof import("@/lib/analytics/domain-event-projection")["projectDomainEventTx"];
 
     const projectionDedupeKey = (eventId: string) =>
-      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:${eventId}`;
+      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:${eventId}`;
 
     beforeAll(async () => {
       prisma = new PrismaClient({

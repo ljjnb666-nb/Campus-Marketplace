@@ -114,14 +114,20 @@ describe("Phase 10B receipt-backed projection", () => {
 
   it("PROJECTION-05: live dedupe identity is projection-versioned, not watermark-based", () => {
     expect(buildLiveDomainEventProjectionDedupeKey("event-1")).toBe(
-      "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
+      "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:event-1",
     );
   });
 
-  it("PROJECTION-06: legal older intent is classified stale for a newer runtime", () => {
-    expect(classifyProjectionIntentVersion(1, 2)).toBe("STALE");
-    expect(classifyProjectionIntentVersion(2, 2)).toBe("CURRENT");
+  it("PROJECTION-06: rolling versions are fenced in both directions", () => {
+    // Current v3 runtime treats old v2 durable intent as stale.
+    expect(classifyProjectionIntentVersion(2, 3)).toBe("STALE");
+    expect(classifyProjectionIntentVersion(3, 3)).toBe("CURRENT");
+    expect(classifyProjectionIntentVersion(4, 3)).toBe("FUTURE");
+
+    // Critical 10C-2 rolling-deploy proof: an old v2 worker must not acknowledge
+    // a new v3 value-event intent as current/zero-contribution.
     expect(classifyProjectionIntentVersion(3, 2)).toBe("FUTURE");
+
     expect(() => classifyProjectionIntentVersion(0, 1)).toThrow(
       "ANALYTICS_PROJECTION_VERSION_INVALID",
     );
@@ -131,14 +137,14 @@ describe("Phase 10B receipt-backed projection", () => {
     const tx = buildTx();
     const before = Date.now();
     const result = await analyticsProjectDomainEventHandler(asTx(tx), {
-      id: "job-v3",
+      id: "job-v4",
       kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
       schemaVersion: 1,
-      dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:event-1",
+      dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection4:event-1",
       payload: { eventId: "event-1" },
       attempts: 1,
       maxAttempts: 5,
-      leaseToken: "lease-3",
+      leaseToken: "lease-4",
       previousStatus: "PENDING",
     });
     expect(result.kind).toBe("RESCHEDULE");
