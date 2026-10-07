@@ -44,6 +44,12 @@ import { Prisma } from "@prisma/client";
  * - include 嵌套关联读取（如 product.include.owner）不被拦截；
  * - 单行 update 不注入 deletedAt 过滤（unique where 无法注入），软删除行的
  *   更新防护由 domain lifecycle services 的前置谓词承担。
+ *
+ * PRISMA-SOFT-DELETE-READ-01：findUnique/findUniqueOrThrow 的软删除判断不能
+ * 依赖调用方恰好返回 deletedAt。select/omit 可能把 deletedAt 从结果 shape
+ * 裁掉，因此 unique read 会在当前 query(args) 执行上下文中临时确保
+ * deletedAt 可见，完成隐藏判定后再恢复调用方原始返回 shape。绝不通过
+ * root PrismaClient/delegate 发第二次查询，避免 interactive transaction escape。
  */
 
 const SOFT_DELETE_MODELS = new Set([
@@ -163,6 +169,87 @@ function throwAsNotFound(): never {
   });
 }
 
+export type UniqueReadPlan = {
+  args: Record<string, unknown>;
+  inspectDeletedAt: boolean;
+  stripInjectedDeletedAt: boolean;
+};
+
+function readObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * unique read 的中央 shape 规划：
+ * - 非软删模型 / caller 显式 deletedAt where：原样透传，不施加默认隐藏；
+ * - select 未返回 deletedAt：内部临时追加 deletedAt:true，返回前剥离；
+ * - omit 明确排除 deletedAt：内部改为 deletedAt:false，返回前剥离；
+ * - 默认/include 场景会返回全部 scalar，deletedAt 天然可供判定。
+ *
+ * 只改写传给当前 query(args) 的参数；不允许额外 root-client query。
+ */
+export function buildUniqueReadPlan(
+  model: string | undefined,
+  args: Record<string, unknown>,
+): UniqueReadPlan {
+  if (!isSoftDeleteModel(model) || explicitlyFiltersDeleted(readWhere(args))) {
+    return {
+      args,
+      inspectDeletedAt: false,
+      stripInjectedDeletedAt: false,
+    };
+  }
+
+  const select = readObject(args.select);
+  if (select) {
+    if (select.deletedAt === true) {
+      return {
+        args,
+        inspectDeletedAt: true,
+        stripInjectedDeletedAt: false,
+      };
+    }
+
+    return {
+      args: {
+        ...args,
+        select: { ...select, deletedAt: true },
+      },
+      inspectDeletedAt: true,
+      stripInjectedDeletedAt: true,
+    };
+  }
+
+  const omit = readObject(args.omit);
+  if (omit?.deletedAt === true) {
+    return {
+      args: {
+        ...args,
+        omit: { ...omit, deletedAt: false },
+      },
+      inspectDeletedAt: true,
+      stripInjectedDeletedAt: true,
+    };
+  }
+
+  return {
+    args,
+    inspectDeletedAt: true,
+    stripInjectedDeletedAt: false,
+  };
+}
+
+function restoreUniqueReadResultShape(row: unknown, stripDeletedAt: boolean): unknown {
+  if (!stripDeletedAt || !row || typeof row !== "object" || Array.isArray(row)) {
+    return row;
+  }
+
+  const { deletedAt: _internalDeletedAt, ...callerShape } = row as Record<string, unknown>;
+  return callerShape;
+}
+
 /**
  * 列表型查询钩子的统一入口：需要注入时改写 args（类型转换收敛于此），
  * 豁免场景原样透传以保留 Prisma 的精确返回类型推断。
@@ -209,20 +296,40 @@ export const softDeleteExtension = Prisma.defineExtension((client) =>
         updateMany: ({ model, args, query }) =>
           filteredListQuery(model, args, query),
 
-        // unique 查询无法往 where 注入额外字段，改为结果后置过滤
+        // unique 查询无法安全依赖 caller result shape 中存在 deletedAt：
+        // select/omit 会裁字段，因此先在当前 query(args) 上临时确保 deletedAt
+        // 可见，判定完成后恢复 caller 原始 shape。绝不走 root client 第二查。
         findUnique: async ({ model, args, query }) => {
-          const row = await query(args);
+          const plan = buildUniqueReadPlan(model, args as Record<string, unknown>);
+          const row = await query(plan.args as typeof args);
 
-          return findUniqueResultHiddenBySoftDelete(model, row) ? null : row;
+          if (
+            plan.inspectDeletedAt &&
+            findUniqueResultHiddenBySoftDelete(model, row)
+          ) {
+            return null;
+          }
+
+          return restoreUniqueReadResultShape(
+            row,
+            plan.stripInjectedDeletedAt,
+          ) as typeof row;
         },
         findUniqueOrThrow: async ({ model, args, query }) => {
-          const row = await query(args);
+          const plan = buildUniqueReadPlan(model, args as Record<string, unknown>);
+          const row = await query(plan.args as typeof args);
 
-          if (findUniqueResultHiddenBySoftDelete(model, row)) {
+          if (
+            plan.inspectDeletedAt &&
+            findUniqueResultHiddenBySoftDelete(model, row)
+          ) {
             throwAsNotFound();
           }
 
-          return row;
+          return restoreUniqueReadResultShape(
+            row,
+            plan.stripInjectedDeletedAt,
+          ) as typeof row;
         },
 
         // 软删除模型：一律 fail closed（含显式 deletedAt 条件——不保留物理豁免 bypass，

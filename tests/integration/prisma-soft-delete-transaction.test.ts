@@ -19,9 +19,9 @@ import { revokeRole } from "@/lib/rbac/assignment-service";
  *  - TX-ESCAPE-03 revoke 域原子性：真实 revokeRole 成功 → assignment 缺席 +
  *    ROLE_REVOKED 审计恰 1 条（targetId/roleKey/campusId 正确）
  *
- * 软删除模型（User/Product/...）的 delete→update 改写路径仍经 root delegate
- * （LATENT_ARCHITECTURE_RISK，当前生产零事务内调用方）——本文件刻意不断言其
- * 事务安全性，不伪造已修复。
+ * PRISMA-SOFT-DELETE-IMPL-01 后软删除模型 delete/deleteMany 已 fail closed；
+ * PRISMA-SOFT-DELETE-READ-01 在本文件追加真实 PG selective unique-read 回归，
+ * 同时验证修复仍只使用当前 transaction query context，不引入 root-client 二次查询。
  */
 
 const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
@@ -243,6 +243,88 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(audits[0]!.targetType).toBe("USER");
       expect(audits[0]!.campusId).toBe(campus.id);
       expect(audits[0]!.metadata).toMatchObject({ roleKey: REVIEWER_ROLE_KEY });
+    });
+
+    it("SD-READ-IT-01: select/omit 均不得让软删除 User 通过 findUnique 泄漏", async () => {
+      const user = await observer!.user.create({
+        data: {
+          email: `${RUN_TAG}-sdread-deleted@it.local`,
+          name: "SDREAD-DELETED",
+          passwordHash: FIXTURE_PASSWORD_HASH,
+          schoolName: "集成测试大学",
+          campusId: campus.id,
+        },
+      });
+      createdUserIds.push(user.id);
+
+      await observer!.user.update({
+        where: { id: user.id },
+        data: { deletedAt: new Date() },
+      });
+
+      await expect(
+        extendedClient!.user.findUnique({
+          where: { id: user.id },
+          select: { id: true, name: true },
+        }),
+      ).resolves.toBeNull();
+
+      await expect(
+        extendedClient!.user.findUnique({
+          where: { id: user.id },
+          omit: { deletedAt: true },
+        }),
+      ).resolves.toBeNull();
+
+      await expect(
+        extendedClient!.user.findUniqueOrThrow({
+          where: { id: user.id },
+          select: { id: true },
+        }),
+      ).rejects.toMatchObject({ code: "P2025" });
+    });
+
+    it("SD-READ-IT-02: live selective shape 保持不变，interactive tx 中软删除仍隐藏", async () => {
+      const live = await observer!.user.create({
+        data: {
+          email: `${RUN_TAG}-sdread-live@it.local`,
+          name: "SDREAD-LIVE",
+          passwordHash: FIXTURE_PASSWORD_HASH,
+          schoolName: "集成测试大学",
+          campusId: campus.id,
+        },
+      });
+      createdUserIds.push(live.id);
+
+      await expect(
+        extendedClient!.user.findUnique({
+          where: { id: live.id },
+          select: { id: true, name: true },
+        }),
+      ).resolves.toEqual({ id: live.id, name: "SDREAD-LIVE" });
+
+      const deleted = await observer!.user.create({
+        data: {
+          email: `${RUN_TAG}-sdread-tx@it.local`,
+          name: "SDREAD-TX",
+          passwordHash: FIXTURE_PASSWORD_HASH,
+          schoolName: "集成测试大学",
+          campusId: campus.id,
+        },
+      });
+      createdUserIds.push(deleted.id);
+      await observer!.user.update({
+        where: { id: deleted.id },
+        data: { deletedAt: new Date() },
+      });
+
+      const insideTx = await extendedClient!.$transaction((tx) =>
+        tx.user.findUnique({
+          where: { id: deleted.id },
+          select: { id: true, name: true },
+        }),
+      );
+      expect(insideTx).toBeNull();
     });
   },
 );
