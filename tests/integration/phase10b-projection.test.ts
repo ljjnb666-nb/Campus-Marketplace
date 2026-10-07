@@ -98,16 +98,16 @@ describe.skipIf(!integrationDatabaseUrl)(
         where: { eventId: { in: eventIds } },
       });
       await prisma.asyncJob.deleteMany({
-        where: {
-          OR: [
-            { dedupeKey: { in: eventIds.map(projectionDedupeKey) } },
-            { payload: { path: ["eventId"], string_contains: "" } },
-          ],
-        },
+        where: { dedupeKey: { in: eventIds.map(projectionDedupeKey) } },
       });
       await prisma.domainEvent.deleteMany({ where: { campusId } });
       await prisma.order.deleteMany({
-        where: { OR: [{ buyerId }, { sellerId: buyerId }, { buyerId: sellerId }, { sellerId }] },
+        where: {
+          OR: [
+            { buyerId: { in: [buyerId, sellerId] } },
+            { sellerId: { in: [buyerId, sellerId] } },
+          ],
+        },
       });
       await prisma.errandTask.deleteMany({ where: { campusId } });
       await prisma.errandCategory.deleteMany({ where: { id: categoryId } });
@@ -208,7 +208,11 @@ describe.skipIf(!integrationDatabaseUrl)(
           where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${aggregateId}` },
         }),
       ).toBe(0);
-      expect(await prisma.asyncJob.count({ where: { dedupeKey: projectionDedupeKey(eventId) } })).toBe(0);
+      expect(
+        await prisma.asyncJob.count({
+          where: { dedupeKey: projectionDedupeKey(eventId) },
+        }),
+      ).toBe(0);
     });
 
     it("P10B-REPLAY-01: receipt makes crash-after-projection-commit replay effectively-once", async () => {
