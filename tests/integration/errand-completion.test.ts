@@ -205,6 +205,43 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     });
   }
 
+  const TEST_ONLY_PARKED_PROJECTION_RUN_AT = new Date("2099-01-01T00:00:00.000Z");
+
+  async function parkProjectionIntentTx(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    const event = await tx.domainEvent.findUnique({
+      where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${orderId}` },
+      select: { id: true },
+    });
+    if (!event) {
+      return;
+    }
+    await tx.asyncJob.updateMany({
+      where: {
+        dedupeKey: `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${event.id}`,
+      },
+      data: { runAt: TEST_ONLY_PARKED_PROJECTION_RUN_AT },
+    });
+  }
+
+  async function completeAndParkProjectionTx(
+    tx: Prisma.TransactionClient,
+    input: {
+      orderId: string;
+      errandTaskId: string;
+      buyerId: string;
+      sellerId: string;
+    },
+  ) {
+    const result = await completeErrandOrderTx(tx, input);
+    if (result.completed) {
+      await parkProjectionIntentTx(tx, input.orderId);
+    }
+    return result;
+  }
+
   // 扩展客户端运行时满足事务客户端能力，类型差异为项目已知坑
   function txClient(): Prisma.TransactionClient {
     return prisma as unknown as Prisma.TransactionClient;
@@ -252,7 +289,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     // 并发触发两次 canonical completion（模拟双击 / 两个入口同时到达）
     const results = await Promise.all([
       runInTransaction((tx) =>
-        completeErrandOrderTx(tx, {
+        completeAndParkProjectionTx(tx, {
           orderId: order.id,
           errandTaskId: task.id,
           buyerId,
@@ -260,7 +297,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
         }),
       ),
       runInTransaction((tx) =>
-        completeErrandOrderTx(tx, {
+        completeAndParkProjectionTx(tx, {
           orderId: order.id,
           errandTaskId: task.id,
           buyerId,
@@ -439,6 +476,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     const results = await runInTransaction(async (tx) => {
       const first = await recordDomainEventTx(tx, baseEvent);
       const second = await recordDomainEventTx(tx, baseEvent);
+      await parkProjectionIntentTx(tx, aggregateId);
       return [first, second];
     });
     expect(results).toEqual([

@@ -23,6 +23,18 @@ describe.skipIf(!integrationDatabaseUrl)(
     const projectionDedupeKey = (eventId: string) =>
       `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${eventId}`;
 
+    const TEST_ONLY_PARKED_RUN_AT = new Date("2099-01-01T00:00:00.000Z");
+
+    async function parkProjectionJobTx(
+      tx: Prisma.TransactionClient,
+      eventId: string,
+    ): Promise<void> {
+      await tx.asyncJob.updateMany({
+        where: { dedupeKey: projectionDedupeKey(eventId) },
+        data: { runAt: TEST_ONLY_PARKED_RUN_AT },
+      });
+    }
+
     beforeAll(async () => {
       prisma = new PrismaClient({
         datasources: { db: { url: integrationDatabaseUrl } },
@@ -217,8 +229,8 @@ describe.skipIf(!integrationDatabaseUrl)(
 
     it("P10B-REPLAY-01: receipt makes crash-after-projection-commit replay effectively-once", async () => {
       const aggregateId = `p10b-replay-${randomUUID()}`;
-      await prisma.$transaction((tx) =>
-        recordDomainEventTx(tx, {
+      await prisma.$transaction(async (tx) => {
+        await recordDomainEventTx(tx, {
           eventType: "ERRAND_ORDER_COMPLETED",
           schemaVersion: 1,
           aggregateType: "ORDER",
@@ -226,8 +238,13 @@ describe.skipIf(!integrationDatabaseUrl)(
           campusId,
           occurredAt: new Date("2026-10-01T01:00:00.000Z"),
           payload: { orderId: aggregateId, errandTaskId: "replay-task" },
-        }),
-      );
+        });
+        const event = await tx.domainEvent.findUniqueOrThrow({
+          where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${aggregateId}` },
+          select: { id: true },
+        });
+        await parkProjectionJobTx(tx, event.id);
+      });
       const event = await prisma.domainEvent.findUniqueOrThrow({
         where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${aggregateId}` },
       });
@@ -294,32 +311,42 @@ describe.skipIf(!integrationDatabaseUrl)(
         },
       });
 
-      const summary = await prisma.$transaction((tx) =>
-        scheduleUnprojectedDomainEventJobsTx(tx, {
+      const summary = await prisma.$transaction(async (tx) => {
+        const result = await scheduleUnprojectedDomainEventJobsTx(tx, {
           batchLimit: 1,
           campusId,
-        }),
-      );
+        });
+        expect(
+          await tx.asyncJob.count({
+            where: { dedupeKey: projectionDedupeKey(later.id), status: "PENDING" },
+          }),
+        ).toBe(1);
+        await parkProjectionJobTx(tx, later.id);
+        return result;
+      });
 
       expect(summary.enqueued).toBe(1);
       expect(summary.structuralGaps).toBe(1);
-      expect(
-        await prisma.asyncJob.count({
-          where: { dedupeKey: projectionDedupeKey(later.id), status: "PENDING" },
-        }),
-      ).toBe(1);
     });
 
     it("P10B-BACKFILL-01: only truthful canonical ERRAND completion is backfilled", async () => {
       const valid = await createCompletedErrandOrder(true);
       const invalid = await createCompletedErrandOrder(false);
 
-      const first = await prisma.$transaction((tx) =>
-        backfillCanonicalErrandCompletionEventsTx(tx, {
+      const first = await prisma.$transaction(async (tx) => {
+        const result = await backfillCanonicalErrandCompletionEventsTx(tx, {
           batchLimit: 10,
           campusId,
-        }),
-      );
+        });
+        const event = await tx.domainEvent.findUnique({
+          where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${valid.order.id}` },
+          select: { id: true },
+        });
+        if (event) {
+          await parkProjectionJobTx(tx, event.id);
+        }
+        return result;
+      });
       expect(first.backfilled).toBe(1);
 
       const event = await prisma.domainEvent.findUniqueOrThrow({
@@ -341,7 +368,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       expect(event.occurredAt.getTime()).toBe(valid.completedAt.getTime());
       expect(
         await prisma.asyncJob.count({
-          where: { dedupeKey: projectionDedupeKey(event.id), status: "PENDING" },
+          where: { dedupeKey: projectionDedupeKey(event.id) },
         }),
       ).toBe(1);
 
