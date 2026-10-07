@@ -53,11 +53,30 @@ describe("Phase 10D explainable risk rules", () => {
     expect(result.matchedRules).toEqual([
       { ruleId: "MANUAL_HIGH_SIGNAL", signalCount: 1 },
       { ruleId: "CONFIRMED_REPORT_PRESENT", signalCount: 2 },
-      { ruleId: "MANUAL_REVIEW_SIGNAL", signalCount: 1 },
     ]);
     expect(RISK_RULESET_VERSION).toBe(1);
     expect(result).not.toHaveProperty("riskScore");
     expect(result).not.toHaveProperty("trustScore");
+  });
+
+  it("HIGH confirmed report matches only the priority rule, not a second overlapping review rule", () => {
+    const result = evaluateRiskSignalBuckets([
+      { kind: "REPORT_CONFIRMED", severity: "HIGH", count: 1 },
+    ]);
+    expect(result.attentionLevel).toBe("PRIORITY_REVIEW");
+    expect(result.matchedRules).toEqual([
+      { ruleId: "CONFIRMED_HIGH_SIGNAL", signalCount: 1 },
+    ]);
+  });
+
+  it("MEDIUM manual flag matches the review rule exactly once", () => {
+    const result = evaluateRiskSignalBuckets([
+      { kind: "MANUAL_FLAG", severity: "MEDIUM", count: 1 },
+    ]);
+    expect(result.attentionLevel).toBe("REVIEW");
+    expect(result.matchedRules).toEqual([
+      { ruleId: "MANUAL_REVIEW_SIGNAL", signalCount: 1 },
+    ]);
   });
 
   it("keeps low-severity manual context at OBSERVE with an explicit context rule", () => {

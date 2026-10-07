@@ -194,7 +194,8 @@ export function evaluateRiskSignalBuckets(
 
   const confirmedReports = countSignals(
     signalBreakdown,
-    (bucket) => bucket.kind === "REPORT_CONFIRMED",
+    (bucket) =>
+      bucket.kind === "REPORT_CONFIRMED" && bucket.severity !== "HIGH",
   );
   if (confirmedReports > 0) {
     matchedRules.push({
@@ -208,7 +209,7 @@ export function evaluateRiskSignalBuckets(
     signalBreakdown,
     (bucket) =>
       bucket.kind === "MANUAL_FLAG" &&
-      (bucket.severity === "MEDIUM" || bucket.severity === "HIGH"),
+      bucket.severity === "MEDIUM",
   );
   if (manualReview > 0) {
     matchedRules.push({
