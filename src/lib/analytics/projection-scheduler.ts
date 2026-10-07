@@ -1,5 +1,3 @@
-import type { Prisma } from "@prisma/client";
-
 import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
 import {
   ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
@@ -16,7 +14,10 @@ const DEFAULT_BATCH_LIMIT = 10;
 
 type ProjectionCandidate = {
   eventId: string;
-  jobStatus: string | null;
+};
+
+type ProjectionGapRow = {
+  jobStatus: string;
 };
 
 export type ProjectionScheduleSummary = {
@@ -56,10 +57,11 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
   ].join(":");
 
   return withTransaction(async (tx) => {
+    // Scheduling candidates deliberately exclude every existing current-version
+    // job. A bad/terminal earlier row can therefore never consume LIMIT and starve
+    // later events that are actually repairable.
     const candidates = await tx.$queryRaw<ProjectionCandidate[]>`
-      SELECT
-        d.id AS "eventId",
-        j.status::text AS "jobStatus"
+      SELECT d.id AS "eventId"
       FROM "DomainEvent" d
       LEFT JOIN "ProjectionReceipt" r
         ON r."eventId" = d.id
@@ -68,47 +70,57 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
       LEFT JOIN "AsyncJob" j
         ON j."dedupeKey" = ${dedupePrefix} || d.id
       WHERE r.id IS NULL
+        AND j.id IS NULL
       ORDER BY d."recordedAt" ASC, d.id ASC
       LIMIT ${batchLimit}
       FOR UPDATE OF d SKIP LOCKED
     `;
 
-    const summary: ProjectionScheduleSummary = {
-      scanned: candidates.length,
-      enqueued: 0,
-      inFlight: 0,
-      deadLettered: 0,
-      structuralGaps: 0,
-    };
-
+    let enqueued = 0;
     for (const candidate of candidates) {
-      if (candidate.jobStatus === null) {
-        const result = await enqueueAsyncJobTx(tx, {
-          kind: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
-          schemaVersion: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
-          dedupeKey: buildLiveDomainEventProjectionDedupeKey(candidate.eventId),
-          payload: { eventId: candidate.eventId },
-          runAt: new Date(),
-        });
-        summary.enqueued += result.recorded ? 1 : 0;
-        continue;
-      }
-
-      if (
-        candidate.jobStatus === "PENDING" ||
-        candidate.jobStatus === "RETRY" ||
-        candidate.jobStatus === "RUNNING"
-      ) {
-        summary.inFlight += 1;
-      } else if (candidate.jobStatus === "DEAD_LETTER") {
-        summary.deadLettered += 1;
-      } else if (candidate.jobStatus === "COMPLETED") {
-        summary.structuralGaps += 1;
-      } else {
-        summary.structuralGaps += 1;
-      }
+      const result = await enqueueAsyncJobTx(tx, {
+        kind: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+        schemaVersion: ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+        dedupeKey: buildLiveDomainEventProjectionDedupeKey(candidate.eventId),
+        payload: { eventId: candidate.eventId },
+        runAt: new Date(),
+      });
+      enqueued += result.recorded ? 1 : 0;
     }
 
-    return summary;
+    // Observation is intentionally separate from scheduling. LIMIT here only
+    // bounds diagnostics; it cannot block replay of later events.
+    const gaps = await tx.$queryRaw<ProjectionGapRow[]>`
+      SELECT j.status::text AS "jobStatus"
+      FROM "DomainEvent" d
+      JOIN "AsyncJob" j
+        ON j."dedupeKey" = ${dedupePrefix} || d.id
+      LEFT JOIN "ProjectionReceipt" r
+        ON r."eventId" = d.id
+       AND r."projectionKey" = ${ANALYTICS_METRIC_PROJECTION_KEY}
+       AND r."projectionVersion" = ${ANALYTICS_METRIC_PROJECTION_VERSION}
+      WHERE r.id IS NULL
+      ORDER BY d."recordedAt" ASC, d.id ASC
+      LIMIT ${batchLimit}
+    `;
+
+    return {
+      scanned: candidates.length,
+      enqueued,
+      inFlight: gaps.filter(
+        (row) =>
+          row.jobStatus === "PENDING" ||
+          row.jobStatus === "RETRY" ||
+          row.jobStatus === "RUNNING",
+      ).length,
+      deadLettered: gaps.filter((row) => row.jobStatus === "DEAD_LETTER").length,
+      structuralGaps: gaps.filter(
+        (row) =>
+          row.jobStatus !== "PENDING" &&
+          row.jobStatus !== "RETRY" &&
+          row.jobStatus !== "RUNNING" &&
+          row.jobStatus !== "DEAD_LETTER",
+      ).length,
+    };
   });
 }

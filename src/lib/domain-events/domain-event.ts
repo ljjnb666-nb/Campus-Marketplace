@@ -149,8 +149,9 @@ function validateEnvelope(input: RecordDomainEventInput): {
  * - dedupe 命中后必须读取既有行并做完整语义一致性校验，禁止同 key
  *   不同 payload/tenant/time 被静默吞掉。
  *
- * 10A 不 enqueue projection job：10B 才建立“未投影 DomainEvent →
- * existing AsyncJob → ProjectionReceipt”的可恢复投影链。
+ * Phase 10B：写入/命中 canonical DomainEvent 后，同事务确保 current-version
+ * projection AsyncJob intent 存在；真正 projection effect 的 correctness authority
+ * 是 ProjectionReceipt，不是 AsyncJob COMPLETED。
  */
 export async function recordDomainEventTx(
   tx: Prisma.TransactionClient,

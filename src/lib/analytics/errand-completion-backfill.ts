@@ -1,5 +1,3 @@
-import type { Prisma } from "@prisma/client";
-
 import { recordDomainEventTx } from "@/lib/domain-events/domain-event";
 import {
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
