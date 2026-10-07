@@ -10,6 +10,10 @@ import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import {
+  recordLiquidityDemandCreatedTx,
+  recordLiquidityTransactionCompletedTx,
+} from "@/lib/analytics/liquidity-domain-events";
+import {
   RENTAL_DAMAGE_CLAIM_FILED_KIND,
   RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
   RENTAL_DISPUTE_OPENED_KIND,
@@ -287,6 +291,13 @@ export async function createRentalOrderTx(
       },
     });
 
+    await recordLiquidityDemandCreatedTx(tx, {
+      demandId: order.id,
+      demandType: "RENTAL_ORDER",
+      campusId: listing.campusId,
+      occurredAt: order.createdAt,
+    });
+
     await writeStatusLog(tx, {
       orderId: order.id,
       fromStatus: null,
@@ -510,7 +521,10 @@ export async function confirmReturnTx(
   const { orderId, userId, role, photos, hasDamage, needsCleaning, accessoriesComplete } = input;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: { in: ['PENDING_RETURN', 'PENDING_INSPECTION'] } },
-    include: { returnRecord: true },
+    include: {
+      returnRecord: true,
+      rentalListing: { select: { campusId: true } },
+    },
   });
   if (!order) return { error: "订单状态错误" };
   if (!isRentalOrderRoleParticipant(order, role, userId)) return { error: "无权操作" };
@@ -567,6 +581,12 @@ export async function confirmReturnTx(
     });
 
     if (nextStatus === 'COMPLETED') {
+      await recordLiquidityTransactionCompletedTx(tx, {
+        transactionId: order.id,
+        transactionType: "RENTAL",
+        campusId: order.rentalListing.campusId,
+        occurredAt: now,
+      });
       await incrementRentalCompletionCounters(tx, order);
     }
 
@@ -1130,7 +1150,13 @@ export async function respondDamageClaimTx(
 
   const claim = await tx.rentalDamageClaim.findFirst({
     where: { id: input.claimId, resolvedAt: null },
-    include: { order: true },
+    include: {
+      order: {
+        include: {
+          rentalListing: { select: { campusId: true } },
+        },
+      },
+    },
   });
   if (!claim || claim.order.renterId !== input.userId) return { error: "无效请求" };
 
@@ -1170,6 +1196,12 @@ export async function respondDamageClaimTx(
       toStatus: 'COMPLETED',
       operatorId: input.userId,
       note: input.agreed ? '租客同意损坏索赔，订单完成' : '租客拒绝损坏索赔，订单完成',
+    });
+    await recordLiquidityTransactionCompletedTx(tx, {
+      transactionId: claim.orderId,
+      transactionType: "RENTAL",
+      campusId: claim.order.rentalListing.campusId,
+      occurredAt: now,
     });
     await incrementRentalCompletionCounters(tx, claim.order);
   }

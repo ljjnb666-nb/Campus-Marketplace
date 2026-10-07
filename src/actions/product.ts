@@ -21,6 +21,7 @@ import { applyFavoriteToggle } from "@/lib/favorite-toggle";
 import { PRODUCT_PUBLIC_EXPOSURE_STATUS } from "@/lib/listings/listing-lifecycle";
 import { listingModerationPublicFilter } from "@/lib/moderation/listing-moderation-query";
 import { productFormSchema, productStatusSchema } from "@/validators/product";
+import { recordLiquidityListingCreatedTx } from "@/lib/analytics/liquidity-domain-events";
 
 export type ProductActionState = {
   success: boolean;
@@ -155,6 +156,13 @@ export async function createProduct(
           })),
         });
       }
+
+      await recordLiquidityListingCreatedTx(tx, {
+        listingId: created.id,
+        listingType: "PRODUCT",
+        campusId: created.campusId,
+        occurredAt: created.createdAt,
+      });
 
       return created;
     });

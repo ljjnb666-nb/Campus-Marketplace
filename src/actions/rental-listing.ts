@@ -19,6 +19,7 @@ import {
   uploadImageAsset,
 } from "@/lib/upload";
 import { rentalListingFormSchema } from "@/validators/rental";
+import { recordLiquidityListingCreatedTx } from "@/lib/analytics/liquidity-domain-events";
 
 export type RentalListingActionState = {
   success: boolean;
@@ -163,6 +164,13 @@ export async function createRentalListing(
           })),
         });
       }
+
+      await recordLiquidityListingCreatedTx(tx, {
+        listingId: created.id,
+        listingType: "RENTAL",
+        campusId: created.campusId,
+        occurredAt: created.createdAt,
+      });
 
       return created;
     });

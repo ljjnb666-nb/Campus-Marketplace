@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+}));
+
 const {
   redirect,
   revalidatePath,
@@ -809,7 +815,7 @@ describe("errand actions", () => {
         expect.objectContaining({
           kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
           schemaVersion: 1,
-          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
           payload: { eventId: "event-1" },
           runAt: expect.any(Date),
         }),

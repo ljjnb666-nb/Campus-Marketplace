@@ -12,7 +12,7 @@ import {
  * 无需 watermark，也不删除旧 receipt。
  */
 export const ANALYTICS_METRIC_PROJECTION_KEY = "ANALYTICS_METRIC_CONTRIBUTIONS";
-export const ANALYTICS_METRIC_PROJECTION_VERSION = 1;
+export const ANALYTICS_METRIC_PROJECTION_VERSION = 2;
 
 export type ProjectionIntentVersionDisposition = "STALE" | "CURRENT" | "FUTURE";
 

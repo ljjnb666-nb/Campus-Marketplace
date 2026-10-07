@@ -21,7 +21,7 @@ describe.skipIf(!integrationDatabaseUrl)(
     let backfillCanonicalErrandCompletionEventsTx: typeof import("@/lib/analytics/errand-completion-backfill")["backfillCanonicalErrandCompletionEventsTx"];
 
     const projectionDedupeKey = (eventId: string) =>
-      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${eventId}`;
+      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:${eventId}`;
 
     const TEST_ONLY_PARKED_RUN_AT = new Date("2099-01-01T00:00:00.000Z");
 
@@ -234,22 +234,27 @@ describe.skipIf(!integrationDatabaseUrl)(
       const aggregateId = `p10b-replay-${randomUUID()}`;
       await prisma.$transaction(async (tx) => {
         await recordDomainEventTx(tx, {
-          eventType: "ERRAND_ORDER_COMPLETED",
+          eventType: "LIQUIDITY_TRANSACTION_COMPLETED",
           schemaVersion: 1,
-          aggregateType: "ORDER",
+          aggregateType: "TRANSACTION",
           aggregateId,
           campusId,
           occurredAt: new Date("2026-10-01T01:00:00.000Z"),
-          payload: { orderId: aggregateId, errandTaskId: "replay-task" },
+          payload: { transactionId: aggregateId, transactionType: "ERRAND" },
         });
         const event = await tx.domainEvent.findUniqueOrThrow({
-          where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${aggregateId}` },
+          where: {
+            occurrenceKey: `LIQUIDITY_TRANSACTION_COMPLETED:ERRAND:${aggregateId}`,
+          },
           select: { id: true },
         });
         await parkProjectionJobTx(tx, event.id);
       });
+
       const event = await prisma.domainEvent.findUniqueOrThrow({
-        where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${aggregateId}` },
+        where: {
+          occurrenceKey: `LIQUIDITY_TRANSACTION_COMPLETED:ERRAND:${aggregateId}`,
+        },
       });
       const job = await prisma.asyncJob.findUniqueOrThrow({
         where: { dedupeKey: projectionDedupeKey(event.id) },
@@ -258,33 +263,27 @@ describe.skipIf(!integrationDatabaseUrl)(
 
       const first = await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
       expect(first).toEqual({ projected: true, contributionCount: 1 });
-      expect(
-        await prisma.projectionReceipt.count({ where: { eventId: event.id } }),
-      ).toBe(1);
-      expect(
-        await prisma.metricContribution.count({ where: { eventId: event.id } }),
-      ).toBe(1);
+      expect(await prisma.projectionReceipt.count({ where: { eventId: event.id } })).toBe(1);
+      expect(await prisma.metricContribution.count({ where: { eventId: event.id } })).toBe(1);
 
-      // Simulate worker crash after projection transaction commit but before its
-      // AsyncJob completion marker: durable intent remains replayable.
+      // Simulate worker crash after projection tx commit but before AsyncJob marker.
       expect(
         (await prisma.asyncJob.findUniqueOrThrow({ where: { id: job.id } })).status,
       ).toBe("PENDING");
 
-      const replay = await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
-      expect(replay).toEqual({ projected: false, contributionCount: 1 });
-      expect(
-        await prisma.projectionReceipt.count({ where: { eventId: event.id } }),
-      ).toBe(1);
+      const replayed = await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
+      expect(replayed).toEqual({ projected: false, contributionCount: 1 });
+      expect(await prisma.projectionReceipt.count({ where: { eventId: event.id } })).toBe(1);
+
       const contribution = await prisma.metricContribution.findMany({
         where: { eventId: event.id },
       });
       expect(contribution).toHaveLength(1);
       expect(contribution[0]).toMatchObject({
         metricKey: "COMPLETED_TRANSACTION_COUNT",
-        metricVersion: 1,
+        metricVersion: 2,
         campusId,
-        dimensionKey: "ORDER_TYPE:ERRAND",
+        dimensionKey: "TRANSACTION_TYPE:ERRAND",
       });
       expect(contribution[0]!.occurredAt.getTime()).toBe(event.occurredAt.getTime());
       expect(contribution[0]!.value.toString()).toBe("1");

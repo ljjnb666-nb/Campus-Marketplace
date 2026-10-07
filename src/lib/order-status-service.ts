@@ -8,6 +8,7 @@ import {
 } from "@/lib/product-order-lifecycle";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import { ORDER_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
+import { recordLiquidityTransactionCompletedTx } from "@/lib/analytics/liquidity-domain-events";
 
 /**
  * RB-03 REVIEW FIX（GROUP 2）：GENERAL ORDER STATUS authority。
@@ -240,12 +241,14 @@ export async function updateOrderStatusTx(
     return null;
   }
 
-  // 条件更新充当乐观锁：仅当状态仍是 fresh 读取时的状态才允许流转
+  // 条件更新充当乐观锁：COMPLETED 的 Order.completedAt 与 liquidity
+  // DomainEvent.occurredAt 必须共享同一个业务时钟。
+  const completedAt = requestedStatus === "COMPLETED" ? new Date() : null;
   const transitionResult = await tx.order.updateMany({
     where: { id: order.id, status: order.status },
     data: {
       status: requestedStatus,
-      completedAt: requestedStatus === "COMPLETED" ? new Date() : null,
+      completedAt,
       cancelReason: requestedStatus === "CANCELLED" ? "用户主动取消" : null,
     },
   });
@@ -257,22 +260,41 @@ export async function updateOrderStatusTx(
   // AUDIT2-RB01：PRODUCT CANCELLED 已在函数入口委派 cancelProductOrderTx
   // （条件化 Product 投影）；本 general 路径只保留 COMPLETED 投影。
   if (order.type === "PRODUCT" && order.productId) {
-    if (requestedStatus === "COMPLETED") {
-      await tx.product.update({
+    if (requestedStatus === "COMPLETED" && completedAt) {
+      const product = await tx.product.update({
         where: { id: order.productId },
         data: { status: "SOLD" },
+        select: { campusId: true },
       });
 
+      await recordLiquidityTransactionCompletedTx(tx, {
+        transactionId: order.id,
+        transactionType: "PRODUCT",
+        campusId: product.campusId,
+        occurredAt: completedAt,
+      });
       await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
     }
   }
 
-  if (order.type === "SERVICE" && order.serviceListingId && requestedStatus === "COMPLETED") {
-    await tx.serviceListing.update({
+  if (
+    order.type === "SERVICE" &&
+    order.serviceListingId &&
+    requestedStatus === "COMPLETED" &&
+    completedAt
+  ) {
+    const service = await tx.serviceListing.update({
       where: { id: order.serviceListingId },
       data: { completedOrderCount: { increment: 1 } },
+      select: { campusId: true },
     });
 
+    await recordLiquidityTransactionCompletedTx(tx, {
+      transactionId: order.id,
+      transactionType: "SERVICE",
+      campusId: service.campusId,
+      occurredAt: completedAt,
+    });
     await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
   }
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import { prisma } from "@/lib/prisma";
 import { computeBackoffDelayMs } from "@/lib/async/backoff";
 import {
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
   AsyncJobIntentContractError,
   validateJobIntent,
   type ClaimedAsyncJob,
@@ -13,10 +14,11 @@ import {
 /**
  * Phase 9A：AsyncJob durable queue repository（PostgreSQL authority）。
  *
- * claim 算法（§11）：真实 PostgreSQL FOR UPDATE SKIP LOCKED——绝不以
- * findMany → update 模拟队列。candidate = runnable（PENDING/RETRY 且
- * runAt <= now）∪ crash recovery（RUNNING 且 leaseExpiresAt <= now）。
- * claim 与 lease 写入在单条 UPDATE ... FROM 内原子完成。
+ * claim 算法（§11 / Phase 10C-1 fairness）：真实 PostgreSQL FOR UPDATE
+ * SKIP LOCKED——绝不以 findMany → update 模拟队列。candidate = runnable
+ * （PENDING/RETRY 且 runAt <= now）∪ crash recovery（RUNNING 且
+ * leaseExpiresAt <= now）。每个 class slice 的 claim+lease 仍由单条
+ * UPDATE ... FROM 原子完成；同一外层事务组合 foreground/analytics/fill。
  *
  * lease fencing（§12/§13）：每次 claim 每行生成新的 DB 端 leaseToken
  * （gen_random_uuid）；completion / failure / reschedule 更新必须条件命中
@@ -114,10 +116,16 @@ export type ClaimAsyncJobsInput = {
  * 抢占 + lease 写入 + attempts 递增原子完成；两 worker 并发 claim 时
  * 每行至多被一个事务持有（SKIP LOCKED 跳过他人行锁）——J-RACE-01/02。
  */
-export async function claimDueAsyncJobs(
+type ClaimClass = "FOREGROUND" | "ANALYTICS" | "ANY";
+
+async function claimDueAsyncJobsSlice(
   tx: Prisma.TransactionClient,
   input: ClaimAsyncJobsInput,
+  claimClass: ClaimClass,
+  batchSize: number,
 ): Promise<ClaimedAsyncJob[]> {
+  if (batchSize <= 0) return [];
+
   const now = input.now ?? new Date();
   const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000);
 
@@ -138,15 +146,28 @@ export async function claimDueAsyncJobs(
       SELECT id, status AS "previousStatus"
       FROM "AsyncJob"
       WHERE (
-          "status" IN ('PENDING', 'RETRY')
-          AND "runAt" <= ${now}
+          (
+            "status" IN ('PENDING', 'RETRY')
+            AND "runAt" <= ${now}
+          )
+          OR (
+            "status" = 'RUNNING'
+            AND "leaseExpiresAt" <= ${now}
+          )
         )
-        OR (
-          "status" = 'RUNNING'
-          AND "leaseExpiresAt" <= ${now}
+        AND (
+          ${claimClass}::text = 'ANY'
+          OR (
+            ${claimClass}::text = 'FOREGROUND'
+            AND kind <> ${ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND}
+          )
+          OR (
+            ${claimClass}::text = 'ANALYTICS'
+            AND kind = ${ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND}
+          )
         )
       ORDER BY "runAt" ASC, "createdAt" ASC, id ASC
-      LIMIT ${input.batchSize}
+      LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
     )
     UPDATE "AsyncJob" AS j
@@ -183,6 +204,43 @@ export async function claimDueAsyncJobs(
     leaseToken: row.leaseToken,
     previousStatus: row.previousStatus,
   }));
+}
+
+/**
+ * Phase 10C-1 queue fairness：
+ * - analytics projection 是 derived/background work，不能挤占履约、通知、
+ *   隐私等 foreground durable intents；
+ * - batch >= 2 时 foreground 先拿 batch-1，至少给 analytics 留一个收敛槽；
+ * - 任一类别不足时 ANY 回填，保持 worker capacity 不浪费；
+ * - batch = 1 时 foreground 优先；没有 foreground 才取 analytics。
+ *
+ * 仍是同一 AsyncJob 表/同一事务/同一 SKIP LOCKED fencing 协议，不建立
+ * 第二队列，也不改变 lease/attempts/execution semantics。
+ */
+export async function claimDueAsyncJobs(
+  tx: Prisma.TransactionClient,
+  input: ClaimAsyncJobsInput,
+): Promise<ClaimedAsyncJob[]> {
+  const foregroundBudget = input.batchSize <= 1 ? input.batchSize : input.batchSize - 1;
+  const foreground = await claimDueAsyncJobsSlice(
+    tx,
+    input,
+    "FOREGROUND",
+    foregroundBudget,
+  );
+
+  let remaining = input.batchSize - foreground.length;
+  const analytics = await claimDueAsyncJobsSlice(
+    tx,
+    input,
+    "ANALYTICS",
+    remaining,
+  );
+
+  remaining -= analytics.length;
+  const fill = await claimDueAsyncJobsSlice(tx, input, "ANY", remaining);
+
+  return [...foreground, ...analytics, ...fill];
 }
 
 export type CompleteAsyncJobInput = {

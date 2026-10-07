@@ -406,6 +406,39 @@ describe.skipIf(!integrationDatabaseUrl)(
       ).toBe(1);
     });
 
+    it("J-FAIR-01（10C-1）：analytics backlog 不能阻塞 foreground，且 analytics 保持有界进度", async () => {
+      const foreground = await insertJobFixture({
+        orderId: `fair-fg-${randomUUID().slice(0, 6)}`,
+        runAt: new Date("2000-01-02T00:00:00.000Z"),
+      });
+      const analyticsIds: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const eventId = `fair-event-${i}-${randomUUID().slice(0, 6)}`;
+        const job = await insertJobFixture({
+          orderId: `fair-bg-${i}-${randomUUID().slice(0, 6)}`,
+          kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+          payload: { eventId },
+          // analytics 刻意比 foreground 更老：纯 FIFO 会把 foreground 挤出 batch。
+          runAt: new Date("2000-01-01T00:00:00.000Z"),
+        });
+        analyticsIds.push(job.id);
+      }
+
+      const { claimDueAsyncJobs } = await import("@/lib/async/job-repository");
+      const { withTransaction } = await import("@/lib/prisma");
+      const claimed = await withTransaction((tx) =>
+        claimDueAsyncJobs(tx, {
+          workerId: "worker-fairness",
+          leaseSeconds: 60,
+          batchSize: 2,
+        }),
+      );
+
+      expect(claimed).toHaveLength(2);
+      expect(claimed.some((job) => job.id === foreground.id)).toBe(true);
+      expect(claimed.filter((job) => analyticsIds.includes(job.id))).toHaveLength(1);
+    });
+
     it("J-RACE-01（§46）：两个 worker 并发 claim 同一 job → 恰一个获得（真实 FOR UPDATE SKIP LOCKED 行锁证据）", async () => {
       const job = await insertJobFixture({ orderId: `race1-${randomUUID().slice(0, 6)}` });
 

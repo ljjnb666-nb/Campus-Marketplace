@@ -1,10 +1,21 @@
 import {
-  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
-  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+  LIQUIDITY_DEMAND_CREATED_EVENT_SCHEMA_VERSION,
+  LIQUIDITY_DEMAND_CREATED_EVENT_TYPE,
+  LIQUIDITY_LISTING_CREATED_EVENT_SCHEMA_VERSION,
+  LIQUIDITY_LISTING_CREATED_EVENT_TYPE,
+  LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION,
+  LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
 } from "@/lib/domain-events/domain-event-registry";
 
+export const NEW_LISTING_COUNT_METRIC_KEY = "NEW_LISTING_COUNT";
+export const NEW_LISTING_COUNT_METRIC_VERSION = 1;
+
+export const DEMAND_CREATED_COUNT_METRIC_KEY = "DEMAND_CREATED_COUNT";
+export const DEMAND_CREATED_COUNT_METRIC_VERSION = 1;
+
 export const COMPLETED_TRANSACTION_COUNT_METRIC_KEY = "COMPLETED_TRANSACTION_COUNT";
-export const COMPLETED_TRANSACTION_COUNT_METRIC_VERSION = 1;
+// v2：统一 PRODUCT/SERVICE/ERRAND/RENTAL completion fact；v1 仅有 ERRAND。
+export const COMPLETED_TRANSACTION_COUNT_METRIC_VERSION = 2;
 
 export type MetricDefinition = {
   metricKey: string;
@@ -23,13 +34,33 @@ export type MetricContributionSpec = {
 
 const METRIC_DEFINITIONS = new Map<string, MetricDefinition>([
   [
+    NEW_LISTING_COUNT_METRIC_KEY,
+    {
+      metricKey: NEW_LISTING_COUNT_METRIC_KEY,
+      metricVersion: NEW_LISTING_COUNT_METRIC_VERSION,
+      valueType: "COUNT",
+      authority: "DOMAIN_EVENT",
+      description: "新供给 listing 创建数；按 PRODUCT/SERVICE/RENTAL 维度。",
+    },
+  ],
+  [
+    DEMAND_CREATED_COUNT_METRIC_KEY,
+    {
+      metricKey: DEMAND_CREATED_COUNT_METRIC_KEY,
+      metricVersion: DEMAND_CREATED_COUNT_METRIC_VERSION,
+      valueType: "COUNT",
+      authority: "DOMAIN_EVENT",
+      description: "新需求创建数；ERRAND 以任务发布计，其他域以订单/租赁申请创建计。",
+    },
+  ],
+  [
     COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
     {
       metricKey: COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
       metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
       valueType: "COUNT",
       authority: "DOMAIN_EVENT",
-      description: "已完成交易事件计数；不是付款、结算或平台收入。",
+      description: "已完成交易事实计数；不是付款、结算或平台收入。",
     },
   ],
 ]);
@@ -42,15 +73,47 @@ type EventMetricProjector = (input: {
 
 const EVENT_METRIC_PROJECTORS = new Map<string, Map<number, EventMetricProjector>>([
   [
-    ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+    LIQUIDITY_LISTING_CREATED_EVENT_TYPE,
     new Map([
       [
-        ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
-        () => [
+        LIQUIDITY_LISTING_CREATED_EVENT_SCHEMA_VERSION,
+        ({ payload }) => [
+          {
+            metricKey: NEW_LISTING_COUNT_METRIC_KEY,
+            metricVersion: NEW_LISTING_COUNT_METRIC_VERSION,
+            dimensionKey: `LISTING_TYPE:${String(payload.listingType)}`,
+            value: "1",
+          },
+        ],
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_DEMAND_CREATED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_DEMAND_CREATED_EVENT_SCHEMA_VERSION,
+        ({ payload }) => [
+          {
+            metricKey: DEMAND_CREATED_COUNT_METRIC_KEY,
+            metricVersion: DEMAND_CREATED_COUNT_METRIC_VERSION,
+            dimensionKey: `DEMAND_TYPE:${String(payload.demandType)}`,
+            value: "1",
+          },
+        ],
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION,
+        ({ payload }) => [
           {
             metricKey: COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
             metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
-            dimensionKey: "ORDER_TYPE:ERRAND",
+            dimensionKey: `TRANSACTION_TYPE:${String(payload.transactionType)}`,
             value: "1",
           },
         ],
@@ -68,9 +131,9 @@ export function listMetricDefinitions(): MetricDefinition[] {
 }
 
 /**
- * 未映射事件返回 []，不是错误：DomainEvent ledger 可比 analytics registry
- * 更宽。未来给既有 event 新增 metric projector 时必须提升 projectionVersion
- * 并 replay，禁止同版本静默改变历史 projection 语义。
+ * 未映射事件返回 []：10C projection v2 故意不再消费旧
+ * ERRAND_ORDER_COMPLETED，避免与统一 LIQUIDITY_TRANSACTION_COMPLETED
+ * 双计。旧 v1 contribution/receipt 保留作历史版本，不做 destructive cleanup。
  */
 export function resolveMetricContributions(input: {
   eventType: string;

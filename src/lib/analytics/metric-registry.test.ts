@@ -3,51 +3,90 @@ import { describe, expect, it } from "vitest";
 import {
   COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
   COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
+  DEMAND_CREATED_COUNT_METRIC_KEY,
+  DEMAND_CREATED_COUNT_METRIC_VERSION,
+  NEW_LISTING_COUNT_METRIC_KEY,
+  NEW_LISTING_COUNT_METRIC_VERSION,
   getMetricDefinition,
   listMetricDefinitions,
   resolveMetricContributions,
 } from "@/lib/analytics/metric-registry";
 
-describe("Phase 10B Metric Registry", () => {
-  it("METRIC-REG-01: completed transaction count has explicit versioned DomainEvent authority", () => {
-    expect(getMetricDefinition(COMPLETED_TRANSACTION_COUNT_METRIC_KEY)).toEqual({
-      metricKey: COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
-      metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
-      valueType: "COUNT",
-      authority: "DOMAIN_EVENT",
-      description: "已完成交易事件计数；不是付款、结算或平台收入。",
-    });
-    expect(listMetricDefinitions()).toHaveLength(1);
-  });
-
-  it("METRIC-REG-02: ERRAND completion emits one event-level contribution, not a time bucket", () => {
-    expect(
-      resolveMetricContributions({
-        eventType: "ERRAND_ORDER_COMPLETED",
-        schemaVersion: 1,
-        aggregateType: "ORDER",
-        aggregateId: "order-1",
-        payload: { orderId: "order-1", errandTaskId: "errand-1" },
+describe("Phase 10C-1 Liquidity Metric Registry", () => {
+  it("P10C1-METRIC-01: three safe count metrics have explicit DomainEvent authority", () => {
+    expect(listMetricDefinitions()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        metricKey: NEW_LISTING_COUNT_METRIC_KEY,
+        metricVersion: NEW_LISTING_COUNT_METRIC_VERSION,
+        valueType: "COUNT",
+        authority: "DOMAIN_EVENT",
       }),
-    ).toEqual([
-      {
+      expect.objectContaining({
+        metricKey: DEMAND_CREATED_COUNT_METRIC_KEY,
+        metricVersion: DEMAND_CREATED_COUNT_METRIC_VERSION,
+        valueType: "COUNT",
+        authority: "DOMAIN_EVENT",
+      }),
+      expect.objectContaining({
         metricKey: COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
         metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
-        dimensionKey: "ORDER_TYPE:ERRAND",
-        value: "1",
-      },
-    ]);
+        valueType: "COUNT",
+        authority: "DOMAIN_EVENT",
+      }),
+    ]));
+    expect(listMetricDefinitions()).toHaveLength(3);
+    expect(getMetricDefinition("GMV")).toBeNull();
+    expect(getMetricDefinition("CTV")).toBeNull();
   });
 
-  it("METRIC-REG-03: unmapped DomainEvent is a valid zero-contribution projection", () => {
-    expect(
-      resolveMetricContributions({
-        eventType: "FUTURE_EVENT",
-        schemaVersion: 1,
-        aggregateType: "FUTURE",
-        aggregateId: "a1",
-        payload: {},
-      }),
-    ).toEqual([]);
+  it("P10C1-METRIC-02: listing/demand/completion facts emit one count each", () => {
+    expect(resolveMetricContributions({
+      eventType: "LIQUIDITY_LISTING_CREATED",
+      schemaVersion: 1,
+      aggregateType: "LISTING",
+      aggregateId: "p1",
+      payload: { listingId: "p1", listingType: "PRODUCT" },
+    })).toEqual([{
+      metricKey: NEW_LISTING_COUNT_METRIC_KEY,
+      metricVersion: NEW_LISTING_COUNT_METRIC_VERSION,
+      dimensionKey: "LISTING_TYPE:PRODUCT",
+      value: "1",
+    }]);
+
+    expect(resolveMetricContributions({
+      eventType: "LIQUIDITY_DEMAND_CREATED",
+      schemaVersion: 1,
+      aggregateType: "DEMAND",
+      aggregateId: "e1",
+      payload: { demandId: "e1", demandType: "ERRAND_TASK" },
+    })).toEqual([{
+      metricKey: DEMAND_CREATED_COUNT_METRIC_KEY,
+      metricVersion: DEMAND_CREATED_COUNT_METRIC_VERSION,
+      dimensionKey: "DEMAND_TYPE:ERRAND_TASK",
+      value: "1",
+    }]);
+
+    expect(resolveMetricContributions({
+      eventType: "LIQUIDITY_TRANSACTION_COMPLETED",
+      schemaVersion: 1,
+      aggregateType: "TRANSACTION",
+      aggregateId: "o1",
+      payload: { transactionId: "o1", transactionType: "RENTAL" },
+    })).toEqual([{
+      metricKey: COMPLETED_TRANSACTION_COUNT_METRIC_KEY,
+      metricVersion: COMPLETED_TRANSACTION_COUNT_METRIC_VERSION,
+      dimensionKey: "TRANSACTION_TYPE:RENTAL",
+      value: "1",
+    }]);
+  });
+
+  it("P10C1-METRIC-03: legacy ERRAND completion is zero-contribution under v2", () => {
+    expect(resolveMetricContributions({
+      eventType: "ERRAND_ORDER_COMPLETED",
+      schemaVersion: 1,
+      aggregateType: "ORDER",
+      aggregateId: "order-1",
+      payload: { orderId: "order-1", errandTaskId: "errand-1" },
+    })).toEqual([]);
   });
 });

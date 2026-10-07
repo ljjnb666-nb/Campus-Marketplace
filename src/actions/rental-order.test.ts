@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
+vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+}));
+
 const {
   revalidatePath,
   requireUser,
@@ -298,6 +304,7 @@ const pendingInspectionClaim = {
     renterId: "user-renter",
     depositAmount: new Prisma.Decimal("50"),
     depositStatus: "PAID",
+    rentalListing: { campusId: "campus-1" },
   },
 };
 

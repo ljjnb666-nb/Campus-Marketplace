@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
+vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+}));
+
 const { txNotificationCreateMany, txNotificationFindUnique, checkTimeConflict } = vi.hoisted(() => ({
   // Phase 9B：canonical notification emit（emitNotificationTx 写边界）
   txNotificationCreateMany: vi.fn(),
@@ -310,6 +316,7 @@ describe("rental-order-machine", () => {
         renterId: "user-renter",
         depositAmount: new Prisma.Decimal("50"),
         depositStatus: "PAID",
+        rentalListing: { campusId: "campus-1" },
       },
     });
 
@@ -356,6 +363,7 @@ describe("rental-order-machine", () => {
         renterId: "user-renter",
         depositAmount: new Prisma.Decimal("50"),
         depositStatus: "PAID",
+        rentalListing: { campusId: "campus-1" },
       },
     });
 

@@ -61,6 +61,7 @@ import { scheduleDueErrandDeadlineJobs } from "@/lib/async/errand-deadline-sched
 import { reconcileDataExportDeadLetters } from "@/lib/privacy/data-export-async";
 import { getQueueStatsSnapshot } from "@/lib/async/queue-stats";
 import { backfillCanonicalErrandCompletionEvents } from "@/lib/analytics/errand-completion-backfill";
+import { backfillCanonicalLiquidityFacts } from "@/lib/analytics/liquidity-backfill";
 import { scheduleUnprojectedDomainEventJobs } from "@/lib/analytics/projection-scheduler";
 
 const DEFAULT_POLL_MS = 1000;
@@ -188,8 +189,10 @@ function emitSyncShutdownLog(
 interface CycleSummary {
   /** Phase 9C-02：本轮 scheduler producer 新 enqueue 的 errand expiry intent 数。 */
   errandDeadlinesScheduled: number;
-  /** Phase 10B：从 canonical completed ERRAND 补出的历史 DomainEvent 数。 */
+  /** Phase 10B：从 canonical completed ERRAND 补出的历史兼容 DomainEvent 数。 */
   domainEventsBackfilled: number;
+  /** Phase 10C-1：canonical liquidity facts backfill 数（每条会产生一个 projection intent）。 */
+  liquidityFactsBackfilled: number;
   /** Phase 10B：为 current-version receipt 缺失事件新 enqueue 数。 */
   projectionJobsScheduled: number;
   /** Phase 10B：projection DEAD_LETTER 显式观测，不自动无限 requeue。 */
@@ -215,6 +218,7 @@ function summarize(
   CycleSummary,
   | "errandDeadlinesScheduled"
   | "domainEventsBackfilled"
+  | "liquidityFactsBackfilled"
   | "projectionJobsScheduled"
   | "projectionDeadLetters"
   | "projectionStructuralGaps"
@@ -236,6 +240,7 @@ function didWork(summary: CycleSummary): boolean {
   return (
     summary.errandDeadlinesScheduled > 0 ||
     summary.domainEventsBackfilled > 0 ||
+    summary.liquidityFactsBackfilled > 0 ||
     summary.projectionJobsScheduled > 0 ||
     summary.jobsClaimed > 0 ||
     summary.outboxClaimed > 0 ||
@@ -330,6 +335,25 @@ async function main() {
         }
       }
 
+      // Phase 10C-1 unified liquidity history。与 legacy ERRAND backfill 共用
+      // producer budget；每个新 DomainEvent 会在 recordDomainEventTx 内同事务
+      // enqueue 一个 v2 projection intent，因此按 backfilled 数扣预算。
+      let liquidityFactsBackfilled = 0;
+      if (producerBudget > 0) {
+        try {
+          const backfill = await backfillCanonicalLiquidityFacts({
+            batchLimit: producerBudget,
+          });
+          liquidityFactsBackfilled = backfill.backfilled;
+          producerBudget = Math.max(0, producerBudget - backfill.backfilled);
+        } catch (error) {
+          logger.warn("liquidity canonical backfill 失败，等待下个周期", "async-worker", {
+            event: "async_worker_liquidity_backfill_failed",
+            errorName: error instanceof Error ? error.name : "unknown",
+          });
+        }
+      }
+
       let projectionJobsScheduled = 0;
       let projectionDeadLetters = 0;
       let projectionStructuralGaps = 0;
@@ -387,6 +411,7 @@ async function main() {
       cycle = {
         errandDeadlinesScheduled,
         domainEventsBackfilled,
+        liquidityFactsBackfilled,
         projectionJobsScheduled,
         projectionDeadLetters,
         projectionStructuralGaps,

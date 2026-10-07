@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
+vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+}));
+
 const {
   txNotificationCreateMany,
   txNotificationFindUnique,
@@ -163,7 +169,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
         expect.objectContaining({
           kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
           schemaVersion: 1,
-          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
           payload: { eventId: "event-1" },
           runAt: expect.any(Date),
         }),
