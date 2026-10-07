@@ -13,12 +13,61 @@ export const ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE = "ERRAND_ORDER_COMPLETED"
 export const ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION = 1;
 export const ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE = "ORDER";
 
+// Phase 10C-1：统一 liquidity facts。aggregateType 使用稳定的 analytics-domain
+// aggregate，而 payload 保留具体业务类型；禁止自由文本/价格/地点等次生复制。
+export const LIQUIDITY_LISTING_CREATED_EVENT_TYPE = "LIQUIDITY_LISTING_CREATED";
+export const LIQUIDITY_LISTING_CREATED_EVENT_SCHEMA_VERSION = 1;
+export const LIQUIDITY_LISTING_CREATED_AGGREGATE_TYPE = "LISTING";
+
+export const LIQUIDITY_DEMAND_CREATED_EVENT_TYPE = "LIQUIDITY_DEMAND_CREATED";
+export const LIQUIDITY_DEMAND_CREATED_EVENT_SCHEMA_VERSION = 1;
+export const LIQUIDITY_DEMAND_CREATED_AGGREGATE_TYPE = "DEMAND";
+
+export const LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE = "LIQUIDITY_TRANSACTION_COMPLETED";
+export const LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION = 1;
+export const LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE = "TRANSACTION";
+
+export const LIQUIDITY_LISTING_TYPES = ["PRODUCT", "SERVICE", "RENTAL"] as const;
+export const LIQUIDITY_DEMAND_TYPES = [
+  "PRODUCT_ORDER",
+  "SERVICE_ORDER",
+  "RENTAL_ORDER",
+  "ERRAND_TASK",
+] as const;
+export const LIQUIDITY_TRANSACTION_TYPES = [
+  "PRODUCT",
+  "SERVICE",
+  "ERRAND",
+  "RENTAL",
+] as const;
+
 const boundedId = z.string().min(1).max(191);
 
 const errandOrderCompletedPayloadSchema = z
   .object({
     orderId: boundedId,
     errandTaskId: boundedId,
+  })
+  .strict();
+
+const liquidityListingCreatedPayloadSchema = z
+  .object({
+    listingId: boundedId,
+    listingType: z.enum(LIQUIDITY_LISTING_TYPES),
+  })
+  .strict();
+
+const liquidityDemandCreatedPayloadSchema = z
+  .object({
+    demandId: boundedId,
+    demandType: z.enum(LIQUIDITY_DEMAND_TYPES),
+  })
+  .strict();
+
+const liquidityTransactionCompletedPayloadSchema = z
+  .object({
+    transactionId: boundedId,
+    transactionType: z.enum(LIQUIDITY_TRANSACTION_TYPES),
   })
   .strict();
 
@@ -39,10 +88,53 @@ const DOMAIN_EVENT_DEFINITIONS = new Map<string, Map<number, DomainEventDefiniti
           aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
           payloadSchema: errandOrderCompletedPayloadSchema,
           aggregateIdFromPayload: (payload) => payload.orderId as string,
-          // occurrence identity 刻意不包含 schemaVersion：schema 升级不能把
-          // 同一业务事实变成第二次 occurrence。
           occurrenceKey: (aggregateId) =>
             `${ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE}:${aggregateId}`,
+        },
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_LISTING_CREATED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_LISTING_CREATED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LIQUIDITY_LISTING_CREATED_AGGREGATE_TYPE,
+          payloadSchema: liquidityListingCreatedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.listingId as string,
+          occurrenceKey: (aggregateId, payload) =>
+            `${LIQUIDITY_LISTING_CREATED_EVENT_TYPE}:${payload.listingType}:${aggregateId}`,
+        },
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_DEMAND_CREATED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_DEMAND_CREATED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LIQUIDITY_DEMAND_CREATED_AGGREGATE_TYPE,
+          payloadSchema: liquidityDemandCreatedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.demandId as string,
+          occurrenceKey: (aggregateId, payload) =>
+            `${LIQUIDITY_DEMAND_CREATED_EVENT_TYPE}:${payload.demandType}:${aggregateId}`,
+        },
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE,
+          payloadSchema: liquidityTransactionCompletedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.transactionId as string,
+          occurrenceKey: (aggregateId, payload) =>
+            `${LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE}:${payload.transactionType}:${aggregateId}`,
         },
       ],
     ]),
