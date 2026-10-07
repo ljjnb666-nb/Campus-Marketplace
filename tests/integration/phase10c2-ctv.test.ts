@@ -590,6 +590,132 @@ describe.skipIf(!integrationDatabaseUrl)(
       }
     });
 
+
+    it("P10C2-PG-05: campus-scoped backfill never crosses tenant boundary", async () => {
+      const suffix = randomUUID().slice(0, 8);
+      const otherCampus = await prisma.campus.create({
+        data: {
+          name: `P10C2 other campus ${suffix}`,
+          slug: `p10c2-other-${suffix}`,
+          schoolName: "另一所集成测试大学",
+        },
+      });
+      const [otherBuyer, otherSeller] = await Promise.all([
+        prisma.user.create({
+          data: {
+            name: "p10c2-other-buyer",
+            email: `p10c2-other-buyer-${suffix}@it.local`,
+            passwordHash: "test-only",
+            schoolName: "另一所集成测试大学",
+            campusId: otherCampus.id,
+          },
+        }),
+        prisma.user.create({
+          data: {
+            name: "p10c2-other-seller",
+            email: `p10c2-other-seller-${suffix}@it.local`,
+            passwordHash: "test-only",
+            schoolName: "另一所集成测试大学",
+            campusId: otherCampus.id,
+          },
+        }),
+      ]);
+
+      let otherOrderId = "";
+      try {
+        const product = await prisma.product.create({
+          data: {
+            title: "P10C2 cross-campus product",
+            description: "cross campus fixture",
+            price: "6.50",
+            locationText: "Z",
+            condition: "LIKE_NEW",
+            status: "SOLD",
+            sellerId: otherSeller.id,
+            campusId: otherCampus.id,
+            categoryId: productCategoryId,
+          },
+        });
+        const otherOrder = await prisma.order.create({
+          data: {
+            orderNo: `P10C2-X-${suffix}`,
+            type: "PRODUCT",
+            status: "COMPLETED",
+            paymentStatus: "OFFLINE_PENDING",
+            amount: "6.50",
+            completedAt: new Date("2026-10-05T09:00:00.000Z"),
+            buyerId: otherBuyer.id,
+            sellerId: otherSeller.id,
+            productId: product.id,
+          },
+        });
+        otherOrderId = otherOrder.id;
+
+        await prisma.$transaction((tx) =>
+          backfillCanonicalTransactionValuesTx(tx, {
+            batchLimit: 100,
+            campusId,
+          }),
+        );
+        expect(
+          await prisma.domainEvent.count({
+            where: {
+              occurrenceKey:
+                `LIQUIDITY_TRANSACTION_VALUE_RECORDED:PRODUCT:${otherOrder.id}`,
+            },
+          }),
+        ).toBe(0);
+
+        const otherScope = await prisma.$transaction((tx) =>
+          backfillCanonicalTransactionValuesTx(tx, {
+            batchLimit: 100,
+            campusId: otherCampus.id,
+          }),
+        );
+        expect(otherScope.backfilled).toBe(1);
+        expect(otherScope.corruptRows).toBe(0);
+
+        const event = await prisma.domainEvent.findUnique({
+          where: {
+            occurrenceKey:
+              `LIQUIDITY_TRANSACTION_VALUE_RECORDED:PRODUCT:${otherOrder.id}`,
+          },
+        });
+        expect(event).toMatchObject({
+          campusId: otherCampus.id,
+          payload: expect.objectContaining({ bookedValue: "6.50" }),
+        });
+      } finally {
+        if (otherOrderId) {
+          const event = await prisma.domainEvent.findUnique({
+            where: {
+              occurrenceKey:
+                `LIQUIDITY_TRANSACTION_VALUE_RECORDED:PRODUCT:${otherOrderId}`,
+            },
+            select: { id: true },
+          });
+          if (event) {
+            await prisma.metricContribution.deleteMany({ where: { eventId: event.id } });
+            await prisma.projectionReceipt.deleteMany({ where: { eventId: event.id } });
+            await prisma.asyncJob.deleteMany({
+              where: { dedupeKey: projectionDedupeKey(event.id) },
+            });
+            await prisma.domainEvent.delete({ where: { id: event.id } });
+          }
+        }
+        await prisma.order.deleteMany({
+          where: {
+            OR: [{ buyerId: otherBuyer.id }, { sellerId: otherSeller.id }],
+          },
+        });
+        await prisma.product.deleteMany({ where: { campusId: otherCampus.id } });
+        await prisma.user.deleteMany({
+          where: { id: { in: [otherBuyer.id, otherSeller.id] } },
+        });
+        await prisma.campus.delete({ where: { id: otherCampus.id } });
+      }
+    });
+
     it("P10C2-PG-04: corrupt earlier history is reported partial without starving later safe history", async () => {
       const suffix = randomUUID().slice(0, 8);
       const t = (minute: number) => new Date(Date.UTC(2026, 9, 4, 9, minute, 0));
