@@ -2533,7 +2533,7 @@ model ProjectionReceipt {
 
   @@unique([projectionKey, eventId, projectionVersion])
   @@index([eventId, projectionKey, projectionVersion])
-  @@index([projectionKey, projectionVersion, projectedAt])
+  @@index([projectionKey, projectionVersion, projectedAt], map: "ProjectionReceipt_projection_version_projected_idx")
 }
 
 // Event-level metric contribution：故意不在 10B 固化 campus-local day bucket。
@@ -2555,8 +2555,8 @@ model MetricContribution {
 
   createdAt DateTime @default(now())
 
-  @@unique([projectionKey, projectionVersion, eventId, metricKey, metricVersion, dimensionKey])
-  @@index([metricKey, metricVersion, campusId, occurredAt])
+  @@unique([projectionKey, projectionVersion, eventId, metricKey, metricVersion, dimensionKey], map: "MetricContribution_projection_event_metric_dim_key")
+  @@index([metricKey, metricVersion, campusId, occurredAt], map: "MetricContribution_metric_campus_occurred_idx")
   @@index([eventId, projectionKey, projectionVersion])
 }
 

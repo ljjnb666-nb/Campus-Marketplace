@@ -7,6 +7,7 @@ import { projectDomainEventTx } from "@/lib/analytics/domain-event-projection";
 import {
   ANALYTICS_METRIC_PROJECTION_VERSION,
   buildLiveDomainEventProjectionDedupeKey,
+  classifyProjectionIntentVersion,
   parseDomainEventProjectionVersion,
 } from "@/lib/analytics/projection-contract";
 
@@ -34,10 +35,14 @@ export const analyticsProjectDomainEventHandler: JobHandler = async (tx, job) =>
       `analytics projection dedupe identity 非法：jobId=${job.id}`,
     );
   }
-  if (intentProjectionVersion < ANALYTICS_METRIC_PROJECTION_VERSION) {
+  const disposition = classifyProjectionIntentVersion(
+    intentProjectionVersion,
+    ANALYTICS_METRIC_PROJECTION_VERSION,
+  );
+  if (disposition === "STALE") {
     return { kind: "COMPLETED_IDEMPOTENT" };
   }
-  if (intentProjectionVersion > ANALYTICS_METRIC_PROJECTION_VERSION) {
+  if (disposition === "FUTURE") {
     return { kind: "RESCHEDULE", runAt: new Date(Date.now() + 60_000) };
   }
 

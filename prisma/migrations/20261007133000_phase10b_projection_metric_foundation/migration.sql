@@ -41,10 +41,10 @@ ON "ProjectionReceipt"("projectionKey", "eventId", "projectionVersion");
 CREATE INDEX "ProjectionReceipt_eventId_projectionKey_projectionVersion_idx"
 ON "ProjectionReceipt"("eventId", "projectionKey", "projectionVersion");
 
-CREATE INDEX "ProjectionReceipt_projectionKey_projectionVersion_projectedAt_idx"
+CREATE INDEX "ProjectionReceipt_projection_version_projected_idx"
 ON "ProjectionReceipt"("projectionKey", "projectionVersion", "projectedAt");
 
-CREATE UNIQUE INDEX "MetricContribution_projectionKey_projectionVersion_eventId_metricKey_metricVersion_dimensionKey_key"
+CREATE UNIQUE INDEX "MetricContribution_projection_event_metric_dim_key"
 ON "MetricContribution"(
   "projectionKey",
   "projectionVersion",
@@ -54,7 +54,7 @@ ON "MetricContribution"(
   "dimensionKey"
 );
 
-CREATE INDEX "MetricContribution_metricKey_metricVersion_campusId_occurredAt_idx"
+CREATE INDEX "MetricContribution_metric_campus_occurred_idx"
 ON "MetricContribution"("metricKey", "metricVersion", "campusId", "occurredAt");
 
 CREATE INDEX "MetricContribution_eventId_projectionKey_projectionVersion_idx"

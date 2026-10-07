@@ -7,6 +7,7 @@ import {
   ANALYTICS_METRIC_PROJECTION_KEY,
   ANALYTICS_METRIC_PROJECTION_VERSION,
   buildLiveDomainEventProjectionDedupeKey,
+  classifyProjectionIntentVersion,
   parseDomainEventProjectionVersion,
 } from "@/lib/analytics/projection-contract";
 import { PermanentJobFailure } from "@/lib/async/job-types";
@@ -117,26 +118,13 @@ describe("Phase 10B receipt-backed projection", () => {
     );
   });
 
-  it("PROJECTION-06: stale-version durable intent is a no-op under newer runtime semantics", async () => {
-    const tx = buildTx();
-
-    await expect(
-      analyticsProjectDomainEventHandler(asTx(tx), {
-        id: "job-v0",
-        kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
-        schemaVersion: 1,
-        dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection0:event-1",
-        payload: { eventId: "event-1" },
-        attempts: 1,
-        maxAttempts: 5,
-        leaseToken: "lease-1",
-        previousStatus: "PENDING",
-      }),
-    ).resolves.toEqual({ kind: "COMPLETED_IDEMPOTENT" });
-
-    expect(tx.domainEvent.findUnique).not.toHaveBeenCalled();
-    expect(tx.projectionReceipt.createMany).not.toHaveBeenCalled();
-    expect(tx.metricContribution.createMany).not.toHaveBeenCalled();
+  it("PROJECTION-06: legal older intent is classified stale for a newer runtime", () => {
+    expect(classifyProjectionIntentVersion(1, 2)).toBe("STALE");
+    expect(classifyProjectionIntentVersion(2, 2)).toBe("CURRENT");
+    expect(classifyProjectionIntentVersion(3, 2)).toBe("FUTURE");
+    expect(() => classifyProjectionIntentVersion(0, 1)).toThrow(
+      "ANALYTICS_PROJECTION_VERSION_INVALID",
+    );
   });
 
   it("PROJECTION-07: old runtime reschedules a future-version intent instead of poisoning it", async () => {
