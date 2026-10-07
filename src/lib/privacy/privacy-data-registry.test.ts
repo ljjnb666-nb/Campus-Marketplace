@@ -82,8 +82,8 @@ const schemaFields = parseSchemaModelFields(schemaText);
 const schemaModelNames = parseSchemaModelNames(schemaText);
 
 describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", () => {
-  it("20 个冻结 personal-bearing models 全部有 model 级 policy（Phase 9C-04 +AsyncJob/OutboxEvent）", () => {
-    expect(FROZEN_PERSONAL_MODELS).toHaveLength(20);
+  it("21 个冻结 personal-bearing models 全部有 model 级 policy（Phase 10A +DomainEvent）", () => {
+    expect(FROZEN_PERSONAL_MODELS).toHaveLength(21);
 
     for (const model of FROZEN_PERSONAL_MODELS) {
       const policy = getModelPrivacyPolicy(model);
@@ -91,6 +91,17 @@ describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", 
       expect(SELF_EXPORT_MODES).toContain(policy!.selfExport);
       expect(ERASURE_MODES).toContain(policy!.erasure);
     }
+  });
+
+  it("Phase 10A DomainEvent 作为 authoritative transaction history 登记", () => {
+    const policy = getModelPrivacyPolicy("DomainEvent");
+    expect(policy).toMatchObject({
+      classification: "TRANSACTION_HISTORY",
+      selfExport: "EXCLUDE",
+      erasure: "RETAIN_STRUCTURAL",
+      secondaryCopyAllowed: false,
+      logSafe: false,
+    });
   });
 
   it("冻结 model 全部真实存在于 Prisma schema（防拼写漂移）", () => {

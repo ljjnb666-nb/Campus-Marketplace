@@ -1,5 +1,6 @@
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { softDeleteExtension } from "@/lib/prisma-soft-delete";
+import { domainEventLedgerExtension } from "@/lib/domain-events/domain-event";
 
 const isDev = process.env.NODE_ENV === "development";
 
@@ -35,9 +36,13 @@ const basePrisma =
 // connection_limit 直接核算。
 global.prisma = basePrisma;
 
-// 对外导出的客户端统一挂载软删除拦截（deletedAt 过滤/delete 映射），
-// 业务代码无需逐查询手写 deletedAt: null，详见 prisma-soft-delete.ts
-export const prisma = basePrisma.$extends(softDeleteExtension);
+// 对外业务客户端统一挂载：
+// 1) soft-delete read/mutation boundary；
+// 2) Phase 10A DomainEvent append-only boundary。
+// raw/base PrismaClient 仅供迁移、测试 fixture cleanup 与未来显式 maintenance seam。
+export const prisma = basePrisma
+  .$extends(softDeleteExtension)
+  .$extends(domainEventLedgerExtension);
 
 // 交互事务的默认超时时间（毫秒），防止慢查询阻塞连接池。
 // 导出供 AsyncJob execution policy 继承（Phase 9B RB06：per-job 预算

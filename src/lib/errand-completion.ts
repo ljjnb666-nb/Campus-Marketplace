@@ -2,6 +2,12 @@ import type { Prisma } from "@prisma/client";
 
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import { ERRAND_ORDER_COMPLETED_KIND } from "@/lib/notifications/notification-registry";
+import { recordDomainEventTx } from "@/lib/domain-events/domain-event";
+import {
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+} from "@/lib/domain-events/domain-event-registry";
 
 /**
  * ERRAND 订单完成的唯一权威实现（exactly-once）。
@@ -18,9 +24,12 @@ import { ERRAND_ORDER_COMPLETED_KIND } from "@/lib/notifications/notification-re
  * - ErrandTask 的条件 updateMany 是胜者闸门：并发下只有一个事务能把
  *   PENDING_CONFIRMATION 推到 COMPLETED（READ COMMITTED 下落败方的
  *   UPDATE 在行锁释放后重新评估 WHERE，count=0）；
- * - 落败/过期重试返回 { completed: false }，不产生任何计数与通知；
+ * - 落败/过期重试返回 { completed: false }，不产生任何计数、通知或事件；
  * - 闸门通过但 Order 条件更新落空（数据不一致的防御分支）时抛错，
- *   整个事务回滚，两表都不留半程状态。
+ *   整个事务回滚，两表都不留半程状态；
+ * - Phase 10A：胜者在同一事务内追加 ERRAND_ORDER_COMPLETED DomainEvent。
+ *   campusId 必须来自 winner ErrandTask 的事务内 canonical row，绝不信任
+ *   request/input；事件写失败必须回滚订单完成与全部副作用。
  */
 export type ErrandCompletionResult = { completed: boolean };
 
@@ -45,17 +54,59 @@ export async function completeErrandOrderTx(
     return { completed: false };
   }
 
-  // 2) Order 条件流转（乐观锁）
+  // 2) Order 条件流转（乐观锁）。occurredAt 与 completedAt 共用同一业务时钟，
+  //    后续 metric/replay 禁止使用 worker/recordedAt 冒充业务发生时间。
+  const occurredAt = new Date();
   const orderResult = await tx.order.updateMany({
     where: { id: input.orderId, status: "IN_PROGRESS" },
-    data: { status: "COMPLETED", completedAt: new Date() },
+    data: { status: "COMPLETED", completedAt: occurredAt },
   });
 
   if (orderResult.count === 0) {
     throw new Error("ERRAND_COMPLETION_CONFLICT");
   }
 
-  // 3) 副作用仅由胜者事务执行：完成计数 + 完成通知（每个接收者恰好一条）
+  // 3) Aggregate binding safety belt：即使未来新增 caller，也不能靠 input
+  //    拼接一个 Task 与另一张 Order。两个正式 lifecycle caller 已在锁内验证，
+  //    此处仍由 completion authority 自己复核 participant + relation。
+  const [taskScope, orderScope] = await Promise.all([
+    tx.errandTask.findUnique({
+      where: { id: input.errandTaskId },
+      select: { campusId: true, publisherId: true, accepterId: true },
+    }),
+    tx.order.findUnique({
+      where: { id: input.orderId },
+      select: { errandTaskId: true, buyerId: true, sellerId: true },
+    }),
+  ]);
+  if (!taskScope || !orderScope) {
+    throw new Error("ERRAND_COMPLETION_SCOPE_MISSING");
+  }
+  if (
+    taskScope.publisherId !== input.buyerId ||
+    taskScope.accepterId !== input.sellerId ||
+    orderScope.errandTaskId !== input.errandTaskId ||
+    orderScope.buyerId !== input.buyerId ||
+    orderScope.sellerId !== input.sellerId
+  ) {
+    throw new Error("ERRAND_COMPLETION_AUTHORITY_MISMATCH");
+  }
+
+  // 4) authoritative fact ledger：domain mutation + event 同一事务原子提交。
+  await recordDomainEventTx(tx, {
+    eventType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+    schemaVersion: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+    aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+    aggregateId: input.orderId,
+    campusId: taskScope.campusId,
+    occurredAt,
+    payload: {
+      orderId: input.orderId,
+      errandTaskId: input.errandTaskId,
+    },
+  });
+
+  // 5) 副作用仅由胜者事务执行：完成计数 + 完成通知（每个接收者恰好一条）
   await tx.user.update({
     where: { id: input.buyerId },
     data: { completedOrdersCount: { increment: 1 } },
