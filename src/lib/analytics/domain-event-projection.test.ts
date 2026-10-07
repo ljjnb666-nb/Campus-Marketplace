@@ -7,6 +7,7 @@ import {
   ANALYTICS_METRIC_PROJECTION_KEY,
   ANALYTICS_METRIC_PROJECTION_VERSION,
   buildLiveDomainEventProjectionDedupeKey,
+  parseDomainEventProjectionVersion,
 } from "@/lib/analytics/projection-contract";
 import { PermanentJobFailure } from "@/lib/async/job-types";
 
@@ -136,5 +137,43 @@ describe("Phase 10B receipt-backed projection", () => {
     expect(tx.domainEvent.findUnique).not.toHaveBeenCalled();
     expect(tx.projectionReceipt.createMany).not.toHaveBeenCalled();
     expect(tx.metricContribution.createMany).not.toHaveBeenCalled();
+  });
+
+  it("PROJECTION-07: old runtime reschedules a future-version intent instead of poisoning it", async () => {
+    const tx = buildTx();
+    const before = Date.now();
+    const result = await analyticsProjectDomainEventHandler(asTx(tx), {
+      id: "job-v2",
+      kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+      schemaVersion: 1,
+      dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
+      payload: { eventId: "event-1" },
+      attempts: 1,
+      maxAttempts: 5,
+      leaseToken: "lease-2",
+      previousStatus: "PENDING",
+    });
+    expect(result.kind).toBe("RESCHEDULE");
+    if (result.kind === "RESCHEDULE") {
+      expect(result.runAt.getTime()).toBeGreaterThanOrEqual(before + 60_000);
+    }
+    expect(tx.domainEvent.findUnique).not.toHaveBeenCalled();
+    expect(tx.projectionReceipt.createMany).not.toHaveBeenCalled();
+  });
+
+  it("PROJECTION-08: projection dedupe parser is strict and event-bound", () => {
+    expect(
+      parseDomainEventProjectionVersion(
+        "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection12:event-1",
+        "event-1",
+      ),
+    ).toBe(12);
+    expect(
+      parseDomainEventProjectionVersion(
+        "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection12:other-event",
+        "event-1",
+      ),
+    ).toBeNull();
+    expect(parseDomainEventProjectionVersion(undefined, "event-1")).toBeNull();
   });
 });

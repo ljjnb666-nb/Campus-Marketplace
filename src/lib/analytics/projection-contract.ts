@@ -22,3 +22,27 @@ export function buildLiveDomainEventProjectionDedupeKey(eventId: string): string
     eventId,
   ].join(":");
 }
+
+export function parseDomainEventProjectionVersion(
+  dedupeKey: string | undefined,
+  eventId: string,
+): number | null {
+  if (!dedupeKey) {
+    return null;
+  }
+  const prefix = [
+    ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+    `schema${ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION}`,
+    "projection",
+  ].join(":");
+  const suffix = `:${eventId}`;
+  if (!dedupeKey.startsWith(prefix) || !dedupeKey.endsWith(suffix)) {
+    return null;
+  }
+  const rawVersion = dedupeKey.slice(prefix.length, dedupeKey.length - suffix.length);
+  if (!/^[1-9][0-9]*$/.test(rawVersion)) {
+    return null;
+  }
+  const parsed = Number(rawVersion);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
