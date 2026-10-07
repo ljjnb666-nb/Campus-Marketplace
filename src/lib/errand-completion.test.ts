@@ -14,8 +14,15 @@ import { completeErrandOrderTx } from "@/lib/errand-completion";
 
 function buildTx() {
   return {
-    errandTask: { updateMany: vi.fn() },
+    errandTask: {
+      updateMany: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue({ campusId: "campus-1" }),
+    },
     order: { updateMany: vi.fn() },
+    domainEvent: {
+      createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUnique: vi.fn(),
+    },
     user: { update: vi.fn() },
     // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
     notification: {
@@ -56,6 +63,8 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
       data: { status: "COMPLETED" },
     });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
+    expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
+    expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -68,6 +77,8 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
 
     expect(result).toEqual({ completed: false });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
+    expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
+    expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -84,6 +95,30 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(tx.order.updateMany).toHaveBeenCalledWith({
       where: { id: "order-1", status: "IN_PROGRESS" },
       data: { status: "COMPLETED", completedAt: expect.any(Date) },
+    });
+    const completedAt = tx.order.updateMany.mock.calls[0]![0].data.completedAt as Date;
+    expect(tx.errandTask.findUnique).toHaveBeenCalledWith({
+      where: { id: "errand-1" },
+      select: { campusId: true },
+    });
+    expect(tx.domainEvent.createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          eventType: "ERRAND_ORDER_COMPLETED",
+          schemaVersion: 1,
+          aggregateType: "ORDER",
+          aggregateId: "order-1",
+          campusId: "campus-1",
+          actorUserId: null,
+          subjectUserId: null,
+          occurrenceKey: "ERRAND_ORDER_COMPLETED:order-1",
+          payload: { orderId: "order-1", errandTaskId: "errand-1" },
+          occurredAt: completedAt,
+          sourceType: "DOMAIN_TX",
+          sourceId: null,
+        },
+      ],
+      skipDuplicates: true,
     });
     expect(tx.user.update).toHaveBeenCalledTimes(2);
     expect(tx.user.update).toHaveBeenCalledWith({
@@ -116,6 +151,20 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     ]);
   });
 
+  it("scope authority 缺失时 fail closed：事件/计数/通知均不写", async () => {
+    const tx = buildTx();
+    tx.errandTask.updateMany.mockResolvedValue({ count: 1 });
+    tx.order.updateMany.mockResolvedValue({ count: 1 });
+    tx.errandTask.findUnique.mockResolvedValue(null);
+
+    await expect(completeErrandOrderTx(asTx(tx), baseInput)).rejects.toThrow(
+      "ERRAND_COMPLETION_SCOPE_MISSING",
+    );
+    expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
+  });
+
   it("冲突防御：闸门通过但 Order 条件更新落空时抛错（调用方事务整体回滚）", async () => {
     const tx = buildTx();
     tx.errandTask.updateMany.mockResolvedValue({ count: 1 });
@@ -138,6 +187,8 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
 
     expect(result).toEqual({ completed: false });
     expect(tx.order.updateMany).not.toHaveBeenCalled();
+    expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
+    expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });

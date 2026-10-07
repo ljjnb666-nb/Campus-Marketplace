@@ -2458,6 +2458,59 @@ model AsyncJob {
   @@index([status, completedAt, tombstonedAt])
 }
 
+
+// ============================================================
+// Phase 10A — Authoritative Domain Fact Ledger
+// ============================================================
+//
+// DomainEvent != OutboxEvent:
+// - DomainEvent = 已发生领域事实的持久历史 authority，供 replay/backfill/
+//   analytics projection 使用；不得被 retention tombstone。
+// - OutboxEvent = 已发生事实等待派生副作用的 transport runtime，允许 terminal
+//   payload compaction；绝不能反过来充当历史 event store。
+//
+// 10A 只建立 ledger + 写边界 + 一个真实纵向 writer；10B 才接 projection
+// scheduling / AsyncJob / ProjectionReceipt，避免提前创建会被无意义消费的 job。
+model DomainEvent {
+  id            String   @id @default(cuid())
+  eventType     String
+  schemaVersion Int
+
+  aggregateType String
+  aggregateId   String
+
+  // 事件发生时的 authoritative tenant snapshot。禁止从 request/client 输入
+  // 直接透传；writer 必须从锁内/事务内 canonical domain row 获取。
+  campusId String
+
+  // 可选 provenance。不是关系 FK：ledger 必须能在账号 pseudonymous erasure
+  // 后继续保留历史结构事实，不被用户行生命周期级联删除。
+  actorUserId   String?
+  subjectUserId String?
+
+  // 语义 occurrence identity（跨 schema version 稳定）——同一事实只能存在一次。
+  occurrenceKey String @unique
+
+  // 只允许 registry strict schema 的 IDs + machine enums / bounded machine values；
+  // 禁止 user-authored free text、secret、provider raw payload。
+  payload Json
+
+  // occurredAt = 领域事实发生时间；recordedAt = ledger 持久化时间。
+  // 指标分桶必须使用 occurredAt，禁止用 worker/recordedAt 代替业务时间。
+  occurredAt DateTime
+  recordedAt DateTime @default(now())
+
+  // provenance：10A live writer 固定 DOMAIN_TX；未来 backfill/reconciliation
+  // 必须显式使用不同机器 sourceType，禁止伪装为实时 domain event。
+  sourceType String @default("DOMAIN_TX")
+  sourceId   String?
+
+  @@index([eventType, occurredAt, id])
+  @@index([aggregateType, aggregateId, occurredAt])
+  @@index([campusId, occurredAt, id])
+  @@index([recordedAt, id])
+}
+
 model OutboxEvent {
   id            String @id @default(cuid())
   eventType     String

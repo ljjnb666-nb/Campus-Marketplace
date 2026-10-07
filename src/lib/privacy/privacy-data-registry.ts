@@ -118,6 +118,9 @@ export const FROZEN_PERSONAL_MODELS = [
   // COMPLETED/PUBLISHED 行 in-place compaction 为机器 tombstone marker
   "AsyncJob",
   "OutboxEvent",
+  // Phase 10A：authoritative domain fact ledger。只保存结构化 IDs + machine
+  // state，不是用户可见副本；作为交易历史 provenance 长期保留。
+  "DomainEvent",
 ] as const;
 
 export type FrozenPersonalModel = (typeof FROZEN_PERSONAL_MODELS)[number];
@@ -237,6 +240,14 @@ export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPol
   OutboxEvent: {
     model: "OutboxEvent",
     ...entry("DERIVED_EPHEMERAL", "EXCLUDE", "RETAIN_STRUCTURAL", false, false),
+  },
+  // Phase 10A：DomainEvent 是 authoritative historical fact ledger，不是
+  // derived telemetry。payload 由 strict registry 写边界限制为 IDs + machine
+  // values；self-export 继续以 canonical business records 为准，内部 ledger
+  // 不直接暴露。账号注销保留结构 provenance，不保存 user-authored free text。
+  DomainEvent: {
+    model: "DomainEvent",
+    ...entry("TRANSACTION_HISTORY", "EXCLUDE", "RETAIN_STRUCTURAL", false, false),
   },
 };
 

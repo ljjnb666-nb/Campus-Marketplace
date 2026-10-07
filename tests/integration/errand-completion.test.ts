@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Prisma } from "@prisma/client";
+import { recordDomainEventTx } from "@/lib/domain-events/domain-event";
+import {
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+  ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+} from "@/lib/domain-events/domain-event-registry";
 
 /**
  * ERRAND 完成 exactly-once 真实数据库集成测试。
@@ -13,7 +19,10 @@ import type { Prisma } from "@prisma/client";
  * 2. 并发完成（exactly-once）：PENDING_CONFIRMATION + IN_PROGRESS 状态下
  *    并发触发两次 canonical completion → 恰好一个胜者；
  *    Order/ErrandTask 均为 COMPLETED；双方计数恰好 +1；完成通知无重复
- * 3. 重试幂等：已 COMPLETED 后再次提交 → 状态/计数/通知全部不变
+ * 3. 重试幂等：已 COMPLETED 后再次提交 → 状态/计数/通知/DomainEvent 全部不变
+ * 4. Phase 10A：winner 恰好一条 DomainEvent；occurredAt === Order.completedAt；
+ *    campusId 来自 ErrandTask；事务 rollback 时 domain state/event/副作用一起回滚
+ * 5. DomainEvent occurrenceKey 重复写：相同事实幂等，冲突事实 fail closed
  */
 
 const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
@@ -100,6 +109,15 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     const userIds = campusUsers.map((u) => u.id);
 
     // 原生客户端（无软删除扩展）：deleteMany 即物理删除
+    const orderIds = (
+      await prisma.order.findMany({
+        where: { buyerId: { in: userIds } },
+        select: { id: true },
+      })
+    ).map((order) => order.id);
+    await prisma.domainEvent.deleteMany({
+      where: { aggregateType: "ORDER", aggregateId: { in: orderIds } },
+    });
     await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.order.deleteMany({ where: { buyerId: { in: userIds } } });
     await prisma.errandTask.deleteMany({ where: { campusId } });
@@ -165,6 +183,16 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     });
   }
 
+  async function countCompletionEvents(orderId: string) {
+    return prisma.domainEvent.count({
+      where: {
+        eventType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+        aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+        aggregateId: orderId,
+      },
+    });
+  }
+
   // 扩展客户端运行时满足事务客户端能力，类型差异为项目已知坑
   function txClient(): Prisma.TransactionClient {
     return prisma as unknown as Prisma.TransactionClient;
@@ -197,6 +225,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     expect(after.buyer).toBe(before.buyer);
     expect(after.seller).toBe(before.seller);
     expect(await countCompletionNotifications(order.id)).toBe(notificationsBefore);
+    expect(await countCompletionEvents(order.id)).toBe(0);
   });
 
   it("并发完成 exactly-once：单胜者、计数恰好 +1、完成通知无重复", async () => {
@@ -237,6 +266,28 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     expect(taskAfter?.status).toBe("COMPLETED");
     expect(orderAfter?.status).toBe("COMPLETED");
     expect(orderAfter?.completedAt).not.toBeNull();
+
+    const events = await prisma.domainEvent.findMany({
+      where: {
+        eventType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+        aggregateId: order.id,
+      },
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      schemaVersion: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+      aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+      aggregateId: order.id,
+      campusId,
+      occurrenceKey: `ERRAND_ORDER_COMPLETED:${order.id}`,
+      payload: { orderId: order.id, errandTaskId: task.id },
+      sourceType: "DOMAIN_TX",
+      sourceId: null,
+      actorUserId: null,
+      subjectUserId: null,
+    });
+    expect(events[0]!.occurredAt.getTime()).toBe(orderAfter!.completedAt!.getTime());
+    expect(events[0]!.recordedAt.getTime()).toBeGreaterThanOrEqual(events[0]!.occurredAt.getTime());
 
     // 计数恰好各 +1，不能 +2
     const after = await readCounts();
@@ -284,5 +335,80 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     expect(after.buyer).toBe(before.buyer);
     expect(after.seller).toBe(before.seller);
     expect(await countCompletionNotifications(order.id)).toBe(notificationsBefore);
+    expect(await countCompletionEvents(order.id)).toBe(0);
+  });
+
+  it("Phase 10A transaction atomicity：外层回滚时状态、事件、计数、通知一起回滚", async () => {
+    const { task, order } = await createErrandWithOrder({
+      taskStatus: "PENDING_CONFIRMATION",
+      orderStatus: "IN_PROGRESS",
+    });
+    const before = await readCounts();
+
+    await expect(
+      runInTransaction(async (tx) => {
+        const result = await completeErrandOrderTx(tx, {
+          orderId: order.id,
+          errandTaskId: task.id,
+          buyerId,
+          sellerId,
+        });
+        expect(result).toEqual({ completed: true });
+        expect(
+          await tx.domainEvent.count({
+            where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${order.id}` },
+          }),
+        ).toBe(1);
+        throw new Error("PHASE10A_ROLLBACK_SENTINEL");
+      }),
+    ).rejects.toThrow("PHASE10A_ROLLBACK_SENTINEL");
+
+    const [taskAfter, orderAfter] = await Promise.all([
+      prisma.errandTask.findUnique({ where: { id: task.id } }),
+      prisma.order.findUnique({ where: { id: order.id } }),
+    ]);
+    expect(taskAfter?.status).toBe("PENDING_CONFIRMATION");
+    expect(orderAfter?.status).toBe("IN_PROGRESS");
+    expect(orderAfter?.completedAt).toBeNull();
+    expect(await readCounts()).toEqual(before);
+    expect(await countCompletionNotifications(order.id)).toBe(0);
+    expect(await countCompletionEvents(order.id)).toBe(0);
+  });
+
+  it("Phase 10A occurrence dedupe：相同事实幂等，冲突事实拒绝", async () => {
+    const aggregateId = `phase10a-contract-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const occurrenceKey = `ERRAND_ORDER_COMPLETED:${aggregateId}`;
+    const eventTime = new Date("2026-10-07T00:00:00.000Z");
+    const baseEvent = {
+      eventType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+      schemaVersion: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+      aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+      aggregateId,
+      campusId,
+      occurredAt: eventTime,
+      payload: { orderId: aggregateId, errandTaskId: "errand-contract-1" },
+    };
+
+    const results = await runInTransaction(async (tx) => {
+      const first = await recordDomainEventTx(tx, baseEvent);
+      const second = await recordDomainEventTx(tx, baseEvent);
+      return [first, second];
+    });
+    expect(results).toEqual([
+      { recorded: true, occurrenceKey },
+      { recorded: false, occurrenceKey },
+    ]);
+    expect(await prisma.domainEvent.count({ where: { occurrenceKey } })).toBe(1);
+
+    await expect(
+      runInTransaction((tx) =>
+        recordDomainEventTx(tx, {
+          ...baseEvent,
+          campusId: `${campusId}-conflict`,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "DOMAIN_EVENT_OCCURRENCE_CONFLICT" });
+
+    await prisma.domainEvent.deleteMany({ where: { occurrenceKey } });
   });
 });
