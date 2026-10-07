@@ -387,7 +387,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         unsupportedServiceRows: 1,
         corruptRows: 0,
       });
-    }
+    });
 
     it("P10C2-PG-02: live PRODUCT emits CTV, SERVICE completion stays count-only", async () => {
       const suffix = randomUUID().slice(0, 8);
