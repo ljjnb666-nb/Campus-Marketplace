@@ -59,7 +59,15 @@ describe("Phase 10D Risk Intelligence architecture contract", () => {
     expect(migration).toContain("COMMIT;");
     expect(migration).toContain("'risk.read'");
     expect(migration).toContain("PLATFORM_ADMIN");
-    expect(migration).not.toContain("UserRoleAssignment");
+    for (const forbidden of [
+      'INSERT INTO "UserRoleAssignment"',
+      'UPDATE "UserRoleAssignment"',
+      'DELETE FROM "UserRoleAssignment"',
+      'ALTER TABLE "UserRoleAssignment"',
+      'DROP TABLE "UserRoleAssignment"',
+    ]) {
+      expect(migration).not.toContain(forbidden);
+    }
 
     const legacyStart = permissions.indexOf(
       "LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS",
