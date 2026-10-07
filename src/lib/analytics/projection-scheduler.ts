@@ -1,3 +1,5 @@
+import type { Prisma } from "@prisma/client";
+
 import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
 import {
   ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
@@ -45,10 +47,10 @@ function resolveBatchLimit(value: number | undefined): number {
  * projectionVersion 提升后旧 receipts 不匹配，历史 DomainEvent 会按 current
  * version bounded replay；没有 watermark / id > cursor correctness。
  */
-export async function scheduleUnprojectedDomainEventJobs(input: {
-  batchLimit?: number;
-  campusId?: string;
-} = {}): Promise<ProjectionScheduleSummary> {
+export async function scheduleUnprojectedDomainEventJobsTx(
+  tx: Prisma.TransactionClient,
+  input: { batchLimit?: number; campusId?: string } = {},
+): Promise<ProjectionScheduleSummary> {
   const batchLimit = resolveBatchLimit(input.batchLimit);
   const campusId = input.campusId ?? null;
   if (campusId !== null && campusId.length === 0) {
@@ -61,8 +63,7 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
     "",
   ].join(":");
 
-  return withTransaction(async (tx) => {
-    // Scheduling candidates deliberately exclude every existing current-version
+  // Scheduling candidates deliberately exclude every existing current-version
     // job. A bad/terminal earlier row can therefore never consume LIMIT and starve
     // later events that are actually repairable.
     const candidates = await tx.$queryRaw<ProjectionCandidate[]>`
@@ -111,23 +112,28 @@ export async function scheduleUnprojectedDomainEventJobs(input: {
       LIMIT ${batchLimit}
     `;
 
-    return {
-      scanned: candidates.length,
-      enqueued,
-      inFlight: gaps.filter(
+  return {
+    scanned: candidates.length,
+    enqueued,
+    inFlight: gaps.filter(
         (row) =>
           row.jobStatus === "PENDING" ||
           row.jobStatus === "RETRY" ||
           row.jobStatus === "RUNNING",
       ).length,
-      deadLettered: gaps.filter((row) => row.jobStatus === "DEAD_LETTER").length,
-      structuralGaps: gaps.filter(
-        (row) =>
-          row.jobStatus !== "PENDING" &&
-          row.jobStatus !== "RETRY" &&
-          row.jobStatus !== "RUNNING" &&
-          row.jobStatus !== "DEAD_LETTER",
-      ).length,
-    };
-  });
+    deadLettered: gaps.filter((row) => row.jobStatus === "DEAD_LETTER").length,
+    structuralGaps: gaps.filter(
+      (row) =>
+        row.jobStatus !== "PENDING" &&
+        row.jobStatus !== "RETRY" &&
+        row.jobStatus !== "RUNNING" &&
+        row.jobStatus !== "DEAD_LETTER",
+    ).length,
+  };
+}
+
+export async function scheduleUnprojectedDomainEventJobs(
+  input: { batchLimit?: number; campusId?: string } = {},
+): Promise<ProjectionScheduleSummary> {
+  return withTransaction((tx) => scheduleUnprojectedDomainEventJobsTx(tx, input));
 }

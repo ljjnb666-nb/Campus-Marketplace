@@ -1,3 +1,5 @@
+import type { Prisma } from "@prisma/client";
+
 import { recordDomainEventTx } from "@/lib/domain-events/domain-event";
 import {
   ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
@@ -28,17 +30,15 @@ function resolveBatchLimit(value: number | undefined): number {
  * Order↔ErrandTask participants, and authoritative task campus are eligible.
  * Never invent occurredAt from updatedAt or migration time.
  */
-export async function backfillCanonicalErrandCompletionEvents(input: {
-  batchLimit?: number;
-  campusId?: string;
-} = {}): Promise<{ scanned: number; backfilled: number; racedWithExisting: number }> {
+export async function backfillCanonicalErrandCompletionEventsTx(
+  tx: Prisma.TransactionClient,
+  input: { batchLimit?: number; campusId?: string } = {},
+): Promise<{ scanned: number; backfilled: number; racedWithExisting: number }> {
   const batchLimit = resolveBatchLimit(input.batchLimit);
   const campusId = input.campusId ?? null;
   if (campusId !== null && campusId.length === 0) {
     throw new Error("ANALYTICS_BACKFILL_CAMPUS_SCOPE_INVALID");
   }
-
-  return withTransaction(async (tx) => {
     const rows = await tx.$queryRaw<CanonicalErrandCompletionRow[]>`
       SELECT
         o.id AS "orderId",
@@ -94,6 +94,11 @@ export async function backfillCanonicalErrandCompletionEvents(input: {
       backfilled += result.recorded ? 1 : 0;
     }
 
-    return { scanned: rows.length, backfilled, racedWithExisting };
-  });
+  return { scanned: rows.length, backfilled, racedWithExisting };
+}
+
+export async function backfillCanonicalErrandCompletionEvents(
+  input: { batchLimit?: number; campusId?: string } = {},
+): Promise<{ scanned: number; backfilled: number; racedWithExisting: number }> {
+  return withTransaction((tx) => backfillCanonicalErrandCompletionEventsTx(tx, input));
 }
