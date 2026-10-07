@@ -1,4 +1,6 @@
 import {
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
   DATA_EXPORT_GENERATE_JOB_KIND,
   DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION,
   ERRAND_DEADLINE_EXPIRE_JOB_KIND,
@@ -13,6 +15,7 @@ import { productReservationExpireHandler } from "@/lib/async/handlers/product-re
 import { notificationDeliveryHandler } from "@/lib/async/handlers/notification-delivery";
 import { errandDeadlineExpireHandler } from "@/lib/async/handlers/errand-deadline-expire";
 import { dataExportGenerateHandler } from "@/lib/async/handlers/data-export-generate";
+import { analyticsProjectDomainEventHandler } from "@/lib/async/handlers/analytics-project-domain-event";
 import {
   EMAIL_DELIVERY_EXECUTION_LEASE_SECONDS,
   EMAIL_DELIVERY_EXECUTION_TX_TIMEOUT_MS,
@@ -60,6 +63,15 @@ const jobHandlers: JobHandlerRegistry = new Map([
   [
     DATA_EXPORT_GENERATE_JOB_KIND,
     new Map([[DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION, dataExportGenerateHandler]]),
+  ],
+  [
+    ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+    new Map([
+      [
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+        analyticsProjectDomainEventHandler,
+      ],
+    ]),
   ],
 ]);
 

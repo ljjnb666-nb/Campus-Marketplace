@@ -13,7 +13,7 @@ const {
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 
 function buildTx() {
-  return {
+  const tx = {
     errandTask: {
       updateMany: vi.fn(),
       findUnique: vi.fn().mockResolvedValue({
@@ -34,13 +34,34 @@ function buildTx() {
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
       findUnique: vi.fn(),
     },
+    asyncJob: {
+      createMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     user: { update: vi.fn() },
-    // Phase 9B：emitNotificationTx 内部写入（createMany + dedupe winner 读回）
     notification: {
       createMany: txNotificationCreateMany,
       findUnique: txNotificationFindUnique,
     },
   };
+
+  tx.domainEvent.findUnique.mockImplementation(async () => ({
+    id: "event-1",
+    eventType: "ERRAND_ORDER_COMPLETED",
+    schemaVersion: 1,
+    aggregateType: "ORDER",
+    aggregateId: "order-1",
+    campusId: "campus-1",
+    actorUserId: null,
+    subjectUserId: null,
+    payload: { orderId: "order-1", errandTaskId: "errand-1" },
+    occurredAt:
+      (tx.order.updateMany.mock.calls[0]?.[0]?.data?.completedAt as Date | undefined) ??
+      new Date(0),
+    sourceType: "DOMAIN_TX",
+    sourceId: null,
+  }));
+
+  return tx;
 }
 
 function asTx(tx: ReturnType<typeof buildTx>): Prisma.TransactionClient {
@@ -76,6 +97,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -90,6 +112,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -135,6 +158,18 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
       ],
       skipDuplicates: true,
     });
+    expect(tx.asyncJob.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+          schemaVersion: 1,
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          payload: { eventId: "event-1" },
+          runAt: expect.any(Date),
+        }),
+      ],
+      skipDuplicates: true,
+    });
     expect(tx.user.update).toHaveBeenCalledTimes(2);
     expect(tx.user.update).toHaveBeenCalledWith({
       where: { id: "user-buyer" },
@@ -176,6 +211,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
       "ERRAND_COMPLETION_SCOPE_MISSING",
     );
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -194,6 +230,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
       "ERRAND_COMPLETION_AUTHORITY_MISMATCH",
     );
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
@@ -222,6 +259,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     expect(tx.order.updateMany).not.toHaveBeenCalled();
     expect(tx.errandTask.findUnique).not.toHaveBeenCalled();
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });

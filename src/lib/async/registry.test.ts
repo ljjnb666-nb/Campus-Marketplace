@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { resolveJobExecutionPolicy, resolveJobHandler } from "./job-registry";
 import { resolveOutboxEventHandler } from "./outbox-registry";
 import {
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
   DATA_EXPORT_GENERATE_JOB_KIND,
   DATA_EXPORT_GENERATE_JOB_SCHEMA_VERSION,
   NOTIFICATION_DELIVERY_JOB_KIND,
@@ -70,10 +72,22 @@ describe("Phase 9B RB06：per-job execution policy（SSOT = job registry）", ()
 });
 
 describe("Phase 9A runtime registry fail closed（§6/§22）", () => {
-  it("已注册 job kind + schemaVersion 可解析（含 9C-03 DATA_EXPORT_GENERATE@1）", () => {
+  it("已注册 job kind + schemaVersion 可解析（含 Phase 10B analytics projection）", () => {
     expect(
       resolveJobHandler(PRODUCT_RESERVATION_EXPIRE_JOB_KIND, PRODUCT_RESERVATION_EXPIRE_JOB_SCHEMA_VERSION),
     ).toBeTypeOf("function");
+    expect(
+      resolveJobHandler(
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+      ),
+    ).toBeTypeOf("function");
+    expect(
+      resolveJobExecutionPolicy(
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+      ),
+    ).toEqual({});
   });
 
   it("未知 job kind / 未知 schemaVersion → null（调用方必须 PERMANENT → DEAD_LETTER）", () => {

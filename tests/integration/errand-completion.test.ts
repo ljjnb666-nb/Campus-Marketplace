@@ -108,16 +108,28 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     });
     const userIds = campusUsers.map((u) => u.id);
 
-    // 原生客户端（无软删除扩展）：deleteMany 即物理删除
-    const orderIds = (
-      await prisma.order.findMany({
-        where: { buyerId: { in: userIds } },
+    // Phase 10B：DomainEvent 现在会原子创建 analytics projection job，且
+    // projection receipt/effect 对 DomainEvent 是 RESTRICT FK。fixture cleanup
+    // 必须按 derived → intent → authority 顺序删除，避免跨测试遗留可消费 job。
+    const eventIds = (
+      await prisma.domainEvent.findMany({
+        where: { campusId },
         select: { id: true },
       })
-    ).map((order) => order.id);
-    await prisma.domainEvent.deleteMany({
-      where: { aggregateType: "ORDER", aggregateId: { in: orderIds } },
+    ).map((event) => event.id);
+    const projectionDedupeKeys = eventIds.map(
+      (eventId) => `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${eventId}`,
+    );
+    await prisma.metricContribution.deleteMany({
+      where: { eventId: { in: eventIds } },
     });
+    await prisma.projectionReceipt.deleteMany({
+      where: { eventId: { in: eventIds } },
+    });
+    await prisma.asyncJob.deleteMany({
+      where: { dedupeKey: { in: projectionDedupeKeys } },
+    });
+    await prisma.domainEvent.deleteMany({ where: { campusId } });
     await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await prisma.order.deleteMany({ where: { buyerId: { in: userIds } } });
     await prisma.errandTask.deleteMany({ where: { campusId } });
@@ -193,6 +205,43 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     });
   }
 
+  const TEST_ONLY_PARKED_PROJECTION_RUN_AT = new Date("2099-01-01T00:00:00.000Z");
+
+  async function parkProjectionIntentTx(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    const event = await tx.domainEvent.findUnique({
+      where: { occurrenceKey: `ERRAND_ORDER_COMPLETED:${orderId}` },
+      select: { id: true },
+    });
+    if (!event) {
+      return;
+    }
+    await tx.asyncJob.updateMany({
+      where: {
+        dedupeKey: `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:${event.id}`,
+      },
+      data: { runAt: TEST_ONLY_PARKED_PROJECTION_RUN_AT },
+    });
+  }
+
+  async function completeAndParkProjectionTx(
+    tx: Prisma.TransactionClient,
+    input: {
+      orderId: string;
+      errandTaskId: string;
+      buyerId: string;
+      sellerId: string;
+    },
+  ) {
+    const result = await completeErrandOrderTx(tx, input);
+    if (result.completed) {
+      await parkProjectionIntentTx(tx, input.orderId);
+    }
+    return result;
+  }
+
   // 扩展客户端运行时满足事务客户端能力，类型差异为项目已知坑
   function txClient(): Prisma.TransactionClient {
     return prisma as unknown as Prisma.TransactionClient;
@@ -240,7 +289,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     // 并发触发两次 canonical completion（模拟双击 / 两个入口同时到达）
     const results = await Promise.all([
       runInTransaction((tx) =>
-        completeErrandOrderTx(tx, {
+        completeAndParkProjectionTx(tx, {
           orderId: order.id,
           errandTaskId: task.id,
           buyerId,
@@ -248,7 +297,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
         }),
       ),
       runInTransaction((tx) =>
-        completeErrandOrderTx(tx, {
+        completeAndParkProjectionTx(tx, {
           orderId: order.id,
           errandTaskId: task.id,
           buyerId,
@@ -427,6 +476,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     const results = await runInTransaction(async (tx) => {
       const first = await recordDomainEventTx(tx, baseEvent);
       const second = await recordDomainEventTx(tx, baseEvent);
+      await parkProjectionIntentTx(tx, aggregateId);
       return [first, second];
     });
     expect(results).toEqual([
@@ -444,6 +494,7 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
       ),
     ).rejects.toMatchObject({ code: "DOMAIN_EVENT_OCCURRENCE_CONFLICT" });
 
-    await prisma.domainEvent.deleteMany({ where: { occurrenceKey } });
+    // 留给 afterAll 统一按 projection effect → receipt → job → DomainEvent
+    // 顺序清理，避免留下 orphan projection intent。
   });
 });
