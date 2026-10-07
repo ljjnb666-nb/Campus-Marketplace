@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
 vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
+  // Formula semantics are covered by liquidity-domain-events.test + real-PG CTV
+  // integration. These legacy action/machine tests mock the analytics boundary.
+  computeRentalCompletedBookedValue: vi.fn(() => "15.00"),
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
