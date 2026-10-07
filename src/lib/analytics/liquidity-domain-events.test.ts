@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canonicalizeBookedValue,
+  computeRentalCompletedBookedValue,
 } from "@/lib/analytics/liquidity-domain-events";
 import { validateDomainEventIntent } from "@/lib/domain-events/domain-event-registry";
 
@@ -85,5 +86,22 @@ describe("Phase 10C liquidity DomainEvent contracts", () => {
     expect(() => canonicalizeBookedValue("100000000.00")).toThrow(
       "LIQUIDITY_BOOKED_VALUE_INVALID",
     );
+  });
+
+  it("P10C2-EVENT-03: rental CTV includes non-refundable obligations and excludes deposit principal", () => {
+    expect(
+      computeRentalCompletedBookedValue({
+        rentalAmount: "15.00",
+        serviceFee: "7.00",
+        overdueFee: "3.00",
+        depositDeduction: "5.00",
+      }).toFixed(2),
+    ).toBe("30.00");
+    expect(() =>
+      computeRentalCompletedBookedValue({
+        rentalAmount: "15.00",
+        depositDeduction: "-0.01",
+      }),
+    ).toThrow("LIQUIDITY_RENTAL_VALUE_PART_INVALID:depositDeduction");
   });
 });

@@ -463,10 +463,18 @@ describe("rental-order-machine", () => {
       rentalListingId: "listing-1",
       startTime: new Date("2026-10-01T10:00:00.000Z"),
       endTime: new Date("2026-10-02T10:00:00.000Z"),
-      quantity: 1,
+      quantity: 2,
     });
 
     expect(result).toEqual({ orderId: "order-1" });
+    expect(tx.rentalOrder.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        quantity: 2,
+        rentalDuration: 1,
+        rentalAmount: new Prisma.Decimal("40"),
+        finalAmount: new Prisma.Decimal("90"),
+      }),
+    });
 
     // 精确调用序列（Phase 6C-3 Repair 2）：pre-read（无锁）→ 两把 subject 锁
     // → 锁内校验（validateLocked；真实实现=actor 三门+全参与方资格）→ FOR UPDATE
@@ -610,7 +618,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
   it("§14 request normal：锁序 subject→order→listing，fee 基于订单 snapshot", async () => {
     const tx = buildExtensionTx({
       orderPreRead: [{ id: "order-1", ownerId: "user-owner", renterId: "user-renter" }],
-      orderRow: [extensionOrderRow()],
+      orderRow: [extensionOrderRow({ quantity: 2 })],
       listingRow: [{ id: "listing-1" }],
       pendingCount: 0,
       conflictAvailable: true,
@@ -639,7 +647,7 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
         orderId: "order-1",
         requesterId: "user-renter",
         status: "PENDING",
-        additionalFee: new Prisma.Decimal("40"),
+        additionalFee: new Prisma.Decimal("80"),
       }),
     });
   });
@@ -724,9 +732,9 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
   it("§23-§39 approve normal：锁序 USER→ORDER→LISTING→EXTENSION + winner gate + 会计一致", async () => {
     const tx = buildExtensionTx({
       extPreRead: [{ id: "ext-1", orderId: "order-1", ownerId: "user-owner", renterId: "user-renter", listingId: "listing-1" }],
-      orderRow: [extensionOrderRow()],
+      orderRow: [extensionOrderRow({ quantity: 2 })],
       listingRow: [{ id: "listing-1" }],
-      extRow: [extensionExtRow()],
+      extRow: [extensionExtRow({ additionalFee: "80" })],
       pendingCount: 1,
       unavailable: null,
       conflictAvailable: true,
@@ -762,8 +770,8 @@ describe("rental-order-machine extension authority (AUDIT2-RB03)", () => {
       data: {
         endTime: NEW_END,
         rentalDuration: 4,
-        rentalAmount: { increment: new Prisma.Decimal("40") },
-        finalAmount: { increment: new Prisma.Decimal("40") },
+        rentalAmount: { increment: new Prisma.Decimal("80") },
+        finalAmount: { increment: new Prisma.Decimal("80") },
       },
     });
     // §38 same-status log
