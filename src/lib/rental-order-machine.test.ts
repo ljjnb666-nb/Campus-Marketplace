@@ -382,6 +382,31 @@ describe("rental-order-machine", () => {
     expect(tx.rentalOrder.update).not.toHaveBeenCalled();
   });
 
+  it("quantity safety belt rejects malformed direct calls before discovery/locks", async () => {
+    const tx = {
+      $queryRaw: vi.fn(),
+      $executeRaw: vi.fn(),
+    };
+
+    for (const quantity of [0, -1, 1.5]) {
+      const result = await createRentalOrderTx(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          userId: "user-renter",
+          rentalListingId: "listing-1",
+          startTime: new Date("2026-10-01T10:00:00.000Z"),
+          endTime: new Date("2026-10-02T10:00:00.000Z"),
+          quantity,
+        },
+      );
+      expect(result).toEqual({ error: "租赁数量至少为1" });
+    }
+
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(checkTimeConflict).not.toHaveBeenCalled();
+  });
+
   // ⚠️ Schema 漂移防护：createRentalOrderTx 使用 $queryRaw 绕过 Prisma 类型化查询，
   // 手动列举了 RentalListing 的字段。此测试确保这些字段仍存在于 schema 中，
   // 如果 RentalListing 模型重命名/删除了字段，这个测试会失败提醒开发者同步 raw SQL。

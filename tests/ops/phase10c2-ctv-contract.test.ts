@@ -63,4 +63,16 @@ describe("Phase 10C-2 CTV authority guards", () => {
     );
     expect(registry).not.toContain('metricKey: "GMV"');
   });
+
+  it("P10C2-ARCH-05: quantity repair migration corrects legacy value and installs DB safety belt", () => {
+    const migration = source(
+      "prisma/migrations/20261007140000_phase10c2_rental_quantity_accounting/migration.sql",
+    );
+    expect(migration).toContain('"rentalAmount" = "rentalAmount" * quantity');
+    expect(migration).toContain(
+      '"finalAmount" = "finalAmount" + ("rentalAmount" * (quantity - 1))',
+    );
+    expect(migration).toContain('CHECK (quantity >= 1)');
+    expect(migration).toContain("PHASE10C2_RENTAL_VALUE_REPAIR_OVERFLOW");
+  });
 });
