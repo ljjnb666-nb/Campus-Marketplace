@@ -114,7 +114,12 @@ describe.skipIf(!integrationDatabaseUrl)(
       }
       await prisma.domainEvent.deleteMany({ where: { campusId } });
       await prisma.rentalOrder.deleteMany({
-        where: { OR: [{ ownerId: sellerId }, { renterId: buyerId }] },
+        where: {
+          OR: [
+            { ownerId: { in: [buyerId, sellerId] } },
+            { renterId: { in: [buyerId, sellerId] } },
+          ],
+        },
       });
       await prisma.order.deleteMany({
         where: { OR: [{ buyerId }, { sellerId }] },
