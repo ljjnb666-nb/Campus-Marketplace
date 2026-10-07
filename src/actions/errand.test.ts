@@ -4,6 +4,10 @@ vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletionFactsTx: vi.fn().mockResolvedValue({
+    completion: { recorded: true },
+    value: { recorded: true },
+  }),
 }));
 
 const {
@@ -308,6 +312,7 @@ describe("errand actions", () => {
         errandTaskId: row.errandTaskId ?? "errand-1",
         buyerId: row.buyerId,
         sellerId: row.sellerId,
+        amount: row.amount ?? "8.00",
       };
     });
     txDomainEventCreateMany.mockResolvedValue({ count: 1 });
@@ -765,6 +770,7 @@ describe("errand actions", () => {
         buyerId: "user-1",
         sellerId: "runner-1",
         errandTaskId: "errand-1",
+        amount: "8.00",
       },
     ];
 

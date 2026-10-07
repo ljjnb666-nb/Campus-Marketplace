@@ -8,7 +8,7 @@ function source(file: string) {
 }
 
 describe("Phase 10C-2 CTV authority guards", () => {
-  it("P10C2-ARCH-01: backfill SQL only uses canonical completed core value fields", () => {
+  it("P10C2-ARCH-01: backfill uses canonical completed booked-value fields only", () => {
     const text = source("src/lib/analytics/transaction-value-backfill.ts");
     const query = text.slice(
       text.indexOf("const rows ="),
@@ -17,15 +17,15 @@ describe("Phase 10C-2 CTV authority guards", () => {
 
     expect(query).toContain('o.amount AS "bookedValue"');
     expect(query).toContain('ro."rentalAmount"');
+    expect(query).toContain('ro."serviceFee"');
+    expect(query).toContain('ro."overdueFee"');
+    expect(query).toContain('ro."depositDeduction"');
     expect(query).toContain('o."completedAt"');
     expect(query).toContain('ro."completedAt"');
 
     for (const forbidden of [
       '"finalAmount"',
       '"depositAmount"',
-      '"depositDeduction"',
-      '"serviceFee"',
-      '"overdueFee"',
       '"cancellationFee"',
       '"updatedAt"',
     ]) {
@@ -33,12 +33,20 @@ describe("Phase 10C-2 CTV authority guards", () => {
     }
   });
 
-  it("P10C2-ARCH-02: live rental CTV uses rentalAmount, never finalAmount", () => {
+  it("P10C2-ARCH-02: live rental CTV uses one central non-refundable formula", () => {
     const text = source("src/lib/rental-order-machine.ts");
-    expect(text).toContain("bookedValue: order.rentalAmount");
-    expect(text).toContain("bookedValue: claim.order.rentalAmount");
+    expect(text).toContain("computeRentalCompletedBookedValue(order)");
+    expect(text).toContain("computeRentalCompletedBookedValue({");
+    expect(text).toContain("depositDeduction: input.agreed");
     expect(text).not.toContain("bookedValue: order.finalAmount");
     expect(text).not.toContain("bookedValue: claim.order.finalAmount");
+  });
+
+  it("P10C2-ARCH-02B: rental creation and extension accounting consume authoritative quantity", () => {
+    const text = source("src/lib/rental-order-machine.ts");
+    expect(text).toContain("endTime,\n      quantity,");
+    expect(text).toContain("input.newEndTime,\n    order.quantity,");
+    expect(text).toContain("ext.newEndTime,\n    order.quantity,");
   });
 
   it("P10C2-ARCH-03: ordinary/errand completion uses canonical Order.amount", () => {

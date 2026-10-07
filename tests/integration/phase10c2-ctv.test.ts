@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { PrismaClient } from "@prisma/client";
+import { ANALYTICS_METRIC_PROJECTION_VERSION } from "@/lib/analytics/projection-contract";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 const integrationDatabaseUrl = process.env.INTEGRATION_DATABASE_URL;
@@ -315,7 +316,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       )?.payload).toMatchObject({ bookedValue: "8.00" });
       expect(byKey.get(
         `LIQUIDITY_TRANSACTION_VALUE_RECORDED:RENTAL:${rentalOrder.id}`,
-      )?.payload).toMatchObject({ bookedValue: "15.00" });
+      )?.payload).toMatchObject({ bookedValue: "30.00" });
 
       for (const event of events) {
         await prisma.$transaction((tx) => projectDomainEventTx(tx, event.id));
@@ -324,7 +325,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       const contributions = await prisma.metricContribution.findMany({
         where: {
           eventId: { in: events.map((event) => event.id) },
-          projectionVersion: 2,
+          projectionVersion: ANALYTICS_METRIC_PROJECTION_VERSION,
           metricKey: "COMPLETED_TRANSACTION_VALUE",
         },
         orderBy: { dimensionKey: "asc" },
@@ -335,18 +336,19 @@ describe.skipIf(!integrationDatabaseUrl)(
       ).toEqual([
         ["TRANSACTION_TYPE:ERRAND", "8.00"],
         ["TRANSACTION_TYPE:PRODUCT", "10.00"],
-        ["TRANSACTION_TYPE:RENTAL", "15.00"],
+        ["TRANSACTION_TYPE:RENTAL", "30.00"],
         ["TRANSACTION_TYPE:SERVICE", "20.00"],
       ]);
 
-      // Strong negative proof: rental CTV is core rentalAmount only.
+      // Rental CTV includes non-refundable completed obligations but excludes
+      // refundable deposit principal, finalAmount and cancellationFee.
       expect(rentalOrder.finalAmount.toFixed(2)).toBe("65.00");
       expect(rentalOrder.depositAmount.toFixed(2)).toBe("50.00");
       expect(rentalOrder.depositDeduction.toFixed(2)).toBe("5.00");
       const rentalContribution = contributions.find(
         (row) => row.dimensionKey === "TRANSACTION_TYPE:RENTAL",
       );
-      expect(rentalContribution?.value.toFixed(2)).toBe("15.00");
+      expect(rentalContribution?.value.toFixed(2)).toBe("30.00");
 
       const second = await prisma.$transaction((tx) =>
         backfillCanonicalTransactionValuesTx(tx, {
