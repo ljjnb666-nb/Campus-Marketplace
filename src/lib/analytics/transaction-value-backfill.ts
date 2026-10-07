@@ -149,7 +149,7 @@ export async function backfillCanonicalTransactionValuesTx(
     WITH unsupported_service AS (
       SELECT s."campusId" AS "campusId"
       FROM "Order" o
-      JOIN "ServiceListing" s ON s.id = o."serviceListingId"
+      LEFT JOIN "ServiceListing" s ON s.id = o."serviceListingId"
       LEFT JOIN "DomainEvent" d
         ON d."occurrenceKey" = 'LIQUIDITY_TRANSACTION_VALUE_RECORDED:SERVICE:' || o.id
       WHERE o.type = 'SERVICE'

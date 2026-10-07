@@ -76,7 +76,7 @@ const METRIC_DEFINITIONS = new Map<string, MetricDefinition>([
       valueType: "DECIMAL",
       authority: "DOMAIN_EVENT",
       description:
-        "CTV：平台记录的已完成交易对价金额；不是支付实收、结算、平台收入或 GMV。Rental 仅计 rentalAmount，排除押金、损坏赔付与各类费用。",
+        "CTV：平台记录的已完成交易对价金额；当前仅 PRODUCT/ERRAND/RENTAL 具备可证明金额 authority，SERVICE 暂不贡献。不是支付实收、结算、平台收入或 GMV；Rental 仅计 rentalAmount，排除押金、损坏赔付与各类费用。",
     },
   ],
 ]);
