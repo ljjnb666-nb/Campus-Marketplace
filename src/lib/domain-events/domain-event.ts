@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import {
   DomainEventIntentContractError,
@@ -39,6 +39,50 @@ export class DomainEventOccurrenceConflictError extends Error {
   }
 }
 
+export class DomainEventAppendOnlyViolationError extends Error {
+  readonly code = "DOMAIN_EVENT_APPEND_ONLY";
+
+  constructor(readonly operation: string) {
+    super(`DOMAIN_EVENT_APPEND_ONLY: ${operation}`);
+    this.name = "DomainEventAppendOnlyViolationError";
+  }
+}
+
+const FORBIDDEN_DOMAIN_EVENT_MUTATIONS = new Set([
+  "update",
+  "updateMany",
+  "updateManyAndReturn",
+  "delete",
+  "deleteMany",
+  "upsert",
+]);
+
+export function isForbiddenDomainEventMutation(operation: string): boolean {
+  return FORBIDDEN_DOMAIN_EVENT_MUTATIONS.has(operation);
+}
+
+/**
+ * Business Prisma client 的 append-only runtime guard。
+ *
+ * raw/base PrismaClient 不挂本 extension：迁移/测试 fixture cleanup/未来受控
+ * maintenance seam 可显式使用 raw authority；普通业务代码只能 create/read
+ * DomainEvent，任何 update/delete/upsert 立即 fail closed。
+ */
+export const domainEventLedgerExtension = Prisma.defineExtension((client) =>
+  client.$extends({
+    query: {
+      $allModels: {
+        $allOperations({ model, operation, args, query }) {
+          if (model === "DomainEvent" && isForbiddenDomainEventMutation(operation)) {
+            throw new DomainEventAppendOnlyViolationError(operation);
+          }
+          return query(args);
+        },
+      },
+    },
+  }),
+);
+
 function assertId(value: string | null | undefined, field: string, optional = false): void {
   if (optional && (value === null || value === undefined)) {
     return;
@@ -58,7 +102,7 @@ function stableJson(value: unknown): string {
       .map(([key, nested]) => `${JSON.stringify(key)}:${stableJson(nested)}`);
     return `{${entries.join(",")}}`;
   }
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? "undefined";
 }
 
 function validateEnvelope(input: RecordDomainEventInput): {

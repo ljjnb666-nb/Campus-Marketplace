@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { Prisma } from "@prisma/client";
 
 import {
+  DomainEventAppendOnlyViolationError,
   DomainEventOccurrenceConflictError,
+  domainEventLedgerExtension,
   recordDomainEventTx,
 } from "@/lib/domain-events/domain-event";
 import {
@@ -36,6 +38,37 @@ const validInput = {
   occurredAt,
   payload: { orderId: "order-1", errandTaskId: "errand-1" },
 };
+
+function captureLedgerAllOperations() {
+  let handler:
+    | ((params: {
+        model?: string;
+        operation: string;
+        args: unknown;
+        query: (args: unknown) => unknown;
+      }) => unknown)
+    | undefined;
+
+  const client = {
+    $extends: (config: {
+      query: {
+        $allModels: {
+          $allOperations: typeof handler;
+        };
+      };
+    }) => {
+      handler = config.query.$allModels.$allOperations;
+      return { extended: true };
+    },
+  };
+
+  domainEventLedgerExtension(client as never);
+
+  if (!handler) {
+    throw new Error("DomainEvent ledger extension 未成功挂载");
+  }
+  return handler;
+}
 
 describe("Phase 10A DomainEvent registry / write boundary", () => {
   it("DE-REG-01: strict payload accepts IDs only and derives stable occurrence identity", () => {
@@ -160,5 +193,55 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
       }),
     ).rejects.toMatchObject({ code: "DOMAIN_EVENT_ENVELOPE_INVALID" });
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+  });
+
+  it("DE-APPEND-01: business client rejects every DomainEvent mutation but passes reads/creates", () => {
+    const handler = captureLedgerAllOperations();
+    const query = vi.fn((args: unknown) => args);
+
+    for (const operation of [
+      "update",
+      "updateMany",
+      "updateManyAndReturn",
+      "delete",
+      "deleteMany",
+      "upsert",
+    ]) {
+      expect(() =>
+        handler({ model: "DomainEvent", operation, args: {}, query }),
+      ).toThrow(DomainEventAppendOnlyViolationError);
+    }
+    expect(query).not.toHaveBeenCalled();
+
+    expect(
+      handler({
+        model: "DomainEvent",
+        operation: "findMany",
+        args: { where: { campusId: "campus-1" } },
+        query,
+      }),
+    ).toEqual({ where: { campusId: "campus-1" } });
+    expect(
+      handler({
+        model: "DomainEvent",
+        operation: "createMany",
+        args: { data: [] },
+        query,
+      }),
+    ).toEqual({ data: [] });
+  });
+
+  it("DE-APPEND-02: guard does not change mutation semantics for other models", () => {
+    const handler = captureLedgerAllOperations();
+    const query = vi.fn((args: unknown) => args);
+
+    expect(
+      handler({
+        model: "Order",
+        operation: "update",
+        args: { where: { id: "o1" } },
+        query,
+      }),
+    ).toEqual({ where: { id: "o1" } });
   });
 });
