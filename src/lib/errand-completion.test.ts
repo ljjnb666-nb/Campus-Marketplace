@@ -16,9 +16,20 @@ function buildTx() {
   return {
     errandTask: {
       updateMany: vi.fn(),
-      findUnique: vi.fn().mockResolvedValue({ campusId: "campus-1" }),
+      findUnique: vi.fn().mockResolvedValue({
+        campusId: "campus-1",
+        publisherId: "user-buyer",
+        accepterId: "user-seller",
+      }),
     },
-    order: { updateMany: vi.fn() },
+    order: {
+      updateMany: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue({
+        errandTaskId: "errand-1",
+        buyerId: "user-buyer",
+        sellerId: "user-seller",
+      }),
+    },
     domainEvent: {
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
       findUnique: vi.fn(),
@@ -99,7 +110,11 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     const completedAt = tx.order.updateMany.mock.calls[0]![0].data.completedAt as Date;
     expect(tx.errandTask.findUnique).toHaveBeenCalledWith({
       where: { id: "errand-1" },
-      select: { campusId: true },
+      select: { campusId: true, publisherId: true, accepterId: true },
+    });
+    expect(tx.order.findUnique).toHaveBeenCalledWith({
+      where: { id: "order-1" },
+      select: { errandTaskId: true, buyerId: true, sellerId: true },
     });
     expect(tx.domainEvent.createMany).toHaveBeenCalledWith({
       data: [
@@ -159,6 +174,24 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
 
     await expect(completeErrandOrderTx(asTx(tx), baseInput)).rejects.toThrow(
       "ERRAND_COMPLETION_SCOPE_MISSING",
+    );
+    expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.user.update).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("aggregate binding mismatch 时 fail closed：不能拼接其它 Task/Order 的 tenant scope", async () => {
+    const tx = buildTx();
+    tx.errandTask.updateMany.mockResolvedValue({ count: 1 });
+    tx.order.updateMany.mockResolvedValue({ count: 1 });
+    tx.order.findUnique.mockResolvedValue({
+      errandTaskId: "other-errand",
+      buyerId: "user-buyer",
+      sellerId: "user-seller",
+    });
+
+    await expect(completeErrandOrderTx(asTx(tx), baseInput)).rejects.toThrow(
+      "ERRAND_COMPLETION_AUTHORITY_MISMATCH",
     );
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
     expect(tx.user.update).not.toHaveBeenCalled();

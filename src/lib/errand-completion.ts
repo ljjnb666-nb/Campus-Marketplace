@@ -66,13 +66,30 @@ export async function completeErrandOrderTx(
     throw new Error("ERRAND_COMPLETION_CONFLICT");
   }
 
-  // 3) authoritative tenant snapshot：只信任刚刚赢得状态闸门的 ErrandTask。
-  const taskScope = await tx.errandTask.findUnique({
-    where: { id: input.errandTaskId },
-    select: { campusId: true },
-  });
-  if (!taskScope) {
+  // 3) Aggregate binding safety belt：即使未来新增 caller，也不能靠 input
+  //    拼接一个 Task 与另一张 Order。两个正式 lifecycle caller 已在锁内验证，
+  //    此处仍由 completion authority 自己复核 participant + relation。
+  const [taskScope, orderScope] = await Promise.all([
+    tx.errandTask.findUnique({
+      where: { id: input.errandTaskId },
+      select: { campusId: true, publisherId: true, accepterId: true },
+    }),
+    tx.order.findUnique({
+      where: { id: input.orderId },
+      select: { errandTaskId: true, buyerId: true, sellerId: true },
+    }),
+  ]);
+  if (!taskScope || !orderScope) {
     throw new Error("ERRAND_COMPLETION_SCOPE_MISSING");
+  }
+  if (
+    taskScope.publisherId !== input.buyerId ||
+    taskScope.accepterId !== input.sellerId ||
+    orderScope.errandTaskId !== input.errandTaskId ||
+    orderScope.buyerId !== input.buyerId ||
+    orderScope.sellerId !== input.sellerId
+  ) {
+    throw new Error("ERRAND_COMPLETION_AUTHORITY_MISMATCH");
   }
 
   // 4) authoritative fact ledger：domain mutation + event 同一事务原子提交。

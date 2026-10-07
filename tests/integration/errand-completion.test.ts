@@ -375,6 +375,41 @@ describe.skipIf(!integrationDatabaseUrl)("ERRAND 完成 exactly-once 集成测�
     expect(await countCompletionEvents(order.id)).toBe(0);
   });
 
+  it("Phase 10A aggregate binding：跨 Task/Order 拼接必须整体回滚且零事件", async () => {
+    const left = await createErrandWithOrder({
+      taskStatus: "PENDING_CONFIRMATION",
+      orderStatus: "IN_PROGRESS",
+    });
+    const right = await createErrandWithOrder({
+      taskStatus: "PENDING_CONFIRMATION",
+      orderStatus: "IN_PROGRESS",
+    });
+    const before = await readCounts();
+
+    await expect(
+      runInTransaction((tx) =>
+        completeErrandOrderTx(tx, {
+          orderId: left.order.id,
+          errandTaskId: right.task.id,
+          buyerId,
+          sellerId,
+        }),
+      ),
+    ).rejects.toThrow("ERRAND_COMPLETION_AUTHORITY_MISMATCH");
+
+    const [leftOrder, rightTask] = await Promise.all([
+      prisma.order.findUnique({ where: { id: left.order.id } }),
+      prisma.errandTask.findUnique({ where: { id: right.task.id } }),
+    ]);
+    expect(leftOrder?.status).toBe("IN_PROGRESS");
+    expect(leftOrder?.completedAt).toBeNull();
+    expect(rightTask?.status).toBe("PENDING_CONFIRMATION");
+    expect(await readCounts()).toEqual(before);
+    expect(await countCompletionEvents(left.order.id)).toBe(0);
+    expect(await countCompletionEvents(right.order.id)).toBe(0);
+    expect(await countCompletionNotifications(left.order.id)).toBe(0);
+  });
+
   it("Phase 10A occurrence dedupe：相同事实幂等，冲突事实拒绝", async () => {
     const aggregateId = `phase10a-contract-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const occurrenceKey = `ERRAND_ORDER_COMPLETED:${aggregateId}`;
