@@ -12,6 +12,7 @@ import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateErrandViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { errandFormSchema, errandStatusSchema } from "@/validators/errand";
+import { recordLiquidityDemandCreatedTx } from "@/lib/analytics/liquidity-domain-events";
 
 export type ErrandActionState = {
   success: boolean;
@@ -99,7 +100,7 @@ export async function createErrand(
 
       await enforceMarketplaceCapability(tx, user.id, publisher.campusId);
 
-      return tx.errandTask.create({
+      const created = await tx.errandTask.create({
         data: {
           title: parsed.data.title,
           description: parsed.data.description,
@@ -118,6 +119,15 @@ export async function createErrand(
           publisherId: user.id,
         },
       });
+
+      await recordLiquidityDemandCreatedTx(tx, {
+        demandId: created.id,
+        demandType: "ERRAND_TASK",
+        campusId: created.campusId,
+        occurredAt: created.createdAt,
+      });
+
+      return created;
     });
 
     revalidateErrandViews(errand.id);

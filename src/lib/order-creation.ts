@@ -13,6 +13,7 @@ import { computeProductReservationExpiresAt } from "@/lib/product-reservation";
 import {
   emitNotificationsTx,
 } from "@/lib/notifications/notification-service";
+import { recordLiquidityDemandCreatedTx } from "@/lib/analytics/liquidity-domain-events";
 import {
   ERRAND_ORDER_CLAIMED_KIND,
   PRODUCT_ORDER_CREATED_KIND,
@@ -141,6 +142,13 @@ export async function createProductOrderTx(
         },
       });
 
+      await recordLiquidityDemandCreatedTx(tx, {
+        demandId: order.id,
+        demandType: "PRODUCT_ORDER",
+        campusId: fresh.campusId,
+        occurredAt: order.createdAt,
+      });
+
       // Phase 9A（§8/§9）：Order exists ⇔ expiry job durable intent exists。
       // AsyncJob 与 Order 在同一业务事务内原子落盘——严禁事务后 enqueue
       // （两步之间 crash → reservation 永不过期）。dedupeKey 幂等，worker
@@ -237,6 +245,13 @@ export async function createServiceOrderTx(
           sellerId: fresh.providerId,
           serviceListingId: fresh.id,
         },
+      });
+
+      await recordLiquidityDemandCreatedTx(tx, {
+        demandId: order.id,
+        demandType: "SERVICE_ORDER",
+        campusId: fresh.campusId,
+        occurredAt: order.createdAt,
       });
 
       await emitNotificationsTx(tx, [

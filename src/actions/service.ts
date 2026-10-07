@@ -18,6 +18,7 @@ import {
   uploadImageAsset,
 } from "@/lib/upload";
 import { serviceFormSchema, serviceStatusSchema } from "@/validators/service";
+import { recordLiquidityListingCreatedTx } from "@/lib/analytics/liquidity-domain-events";
 
 export type ServiceActionState = {
   success: boolean;
@@ -113,7 +114,7 @@ export async function createService(
 
       await enforceMarketplaceCapability(tx, user.id, provider.campusId);
 
-      return tx.serviceListing.create({
+      const created = await tx.serviceListing.create({
         data: {
           title: parsed.data.title,
           description: parsed.data.description,
@@ -126,6 +127,15 @@ export async function createService(
           providerId: user.id,
         },
       });
+
+      await recordLiquidityListingCreatedTx(tx, {
+        listingId: created.id,
+        listingType: "SERVICE",
+        campusId: created.campusId,
+        occurredAt: created.createdAt,
+      });
+
+      return created;
     });
 
     // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源

@@ -10,6 +10,10 @@ import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import {
+  recordLiquidityDemandCreatedTx,
+  recordLiquidityTransactionCompletedTx,
+} from "@/lib/analytics/liquidity-domain-events";
+import {
   RENTAL_DAMAGE_CLAIM_FILED_KIND,
   RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
   RENTAL_DISPUTE_OPENED_KIND,
@@ -285,6 +289,13 @@ export async function createRentalOrderTx(
         returnLocationSnapshot: listing.returnLocation,
         renterNote: input.renterNote || null,
       },
+    });
+
+    await recordLiquidityDemandCreatedTx(tx, {
+      demandId: order.id,
+      demandType: "RENTAL_ORDER",
+      campusId: listing.campusId,
+      occurredAt: order.createdAt,
     });
 
     await writeStatusLog(tx, {
