@@ -65,7 +65,7 @@ describe("Phase 10C-2 CTV authority guards", () => {
     expect(orderStatus).toContain("bookedValue: order.amount");
 
     const serviceBlock = orderStatus.slice(
-      orderStatus.indexOf('order.type === "SERVICE"'),
+      orderStatus.indexOf('if (\n    order.type === "SERVICE"'),
       orderStatus.indexOf("const actorRole"),
     );
     expect(serviceBlock).toContain("recordLiquidityTransactionCompletedTx");
