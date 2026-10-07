@@ -5,6 +5,7 @@ import {
   SOFT_DELETE_MODEL_NAMES,
   SoftDeleteExplicitDomainMutationRequiredError,
   buildFilteredListArgs,
+  buildUniqueReadPlan,
   explicitlyFiltersDeleted,
   findUniqueResultHiddenBySoftDelete,
   softDeleteExtension,
@@ -71,6 +72,66 @@ describe("buildFilteredListArgs", () => {
     const args = { where: { deletedAt: { not: null } } };
 
     expect(buildFilteredListArgs("Product", args)).toBe(args);
+  });
+});
+
+describe("buildUniqueReadPlan", () => {
+  it("SD-READ-PLAN-01: select omitted deletedAt is injected internally without mutating caller args", () => {
+    const args = { where: { id: "u1" }, select: { id: true, name: true } };
+    const plan = buildUniqueReadPlan("User", args);
+
+    expect(plan.args).toEqual({
+      where: { id: "u1" },
+      select: { id: true, name: true, deletedAt: true },
+    });
+    expect(plan.inspectDeletedAt).toBe(true);
+    expect(plan.stripInjectedDeletedAt).toBe(true);
+    expect(args).toEqual({ where: { id: "u1" }, select: { id: true, name: true } });
+  });
+
+  it("SD-READ-PLAN-02: explicit select false is overridden internally and restored later", () => {
+    const args = { where: { id: "u1" }, select: { id: true, deletedAt: false } };
+    const plan = buildUniqueReadPlan("User", args);
+
+    expect(plan.args).toEqual({
+      where: { id: "u1" },
+      select: { id: true, deletedAt: true },
+    });
+    expect(plan.inspectDeletedAt).toBe(true);
+    expect(plan.stripInjectedDeletedAt).toBe(true);
+  });
+
+  it("SD-READ-PLAN-03: omit deletedAt is temporarily overridden for internal inspection", () => {
+    const args = { where: { id: "u1" }, omit: { passwordHash: true, deletedAt: true } };
+    const plan = buildUniqueReadPlan("User", args);
+
+    expect(plan.args).toEqual({
+      where: { id: "u1" },
+      omit: { passwordHash: true, deletedAt: false },
+    });
+    expect(plan.inspectDeletedAt).toBe(true);
+    expect(plan.stripInjectedDeletedAt).toBe(true);
+  });
+
+  it("SD-READ-PLAN-04: explicit deletedAt where keeps caller-managed visibility", () => {
+    const args = {
+      where: { id: "u1", deletedAt: { not: null } },
+      select: { id: true },
+    };
+    const plan = buildUniqueReadPlan("User", args);
+
+    expect(plan.args).toBe(args);
+    expect(plan.inspectDeletedAt).toBe(false);
+    expect(plan.stripInjectedDeletedAt).toBe(false);
+  });
+
+  it("SD-READ-PLAN-05: non soft-delete models pass through untouched", () => {
+    const args = { where: { id: "o1" }, select: { id: true } };
+    const plan = buildUniqueReadPlan("Order", args);
+
+    expect(plan.args).toBe(args);
+    expect(plan.inspectDeletedAt).toBe(false);
+    expect(plan.stripInjectedDeletedAt).toBe(false);
   });
 });
 
@@ -181,7 +242,7 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
     });
   });
 
-  it("findUnique hides soft-deleted rows and passes live rows through", async () => {
+  it("findUnique hides soft-deleted rows and passes live full rows through", async () => {
     const handlers = captureHandlers()();
 
     const hiddenQuery = makeQuery({ id: "p1", deletedAt: new Date() });
@@ -196,16 +257,110 @@ describe("softDeleteExtension 挂载与查询拦截", () => {
     ).resolves.toBe(liveRow);
   });
 
-  it("findUniqueOrThrow converts soft-deleted hits into P2025 failures", async () => {
+  it("SD-READ-SELECT-01: findUnique injects deletedAt for selective reads and hides deleted rows", async () => {
+    const handlers = captureHandlers()();
+    const query = vi.fn(async (args: Record<string, unknown>) => {
+      expect(args).toEqual({
+        where: { id: "p-select-deleted" },
+        select: { id: true, title: true, deletedAt: true },
+      });
+      return { id: "p-select-deleted", title: "hidden", deletedAt: new Date() };
+    });
+
+    await expect(
+      handlers.findUnique({
+        model: "Product",
+        args: { where: { id: "p-select-deleted" }, select: { id: true, title: true } },
+        query,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("SD-READ-SHAPE-01: live selective reads do not expose internally injected deletedAt", async () => {
+    const handlers = captureHandlers()();
+    const query = makeQuery({ id: "p-select-live", title: "visible", deletedAt: null });
+
+    await expect(
+      handlers.findUnique({
+        model: "Product",
+        args: { where: { id: "p-select-live" }, select: { id: true, title: true } },
+        query,
+      }),
+    ).resolves.toEqual({ id: "p-select-live", title: "visible" });
+  });
+
+  it("SD-READ-INCLUDE-01: include/default scalar reads still hide deleted rows without shape rewrite", async () => {
+    const handlers = captureHandlers()();
+    const args = { where: { id: "p-include-deleted" }, include: { images: true } };
+    const query = makeQuery({
+      id: "p-include-deleted",
+      deletedAt: new Date(),
+      images: [],
+    });
+
+    await expect(
+      handlers.findUnique({ model: "Product", args, query }),
+    ).resolves.toBeNull();
+    expect(query).toHaveBeenCalledWith(args);
+  });
+
+  it("SD-READ-OMIT-01: findUnique overrides omit internally, hides deleted rows, and preserves caller shape", async () => {
+    const handlers = captureHandlers()();
+    const hiddenQuery = vi.fn(async (args: Record<string, unknown>) => {
+      expect(args).toEqual({
+        where: { id: "u-omit-deleted" },
+        omit: { passwordHash: true, deletedAt: false },
+      });
+      return { id: "u-omit-deleted", name: "hidden", deletedAt: new Date() };
+    });
+
+    await expect(
+      handlers.findUnique({
+        model: "User",
+        args: {
+          where: { id: "u-omit-deleted" },
+          omit: { passwordHash: true, deletedAt: true },
+        },
+        query: hiddenQuery,
+      }),
+    ).resolves.toBeNull();
+
+    const liveQuery = makeQuery({ id: "u-omit-live", name: "visible", deletedAt: null });
+    await expect(
+      handlers.findUnique({
+        model: "User",
+        args: {
+          where: { id: "u-omit-live" },
+          omit: { passwordHash: true, deletedAt: true },
+        },
+        query: liveQuery,
+      }),
+    ).resolves.toEqual({ id: "u-omit-live", name: "visible" });
+  });
+
+  it("SD-READ-SELECT-02: findUniqueOrThrow detects deleted rows when caller select omits deletedAt", async () => {
     const handlers = captureHandlers()();
 
     await expect(
       handlers.findUniqueOrThrow({
         model: "User",
-        args: { where: { id: "u1" } },
+        args: { where: { id: "u1" }, select: { id: true } },
         query: makeQuery({ id: "u1", deletedAt: new Date() }),
       }),
     ).rejects.toMatchObject({ code: "P2025" });
+  });
+
+  it("SD-READ-EXPLICIT-01: caller-selected deletedAt remains visible on live rows", async () => {
+    const handlers = captureHandlers()();
+    const liveRow = { id: "u-explicit", deletedAt: null };
+
+    await expect(
+      handlers.findUnique({
+        model: "User",
+        args: { where: { id: "u-explicit" }, select: { id: true, deletedAt: true } },
+        query: makeQuery(liveRow),
+      }),
+    ).resolves.toEqual(liveRow);
   });
 
   // ============================================================
