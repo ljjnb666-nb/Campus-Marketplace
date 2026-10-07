@@ -19,12 +19,12 @@ function buildTx() {
     domainEvent: {
       findUnique: vi.fn().mockResolvedValue({
         id: "event-1",
-        eventType: "ERRAND_ORDER_COMPLETED",
+        eventType: "LIQUIDITY_TRANSACTION_COMPLETED",
         schemaVersion: 1,
-        aggregateType: "ORDER",
+        aggregateType: "TRANSACTION",
         aggregateId: "order-1",
         campusId: "campus-1",
-        payload: { orderId: "order-1", errandTaskId: "errand-1" },
+        payload: { transactionId: "order-1", transactionType: "ERRAND" },
         occurredAt,
       }),
     },
@@ -36,8 +36,8 @@ function buildTx() {
       findMany: vi.fn().mockResolvedValue([
         {
           metricKey: "COMPLETED_TRANSACTION_COUNT",
-          metricVersion: 1,
-          dimensionKey: "ORDER_TYPE:ERRAND",
+          metricVersion: 2,
+          dimensionKey: "TRANSACTION_TYPE:ERRAND",
           campusId: "campus-1",
           occurredAt,
           value: { toString: () => "1" },
@@ -75,7 +75,7 @@ describe("Phase 10B receipt-backed projection", () => {
           campusId: "campus-1",
           occurredAt,
           metricKey: "COMPLETED_TRANSACTION_COUNT",
-          dimensionKey: "ORDER_TYPE:ERRAND",
+          dimensionKey: "TRANSACTION_TYPE:ERRAND",
           value: "1",
         }),
       ],
@@ -114,7 +114,7 @@ describe("Phase 10B receipt-backed projection", () => {
 
   it("PROJECTION-05: live dedupe identity is projection-versioned, not watermark-based", () => {
     expect(buildLiveDomainEventProjectionDedupeKey("event-1")).toBe(
-      "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+      "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
     );
   });
 
@@ -131,14 +131,14 @@ describe("Phase 10B receipt-backed projection", () => {
     const tx = buildTx();
     const before = Date.now();
     const result = await analyticsProjectDomainEventHandler(asTx(tx), {
-      id: "job-v2",
+      id: "job-v3",
       kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
       schemaVersion: 1,
-      dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
+      dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:event-1",
       payload: { eventId: "event-1" },
       attempts: 1,
       maxAttempts: 5,
-      leaseToken: "lease-2",
+      leaseToken: "lease-3",
       previousStatus: "PENDING",
     });
     expect(result.kind).toBe("RESCHEDULE");
