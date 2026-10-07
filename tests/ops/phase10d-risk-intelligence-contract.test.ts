@@ -70,7 +70,7 @@ describe("Phase 10D Risk Intelligence architecture contract", () => {
     }
 
     const legacyStart = permissions.indexOf(
-      "LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS",
+      "export const LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS",
     );
     const legacyEnd = permissions.indexOf(
       "ADMIN_SURFACE_PERMISSION_KEYS",
