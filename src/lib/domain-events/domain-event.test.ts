@@ -160,7 +160,7 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
         expect.objectContaining({
           kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
           schemaVersion: 1,
-          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
           payload: { eventId: "event-1" },
           runAt: expect.any(Date),
         }),

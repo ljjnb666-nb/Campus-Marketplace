@@ -268,7 +268,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       // Historical creation/completion facts survive later soft deletion.
       await prisma.product.update({
         where: { id: product.id },
-        data: { deletedAt: t(20) },
+        data: { status: "OFFLINE", deletedAt: t(20) },
       });
 
       const first = await prisma.$transaction((tx) =>

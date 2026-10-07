@@ -11,7 +11,7 @@ describe("Phase 10C-1 architecture guards", () => {
     const text = source("src/lib/analytics/liquidity-backfill.ts");
     expect(text.includes('"createdAt"')).toBe(true);
     expect(text.includes('"completedAt"')).toBe(true);
-    expect(text.includes("updatedAt")).toBe(false);
+    expect(text.includes('"updatedAt"')).toBe(false);
   });
 
   it("safe-core metric registry has no money source fields", () => {
