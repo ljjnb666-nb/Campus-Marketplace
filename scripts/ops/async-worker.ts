@@ -60,6 +60,8 @@ import { runOutboxBatchOnce } from "@/lib/async/outbox-dispatcher";
 import { scheduleDueErrandDeadlineJobs } from "@/lib/async/errand-deadline-scheduler";
 import { reconcileDataExportDeadLetters } from "@/lib/privacy/data-export-async";
 import { getQueueStatsSnapshot } from "@/lib/async/queue-stats";
+import { backfillCanonicalErrandCompletionEvents } from "@/lib/analytics/errand-completion-backfill";
+import { scheduleUnprojectedDomainEventJobs } from "@/lib/analytics/projection-scheduler";
 
 const DEFAULT_POLL_MS = 1000;
 const MIN_PRODUCTION_POLL_MS = 250;
@@ -186,6 +188,14 @@ function emitSyncShutdownLog(
 interface CycleSummary {
   /** Phase 9C-02：本轮 scheduler producer 新 enqueue 的 errand expiry intent 数。 */
   errandDeadlinesScheduled: number;
+  /** Phase 10B：从 canonical completed ERRAND 补出的历史 DomainEvent 数。 */
+  domainEventsBackfilled: number;
+  /** Phase 10B：为 current-version receipt 缺失事件新 enqueue 数。 */
+  projectionJobsScheduled: number;
+  /** Phase 10B：projection DEAD_LETTER 显式观测，不自动无限 requeue。 */
+  projectionDeadLetters: number;
+  /** Phase 10B：AsyncJob COMPLETED 但 receipt 缺失 = structural gap。 */
+  projectionStructuralGaps: number;
   /** Phase 9C-03（§21）：本轮 scoped dead-letter reconciler 收敛的导出请求数。 */
   dataExportDeadLettersReconciled: number;
   jobsClaimed: number;
@@ -201,7 +211,15 @@ interface CycleSummary {
 function summarize(
   jobSummary: Awaited<ReturnType<typeof runAsyncJobBatchOnce>>,
   outboxSummary: Awaited<ReturnType<typeof runOutboxBatchOnce>>,
-): Omit<CycleSummary, "errandDeadlinesScheduled" | "dataExportDeadLettersReconciled"> {
+): Omit<
+  CycleSummary,
+  | "errandDeadlinesScheduled"
+  | "domainEventsBackfilled"
+  | "projectionJobsScheduled"
+  | "projectionDeadLetters"
+  | "projectionStructuralGaps"
+  | "dataExportDeadLettersReconciled"
+> {
   return {
     jobsClaimed: jobSummary.claimed,
     jobsCompleted: jobSummary.completed + jobSummary.idempotentNoOp,
@@ -216,6 +234,9 @@ function summarize(
 
 function didWork(summary: CycleSummary): boolean {
   return (
+    summary.errandDeadlinesScheduled > 0 ||
+    summary.domainEventsBackfilled > 0 ||
+    summary.projectionJobsScheduled > 0 ||
     summary.jobsClaimed > 0 ||
     summary.outboxClaimed > 0 ||
     summary.jobsRetried > 0 ||
@@ -278,17 +299,61 @@ async function main() {
       // 先行——producer 只 enqueue durable intent（非 authority）；catch-up
       // 预算 = config.batchSize（每周期新 intent ≤ 本周期可消费规模，禁止
       // 结构性 backlog 放大）；失败不伪造 expiry、不阻断本周期其余部分
+      let producerBudget = config.batchSize;
       let errandDeadlinesScheduled = 0;
       try {
         const scheduled = await scheduleDueErrandDeadlineJobs({
           batchLimit: config.batchSize,
         });
         errandDeadlinesScheduled = scheduled.enqueued;
+        producerBudget = Math.max(0, producerBudget - scheduled.enqueued);
       } catch (error) {
         logger.warn("errand deadline scheduler producer 失败，等待下个周期", "async-worker", {
           event: "async_worker_scheduler_failed",
           errorName: error instanceof Error ? error.name : "unknown",
         });
+      }
+
+      let domainEventsBackfilled = 0;
+      if (producerBudget > 0) {
+        try {
+          const backfill = await backfillCanonicalErrandCompletionEvents({
+            batchLimit: producerBudget,
+          });
+          domainEventsBackfilled = backfill.backfilled;
+          producerBudget = Math.max(0, producerBudget - backfill.backfilled);
+        } catch (error) {
+          logger.warn("domain event canonical backfill 失败，等待下个周期", "async-worker", {
+            event: "async_worker_domain_event_backfill_failed",
+            errorName: error instanceof Error ? error.name : "unknown",
+          });
+        }
+      }
+
+      let projectionJobsScheduled = 0;
+      let projectionDeadLetters = 0;
+      let projectionStructuralGaps = 0;
+      if (producerBudget > 0) {
+        try {
+          const projection = await scheduleUnprojectedDomainEventJobs({
+            batchLimit: producerBudget,
+          });
+          projectionJobsScheduled = projection.enqueued;
+          projectionDeadLetters = projection.deadLettered;
+          projectionStructuralGaps = projection.structuralGaps;
+          if (projection.deadLettered > 0 || projection.structuralGaps > 0) {
+            logger.warn("analytics projection convergence 存在未自动修复 gap", "async-worker", {
+              event: "async_worker_projection_convergence_gap",
+              deadLettered: projection.deadLettered,
+              structuralGaps: projection.structuralGaps,
+            });
+          }
+        } catch (error) {
+          logger.warn("analytics projection scheduler 失败，等待下个周期", "async-worker", {
+            event: "async_worker_projection_scheduler_failed",
+            errorName: error instanceof Error ? error.name : "unknown",
+          });
+        }
       }
 
       // Phase 9C-03（§20/§21）：scoped dead-letter reconciler——job 终局
@@ -321,6 +386,10 @@ async function main() {
       });
       cycle = {
         errandDeadlinesScheduled,
+        domainEventsBackfilled,
+        projectionJobsScheduled,
+        projectionDeadLetters,
+        projectionStructuralGaps,
         dataExportDeadLettersReconciled,
         ...summarize(jobSummary, outboxSummary),
       };
