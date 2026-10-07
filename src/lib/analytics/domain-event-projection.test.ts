@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { projectDomainEventTx } from "@/lib/analytics/domain-event-projection";
 import { analyticsProjectDomainEventHandler } from "@/lib/async/handlers/analytics-project-domain-event";
@@ -92,6 +92,54 @@ describe("Phase 10B receipt-backed projection", () => {
       contributionCount: 1,
     });
     expect(tx.metricContribution.createMany).not.toHaveBeenCalled();
+  });
+
+  it("PROJECTION-02B: Decimal scale normalization preserves numeric equality but still detects corruption", async () => {
+    const tx = buildTx();
+    tx.domainEvent.findUnique.mockResolvedValue({
+      id: "event-1",
+      eventType: "LIQUIDITY_TRANSACTION_VALUE_RECORDED",
+      schemaVersion: 1,
+      aggregateType: "TRANSACTION",
+      aggregateId: "order-1",
+      campusId: "campus-1",
+      payload: {
+        transactionId: "order-1",
+        transactionType: "RENTAL",
+        bookedValue: "15.00",
+      },
+      occurredAt,
+    });
+    tx.projectionReceipt.createMany.mockResolvedValue({ count: 0 });
+    tx.metricContribution.findMany.mockResolvedValue([
+      {
+        metricKey: "COMPLETED_TRANSACTION_VALUE",
+        metricVersion: 1,
+        dimensionKey: "TRANSACTION_TYPE:RENTAL",
+        campusId: "campus-1",
+        occurredAt,
+        value: new Prisma.Decimal("15"),
+      },
+    ]);
+
+    await expect(projectDomainEventTx(asTx(tx), "event-1")).resolves.toEqual({
+      projected: false,
+      contributionCount: 1,
+    });
+
+    tx.metricContribution.findMany.mockResolvedValue([
+      {
+        metricKey: "COMPLETED_TRANSACTION_VALUE",
+        metricVersion: 1,
+        dimensionKey: "TRANSACTION_TYPE:RENTAL",
+        campusId: "campus-1",
+        occurredAt,
+        value: new Prisma.Decimal("15.01"),
+      },
+    ]);
+    await expect(projectDomainEventTx(asTx(tx), "event-1")).rejects.toMatchObject({
+      code: "ANALYTICS_PROJECTION_EFFECT_CORRUPT",
+    });
   });
 
   it("PROJECTION-03: receipt without matching effect is structural corruption, not silent success", async () => {

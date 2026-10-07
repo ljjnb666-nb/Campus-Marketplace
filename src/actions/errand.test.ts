@@ -789,7 +789,7 @@ describe("errand actions", () => {
     });
     expect(txOrderFindUnique).toHaveBeenCalledWith({
       where: { id: "order-1" },
-      select: { errandTaskId: true, buyerId: true, sellerId: true },
+      select: { errandTaskId: true, buyerId: true, sellerId: true, amount: true },
     });
     expect(txDomainEventCreateMany).toHaveBeenCalledWith({
       data: [
@@ -815,7 +815,7 @@ describe("errand actions", () => {
         expect.objectContaining({
           kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
           schemaVersion: 1,
-          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:event-1",
           payload: { eventId: "event-1" },
           runAt: expect.any(Date),
         }),
