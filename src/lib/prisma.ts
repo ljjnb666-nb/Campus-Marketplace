@@ -1,6 +1,6 @@
 import { PrismaClient, type Prisma } from "@prisma/client";
 import { softDeleteExtension } from "@/lib/prisma-soft-delete";
-import { domainEventLedgerExtension } from "@/lib/domain-events/domain-event";
+import { domainEventLedgerExtension } from "@/lib/domain-events/domain-event-ledger-extension";
 
 const isDev = process.env.NODE_ENV === "development";
 
