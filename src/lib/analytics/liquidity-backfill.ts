@@ -47,9 +47,13 @@ function resolveBatchLimit(value: number | undefined): number {
  */
 export async function backfillCanonicalLiquidityFactsTx(
   tx: Prisma.TransactionClient,
-  input: { batchLimit?: number } = {},
+  input: { batchLimit?: number; campusId?: string } = {},
 ): Promise<LiquidityBackfillSummary> {
   const batchLimit = resolveBatchLimit(input.batchLimit);
+  const campusId = input.campusId ?? null;
+  if (campusId !== null && campusId.length === 0) {
+    throw new Error("LIQUIDITY_BACKFILL_CAMPUS_SCOPE_INVALID");
+  }
 
   const rows = await tx.$queryRaw<LiquidityBackfillCandidate[]>`
     WITH candidates AS (
@@ -168,6 +172,7 @@ export async function backfillCanonicalLiquidityFactsTx(
     )
     SELECT "factKind", "entityId", subtype, "campusId", "occurredAt", "occurrenceKey"
     FROM candidates
+    WHERE (${campusId}::text IS NULL OR "campusId" = ${campusId})
     ORDER BY "occurredAt" ASC, "factKind" ASC, subtype ASC, "entityId" ASC
     LIMIT ${batchLimit}
   `;
@@ -226,7 +231,7 @@ export async function backfillCanonicalLiquidityFactsTx(
 }
 
 export function backfillCanonicalLiquidityFacts(
-  input: { batchLimit?: number } = {},
+  input: { batchLimit?: number; campusId?: string } = {},
 ): Promise<LiquidityBackfillSummary> {
   return withTransaction((tx) => backfillCanonicalLiquidityFactsTx(tx, input));
 }
