@@ -9,6 +9,9 @@ import {
   productReservationExpirePayloadSchema,
   safeAsyncErrorCode,
   validateJobIntent,
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+  ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+  analyticsProjectDomainEventPayloadSchema,
   ERRAND_DEADLINE_EXPIRE_JOB_KIND,
   ERRAND_DEADLINE_EXPIRE_JOB_SCHEMA_VERSION,
   errandDeadlineExpirePayloadSchema,
@@ -126,6 +129,22 @@ describe("Phase 9A job failure 分类与错误消毒（§17/§18）", () => {
     expect(
       validateJobIntent(ERRAND_DEADLINE_EXPIRE_JOB_KIND, 1, { errandId: "errand-1", note: "x" }),
     ).toEqual({ ok: false, reason: "INVALID_PAYLOAD" });
+  });
+
+  it("Phase 10B ANALYTICS_PROJECT_DOMAIN_EVENT@1：payload 仅 eventId，strict 拒绝 free text", () => {
+    expect(ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND).toBe("ANALYTICS_PROJECT_DOMAIN_EVENT");
+    expect(ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION).toBe(1);
+    expect(analyticsProjectDomainEventPayloadSchema.safeParse({ eventId: "event-1" }).success).toBe(true);
+    expect(
+      analyticsProjectDomainEventPayloadSchema.safeParse({ eventId: "event-1", note: "用户文本" }).success,
+    ).toBe(false);
+    expect(
+      validateJobIntent(
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_KIND,
+        ANALYTICS_PROJECT_DOMAIN_EVENT_JOB_SCHEMA_VERSION,
+        { eventId: "event-1" },
+      ),
+    ).toEqual({ ok: true, payload: { eventId: "event-1" } });
   });
 
   it("RB04 validateJobIntent：已知契约返回 canonical payload；未知契约/非法形状拒绝", () => {

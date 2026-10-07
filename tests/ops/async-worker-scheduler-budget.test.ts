@@ -33,8 +33,20 @@ describe("Review Repair RB03：errand deadline scheduler budget wiring（静态�
       path.join(process.cwd(), "src", "lib", "async", "errand-deadline-scheduler.ts"),
       "utf8",
     );
-    // enqueue 的 runAt 参数必须是 cycle 捕获的 now，禁止 candidate.deadline
     expect(schedulerSource).toMatch(/runAt: now,/);
     expect(schedulerSource).not.toMatch(/runAt: candidate\.deadline/);
+  });
+
+  it("Phase 10B：backfill + projection replay 只消费 errand scheduler 剩余 producer budget", () => {
+    const workerSource = readFileSync(
+      path.join(process.cwd(), "scripts", "ops", "async-worker.ts"),
+      "utf8",
+    );
+    expect(workerSource).toContain("let producerBudget = config.batchSize");
+    expect(workerSource).toContain("producerBudget - scheduled.enqueued");
+    expect(workerSource).toContain("backfillCanonicalErrandCompletionEvents({");
+    expect(workerSource).toContain("batchLimit: producerBudget");
+    expect(workerSource).toContain("producerBudget - backfill.backfilled");
+    expect(workerSource).toContain("scheduleUnprojectedDomainEventJobs({");
   });
 });

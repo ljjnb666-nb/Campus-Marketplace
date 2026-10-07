@@ -20,7 +20,23 @@ function buildTx() {
   return {
     domainEvent: {
       createMany: vi.fn().mockResolvedValue({ count: 1 }),
-      findUnique: vi.fn(),
+      findUnique: vi.fn().mockResolvedValue({
+        id: "event-1",
+        eventType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
+        schemaVersion: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_SCHEMA_VERSION,
+        aggregateType: ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_AGGREGATE_TYPE,
+        aggregateId: "order-1",
+        campusId: "campus-1",
+        actorUserId: null,
+        subjectUserId: null,
+        payload: { orderId: "order-1", errandTaskId: "errand-1" },
+        occurredAt,
+        sourceType: "DOMAIN_TX",
+        sourceId: null,
+      }),
+    },
+    asyncJob: {
+      createMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
   };
 }
@@ -135,13 +151,29 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
       ],
       skipDuplicates: true,
     });
-    expect(tx.domainEvent.findUnique).not.toHaveBeenCalled();
+    expect(tx.domainEvent.findUnique).toHaveBeenCalledWith({
+      where: { occurrenceKey: "ERRAND_ORDER_COMPLETED:order-1" },
+      select: expect.objectContaining({ id: true }),
+    });
+    expect(tx.asyncJob.createMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
+          schemaVersion: 1,
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection1:event-1",
+          payload: { eventId: "event-1" },
+          runAt: expect.any(Date),
+        }),
+      ],
+      skipDuplicates: true,
+    });
   });
 
   it("DE-WRITE-02: identical duplicate is idempotent, not a second fact", async () => {
     const tx = buildTx();
     tx.domainEvent.createMany.mockResolvedValue({ count: 0 });
     tx.domainEvent.findUnique.mockResolvedValue({
+      id: "event-1",
       eventType: validInput.eventType,
       schemaVersion: validInput.schemaVersion,
       aggregateType: validInput.aggregateType,
@@ -165,6 +197,7 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
     const tx = buildTx();
     tx.domainEvent.createMany.mockResolvedValue({ count: 0 });
     tx.domainEvent.findUnique.mockResolvedValue({
+      id: "event-1",
       eventType: validInput.eventType,
       schemaVersion: validInput.schemaVersion,
       aggregateType: validInput.aggregateType,
@@ -181,6 +214,7 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
     await expect(recordDomainEventTx(asTx(tx), validInput)).rejects.toBeInstanceOf(
       DomainEventOccurrenceConflictError,
     );
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
   });
 
   it("DE-WRITE-04: invalid sourceType fails before touching the database", async () => {
@@ -193,6 +227,16 @@ describe("Phase 10A DomainEvent registry / write boundary", () => {
       }),
     ).rejects.toMatchObject({ code: "DOMAIN_EVENT_ENVELOPE_INVALID" });
     expect(tx.domainEvent.createMany).not.toHaveBeenCalled();
+    expect(tx.asyncJob.createMany).not.toHaveBeenCalled();
+  });
+
+  it("DE-WRITE-05: projection intent failure propagates so the caller transaction can roll back event + job atomically", async () => {
+    const tx = buildTx();
+    tx.asyncJob.createMany.mockRejectedValue(new Error("queue unavailable"));
+
+    await expect(recordDomainEventTx(asTx(tx), validInput)).rejects.toThrow("queue unavailable");
+    expect(tx.domainEvent.createMany).toHaveBeenCalledTimes(1);
+    expect(tx.asyncJob.createMany).toHaveBeenCalledTimes(1);
   });
 
   it("DE-APPEND-01: business client rejects every DomainEvent mutation but passes reads/creates", () => {
