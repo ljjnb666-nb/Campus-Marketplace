@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { PermanentJobFailure } from "@/lib/async/job-types";
 import {
@@ -17,6 +17,23 @@ type ProjectedEffect = {
   value: string;
 };
 
+function normalizeMetricValue(value: string): string {
+  try {
+    const decimal = new Prisma.Decimal(value);
+    if (!decimal.isFinite()) {
+      throw new Error("non-finite metric value");
+    }
+    // Decimal(24,6) persistence may normalize lexical scale ("15.00" -> "15").
+    // Projection corruption checks compare numeric value, never presentation scale.
+    return decimal.toString();
+  } catch {
+    throw new PermanentJobFailure(
+      "ANALYTICS_PROJECTION_EFFECT_CORRUPT",
+      "projection metric value 无法按 Decimal 数值规范化",
+    );
+  }
+}
+
 function effectSignature(effect: ProjectedEffect): string {
   return [
     effect.metricKey,
@@ -24,7 +41,7 @@ function effectSignature(effect: ProjectedEffect): string {
     effect.dimensionKey,
     effect.campusId,
     effect.occurredAt.toISOString(),
-    effect.value,
+    normalizeMetricValue(effect.value),
   ].join("|");
 }
 

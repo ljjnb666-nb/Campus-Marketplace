@@ -5,6 +5,10 @@ vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityDemandCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
   recordLiquidityTransactionCompletedTx: vi.fn().mockResolvedValue({ recorded: true }),
+  recordLiquidityTransactionCompletionFactsTx: vi.fn().mockResolvedValue({
+    completion: { recorded: true },
+    value: { recorded: true },
+  }),
 }));
 
 const {
@@ -34,6 +38,7 @@ function buildTx() {
         errandTaskId: "errand-1",
         buyerId: "user-buyer",
         sellerId: "user-seller",
+        amount: new Prisma.Decimal("8.00"),
       }),
     },
     domainEvent: {
@@ -143,7 +148,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
     });
     expect(tx.order.findUnique).toHaveBeenCalledWith({
       where: { id: "order-1" },
-      select: { errandTaskId: true, buyerId: true, sellerId: true },
+      select: { errandTaskId: true, buyerId: true, sellerId: true, amount: true },
     });
     expect(tx.domainEvent.createMany).toHaveBeenCalledWith({
       data: [
@@ -169,7 +174,7 @@ describe("completeErrandOrderTx（ERRAND 完成 exactly-once）", () => {
         expect.objectContaining({
           kind: "ANALYTICS_PROJECT_DOMAIN_EVENT",
           schemaVersion: 1,
-          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:event-1",
+          dedupeKey: "ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:event-1",
           payload: { eventId: "event-1" },
           runAt: expect.any(Date),
         }),

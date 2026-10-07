@@ -20,9 +20,13 @@ export function calculateRentalAmount(
   unit: string,
   startTime: Date,
   endTime: Date,
+  quantity = 1,
 ): Prisma.Decimal {
+  if (!Number.isSafeInteger(quantity) || quantity < 1) {
+    throw new Error("RENTAL_QUANTITY_INVALID");
+  }
   const duration = calculateRentalDuration(unit, startTime, endTime);
-  return unitPrice.mul(duration);
+  return unitPrice.mul(duration).mul(quantity);
 }
 
 export function createRentalOrderNo(): string {

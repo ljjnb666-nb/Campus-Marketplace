@@ -27,6 +27,14 @@ export const LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE = "LIQUIDITY_TRANSACTION
 export const LIQUIDITY_TRANSACTION_COMPLETED_EVENT_SCHEMA_VERSION = 1;
 export const LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE = "TRANSACTION";
 
+// Phase 10C-2：CTV 使用独立 value fact，而不是修改 completion fact schema。
+// 这样 10C-1 已存在的 completion occurrence 不需要被重写，历史金额可独立
+// backfill；value fact 与 completion fact 仍可在同一业务事务内原子提交。
+export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE =
+  "LIQUIDITY_TRANSACTION_VALUE_RECORDED";
+export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_SCHEMA_VERSION = 1;
+export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_AGGREGATE_TYPE = "TRANSACTION";
+
 export const LIQUIDITY_LISTING_TYPES = ["PRODUCT", "SERVICE", "RENTAL"] as const;
 export const LIQUIDITY_DEMAND_TYPES = [
   "PRODUCT_ORDER",
@@ -37,6 +45,16 @@ export const LIQUIDITY_DEMAND_TYPES = [
 export const LIQUIDITY_TRANSACTION_TYPES = [
   "PRODUCT",
   "SERVICE",
+  "ERRAND",
+  "RENTAL",
+] as const;
+
+// Phase 10C-2 value authority is intentionally narrower than completion-count
+// authority. SERVICE price may be PER_HOUR / PER_SESSION / NEGOTIABLE and Order
+// does not snapshot the pricing unit or an agreed final total, so SERVICE cannot
+// safely produce a completed-value fact yet.
+export const LIQUIDITY_TRANSACTION_VALUE_TYPES = [
+  "PRODUCT",
   "ERRAND",
   "RENTAL",
 ] as const;
@@ -68,6 +86,21 @@ const liquidityTransactionCompletedPayloadSchema = z
   .object({
     transactionId: boundedId,
     transactionType: z.enum(LIQUIDITY_TRANSACTION_TYPES),
+  })
+  .strict();
+
+// Canonical application money unit: existing marketplace amount columns are
+// Decimal(10,2). Keep DomainEvent payload deterministic as a two-decimal string;
+// reject negative / over-precision / out-of-range values instead of rounding.
+const bookedValueSchema = z
+  .string()
+  .regex(/^(?:0|[1-9]\d{0,7})\.\d{2}$/);
+
+const liquidityTransactionValueRecordedPayloadSchema = z
+  .object({
+    transactionId: boundedId,
+    transactionType: z.enum(LIQUIDITY_TRANSACTION_VALUE_TYPES),
+    bookedValue: bookedValueSchema,
   })
   .strict();
 
@@ -135,6 +168,21 @@ const DOMAIN_EVENT_DEFINITIONS = new Map<string, Map<number, DomainEventDefiniti
           aggregateIdFromPayload: (payload) => payload.transactionId as string,
           occurrenceKey: (aggregateId, payload) =>
             `${LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE}:${payload.transactionType}:${aggregateId}`,
+        },
+      ],
+    ]),
+  ],
+  [
+    LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE,
+    new Map([
+      [
+        LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LIQUIDITY_TRANSACTION_VALUE_RECORDED_AGGREGATE_TYPE,
+          payloadSchema: liquidityTransactionValueRecordedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.transactionId as string,
+          occurrenceKey: (aggregateId, payload) =>
+            `${LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE}:${payload.transactionType}:${aggregateId}`,
         },
       ],
     ]),

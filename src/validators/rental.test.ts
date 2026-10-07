@@ -192,6 +192,21 @@ describe("rentalOrderCreateSchema", () => {
     }
   });
 
+  it("rejects zero, negative, fractional and non-numeric order quantity", () => {
+    for (const quantity of ["0", "-1", "1.5", "abc"]) {
+      const parsed = rentalOrderCreateSchema.safeParse({
+        rentalListingId: "listing-1",
+        startTime: "2026-09-01T10:00",
+        endTime: "2026-09-03T10:00",
+        quantity,
+      });
+      expect(parsed.success, `quantity=${quantity}`).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues[0]?.message).toBe("租赁数量至少为1");
+      }
+    }
+  });
+
   it("requires start and end times", () => {
     const parsed = rentalOrderCreateSchema.safeParse({ rentalListingId: "listing-1" });
     expect(parsed.success).toBe(false);

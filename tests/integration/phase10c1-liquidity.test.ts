@@ -23,7 +23,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       typeof import("@/lib/analytics/domain-event-projection")["projectDomainEventTx"];
 
     const projectionDedupeKey = (eventId: string) =>
-      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:${eventId}`;
+      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:${eventId}`;
 
     beforeAll(async () => {
       prisma = new PrismaClient({
@@ -142,7 +142,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       await prisma.$disconnect();
     });
 
-    it("P10C1-PG-01: 11 truthful historical facts converge to 3/4/4 v2 contributions", async () => {
+    it("P10C1-PG-01: 11 truthful historical facts converge to 3/4/4 v3 contributions", async () => {
       const suffix = randomUUID().slice(0, 8);
       const t = (minute: number) => new Date(Date.UTC(2026, 9, 1, 9, minute, 0));
 
@@ -399,7 +399,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       const contributions = await prisma.metricContribution.findMany({
         where: {
           eventId: { in: events.map((event) => event.id) },
-          projectionVersion: 2,
+          projectionVersion: 3,
         },
       });
       expect(contributions).toHaveLength(11);

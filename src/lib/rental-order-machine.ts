@@ -10,8 +10,9 @@ import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import {
+  computeRentalCompletedBookedValue,
   recordLiquidityDemandCreatedTx,
-  recordLiquidityTransactionCompletedTx,
+  recordLiquidityTransactionCompletionFactsTx,
 } from "@/lib/analytics/liquidity-domain-events";
 import {
   RENTAL_DAMAGE_CLAIM_FILED_KIND,
@@ -152,6 +153,12 @@ export async function createRentalOrderTx(
 ): Promise<RentalOrderTxError | { orderId: string }> {
   const { userId, startTime, endTime, quantity } = input;
 
+  // CTV/accounting authority safety belt：quantity participates in price and
+  // inventory. Reject malformed direct/forged calls before any row/lock work.
+  if (!Number.isSafeInteger(quantity) || quantity < 1) {
+    return { error: "租赁数量至少为1" };
+  }
+
   // ⚠️ 锁序契约（Phase 5 REPAIR 3，防死锁）：
   //   governance subject locks（renter + owner advisory）
   //   → business/domain row locks（RentalListing FOR UPDATE）
@@ -257,7 +264,13 @@ export async function createRentalOrderTx(
     const conflict = await checkTimeConflict(tx, listing.id, startTime, endTime, quantity);
     if (!conflict.available) return { error: '该时间段已被预订，库存不足' };
 
-    const rentalAmount = calculateRentalAmount(listing.price, listing.pricingUnit, startTime, endTime);
+    const rentalAmount = calculateRentalAmount(
+      listing.price,
+      listing.pricingUnit,
+      startTime,
+      endTime,
+      quantity,
+    );
     const depositAmount = listing.depositAmount;
     const finalAmount = rentalAmount.add(depositAmount);
 
@@ -581,11 +594,12 @@ export async function confirmReturnTx(
     });
 
     if (nextStatus === 'COMPLETED') {
-      await recordLiquidityTransactionCompletedTx(tx, {
+      await recordLiquidityTransactionCompletionFactsTx(tx, {
         transactionId: order.id,
         transactionType: "RENTAL",
         campusId: order.rentalListing.campusId,
         occurredAt: now,
+        bookedValue: computeRentalCompletedBookedValue(order),
       });
       await incrementRentalCompletionCounters(tx, order);
     }
@@ -795,7 +809,13 @@ export async function requestExtensionTx(
   if (!conflict.available) return { error: "续租时间段库存不足" };
 
   // ---- 步骤 9：fee 基于订单 price snapshot（§20）----
-  const additionalFee = calculateRentalAmount(order.unitPriceSnapshot, order.pricingUnitSnapshot, order.endTime, input.newEndTime);
+  const additionalFee = calculateRentalAmount(
+    order.unitPriceSnapshot,
+    order.pricingUnitSnapshot,
+    order.endTime,
+    input.newEndTime,
+    order.quantity,
+  );
 
   const ext = await tx.rentalExtensionRequest.create({
     data: {
@@ -952,6 +972,7 @@ export async function approveExtensionTx(
     order.pricingUnitSnapshot,
     order.endTime,
     ext.newEndTime,
+    order.quantity,
   );
   if (!expectedAdditionalFee.eq(ext.additionalFee)) {
     return { error: "续租费用已变化，请重新提交续租" };
@@ -1197,11 +1218,12 @@ export async function respondDamageClaimTx(
       operatorId: input.userId,
       note: input.agreed ? '租客同意损坏索赔，订单完成' : '租客拒绝损坏索赔，订单完成',
     });
-    await recordLiquidityTransactionCompletedTx(tx, {
+    await recordLiquidityTransactionCompletionFactsTx(tx, {
       transactionId: claim.orderId,
       transactionType: "RENTAL",
       campusId: claim.order.rentalListing.campusId,
       occurredAt: now,
+      bookedValue: computeRentalCompletedBookedValue(claim.order),
     });
     await incrementRentalCompletionCounters(tx, claim.order);
   }

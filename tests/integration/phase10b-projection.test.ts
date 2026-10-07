@@ -21,7 +21,7 @@ describe.skipIf(!integrationDatabaseUrl)(
     let backfillCanonicalErrandCompletionEventsTx: typeof import("@/lib/analytics/errand-completion-backfill")["backfillCanonicalErrandCompletionEventsTx"];
 
     const projectionDedupeKey = (eventId: string) =>
-      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection2:${eventId}`;
+      `ANALYTICS_PROJECT_DOMAIN_EVENT:schema1:projection3:${eventId}`;
 
     const TEST_ONLY_PARKED_RUN_AT = new Date("2099-01-01T00:00:00.000Z");
 

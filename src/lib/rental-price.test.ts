@@ -29,6 +29,30 @@ describe("rental-price", () => {
     expect(amount.toString()).toBe("25");
   });
 
+  it("multiplies unit price by duration and authoritative quantity", () => {
+    const start = new Date("2026-07-01T00:00:00Z");
+    const end = new Date("2026-07-03T00:00:00Z");
+    const amount = calculateRentalAmount(
+      new Prisma.Decimal("12.5"),
+      "PER_DAY",
+      start,
+      end,
+      3,
+    );
+    expect(amount.toString()).toBe("75");
+  });
+
+  it("rejects invalid quantity instead of silently under/over-booking value", () => {
+    const start = new Date("2026-07-01T00:00:00Z");
+    const end = new Date("2026-07-02T00:00:00Z");
+    expect(() =>
+      calculateRentalAmount(new Prisma.Decimal("12.5"), "PER_DAY", start, end, 0),
+    ).toThrow("RENTAL_QUANTITY_INVALID");
+    expect(() =>
+      calculateRentalAmount(new Prisma.Decimal("12.5"), "PER_DAY", start, end, 1.5),
+    ).toThrow("RENTAL_QUANTITY_INVALID");
+  });
+
   it("creates rental order numbers with RT prefix", () => {
     expect(createRentalOrderNo()).toMatch(/^RT\d{8}\d{6}$/);
   });

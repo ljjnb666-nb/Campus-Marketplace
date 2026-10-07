@@ -8,7 +8,10 @@ import {
 } from "@/lib/product-order-lifecycle";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import { ORDER_STATUS_CHANGED_KIND } from "@/lib/notifications/notification-registry";
-import { recordLiquidityTransactionCompletedTx } from "@/lib/analytics/liquidity-domain-events";
+import {
+  recordLiquidityTransactionCompletedTx,
+  recordLiquidityTransactionCompletionFactsTx,
+} from "@/lib/analytics/liquidity-domain-events";
 
 /**
  * RB-03 REVIEW FIX（GROUP 2）：GENERAL ORDER STATUS authority。
@@ -201,6 +204,7 @@ export async function updateOrderStatusTx(
       productId: true,
       errandTaskId: true,
       serviceListingId: true,
+      amount: true,
     },
   });
 
@@ -267,11 +271,12 @@ export async function updateOrderStatusTx(
         select: { campusId: true },
       });
 
-      await recordLiquidityTransactionCompletedTx(tx, {
+      await recordLiquidityTransactionCompletionFactsTx(tx, {
         transactionId: order.id,
         transactionType: "PRODUCT",
         campusId: product.campusId,
         occurredAt: completedAt,
+        bookedValue: order.amount,
       });
       await incrementCompletedUsers(tx, order.buyerId, order.sellerId);
     }
@@ -289,6 +294,10 @@ export async function updateOrderStatusTx(
       select: { campusId: true },
     });
 
+    // 10C-2 authority fence: SERVICE completion is a trustworthy count fact,
+    // but not yet a trustworthy value fact. ServiceListing.price can represent
+    // PER_HOUR / PER_SESSION / PER_ORDER / NEGOTIABLE and Order.amount does not
+    // snapshot pricingUnit or a negotiated final total. Do not guess CTV.
     await recordLiquidityTransactionCompletedTx(tx, {
       transactionId: order.id,
       transactionType: "SERVICE",

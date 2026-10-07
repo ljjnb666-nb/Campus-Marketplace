@@ -20,9 +20,9 @@ describe("Phase 10C-1 architecture guards", () => {
     expect(text.includes("depositAmount")).toBe(false);
   });
 
-  it("projection version is v2 and worker reuses one producer budget", () => {
+  it("current projection version and shared producer budget remain explicit", () => {
     expect(source("src/lib/analytics/projection-contract.ts").includes(
-      "ANALYTICS_METRIC_PROJECTION_VERSION = 2",
+      "ANALYTICS_METRIC_PROJECTION_VERSION = 3",
     )).toBe(true);
     const worker = source("scripts/ops/async-worker.ts");
     expect(worker.includes("let producerBudget = config.batchSize")).toBe(true);
