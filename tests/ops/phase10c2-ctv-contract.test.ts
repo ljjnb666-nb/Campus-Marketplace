@@ -33,13 +33,23 @@ describe("Phase 10C-2 CTV authority guards", () => {
     }
   });
 
-  it("P10C2-ARCH-02: live rental CTV uses one central non-refundable formula", () => {
-    const text = source("src/lib/rental-order-machine.ts");
-    expect(text).toContain("computeRentalCompletedBookedValue(order)");
-    expect(text).toContain("computeRentalCompletedBookedValue({");
-    expect(text).not.toContain("depositDeduction: input.agreed");
-    expect(text).not.toContain("bookedValue: order.finalAmount");
-    expect(text).not.toContain("bookedValue: claim.order.finalAmount");
+  it("P10C2-ARCH-02: live rental CTV uses rentalAmount-only central authority", () => {
+    const machine = source("src/lib/rental-order-machine.ts");
+    const helper = source("src/lib/analytics/liquidity-domain-events.ts");
+    expect(machine).toContain("computeRentalCompletedBookedValue(order)");
+    expect(machine).toContain("computeRentalCompletedBookedValue(claim.order)");
+    expect(machine).not.toContain("bookedValue: order.finalAmount");
+    expect(machine).not.toContain("bookedValue: claim.order.finalAmount");
+
+    const helperBlock = helper.slice(
+      helper.indexOf("export function computeRentalCompletedBookedValue"),
+      helper.indexOf("export function recordLiquidityListingCreatedTx"),
+    );
+    expect(helperBlock).toContain("input.rentalAmount");
+    expect(helperBlock).not.toContain("serviceFee");
+    expect(helperBlock).not.toContain("overdueFee");
+    expect(helperBlock).not.toContain("depositDeduction");
+    expect(helperBlock).not.toContain("finalAmount");
   });
 
   it("P10C2-ARCH-02B: rental creation and extension accounting consume authoritative quantity", () => {

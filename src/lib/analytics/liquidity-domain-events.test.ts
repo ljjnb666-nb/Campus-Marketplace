@@ -88,7 +88,7 @@ describe("Phase 10C liquidity DomainEvent contracts", () => {
     );
   });
 
-  it("P10C2-EVENT-03: rental CTV includes non-refundable obligations and excludes deposit principal", () => {
+  it("P10C2-EVENT-03: rental CTV is rental consideration only and fails closed on invalid rentalAmount", () => {
     expect(
       computeRentalCompletedBookedValue({
         rentalAmount: "15.00",
@@ -96,9 +96,13 @@ describe("Phase 10C liquidity DomainEvent contracts", () => {
     ).toBe("15.00");
     expect(() =>
       computeRentalCompletedBookedValue({
-        rentalAmount: "15.00",
-        depositDeduction: "-0.01",
+        rentalAmount: "-0.01",
       }),
-    ).toThrow("LIQUIDITY_RENTAL_VALUE_PART_INVALID:depositDeduction");
+    ).toThrow("LIQUIDITY_RENTAL_AMOUNT_INVALID");
+    expect(() =>
+      computeRentalCompletedBookedValue({
+        rentalAmount: "15.001",
+      }),
+    ).toThrow("LIQUIDITY_RENTAL_AMOUNT_INVALID");
   });
 });
