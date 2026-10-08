@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { prisma } from "@/lib/prisma";
+import { findAnalyticsUiCampusById, listAnalyticsUiCampuses } from "@/repositories/analytics-ui-campus-repository";
 import { requireUser } from "@/lib/server-auth";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import {
@@ -37,20 +37,13 @@ export default async function GovernanceAnalyticsPage({
 
   // Discovery only: the service rechecks current user/membership permission
   // before querying tenant facts. A campus-only grant never becomes global.
-  const campuses = await prisma.campus.findMany({
-    where: access.global ? {} : { id: { in: access.campusIds } },
-    select: { id: true, name: true },
-    orderBy: [{ name: "asc" }, { id: "asc" }],
-    take: 100,
-  });
+  const campuses = await listAnalyticsUiCampuses(access);
   const campusId = rawScope ?? campuses[0]?.id ?? null;
   if (campusId !== null && !canReadAnalyticsCampus(access, campusId)) notFound();
 
   // An authorized scope may sort beyond the first 100 options.
   if (campusId && !campuses.some(item => item.id === campusId)) {
-    const extra = await prisma.campus.findUnique({
-      where: { id: campusId }, select: { id: true, name: true },
-    });
+    const extra = await findAnalyticsUiCampusById(campusId);
     if (!extra) notFound();
     campuses.push(extra);
   }

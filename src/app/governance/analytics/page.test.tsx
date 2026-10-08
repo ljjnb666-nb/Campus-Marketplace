@@ -8,9 +8,10 @@ const mock = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/server-auth", () => ({ requireUser: mock.requireUser }));
 vi.mock("@/lib/rbac/service", () => ({ loadAuthorizationContext: mock.loadAuthorizationContext }));
-vi.mock("@/lib/prisma", () => ({ prisma: { campus: {
-  findMany: mock.campusList, findUnique: mock.campusFind,
-}} }));
+vi.mock("@/repositories/analytics-ui-campus-repository", () => ({
+  listAnalyticsUiCampuses: mock.campusList,
+  findAnalyticsUiCampusById: mock.campusFind,
+}));
 vi.mock("@/lib/analytics/analytics-overview-query", () => ({
   loadAuthorizedAnalyticsOverview: mock.overview,
 }));
@@ -47,7 +48,7 @@ describe("10J leaf authorization and input safety", () => {
     });
     render(await GovernanceAnalyticsPage(params()));
     expect(screen.getByRole("heading", { name: "校园交易分析" })).toBeTruthy();
-    expect(mock.campusList).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: ["A"] } } }));
+    expect(mock.campusList).toHaveBeenCalledWith({ global: false, campusIds: ["A"] });
     expect(mock.overview).toHaveBeenCalledWith({ actorId: "operator", campusId: "A", periodDays: 30 });
     expect(screen.queryByText(/平台收入总额|GMV 汇总/)).toBeNull();
   });
@@ -71,7 +72,7 @@ describe("10J leaf authorization and input safety", () => {
     mock.overview.mockResolvedValue(null);
     render(await GovernanceAnalyticsPage(params({ campusId: "A", days: "7" })));
     expect(mock.overview).toHaveBeenCalledWith({ actorId: "operator", campusId: "A", periodDays: 7 });
-    expect(mock.campusList).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+    expect(mock.campusList).toHaveBeenCalledWith({ global: true, campusIds: [] });
   });
 
   it("no campus is an explicit empty state, never an unscoped analytics query", async () => {
