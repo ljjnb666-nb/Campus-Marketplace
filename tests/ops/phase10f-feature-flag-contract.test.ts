@@ -44,7 +44,17 @@ describe("Phase 10F kill-switch contract", () => {
     expect(migration).toContain("FeatureFlagRevision_no_change");
     expect(migration).not.toContain('INSERT INTO "UserRoleAssignment"');
   });
-  it("P10F-ARCH-05: new activity denied on DB fault; no UI or business entitlement bypass", () => {
+  it("P10F-ARCH-05: every public content editor is fenced", () => {
+    const files = [
+      "src/actions/product.ts", "src/actions/service.ts",
+      "src/actions/rental-listing.ts", "src/lib/errand-lifecycle.ts",
+    ];
+    for (const file of files) {
+      expect(source(file)).toContain('kind: "LISTING_EDIT"');
+      expect(source(file)).toContain("requireNewActivityAllowed(tx");
+    }
+  });
+  it("P10F-ARCH-06: new activity denied on DB fault; no UI or business entitlement bypass", () => {
     const guard = source("src/lib/feature-flags/feature-flag-guard.ts");
     expect(guard).toContain("throw new NewActivityDisabledError()");
     expect(guard).toContain("featureFlagOverride.findMany");

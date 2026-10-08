@@ -43,6 +43,8 @@ describe("Phase 10F registered kill switches", () => {
       expect(NEW_ACTIVITY_FLAG_KEYS[kind]).toContain("READ_ONLY_MODE");
       expect(NEW_ACTIVITY_FLAG_KEYS[kind]).toContain("MAINTENANCE_MODE");
     }
+    expect(NEW_ACTIVITY_FLAG_KEYS.LISTING_EDIT).toEqual(["MAINTENANCE_MODE", "READ_ONLY_MODE"]);
+    expect(NEW_ACTIVITY_FLAG_KEYS.LISTING_EDIT).not.toContain("DISABLE_NEW_LISTINGS");
     expect(NEW_ACTIVITY_FLAG_KEYS.DISPUTE).toEqual(["DISABLE_DISPUTE_INITIATION"]);
     expect(NEW_ACTIVITY_FLAG_KEYS.MEETUP).toEqual(["DISABLE_MEETUPS"]);
   });

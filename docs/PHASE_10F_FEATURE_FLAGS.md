@@ -32,11 +32,19 @@ canonical lifecycle and authorization contracts.
 | --- | --- |
 | Account registration | DISABLE_REGISTRATION, MAINTENANCE_MODE |
 | New Product/Errand/Service/Rental listing | DISABLE_NEW_LISTINGS, MAINTENANCE_MODE, READ_ONLY_MODE |
+| Edit existing public Product/Errand/Service/Rental listing | MAINTENANCE_MODE, READ_ONLY_MODE (but not DISABLE_NEW_LISTINGS) |
 | New Product/Errand/Service/Rental order | DISABLE_NEW_ORDERS, MAINTENANCE_MODE, READ_ONLY_MODE |
 | New conversation | DISABLE_NEW_CONVERSATIONS, MAINTENANCE_MODE, READ_ONLY_MODE |
 | New direct message | DISABLE_NEW_MESSAGES, MAINTENANCE_MODE, READ_ONLY_MODE |
 | Propose *new* meetup | DISABLE_MEETUPS |
 | Initiate *new* dispute | DISABLE_DISPUTE_INITIATION |
+
+**Catalog edit authority:** PUBLIC listing content edits are checked in the same
+DB transaction using the original listing campus. Do not rely on client UI or
+a non-transactional pre-read. Closing new listings by itself must not block
+maintenance of existing public listings; activating READ_ONLY/MAINTENANCE
+blocks edits while leaving obligations' cancellation/returns possible.
+Private preferences are not public marketplace exposure and are independent.
 
 **Recovery / safety carve-outs:** continue allowing cancellation, returning items,
 fulfilling existing obligations, settlement-free dispute review/resolution,

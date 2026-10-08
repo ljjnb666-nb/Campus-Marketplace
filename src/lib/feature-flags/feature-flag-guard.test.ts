@@ -44,6 +44,25 @@ describe("Phase 10F transaction-level flag gate", () => {
       .rejects.toBeInstanceOf(NewActivityDisabledError);
   });
 
+  it("LISTING_EDIT rejects read-only but not a new-listings-only switch", async () => {
+    const disabled = mockTx([
+      { key: "READ_ONLY_MODE", scopeKey: "GLOBAL", campusId: null, disabled: true, version: 1 },
+    ]);
+    await expect(requireNewActivityAllowed(disabled, { kind: "LISTING_EDIT", campusId: "A" }))
+      .rejects.toMatchObject({ code: "NEW_ACTIVITY_DISABLED" });
+    expect(disabled.featureFlagOverride.findMany).toHaveBeenCalledWith({
+      where: {
+        key: { in: ["MAINTENANCE_MODE", "READ_ONLY_MODE"] },
+        scopeKey: { in: ["GLOBAL", "CAMPUS:A"] },
+      },
+      select: { key: true, scopeKey: true, campusId: true, disabled: true, version: true },
+    });
+
+    const normal = mockTx();
+    await expect(requireNewActivityAllowed(normal, { kind: "LISTING_EDIT", campusId: "A" }))
+      .resolves.toBeUndefined();
+  });
+
   it("fails closed on DB errors, invalid versions, missing campus and unknown activity", async () => {
     const tx = mockTx();
     tx.featureFlagOverride.findMany.mockRejectedValue(new Error("DATABASE_UNAVAILABLE"));
