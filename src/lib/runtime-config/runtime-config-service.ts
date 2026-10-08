@@ -46,7 +46,8 @@ export async function setRuntimeConfigTx(
   const value = input.value === null ? null : parseRuntimeConfigValue(input.key, input.value);
   if (
     !input.actorId ||
-    (input.campusId !== null && !input.campusId.trim()) ||
+    (input.campusId !== null &&
+      (typeof input.campusId !== "string" || !input.campusId.trim())) ||
     !Number.isSafeInteger(input.expectedVersion) ||
     input.expectedVersion < 0
   ) {

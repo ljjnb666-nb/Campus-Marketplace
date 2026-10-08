@@ -28,7 +28,14 @@ describe("10E config authority guard", () => {
     expect(m).toContain("RuntimeConfigRevision_no_change");
     expect(m).not.toContain('INSERT INTO "UserRoleAssignment"');
   });
-  it("P10E-ARCH-04: consumption cannot widen evidence above original upper bound", () => {
+  it("P10E-ARCH-04: scoped operator read exposes its own CAS version", () => {
+    const read = source("src/lib/runtime-config/runtime-config-operator-query.ts");
+    expect(read).toContain('"runtime.config.manage"');
+    expect(read).toContain("currentVersion: row?.version ?? 0");
+    expect(read).toContain("take: 20");
+    expect(read).not.toContain("actorId: true");
+  });
+  it("P10E-ARCH-05: consumption cannot widen evidence above original upper bound", () => {
     const risk = source("src/lib/risk/risk-intelligence.ts");
     expect(risk).toContain("loadEffectiveRuntimeConfig");
     expect(risk).toContain("Math.min(RISK_SIGNAL_EVIDENCE_LIMIT, evidenceLimit.value)");
