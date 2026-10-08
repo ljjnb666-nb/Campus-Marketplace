@@ -13,6 +13,8 @@ import {
 import { governanceError } from "@/lib/governance/domain-errors";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { prisma, withTransaction } from "@/lib/prisma";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
+import { resolveConversationCampusIdTx } from "@/lib/feature-flags/feature-flag-campus";
 import { emitNotificationTx } from "@/lib/notifications/notification-service";
 import { ORDER_CONVERSATION_STARTED_KIND } from "@/lib/notifications/notification-registry";
 import { resolvePairBlockStateTx } from "@/lib/trust/communication-policy";
@@ -189,12 +191,14 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
         }
       }
 
+      let newConversationCampusId: string | null = null;
       if (gate.kind === "MARKETPLACE_LISTING") {
         // 权威资源重读 + 参与关系复核（不盲信事务外 snapshot）
         const fresh = await gate.rereadResource(tx);
         if (!fresh) {
           return null;
         }
+        newConversationCampusId = fresh.campusId;
         if (!sameParticipantSet(fresh.participantIds, participantIds)) {
           // 参与关系已变化（尤其 ERRAND publisher/accepter）→ 不给 stale
           // counterpart 新建会话，走既有"资源不可用"回退
@@ -220,6 +224,16 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
       if (gate.racePoint) {
         await gate.racePoint(tx);
       }
+
+      // Existing obligations have no Order/RentalOrder campusId; resolve from
+      // authoritative original listing/errand. Existing conversation fast-path
+      // above remains permitted, but a new conversation+its first message must
+      // obey BOTH gates in the transaction.
+      const campusId = newConversationCampusId ?? await resolveConversationCampusIdTx(
+        tx, { [bizKeyField]: bizId },
+      );
+      await requireNewActivityAllowed(tx, { kind: "CONVERSATION", campusId });
+      await requireNewActivityAllowed(tx, { kind: "MESSAGE", campusId });
 
       const conv = await tx.conversation.create({
         data: {
