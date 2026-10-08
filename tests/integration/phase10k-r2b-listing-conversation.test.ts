@@ -129,6 +129,12 @@ describe.skipIf(!url)("10K-R2b listing conversation fact atomicity (real Postgre
 
   it("rollback after event insertion leaves no conversation, event or job", async () => {
     const key = "R2B:rollback:" + randomUUID();
+    const eventsBefore = await db.domainEvent.count({
+      where: { campusId, eventType: "LISTING_CONVERSATION_CREATED" },
+    });
+    const jobsBefore = await db.asyncJob.count({
+      where: { kind: "ANALYTICS_PROJECT_DOMAIN_EVENT" },
+    });
     await expect(db.$transaction(async tx => {
       const c = await tx.conversation.create({
         data: { conversationKey: key, productId: listingId },
@@ -142,8 +148,11 @@ describe.skipIf(!url)("10K-R2b listing conversation fact atomicity (real Postgre
     })).rejects.toThrow("TEST_ROLLBACK");
     expect(await db.conversation.count({ where: { conversationKey: key } })).toBe(0);
     expect(await db.domainEvent.count({
-      where: { eventType: "LISTING_CONVERSATION_CREATED", occurrenceKey: { contains: key } },
-    })).toBe(0);
+      where: { campusId, eventType: "LISTING_CONVERSATION_CREATED" },
+    })).toBe(eventsBefore);
+    expect(await db.asyncJob.count({
+      where: { kind: "ANALYTICS_PROJECT_DOMAIN_EVENT" },
+    })).toBe(jobsBefore);
   });
 
   it("same conversation cannot be reassigned to a different tenant or listing", async () => {
