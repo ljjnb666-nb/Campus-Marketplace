@@ -269,6 +269,7 @@ export async function updateRentalListing(
         "MODIFY_PUBLIC_LISTING_CONTENT",
       );
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: existingListing.campusId });
       await tx.rentalListing.update({
         where: { id: listingId },
         data: {

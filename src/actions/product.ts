@@ -265,6 +265,7 @@ export async function updateProduct(
         "MODIFY_PUBLIC_LISTING_CONTENT",
       );
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: existingProduct.campusId });
       await tx.product.update({
         where: { id: productId },
         data: {

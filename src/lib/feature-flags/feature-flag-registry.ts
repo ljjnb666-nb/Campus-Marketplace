@@ -5,7 +5,7 @@
  * Missing rows = no explicit disable, except when the authority DB is
  * unavailable/corrupt (fail-closed for all NEW_ACTIVITY operations).
  *
- * MAINTENANCE/READ_ONLY block new activity only, not safety/recovery,
+ * MAINTENANCE/READ_ONLY block new activity and public catalog edits, not safety/recovery,
  * cancellations, rental returns, dispute handling, privacy rights or ops.
  */
 export const FEATURE_FLAG_KEYS = [
@@ -25,6 +25,8 @@ export type FeatureFlagKey = (typeof FEATURE_FLAG_KEYS)[number];
 export const NEW_ACTIVITY_FLAG_KEYS = {
   REGISTRATION: ["DISABLE_REGISTRATION", "MAINTENANCE_MODE"],
   LISTING: ["DISABLE_NEW_LISTINGS", "MAINTENANCE_MODE", "READ_ONLY_MODE"],
+  // Existing public content changes must not bypass emergency read-only.
+  LISTING_EDIT: ["MAINTENANCE_MODE", "READ_ONLY_MODE"],
   ORDER: ["DISABLE_NEW_ORDERS", "MAINTENANCE_MODE", "READ_ONLY_MODE"],
   CONVERSATION: ["DISABLE_NEW_CONVERSATIONS", "MAINTENANCE_MODE", "READ_ONLY_MODE"],
   MESSAGE: ["DISABLE_NEW_MESSAGES", "MAINTENANCE_MODE", "READ_ONLY_MODE"],

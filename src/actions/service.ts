@@ -251,6 +251,7 @@ export async function updateService(
         "MODIFY_PUBLIC_LISTING_CONTENT",
       );
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: service.campusId });
       await tx.serviceListing.update({
         where: { id: serviceId },
         data: {
