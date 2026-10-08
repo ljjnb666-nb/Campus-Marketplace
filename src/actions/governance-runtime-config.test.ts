@@ -34,6 +34,21 @@ describe("10H runtime config action", () => {
     expect(revalidatePath).toHaveBeenCalledWith("/governance/runtime-config");
   });
 
+  it("ignores only reserved Next.js $ACTION_* transport fields, never business injections", async () => {
+    const form = data();
+    form.append("$ACTION_KEY", "framework-generated");
+    form.append("$ACTION_REF_0", "framework-generated");
+    expect((await changeGovernanceRuntimeConfig(previous, form)).status).toBe("success");
+    expect(setRuntimeConfig).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: "real-session-actor", campusId: "A", value: 12,
+    }));
+    const tampered = data();
+    tampered.append("actorId", "attacker");
+    tampered.append("$ACTION_KEY", "framework-generated");
+    expect((await changeGovernanceRuntimeConfig(previous, tampered)).status).toBe("error");
+    expect(setRuntimeConfig).toHaveBeenCalledTimes(1);
+  });
+
   it("GLOBAL is explicit; inherit is a null tombstone with its own CAS version", async () => {
     expect((await changeGovernanceRuntimeConfig(previous, data({ campusId: "", nextValue: "inherit" }))).status)
       .toBe("success");
