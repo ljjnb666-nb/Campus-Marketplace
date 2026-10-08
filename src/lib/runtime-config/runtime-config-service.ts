@@ -38,7 +38,8 @@ export type RuntimeConfigMutationResult = {
  * No cache, no blind upsert, no last-write-wins. No writes on stale role,
  * invalid value, version conflict or audit failure.
  */
-export async function setRuntimeConfig(
+export async function setRuntimeConfigTx(
+  tx: PrismaTypes.TransactionClient,
   input: RuntimeConfigMutationInput,
 ): Promise<RuntimeConfigMutationResult> {
   assertRuntimeConfigKey(input.key);
@@ -53,7 +54,7 @@ export async function setRuntimeConfig(
   }
   const scopeKey = input.campusId === null ? "GLOBAL" : `CAMPUS:${input.campusId}`;
 
-  return withTransaction(async (tx) => {
+  return (async () => {
     await acquireGovernanceSubjectLocks(tx, [
       { subjectType: "USER", subjectId: input.actorId },
     ]);
@@ -140,5 +141,12 @@ export async function setRuntimeConfig(
       value,
       version,
     };
-  });
+  })();
+}
+
+/** Production entry point: owns transaction; test may exercise Tx core in a rollback-only fixture. */
+export function setRuntimeConfig(
+  input: RuntimeConfigMutationInput,
+): Promise<RuntimeConfigMutationResult> {
+  return withTransaction((tx) => setRuntimeConfigTx(tx, input));
 }
