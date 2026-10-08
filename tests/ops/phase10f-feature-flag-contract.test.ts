@@ -61,5 +61,9 @@ describe("Phase 10F kill-switch contract", () => {
     const read = source("src/lib/feature-flags/feature-flag-operator-query.ts");
     expect(read).toContain('"feature.flags.manage"');
     expect(read).toContain("take: 20");
+    expect(read).toContain("withTransaction");
+    expect(read).toContain("acquireGovernanceSubjectLocks");
+    expect(read).toContain("loadAuthorizationContext(input.actorId, tx)");
+    expect(read).toContain("lockFeatureFlagSharedById");
   });
 });

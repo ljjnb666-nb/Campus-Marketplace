@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { lockFeatureFlagExclusive, requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { setFeatureFlag } from "@/lib/feature-flags/feature-flag-service";
+import { loadFeatureFlagForOperator } from "@/lib/feature-flags/feature-flag-operator-query";
 import { withTransaction } from "@/lib/prisma";
 
 vi.setConfig({ testTimeout: 35_000, hookTimeout: 50_000 });
@@ -219,6 +220,10 @@ describe.skipIf(!enabled)("P10F real PostgreSQL transaction-race acceptance", ()
       expect((abort as Error).message).toBe("P10F_EXPECTED_AUDIT_ABORT");
       await revoke;
       expect(revocationCommitted).toBe(true);
+      // Read and write operations both reject the revoked operator.
+      await expect(loadFeatureFlagForOperator({
+        actorId, key: "DISABLE_NEW_ORDERS", campusId,
+      })).rejects.toThrow();
 
       await expect(setFeatureFlag({
         actorId, key: "DISABLE_NEW_ORDERS", campusId,

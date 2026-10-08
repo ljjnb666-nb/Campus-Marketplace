@@ -44,6 +44,19 @@ export async function lockFeatureFlagExclusive(
 }
 
 /**
+ * Shared exact-scope fence for authorized operator reads. Readers of current
+ * CAS state and revision history must serialize with writer commits too.
+ */
+export async function lockFeatureFlagSharedById(
+  tx: Prisma.TransactionClient,
+  id: string,
+): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(
+    ${FEATURE_FLAG_LOCK_NAMESPACE}::int, hashtext(${id})
+  )`;
+}
+
+/**
  * Central authoritative fail-closed guard. No UI-only or out-of-tx check.
  *
  * - GLOBAL TRUE OR campus TRUE blocks, regardless of opposing false.
@@ -64,9 +77,7 @@ export async function requireNewActivityAllowed(
 
   try {
     for (const id of lockIds(keys, input.campusId)) {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(
-        ${FEATURE_FLAG_LOCK_NAMESPACE}::int, hashtext(${id})
-      )`;
+      await lockFeatureFlagSharedById(tx, id);
     }
 
     const rows = await tx.featureFlagOverride.findMany({
