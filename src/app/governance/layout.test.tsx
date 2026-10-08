@@ -647,3 +647,28 @@ describe("GovernanceLayout Phase 7H union gate（总览 / 校区管理 / 系统�
     expect(screen.queryByRole("link", { name: "校区管理" })).toBeNull();
   });
 });
+
+
+describe("Phase 10H runtime config capability navigation", () => {
+  it("runtime.config.manage-only operator enters governance and sees only its runtime sibling", async () => {
+    requireUser.mockResolvedValue({ id: "cfg-admin" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "cfg-admin", accountActive: true, activeCampusIds: ["A"],
+      grants: [{ roleKey: "CONFIG", scope: "CAMPUS", campusId: "A", permissionKeys: ["runtime.config.manage"] }],
+    });
+    render(await GovernanceLayout({ children: <div data-testid="config-content">内容</div> }));
+    expect(screen.getByTestId("config-content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "运行时配置" }).getAttribute("href")).toBe("/governance/runtime-config");
+    expect(screen.queryByRole("link", { name: "功能开关" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+  });
+
+  it("stale CAMPUS config grant cannot enter root or expose sibling navigation", async () => {
+    requireUser.mockResolvedValue({ id: "cfg-admin" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "cfg-admin", accountActive: true, activeCampusIds: [],
+      grants: [{ roleKey: "CONFIG", scope: "CAMPUS", campusId: "A", permissionKeys: ["runtime.config.manage"] }],
+    });
+    await expect(GovernanceLayout({ children: <div>内容</div> })).rejects.toThrow("NOT_FOUND");
+  });
+});

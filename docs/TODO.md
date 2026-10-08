@@ -1,10 +1,10 @@
 # 开发计划
 
 > Phase 顺序、Phase 状态与 Gate 定义的权威来源是 [MASTER_ROADMAP.md](MASTER_ROADMAP.md)
-> （Master Roadmap v1.0，2026-09-02 冻结）。本文件记录各阶段任务明细与当前测试基线，
+> （Master Roadmap v1.1，2026-09-02 冻结）。本文件记录各阶段任务明细与当前测试基线，
 > 与 MASTER_ROADMAP 冲突时以其为准。
 
-## Production 阶段总览（阶段顺序以 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) Master Roadmap v1.0 为准）
+## Production 阶段总览（阶段顺序以 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) Master Roadmap v1.1 为准）
 
 | 阶段 | 名称 | 状态 |
 | --- | --- | --- |
@@ -19,7 +19,7 @@
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；状态权威见 MASTER_ROADMAP 当前状态表） |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED，PR #57–#62 实施链收口；final master `e497dcde`，post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；closure record 见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.5，运维手册见 [PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)） |
-| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | NOT_STARTED |
+| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | **IN_PROGRESS**（10A–10G 已合并；10G exact-master CI 双绿；10H 开发中，整体未关闭） |
 | Phase 11 | Pilot Readiness | NOT_STARTED |
 | **GATE B** | Pilot Ready（通过后重开 Phase 3B） | NOT_REACHED |
 | Phase 12–14 | Alpha → Closed Beta → Single-Campus Pilot（线下支付语义） | NOT_STARTED |
@@ -157,7 +157,7 @@ post-merge master CI verify + e2e 全绿，master CI run 33637075278）。
 - [x] GitHub branch protection：verify / e2e 已设为 required checks（PR before merge + enforce admins + 禁 force push/删除）
 - [x] Production Phase 3A：仓库侧生产部署基础（见上节，REPO_SIDE_ACCEPTED）
 - [x] Production Phase 4：Observability / Monitoring / Recovery Foundation（DONE / MERGED / MASTER-GREEN / CLOSED）
-- [x] Master Roadmap v1.0：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
+- [x] Master Roadmap v1.1：路线固化 docs closure（[MASTER_ROADMAP.md](MASTER_ROADMAP.md) + [ADR 0001](adr/0001-master-roadmap-v1.md)）
 - [x] Production Phase 5：Agreements / Privacy / Platform Rules / Data Governance（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-05，PR #8；merge commit `dc6dd13539cd9241d5d660dc606fc0f7e27a11c1`；post-merge master CI run 33943242174 双绿，见下节）
 - [x] Production Phase 6：Identity / Trust / Safety / RBAC / Audit（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-12：Phase 6A **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-05，PR #10；merge commit `d1b311c0d1ee1b9a3f78bd30fd28a90742d8bcc3`；post-merge master CI run 33968202720 双绿）；Phase 6B **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-07，PR #12；merge commit `d5f8e19151184f7b5ce5660103cc5632f183e9b9`；post-merge master CI run 34113125694 双绿，见下节）；Phase 6C **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-12，PR #16/#17/#18/#19 实施链，final merge commit `ed63d20850259ee7bcc6674c8d6836bc5b0a56f9`；post-merge master CI run 34673546585 attempt=1 双绿，见下节））
 - [x] Production Phase 7：Operations Admin Foundation（**DONE / MERGED / MASTER-GREEN / CLOSED**，2026-09-22，PR #20–#27 实施链收口；canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`；post-merge master CI run 35713347538 attempt=1 双绿，见下节）
