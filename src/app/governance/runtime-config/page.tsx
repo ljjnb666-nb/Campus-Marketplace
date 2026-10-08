@@ -48,9 +48,11 @@ export default async function GovernanceRuntimeConfigPage({
     key: KEY, ...(campusId === null ? {} : { campusId }),
   });
 
+  // A version change must update props, not remount the action-state component:
+  // remounting here discards successful mutation feedback in useActionState.
   return (
     <RuntimeConfigConsole
-      key={`${campusId ?? "GLOBAL"}:${config.currentVersion}`}
+      key={campusId ?? "GLOBAL"}
       config={config}
       effective={effective}
       campusId={campusId}

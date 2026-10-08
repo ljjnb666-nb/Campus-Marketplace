@@ -36,15 +36,16 @@ test("10H-E2E01：校区参数 → 二次确认 → CAS/审计 → 恢复继承"
     await expect(submit).toBeDisabled();
     await page.getByRole("checkbox", { name: /我已核对校区范围/ }).check();
     await submit.click();
-    // Surface the *actual* server response before asserting durable DB state.
-    // A rejected mutation is a real product failure, not an eventually-consistent write.
-    await expect(page.locator('form:has(input[name="key"]) [role="status"], form:has(input[name="key"]) [role="alert"]'))
-      .toContainText("配置已保存");
-
+    // First establish durable database authority: if the submit was rejected,
+    // report the failed write rather than mistaking a feedback-remount for one.
     await expect.poll(async () => db.runtimeConfigOverride.findUnique({
       where: { key_scopeKey: { key, scopeKey } },
       select: { value: true, version: true },
     })).toEqual({ value: 12, version: 1 });
+    // revalidatePath must refresh visible data without discarding success
+    // feedback, and a later edit must use the fresh CAS version.
+    await expect(page.getByText("当前生效：12 条")).toBeVisible();
+    await expect(page.getByRole("status")).toContainText("配置已保存");
     await expect.poll(async () => db.runtimeConfigRevision.count({
       where: { config: { key, campusId: campus.id } },
     })).toBe(1);

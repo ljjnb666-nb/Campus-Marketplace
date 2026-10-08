@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useState } from "react";
+import { useActionState, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Building2, Globe2, History, ShieldCheck, SlidersHorizontal } from "lucide-react";
 
@@ -45,11 +45,20 @@ export function RuntimeConfigConsole({
   const [value, setValue] = useState(String(config.currentValue ?? RUNTIME_CONFIG_REGISTRY[config.key].defaultValue));
   const [confirm, setConfirm] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [syncedVersion, setSyncedVersion] = useState(config.currentVersion);
   const limits = RUNTIME_CONFIG_REGISTRY[config.key];
 
-  useEffect(() => {
-    if (state.status === "success") router.refresh();
-  }, [state.status, state.message, router]);
+  // Server Action revalidatePath already refreshes the current route. Preserve
+  // useActionState across that refresh so the success notice remains visible;
+  // reconcile form inputs with the fresh CAS version before the next edit.
+  // Guarded render-time adjustment avoids an extra effect-driven stale frame.
+  if (syncedVersion !== config.currentVersion) {
+    setSyncedVersion(config.currentVersion);
+    setMode("set");
+    setValue(String(config.currentValue ?? limits.defaultValue));
+    setConfirm(false);
+    setAcknowledged(false);
+  }
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 sm:py-12">
