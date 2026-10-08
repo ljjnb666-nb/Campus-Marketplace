@@ -698,3 +698,28 @@ describe("Phase 10I risk.read-only navigation", () => {
     await expect(GovernanceLayout({ children: <div>内容</div> })).rejects.toThrow("NOT_FOUND");
   });
 });
+
+
+describe("Phase 10J analytics.read independent navigation", () => {
+  it("analytics.read-only campus operator can enter, without admin/risk/audit privilege exposure", async () => {
+    requireUser.mockResolvedValue({ id: "analyst" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "analyst", accountActive: true, activeCampusIds: ["A"],
+      grants: [{ roleKey: "ANALYST", scope: "CAMPUS", campusId: "A", permissionKeys: ["analytics.read"] }],
+    });
+    render(await GovernanceLayout({ children: <div data-testid="analytics-content">内容</div> }));
+    expect(screen.getByTestId("analytics-content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "运营分析" }).getAttribute("href")).toBe("/governance/analytics");
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "风险情报" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+  });
+  it("stale analytics campus membership denies root access", async () => {
+    requireUser.mockResolvedValue({ id: "analyst" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "analyst", accountActive: true, activeCampusIds: [],
+      grants: [{ roleKey: "ANALYST", scope: "CAMPUS", campusId: "A", permissionKeys: ["analytics.read"] }],
+    });
+    await expect(GovernanceLayout({ children: <div>内容</div> })).rejects.toThrow("NOT_FOUND");
+  });
+});

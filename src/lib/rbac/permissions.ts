@@ -32,6 +32,8 @@ export const PERMISSIONS = {
   // risk.read 只授权规则化风险信号/建议读取，不授予 RiskState mutation /
   // EnforcementAction / audit.read，也不进入 legacy full-admin 等价集合。
   "risk.read": "读取风险信号与规则化风险建议（治理运营可见性）",
+  // Phase 10J isolated analytics, not system.overview, audit or risk.read.
+  "analytics.read": "读取按校区隔离的运营分析与流动性指标（只读）",
   // 10E: independent configuration mutation capability; does not imply
   // enforcement, RBAC, secret-management, feature flags or legacy full-admin.
   "runtime.config.manage": "调整白名单运行时配置（GLOBAL/CAMPUS，审计与版本保护）",
