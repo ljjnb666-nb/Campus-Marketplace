@@ -77,7 +77,12 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 10E runtime configuration author
           orderBy: { createdAt: "asc" },
         });
         expect(audits).toHaveLength(4);
-        expect(audits.at(-1)?.metadata).toMatchObject({
+        // CURRENT_TIMESTAMP is transaction-stable in PostgreSQL; never use
+        // createdAt ordering as an authority for the last config revision.
+        const auditVersion3 = audits.find((row) =>
+          (row.metadata as { nextConfigVersion?: unknown } | null)?.nextConfigVersion === 3,
+        );
+        expect(auditVersion3?.metadata).toMatchObject({
           configKey: "RISK_SIGNAL_EVIDENCE_LIMIT",
           previousConfigValue: 12, nextConfigValue: null,
           previousConfigVersion: 2, nextConfigVersion: 3,
