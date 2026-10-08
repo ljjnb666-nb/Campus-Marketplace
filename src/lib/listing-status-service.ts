@@ -12,6 +12,7 @@ import {
 } from "@/lib/governance/active-account-mutation";
 import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
 import { ACTIVE_PRODUCT_ORDER_STATUSES } from "@/lib/product-order-lifecycle";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 
 /**
  * RB-03 REVIEW FIX（LISTING_STATUS_LIFECYCLE_SERIALIZATION）：
@@ -166,6 +167,9 @@ export async function updateProductStatusTx(
     if (activeOrderId) {
       return false;
     }
+    if (fresh.status !== "ACTIVE") {
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: fresh.campusId });
+    }
   }
 
   await tx.product.update({
@@ -215,6 +219,9 @@ export async function updateServiceStatusTx(
 
   if (targetStatus === "ACTIVE") {
     await requireMarketplaceCapability(tx, actorUserId, fresh.campusId);
+    if (fresh.status !== "ACTIVE") {
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: fresh.campusId });
+    }
   }
 
   await tx.serviceListing.update({
@@ -270,6 +277,9 @@ export async function updateRentalListingStatusTx(
 
   if (targetStatus === "AVAILABLE") {
     await requireMarketplaceCapability(tx, actorUserId, fresh.campusId);
+    if (fresh.status !== "AVAILABLE") {
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: fresh.campusId });
+    }
   }
 
   await tx.rentalListing.update({
