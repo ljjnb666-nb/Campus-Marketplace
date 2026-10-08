@@ -11,7 +11,10 @@ const { requireUser, loadAuthorizationContext, findUnique, findMany, loadFeature
 }));
 vi.mock("@/lib/server-auth", () => ({ requireUser }));
 vi.mock("@/lib/rbac/service", () => ({ loadAuthorizationContext }));
-vi.mock("@/lib/prisma", () => ({ prisma: { campus: { findUnique, findMany } } }));
+vi.mock("@/repositories/feature-flag-ui-campus-repository", () => ({
+  findFlagUiCampusById: findUnique,
+  listFlagUiCampuses: findMany,
+}));
 vi.mock("@/lib/feature-flags/feature-flag-ui-query", () => ({ loadFeatureFlagConsoleRows }));
 vi.mock("next/navigation", () => ({ notFound }));
 vi.mock("@/components/governance/feature-flag-console", () => ({
@@ -50,9 +53,7 @@ describe("Phase 10G /governance/feature-flags self-guard", () => {
     actor([{ scope: "CAMPUS", campusId: "A", permissionKeys: ["feature.flags.manage"] }], ["A"]);
     render(await GovernanceFeatureFlagsPage(params()));
     expect(loadFeatureFlagConsoleRows).toHaveBeenCalledWith({ actorId: "op-1", campusId: "A" });
-    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: { in: ["A"] } },
-    }));
+    expect(findMany).toHaveBeenCalledWith({ global: false, campusIds: ["A"] });
   });
 
   it("G12: forged cross-campus/global URL never reaches campus DB or flag authority", async () => {

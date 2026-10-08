@@ -29,7 +29,7 @@ export async function changeGovernanceFeatureFlag(
   formData: FormData,
 ): Promise<FeatureFlagActionState> {
   const entries = [...formData.entries()];
-  if (entries.some(([key, value]) => typeof value !== "string") ||
+  if (entries.some(([, value]) => typeof value !== "string") ||
       new Set(entries.map(([key]) => key)).size !== entries.length) {
     return { status: "error", message: "提交参数无效，请刷新页面重试" };
   }

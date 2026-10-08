@@ -7,7 +7,7 @@ import {
   hasAnyFeatureFlagUiAccess,
 } from "@/lib/feature-flags/feature-flag-ui-access";
 import { loadFeatureFlagConsoleRows } from "@/lib/feature-flags/feature-flag-ui-query";
-import { prisma } from "@/lib/prisma";
+import { findFlagUiCampusById, listFlagUiCampuses } from "@/repositories/feature-flag-ui-campus-repository";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 
@@ -37,18 +37,10 @@ export default async function GovernanceFeatureFlagsPage({
   if (!canManageFeatureFlagScope(access, campusId)) notFound();
 
   // No campus metadata query until the requested scope is authorized.
-  const campus = campusId === null ? null : await prisma.campus.findUnique({
-    where: { id: campusId },
-    select: { id: true, name: true },
-  });
+  const campus = campusId === null ? null : await findFlagUiCampusById(campusId);
   if (campusId !== null && !campus) notFound();
 
-  const campuses = await prisma.campus.findMany({
-    where: access.global ? {} : { id: { in: access.campusIds } },
-    select: { id: true, name: true },
-    orderBy: [{ name: "asc" }, { id: "asc" }],
-    take: 100,
-  });
+  const campuses = await listFlagUiCampuses(access);
   if (campus && !campuses.some(candidate => candidate.id === campus.id)) {
     campuses.push(campus);
   }

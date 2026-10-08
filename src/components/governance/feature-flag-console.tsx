@@ -85,8 +85,6 @@ function FlagCard({ row, campusId }: { row: FeatureFlagConsoleRow; campusId: str
 
   useEffect(() => {
     if (state.status === "success") {
-      setConfirming(false);
-      setEditing(false);
       router.refresh();
     }
   }, [state.status, state.message, router]);
