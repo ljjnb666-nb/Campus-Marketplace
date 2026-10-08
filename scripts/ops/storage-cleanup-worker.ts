@@ -63,6 +63,8 @@ interface CycleSummary {
   notificationDestinationsRedacted: number;
   /** retention 子任务失败数（> 0 = 整周期 FAIL，§29） */
   phase9Failures: number;
+  searchClaimsPruned: number;
+  searchHoursPruned: number;
 }
 
 /** 解析并校验周期配置；非法配置属进程级 fatal（exit non-zero）。 */
@@ -97,6 +99,8 @@ async function runCycle(dryRun: boolean): Promise<CycleSummary> {
   // phase9Failures 计数上交——调用方据其判定整周期 FAIL。
   const { runPhase9RetentionMaintenance } = await import("@/lib/async/retention");
   const phase9 = await runPhase9RetentionMaintenance({ dryRun });
+  const { cleanupExpiredSearchTelemetry } = await import("@/lib/analytics/search-telemetry-retention");
+  const searchTelemetry = await cleanupExpiredSearchTelemetry({ dryRun });
 
   return {
     dryRun: storage.dryRun,
@@ -115,6 +119,8 @@ async function runCycle(dryRun: boolean): Promise<CycleSummary> {
     notificationDeadLettersReconciled: phase9.notificationDeadLettersReconciled,
     notificationDestinationsRedacted: phase9.notificationDestinationsRedacted,
     phase9Failures: phase9.phase9Failures,
+    searchClaimsPruned: searchTelemetry.deletedClaims,
+    searchHoursPruned: searchTelemetry.deletedHours,
   };
 }
 
@@ -136,7 +142,9 @@ function logSummaryIfWorked(summary: CycleSummary): void {
     summary.outboxEventsTombstoned > 0 ||
     summary.notificationDeadLettersReconciled > 0 ||
     summary.notificationDestinationsRedacted > 0 ||
-    summary.phase9Failures > 0;
+    summary.phase9Failures > 0 ||
+    summary.searchClaimsPruned > 0 ||
+    summary.searchHoursPruned > 0;
   if (!didWork) {
     return;
   }
