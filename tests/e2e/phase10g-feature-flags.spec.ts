@@ -27,7 +27,8 @@ test("10G-E2E01：中文控制台 → 校区暂停 → 二次确认 → 原子�
   try {
     await page.goto(`/governance/feature-flags?campusId=${campus.id}`);
     await expectHeadingSettled(page, "功能开关与应急熔断");
-    await expect(page.getByText(campus.name, { exact: true })).toBeVisible();
+    // Exact scope authority, not a text locator that also matches the picker option.
+    await expect(page.getByRole("combobox", { name: "管理范围" })).toHaveValue(campus.id);
 
     const card = page.locator("article", {
       has: page.getByRole("heading", { name: "新用户注册", exact: true }),

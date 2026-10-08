@@ -24,7 +24,7 @@ const DETAILS: Record<FeatureFlagKey, { name: string; description: string; group
   },
   DISABLE_NEW_LISTINGS: {
     name: "发布新商品及服务", group: "交易活动",
-    description: "阻止发布商品、租赁、技能服务及跑腿任务；不妨碍编辑已有信息。",
+    description: "阻止发布商品、租赁、技能服务及跑腿任务；本开关不直接禁止编辑，维护与只读模式可另行限制。",
   },
   DISABLE_NEW_ORDERS: {
     name: "发起新订单", group: "交易活动",
@@ -49,12 +49,12 @@ const DETAILS: Record<FeatureFlagKey, { name: string; description: string; group
   },
   MAINTENANCE_MODE: {
     name: "平台维护模式", group: "安全与应急",
-    description: "暂停新活动及公开列表编辑；安全、申诉、归还及恢复流程继续可用。",
+    description: "暂停注册、发布及编辑公开列表、新订单、新会话与新消息；面交及纠纷发起由独立开关控制。",
     caution: "影响面广：确认维护窗口与用户告知计划后再操作。",
   },
   READ_ONLY_MODE: {
     name: "只读保护模式", group: "安全与应急",
-    description: "停止新活动与公开内容修改，但不会阻断已有义务的履行和恢复。",
+    description: "暂停公开列表新增与编辑、新订单、新会话及新消息；注册、面交和纠纷由独立开关控制。",
     caution: "影响面广：启用后所有校区或目标校区的新交易活动会被限制。",
   },
 };
