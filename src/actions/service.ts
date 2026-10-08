@@ -1,5 +1,6 @@
 "use server";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
@@ -113,6 +114,8 @@ export async function createService(
       await prepareActiveAccountMutation(tx, user.id);
 
       await enforceMarketplaceCapability(tx, user.id, provider.campusId);
+
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: provider.campusId });
 
       const created = await tx.serviceListing.create({
         data: {

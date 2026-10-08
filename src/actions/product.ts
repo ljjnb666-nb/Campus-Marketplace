@@ -1,5 +1,6 @@
 "use server";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
@@ -123,6 +124,8 @@ export async function createProduct(
       await prepareActiveAccountMutation(tx, user.id);
 
       await enforceMarketplaceCapability(tx, user.id, seller.campusId);
+
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: seller.campusId });
 
       const created = await tx.product.create({
         data: {
