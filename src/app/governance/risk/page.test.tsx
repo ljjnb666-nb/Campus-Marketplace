@@ -44,7 +44,8 @@ describe("10I risk intelligence read-only governance leaf", () => {
     expect(mocks.loadAuthorizedRiskIntelligence).toHaveBeenCalledWith({
       access: { global: false, campusIds: ["A"] }, targetUserId: "target-1", campusId: "A",
     });
-    expect(screen.queryByText(/风险评分|自动处罚/)).toBeNull();
+    expect(screen.getByText(/不是用户风险评分/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /处罚|限制/ })).toBeNull();
   });
 
   it("a forged campus ID denies before the data loader, even with no target user", async () => {

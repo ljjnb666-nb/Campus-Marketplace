@@ -38,7 +38,7 @@ test("10I-E2E01：risk.read 全局/单校区精确隔离，未核实举报只提
     await expectHeadingSettled(page, "风险情报查询");
     const summary = page.getByRole("region", { name: "风险情报概览" });
     await expect(summary.getByRole("heading", { name: "持续关注" })).toBeVisible();
-    await expect(summary).toContainText("活跃风险信号数1");
+    await expect(summary).toContainText(/活跃风险信号数\s*1/);
     const evidenceA = page.getByRole("region", { name: "风险信号证据" });
     await expect(evidenceA).toContainText("E2E_UNCONFIRMED");
     await expect(evidenceA).not.toContainText("E2E_CONFIRMED");
@@ -55,7 +55,7 @@ test("10I-E2E01：risk.read 全局/单校区精确隔离，未核实举报只提
     await page.goto("/governance/risk?targetUserId=" + encodeURIComponent(target.id));
     await expectHeadingSettled(page, "风险情报查询");
     await expect(summary.getByRole("heading", { name: "优先人工复核" })).toBeVisible();
-    await expect(summary).toContainText("活跃风险信号数2");
+    await expect(summary).toContainText(/活跃风险信号数\s*2/);
     await expect(evidenceA).toContainText("E2E_UNCONFIRMED");
     await expect(evidenceA).toContainText("E2E_CONFIRMED");
     await expect(page.locator("body")).not.toContainText(secret);
