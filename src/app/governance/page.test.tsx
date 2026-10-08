@@ -193,3 +193,19 @@ describe("Phase 10H overview discovery", () => {
     }));
   });
 });
+
+
+describe("Phase 10I risk intelligence overview discovery", () => {
+  it("risk.read-only operator sees only risk link and no cross-domain counts", async () => {
+    mockContext([{ scope: "CAMPUS", campusId: "A", permissionKeys: ["risk.read"] }], ["A"]);
+    loadOperationsOverview.mockResolvedValue([]);
+    render(await GovernanceOverviewPage());
+    expect(screen.getByRole("link", { name: "风险情报" }).getAttribute("href")).toBe("/governance/risk");
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "运行时配置" })).toBeNull();
+    expect(loadOperationsOverview).toHaveBeenCalledWith(expect.objectContaining({
+      reports: null, verifications: null, appeals: null, disputes: null, support: null,
+    }));
+  });
+});
