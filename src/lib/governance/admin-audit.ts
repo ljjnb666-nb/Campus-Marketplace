@@ -60,6 +60,12 @@ const ALLOWED_METADATA_KEYS = new Set([
   "nextConfigVersion",
   "previousConfigValue",
   "nextConfigValue",
+  // Phase 10F: machine-only feature flag audit, no secrets or free text.
+  "flagKey",
+  "previousFlagVersion",
+  "nextFlagVersion",
+  "previousFlagDisabled",
+  "nextFlagDisabled",
 ]);
 
 function sanitizeMetadata(

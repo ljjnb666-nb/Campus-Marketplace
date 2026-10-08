@@ -35,6 +35,9 @@ export const PERMISSIONS = {
   // 10E: independent configuration mutation capability; does not imply
   // enforcement, RBAC, secret-management, feature flags or legacy full-admin.
   "runtime.config.manage": "调整白名单运行时配置（GLOBAL/CAMPUS，审计与版本保护）",
+  // Phase 10F: independent, explicitly granted capability. No legacy-admin
+  // equivalence, no runtime.config.manage fallback, no business bypass.
+  "feature.flags.manage": "管理按校区隔离的功能开关与应急熔断（带审计）",
   // Phase 7F：认证证据窄读取（纯 read capability）。语义严格限定为
   // "仅访问 verification-bound private evidence"（UploadedAsset.category ==
   // VERIFICATION 且 campus 精确匹配；其它 category 一律 NO ACCESS）——
