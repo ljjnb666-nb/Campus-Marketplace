@@ -3,6 +3,7 @@ import { ErrandCard } from "@/components/errand/errand-card";
 import { ProductCard } from "@/components/product/product-card";
 import { ServiceCard } from "@/components/service/service-card";
 import { getSearchResults } from "@/repositories/search-repository";
+import { createSearchTelemetryTicket } from "@/lib/analytics/search-telemetry";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ export default async function SearchPage({
   searchParams: Promise<{ q?: string }>;
 }) {
   const params = await searchParams;
+  const ticket = createSearchTelemetryTicket();
   const keyword = params.q?.trim() ?? "";
   const results = keyword
     ? await getSearchResults(keyword)
@@ -24,7 +26,8 @@ export default async function SearchPage({
       <div className="mb-8 space-y-3">
         <h1 className="text-3xl font-semibold text-slate-950">全站搜索</h1>
         <p className="text-sm text-slate-600">搜索商品、跑腿、服务和校园用户。</p>
-        <form className="flex max-w-2xl gap-3">
+        <form action="/search/submit" method="POST" className="flex max-w-2xl gap-3">
+          <input type="hidden" name="ticket" value={ticket} />
           <input
             type="text"
             name="q"

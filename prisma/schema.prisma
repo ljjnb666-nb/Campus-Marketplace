@@ -2672,3 +2672,23 @@ model OutboxEvent {
   // tombstonedAt IS NULL）——terminal anchor 是 publishedAt（§21）
   @@index([status, publishedAt, tombstonedAt])
 }
+
+
+// Phase 10K-R2a: bounded aggregate of explicit completed GLOBAL search submissions.
+// Not an append-only domain fact, audit record, or a personal search history.
+model SearchTelemetryClaim {
+  // SHA-256 of a signed random ephemeral POST form ticket (no query/user/IP).
+  digest    String   @id @db.VarChar(64)
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model SearchTelemetryHour {
+  hourStart   DateTime @id
+  attempts    BigInt   @default(0)
+  zeroResults BigInt   @default(0)
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
