@@ -21,15 +21,13 @@ export async function POST(request: NextRequest) {
   let ticket: FormDataEntryValue | null = null;
   try {
     const fields = await request.formData();
-    if (fields.getAll("q").length === 1 && fields.getAll("ticket").length === 1) {
-      q = fields.get("q");
-      ticket = fields.get("ticket");
-    }
+    if (fields.getAll("q").length === 1) q = fields.get("q");
+    if (fields.getAll("ticket").length === 1) ticket = fields.get("ticket");
   } catch {
     return NextResponse.redirect(fallback, { status: 303 });
   }
 
-  if (typeof q !== "string" || !eligibleSearchKeyword(q)) {
+  if (typeof q !== "string" || !q.trim()) {
     return NextResponse.redirect(fallback, { status: 303 });
   }
   const keyword = q.trim();
@@ -37,7 +35,9 @@ export async function POST(request: NextRequest) {
 
   // Search results are always rendered via the unchanged canonical GET read.
   // An analytics failure MUST NOT prevent the Post/Redirect/Get navigation.
-  if (searchTelemetryEnabled() && typeof ticket === "string") {
+  if (searchTelemetryEnabled()
+    && eligibleSearchKeyword(keyword)
+    && typeof ticket === "string") {
     await captureCompletedSearch({ keyword, ticket, headers: request.headers });
   }
   return NextResponse.redirect(fallback, { status: 303 });
