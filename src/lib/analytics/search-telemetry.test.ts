@@ -83,9 +83,9 @@ describe("R2a search telemetry privacy and gating", () => {
       where: { hourStart: new Date("2026-10-08T12:00:00.000Z") },
       create: {
         hourStart: new Date("2026-10-08T12:00:00.000Z"),
-        attempts: 1n, zeroResults: 1n, expiresAt: new Date("2026-11-08T12:00:00.000Z"),
+        attempts: BigInt(1), zeroResults: BigInt(1), expiresAt: new Date("2026-11-08T12:00:00.000Z"),
       },
-      update: { attempts: { increment: 1n }, zeroResults: { increment: 1n } },
+      update: { attempts: { increment: BigInt(1) }, zeroResults: { increment: BigInt(1) } },
     });
     const payload = JSON.stringify(createMany.mock.calls) + String(upsert.mock.calls);
     expect(payload).not.toContain("never-seen-bike");

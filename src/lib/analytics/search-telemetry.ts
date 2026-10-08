@@ -133,12 +133,12 @@ export async function recordCompletedSearchTx(
   await tx.searchTelemetryHour.upsert({
     where: { hourStart },
     create: {
-      hourStart, attempts: 1n, zeroResults: zero ? 1n : 0n,
+      hourStart, attempts: BigInt(1), zeroResults: zero ? BigInt(1) : BigInt(0),
       expiresAt: new Date(hourStart.getTime() + BUCKET_RETENTION_MS),
     },
     update: {
-      attempts: { increment: 1n },
-      zeroResults: { increment: zero ? 1n : 0n },
+      attempts: { increment: BigInt(1) },
+      zeroResults: { increment: zero ? BigInt(1) : BigInt(0) },
     },
   });
   return "RECORDED";

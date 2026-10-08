@@ -41,8 +41,8 @@ describe.skipIf(!url)("10K-R2a PostgreSQL search count atomicity", () => {
     const bucket = await db.searchTelemetryHour.findUniqueOrThrow({
       where: { hourStart: hours[0] },
     });
-    expect(bucket.attempts).toBe(1n);
-    expect(bucket.zeroResults).toBe(1n);
+    expect(bucket.attempts).toBe(BigInt(1));
+    expect(bucket.zeroResults).toBe(BigInt(1));
     expect(await db.searchTelemetryClaim.count({ where: { digest: key } })).toBe(1);
   });
 
@@ -55,8 +55,8 @@ describe.skipIf(!url)("10K-R2a PostgreSQL search count atomicity", () => {
     const bucket = await db.searchTelemetryHour.findUniqueOrThrow({
       where: { hourStart: hours[1] },
     });
-    expect(bucket.attempts).toBe(8n);
-    expect(bucket.zeroResults).toBe(4n);
+    expect(bucket.attempts).toBe(BigInt(8));
+    expect(bucket.zeroResults).toBe(BigInt(4));
   });
 
   it("transaction rollback cannot leave an orphan claim or count", async () => {
