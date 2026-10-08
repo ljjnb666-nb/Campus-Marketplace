@@ -79,5 +79,16 @@ test("10G-E2E01：中文控制台 → 校区暂停 → 二次确认 → 原子�
     await expect(freshCard).toContainText("可使用");
   } finally {
     await context.close();
+    // Keep the same fixture ownership discipline as the established 7H E2E:
+    // immutable revisions must be removed before their parent override, and
+    // campus-bound audit records before the test campus.
+    await db.featureFlagRevision.deleteMany({
+      where: { flag: { campusId: campus.id } },
+    });
+    await db.featureFlagOverride.deleteMany({ where: { campusId: campus.id } });
+    await db.adminLog.deleteMany({
+      where: { action: "FEATURE_FLAG_CHANGED", campusId: campus.id },
+    });
+    await db.campus.delete({ where: { id: campus.id } });
   }
 });
