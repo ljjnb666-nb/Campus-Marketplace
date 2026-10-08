@@ -32,6 +32,9 @@ export const PERMISSIONS = {
   // risk.read 只授权规则化风险信号/建议读取，不授予 RiskState mutation /
   // EnforcementAction / audit.read，也不进入 legacy full-admin 等价集合。
   "risk.read": "读取风险信号与规则化风险建议（治理运营可见性）",
+  // 10E: independent configuration mutation capability; does not imply
+  // enforcement, RBAC, secret-management, feature flags or legacy full-admin.
+  "runtime.config.manage": "调整白名单运行时配置（GLOBAL/CAMPUS，审计与版本保护）",
   // Phase 7F：认证证据窄读取（纯 read capability）。语义严格限定为
   // "仅访问 verification-bound private evidence"（UploadedAsset.category ==
   // VERIFICATION 且 campus 精确匹配；其它 category 一律 NO ACCESS）——

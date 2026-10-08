@@ -385,6 +385,7 @@ model Campus {
   verificationPolicies CampusVerificationPolicy[]
   userRoles            UserRoleAssignment[]
   adminLogs            AdminLog[]
+  runtimeConfigOverrides RuntimeConfigOverride[]
   // Phase 6B：trust / risk / enforcement
   riskStates           RiskState[]
   riskFlags            RiskFlag[]
@@ -985,6 +986,41 @@ model ModerationKeyword {
 // 管理审计日志（Phase 6A AdminAuditLog foundation，演进自既有 AdminLog）。
 // append-only：业务层不提供任何 update/delete 入口；metadata 仅接受
 // admin-audit 服务白名单键，禁止出现凭据/完整学号/私有对象键/私有 URL。
+
+// Phase 10E: ONLY typed, non-secret, server-owned runtime configuration.
+// Config write authority and scope safety are enforced by the service and DB.
+// Revision rows are immutable provenance, independent from mutable current state.
+model RuntimeConfigOverride {
+  id          String   @id @default(cuid())
+  key         String
+  scopeKey    String
+  campusId    String?
+  value       Int
+  version     Int      @default(1)
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  campus      Campus?  @relation(fields: [campusId], references: [id], onDelete: Restrict)
+  revisions   RuntimeConfigRevision[]
+
+  @@unique([key, scopeKey])
+  @@index([campusId, key])
+}
+
+model RuntimeConfigRevision {
+  id            String   @id @default(cuid())
+  configId      String
+  version       Int
+  previousValue Int?
+  newValue      Int
+  actorId       String
+  createdAt     DateTime @default(now())
+  config        RuntimeConfigOverride @relation(fields: [configId], references: [id], onDelete: Restrict)
+
+  @@unique([configId, version])
+  @@index([configId, createdAt])
+}
+
 model AdminLog {
   id         String   @id @default(cuid())
   adminId    String

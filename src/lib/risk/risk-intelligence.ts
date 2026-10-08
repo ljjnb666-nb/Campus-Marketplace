@@ -6,6 +6,7 @@ import type {
 
 import type { RiskReadAccess } from "@/lib/risk/risk-read-access";
 import { prisma } from "@/lib/prisma";
+import { loadEffectiveRuntimeConfig } from "@/lib/runtime-config/runtime-config-query";
 
 /**
  * Phase 10D — Risk Intelligence v1.
@@ -334,6 +335,12 @@ export async function loadAuthorizedRiskIntelligence(input: {
     ...authorized.whereScope,
   };
 
+  // Phase 10E: effective limit is read live, capped by immutable registry.
+  // Database/config failures use a stricter safe limit; no unbounded evidence.
+  const evidenceLimit = await loadEffectiveRuntimeConfig({
+    key: "RISK_SIGNAL_EVIDENCE_LIMIT",
+    campusId: input.campusId,
+  });
   const [groups, evidenceRows] = await Promise.all([
     prisma.riskFlag.groupBy({
       by: ["kind", "severity"],
@@ -343,7 +350,7 @@ export async function loadAuthorizedRiskIntelligence(input: {
     prisma.riskFlag.findMany({
       where,
       orderBy: [{ severity: "desc" }, { createdAt: "desc" }, { id: "asc" }],
-      take: RISK_SIGNAL_EVIDENCE_LIMIT,
+      take: Math.min(RISK_SIGNAL_EVIDENCE_LIMIT, evidenceLimit.value),
       select: {
         id: true,
         kind: true,
