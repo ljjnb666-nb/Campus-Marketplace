@@ -62,25 +62,25 @@ test("10J-E2E01：analytics.read 多校区与 7/30 天精确隔离，非授权�
   const restricted = await scoped.newPage();
   const cardTotal = () => page.getByRole("article").filter({ hasText: "新增供给（条）" }).locator("p").nth(1);
   try {
-    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "7" }));
+    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "7" }).toString());
     await expectHeadingSettled(page, "校园交易分析");
     await expect(cardTotal()).toHaveText("1");
     await expect(page.getByRole("article").filter({ hasText: "完成交易记账对价（元）" }).locator("p").nth(1)).toHaveText("19.95");
-    await expect(page.getByRole("region", { name: "待建立可信口径" })).toContainText("搜索零结果率");
+    await expect(page.getByRole("region", { name: "暂未提供的指标" })).toContainText("搜索零结果率");
 
-    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "30" }));
+    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "30" }).toString());
     await expectHeadingSettled(page, "校园交易分析");
     await expect(cardTotal()).toHaveText("2");
 
-    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id, days: "7" }));
+    await page.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id, days: "7" }).toString());
     await expectHeadingSettled(page, "校园交易分析");
     await expect(cardTotal()).toHaveText("1");
     await expect(page.getByRole("article").filter({ hasText: "完成交易记账对价（元）" }).locator("p").nth(1)).toHaveText("0.00");
 
-    await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "7" }));
+    await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "7" }).toString());
     await expectHeadingSettled(restricted, "校园交易分析");
     await expect(restricted.getByRole("link", { name: "审计日志" })).toHaveCount(0);
-    const deny = await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id }));
+    const deny = await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id }).toString());
     expect(deny?.status()).toBe(404);
     const forged = await restricted.goto("/governance/analytics?campusId=" + a.id + "&campusId=" + b.id);
     expect(forged?.status()).toBe(404);
