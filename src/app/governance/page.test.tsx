@@ -209,3 +209,19 @@ describe("Phase 10I risk intelligence overview discovery", () => {
     }));
   });
 });
+
+
+describe("Phase 10J analytics.read overview discovery", () => {
+  it("only analytics link; no unauthorized operational summary queries", async () => {
+    mockContext([{ scope: "CAMPUS", campusId: "A", permissionKeys: ["analytics.read"] }], ["A"]);
+    loadOperationsOverview.mockResolvedValue([]);
+    render(await GovernanceOverviewPage());
+    expect(screen.getByRole("link", { name: "运营分析" }).getAttribute("href")).toBe("/governance/analytics");
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "风险情报" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+    expect(loadOperationsOverview).toHaveBeenCalledWith(expect.objectContaining({
+      reports: null, verifications: null, appeals: null, disputes: null, support: null,
+    }));
+  });
+});

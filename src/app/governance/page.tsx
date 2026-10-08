@@ -43,6 +43,7 @@ import {
 import { deriveFeatureFlagUiAccess, hasAnyFeatureFlagUiAccess } from "@/lib/feature-flags/feature-flag-ui-access";
 import { deriveRuntimeConfigUiAccess, hasAnyRuntimeConfigUiAccess } from "@/lib/runtime-config/runtime-config-ui-access";
 import { deriveRiskReadAccess, hasAnyRiskReadAccess } from "@/lib/risk/risk-read-access";
+import { deriveAnalyticsReadAccess, hasAnyAnalyticsReadAccess } from "@/lib/analytics/analytics-read-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -99,6 +100,7 @@ export default async function GovernanceOverviewPage() {
   const featureFlagAccess = deriveFeatureFlagUiAccess(context);
   const runtimeConfigAccess = deriveRuntimeConfigUiAccess(context);
   const riskReadAccess = deriveRiskReadAccess(context);
+  const analyticsReadAccess = deriveAnalyticsReadAccess(context);
 
   // anti-oracle：未授权域传 null → 该域聚合查询结构性不执行
   const summaries = await loadOperationsOverview({
@@ -126,6 +128,7 @@ export default async function GovernanceOverviewPage() {
     { href: "/governance/feature-flags", label: "功能开关", visible: hasAnyFeatureFlagUiAccess(featureFlagAccess) },
     { href: "/governance/runtime-config", label: "运行时配置", visible: hasAnyRuntimeConfigUiAccess(runtimeConfigAccess) },
     { href: "/governance/risk", label: "风险情报", visible: hasAnyRiskReadAccess(riskReadAccess) },
+    { href: "/governance/analytics", label: "运营分析", visible: hasAnyAnalyticsReadAccess(analyticsReadAccess) },
   ].filter((item) => item.visible);
 
   return (

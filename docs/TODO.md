@@ -19,7 +19,7 @@
 | Phase 7 | Operations Admin Foundation（支付无关，先于在线支付） | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，canonical master `2b8ba76606d7e0528f5c1fd861c905a502f1d9e5`） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；状态权威见 MASTER_ROADMAP 当前状态表） |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED，PR #57–#62 实施链收口；final master `e497dcde`，post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；closure record 见 [MASTER_ROADMAP.md](MASTER_ROADMAP.md) §5.5，运维手册见 [PHASE9_OPERATIONS.md](PHASE9_OPERATIONS.md)） |
-| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | **IN_PROGRESS**（10A–10H 已合并；10H exact-master CI run 37765489798 双绿；10I 风险情报界面进行中，整体未关闭） |
+| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | **IN_PROGRESS**（10A–10I 已合并；10I exact-master CI run 37771733142 双绿；10J 运营分析界面进行中，整体未关闭） |
 | Phase 11 | Pilot Readiness | NOT_STARTED |
 | **GATE B** | Pilot Ready（通过后重开 Phase 3B） | NOT_REACHED |
 | Phase 12–14 | Alpha → Closed Beta → Single-Campus Pilot（线下支付语义） | NOT_STARTED |
