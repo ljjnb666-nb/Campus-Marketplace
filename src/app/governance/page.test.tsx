@@ -178,3 +178,18 @@ describe("GovernanceOverviewPage（/governance canonical 落地仪表盘）", ()
     expect(screen.getByText("最早时限：—")).toBeTruthy();
   });
 });
+
+
+describe("Phase 10H overview discovery", () => {
+  it("runtime.config.manage-only operator sees runtime link but not other privileged domains", async () => {
+    mockContext([{ scope: "CAMPUS", campusId: "A", permissionKeys: ["runtime.config.manage"] }], ["A"]);
+    loadOperationsOverview.mockResolvedValue([]);
+    render(await GovernanceOverviewPage());
+    expect(screen.getByRole("link", { name: "运行时配置" }).getAttribute("href")).toBe("/governance/runtime-config");
+    expect(screen.queryByRole("link", { name: "功能开关" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "系统状态" })).toBeNull();
+    expect(loadOperationsOverview).toHaveBeenCalledWith(expect.objectContaining({
+      reports: null, verifications: null, appeals: null, disputes: null, support: null,
+    }));
+  });
+});
