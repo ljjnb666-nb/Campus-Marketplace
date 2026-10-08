@@ -14,8 +14,10 @@ test("10K-R2a search submit preserves navigation while telemetry is disabled", a
     page.waitForURL(url => url.pathname === "/search" && url.searchParams.get("q") === keyword),
     form.getByRole("button", { name: "搜索" }).click(),
   ]);
-  await expect(page.getByText("没有找到相关内容，可以换一个关键词再试。"))
-    .toBeVisible();
+  // Next navigation may briefly retain both outgoing and incoming trees.
+  // Restrict to the currently visible search result before asserting.
+  await expect(page.getByText("没有找到相关内容，可以换一个关键词再试。")
+    .filter({ visible: true }).first()).toBeVisible();
   expect(await e2eDb().searchTelemetryClaim.count()).toBe(beforeClaims);
   expect(await e2eDb().searchTelemetryHour.count()).toBe(beforeHours);
 });
