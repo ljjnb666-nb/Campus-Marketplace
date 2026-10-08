@@ -374,6 +374,18 @@ describe("conversation actions", () => {
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
     });
 
+    it("R2b deployment gate defaults to OFF without affecting conversation creation", async () => {
+      vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "");
+      productFindFirst.mockResolvedValue({ id: "product-1", title: "教材", sellerId: "seller-1" });
+      const formData = new FormData();
+      formData.set("productId", "product-1");
+      await expect(createOrOpenProductConversation(null, formData)).rejects.toThrow(
+        "REDIRECT:/messages/conversation-new",
+      );
+      expect(txConversationCreate).toHaveBeenCalledTimes(1);
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
+    });
+
     it("creates a product conversation with an initial message and notification", async () => {
       productFindFirst.mockResolvedValue({ id: "product-1", title: "高数教材", sellerId: "seller-1" });
 
