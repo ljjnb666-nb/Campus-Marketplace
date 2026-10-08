@@ -10,6 +10,7 @@
  * SEARCH_ZERO_RESULT_RATE measurement UNAVAILABLE.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSearchResults } from "@/repositories/search-repository";
 
@@ -103,29 +104,42 @@ export async function captureCompletedSearch(input: {
     const zero = results.products.length === 0 && results.errands.length === 0
       && results.services.length === 0 && results.users.length === 0;
     const hourStart = new Date(Math.floor(now.getTime() / HOUR_MS) * HOUR_MS);
-    return await prisma.$transaction(async tx => {
-      // PostgreSQL ON CONFLICT DO NOTHING; unique claim is the concurrency gate.
-      const claimed = await tx.searchTelemetryClaim.createMany({
-        data: [{ digest, expiresAt: new Date(now.getTime() + CLAIM_RETENTION_MS) }],
-        skipDuplicates: true,
-      });
-      if (claimed.count === 0) return "DUPLICATE" as const;
-      await tx.searchTelemetryHour.upsert({
-        where: { hourStart },
-        create: {
-          hourStart, attempts: 1n, zeroResults: zero ? 1n : 0n,
-          expiresAt: new Date(hourStart.getTime() + BUCKET_RETENTION_MS),
-        },
-        update: {
-          attempts: { increment: 1n },
-          zeroResults: { increment: zero ? 1n : 0n },
-        },
-      });
-      return "RECORDED" as const;
-    });
+    return await prisma.$transaction(tx => recordCompletedSearchTx(tx as Prisma.TransactionClient, {
+      digest, zero, now, hourStart,
+    }));
   } catch {
     // Deliberately do NOT log arbitrary errors: DB/driver errors may contain SQL
     // query parameters. Coverage of this hour remains UNKNOWN.
     return "FAILED";
   }
+}
+
+/** Exported transaction seam for real-PostgreSQL atomicity and mismatch-db tests. */
+export async function recordCompletedSearchTx(
+  tx: Prisma.TransactionClient,
+  input: { digest: string; zero: boolean; now: Date; hourStart: Date },
+): Promise<"RECORDED" | "DUPLICATE"> {
+  const { digest, zero, now, hourStart } = input;
+  if (!/^[a-f0-9]{64}$/.test(digest)
+    || !Number.isFinite(now.getTime())
+    || hourStart.getTime() !== Math.floor(now.getTime() / HOUR_MS) * HOUR_MS) {
+    throw new Error("SEARCH_TELEMETRY_INTERNAL_FACT_INVALID");
+  }
+  const claimed = await tx.searchTelemetryClaim.createMany({
+    data: [{ digest, expiresAt: new Date(now.getTime() + CLAIM_RETENTION_MS) }],
+    skipDuplicates: true,
+  });
+  if (claimed.count === 0) return "DUPLICATE";
+  await tx.searchTelemetryHour.upsert({
+    where: { hourStart },
+    create: {
+      hourStart, attempts: 1n, zeroResults: zero ? 1n : 0n,
+      expiresAt: new Date(hourStart.getTime() + BUCKET_RETENTION_MS),
+    },
+    update: {
+      attempts: { increment: 1n },
+      zeroResults: { increment: zero ? 1n : 0n },
+    },
+  });
+  return "RECORDED";
 }
