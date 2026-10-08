@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+// Phase 10F's real transaction guard is separately verified by
+// feature-flag-guard.test.ts and Phase 10F real-PostgreSQL contracts.
+// This legacy unit suite isolates its existing domain behavior only.
+vi.mock("@/lib/feature-flags/feature-flag-guard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/feature-flags/feature-flag-guard")>()),
+  requireNewActivityAllowed: vi.fn().mockResolvedValue(undefined),
+}));
+
 
 vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
