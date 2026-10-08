@@ -25,16 +25,28 @@ describe("Phase 10F registered kill switches", () => {
 
   it("GLOBAL disabled wins over campus explicit false; other campus isolated", () => {
     const global = [{
-      scopeKey: "GLOBAL", campusId: null, disabled: true,
+      key: "DISABLE_NEW_ORDERS", scopeKey: "GLOBAL", campusId: null, disabled: true,
     }];
     const local = [{
-      scopeKey: "CAMPUS:A", campusId: "A", disabled: false,
+      key: "DISABLE_NEW_ORDERS", scopeKey: "CAMPUS:A", campusId: "A", disabled: false,
     }];
     expect(isFlagDisabledForScope([...global, ...local], "DISABLE_NEW_ORDERS", "A")).toBe(true);
     expect(isFlagDisabledForScope(local, "DISABLE_NEW_ORDERS", "A")).toBe(false);
     expect(isFlagDisabledForScope([{
-      scopeKey: "CAMPUS:B", campusId: "B", disabled: true,
+      key: "DISABLE_NEW_ORDERS", scopeKey: "CAMPUS:B", campusId: "B", disabled: true,
     }], "DISABLE_NEW_ORDERS", "A")).toBe(false);
+  });
+
+  it("isolates each key even when unrelated GLOBAL or local flags are disabled", () => {
+    const mixed = [
+      { key: "DISABLE_NEW_MESSAGES", scopeKey: "GLOBAL", campusId: null, disabled: true },
+      { key: "DISABLE_NEW_LISTINGS", scopeKey: "CAMPUS:A", campusId: "A", disabled: true },
+      { key: "DISABLE_NEW_ORDERS", scopeKey: "CAMPUS:A", campusId: "A", disabled: false },
+    ];
+    expect(isFlagDisabledForScope(mixed, "DISABLE_NEW_ORDERS", "A")).toBe(false);
+    expect(isFlagDisabledForScope(mixed, "DISABLE_NEW_MESSAGES", "A")).toBe(true);
+    expect(isFlagDisabledForScope(mixed, "DISABLE_NEW_LISTINGS", "A")).toBe(true);
+    expect(isFlagDisabledForScope(mixed, "DISABLE_NEW_LISTINGS", "B")).toBe(false);
   });
 
   it("restrictive high-level modes do not disable safety/recovery workflows", () => {

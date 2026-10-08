@@ -48,14 +48,16 @@ export function assertFlagMutationValue(value: unknown): asserts value is boolea
   }
 }
 
-/** Pure resolution: any GLOBAL or exact CAMPUS true disables; local false cannot override. */
+/** Pure key-scoped resolution: unrelated disabled keys must never affect this key. */
 export function isFlagDisabledForScope(
-  rows: readonly { scopeKey: string; campusId: string | null; disabled: boolean | null }[],
+  rows: readonly { key: string; scopeKey: string; campusId: string | null; disabled: boolean | null }[],
   key: FeatureFlagKey,
   campusId: string,
 ): boolean {
   return rows.some((r) =>
-    (r.scopeKey === "GLOBAL" && r.campusId === null && r.disabled === true) ||
-    (r.scopeKey === `CAMPUS:${campusId}` && r.campusId === campusId && r.disabled === true),
+    r.key === key && r.disabled === true && (
+      (r.scopeKey === "GLOBAL" && r.campusId === null) ||
+      (r.scopeKey === `CAMPUS:${campusId}` && r.campusId === campusId)
+    ),
   );
 }
