@@ -46,7 +46,7 @@ describe("R2a search telemetry privacy and gating", () => {
     const token = createSearchTelemetryTicket(NOW.getTime());
     expect(validateSearchTelemetryTicket(token, NOW.getTime())).toMatch(/^[a-f0-9]{64}$/);
     expect(validateSearchTelemetryTicket(token, NOW.getTime() + 20 * 60_000 + 1)).toBeNull();
-    expect(validateSearchTelemetryTicket(token.replace(/.$/, "0"), NOW.getTime()))
+    expect(validateSearchTelemetryTicket(token.slice(0, -1) + (token.endsWith("0") ? "1" : "0"), NOW.getTime()))
       .toBeNull();
     expect(validateSearchTelemetryTicket("anything", NOW.getTime())).toBeNull();
   });
@@ -54,7 +54,7 @@ describe("R2a search telemetry privacy and gating", () => {
   it("excludes bots, cross-site posts, no activation and control-character keywords", () => {
     expect(eligibleSearchKeyword("")).toBe(false);
     expect(eligibleSearchKeyword("a".repeat(121))).toBe(false);
-    expect(eligibleSearchKeyword("hi\\n")).toBe(false);
+    expect(eligibleSearchKeyword("hi\n")).toBe(false);
     expect(eligibleSubmissionHeaders(headers)).toBe(true);
     for (const changes of [
       { "sec-fetch-user": "" }, { "sec-fetch-site": "cross-site" },
