@@ -35,6 +35,13 @@ export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_TYPE =
 export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_EVENT_SCHEMA_VERSION = 1;
 export const LIQUIDITY_TRANSACTION_VALUE_RECORDED_AGGREGATE_TYPE = "TRANSACTION";
 
+// Phase 10K-R2b: a canonical, newly created two-party listing conversation.
+// Pure fact only; no MetricContribution until cohort attribution R3 is proven.
+// Exclude ERRAND (demand) and ORDER/RENTAL_ORDER (obligation-first chats).
+export const LISTING_CONVERSATION_CREATED_EVENT_TYPE = "LISTING_CONVERSATION_CREATED";
+export const LISTING_CONVERSATION_CREATED_EVENT_SCHEMA_VERSION = 1;
+export const LISTING_CONVERSATION_CREATED_AGGREGATE_TYPE = "CONVERSATION";
+
 export const LIQUIDITY_LISTING_TYPES = ["PRODUCT", "SERVICE", "RENTAL"] as const;
 export const LIQUIDITY_DEMAND_TYPES = [
   "PRODUCT_ORDER",
@@ -70,6 +77,16 @@ const errandOrderCompletedPayloadSchema = z
 
 const liquidityListingCreatedPayloadSchema = z
   .object({
+    listingId: boundedId,
+    listingType: z.enum(LIQUIDITY_LISTING_TYPES),
+  })
+  .strict();
+
+// No raw message content, actor ID, user name, campus claim or search keyword
+// can enter the append-only domain ledger through this event.
+const listingConversationCreatedPayloadSchema = z
+  .object({
+    conversationId: boundedId,
     listingId: boundedId,
     listingType: z.enum(LIQUIDITY_LISTING_TYPES),
   })
@@ -112,6 +129,21 @@ type DomainEventDefinition = {
 };
 
 const DOMAIN_EVENT_DEFINITIONS = new Map<string, Map<number, DomainEventDefinition>>([
+  [
+    LISTING_CONVERSATION_CREATED_EVENT_TYPE,
+    new Map([
+      [
+        LISTING_CONVERSATION_CREATED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LISTING_CONVERSATION_CREATED_AGGREGATE_TYPE,
+          payloadSchema: listingConversationCreatedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.conversationId as string,
+          occurrenceKey: (aggregateId) =>
+            `${LISTING_CONVERSATION_CREATED_EVENT_TYPE}:${aggregateId}`,
+        },
+      ],
+    ]),
+  ],
   [
     ERRAND_ORDER_COMPLETED_DOMAIN_EVENT_TYPE,
     new Map([

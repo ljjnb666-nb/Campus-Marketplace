@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Phase 10F's real transaction guard is separately verified by
 // feature-flag-guard.test.ts and Phase 10F real-PostgreSQL contracts.
 // This legacy unit suite isolates its existing domain behavior only.
@@ -9,6 +9,11 @@ vi.mock("@/lib/feature-flags/feature-flag-guard", async (importOriginal) => ({
 
 vi.mock("@/lib/feature-flags/feature-flag-campus", () => ({
   resolveConversationCampusIdTx: vi.fn().mockResolvedValue("campus-1"),
+}));
+
+// Unit-only stub. R2b durable ledger and receipt are tested against real PG.
+vi.mock("@/lib/analytics/conversation-attribution", () => ({
+  recordListingConversationCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
 }));
 
 
@@ -280,6 +285,7 @@ import {
   enforcementError,
   type EnforcementError,
 } from "@/lib/enforcement/errors";
+import { recordListingConversationCreatedTx } from "@/lib/analytics/conversation-attribution";
 
 function p2002Error() {
   return Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
@@ -290,7 +296,11 @@ function asEnforcementError(error: EnforcementError): EnforcementError {
 }
 
 describe("conversation actions", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
   beforeEach(() => {
+    // Simulate controlled rollout only in the isolated legacy writer suite;
+    // default production remains OFF until all workers are upgraded.
+    vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "enabled");
     vi.clearAllMocks();
     userFindMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => {
       return (where?.id?.in || []).map((id: string) => ({ id }));
@@ -314,7 +324,7 @@ describe("conversation actions", () => {
     acquireGovernanceSubjectLocks.mockResolvedValue(undefined);
     gateRequireMarketplaceCapability.mockResolvedValue(undefined);
     gateRequireParticipantsEligible.mockResolvedValue(undefined);
-    txConversationCreate.mockResolvedValue({ id: "conversation-new" });
+    txConversationCreate.mockResolvedValue({ id: "conversation-new", createdAt: new Date("2026-10-08T13:10:00.000Z") });
     txMessageCreate.mockResolvedValue({ id: "message-1" });
     txConversationUpdate.mockResolvedValue({});
     txConversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
@@ -378,6 +388,14 @@ describe("conversation actions", () => {
       expect(createData.title).toBe("商品咨询：高数教材");
       expect(createData.productId).toBe("product-1");
       expect(createData.messages.create.senderId).toBe("user-1");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledTimes(1);
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(
+        expect.anything(), {
+          conversationId: "conversation-new", listingId: "product-1",
+          listingType: "PRODUCT", campusId: "campus-1",
+          occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+        },
+      );
       // Phase 9B：通知走 canonical emitNotificationTx（registry 渲染，不含 listing title）
       expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
       expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({

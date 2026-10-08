@@ -18,6 +18,7 @@ import { resolveConversationCampusIdTx } from "@/lib/feature-flags/feature-flag-
 import { emitNotificationTx } from "@/lib/notifications/notification-service";
 import { ORDER_CONVERSATION_STARTED_KIND } from "@/lib/notifications/notification-registry";
 import { resolvePairBlockStateTx } from "@/lib/trust/communication-policy";
+import { recordListingConversationCreatedTx } from "@/lib/analytics/conversation-attribution";
 
 /**
  * Phase 6C-3 / Phase 8A-03：会话创建领域逻辑（从 conversation action 抽出，
@@ -254,8 +255,28 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
             },
           },
         },
-        select: { id: true },
+        select: { id: true, createdAt: true },
       });
+
+      // R2b two-step deployment fence: unknown new event types are PERMANENT
+      // worker failures on old binaries. Disabled by default in every
+      // environment, including production, until operators have verified
+      // that ALL projection workers recognize the new strict schema.
+      // This is a rollout gate, NOT permission to bypass marketplace RBAC.
+      if (process.env.ANALYTICS_CONVERSATION_EVENT_EMISSION === "enabled" &&
+          gate.kind === "MARKETPLACE_LISTING" &&
+          (bizType === "PRODUCT" || bizType === "SERVICE" || bizType === "RENTAL") &&
+          ((bizType === "PRODUCT" && bizKeyField === "productId") ||
+           (bizType === "SERVICE" && bizKeyField === "serviceListingId") ||
+           (bizType === "RENTAL" && bizKeyField === "rentalListingId"))) {
+        await recordListingConversationCreatedTx(tx, {
+          conversationId: conv.id,
+          listingId: bizId,
+          listingType: bizType,
+          campusId,
+          occurredAt: conv.createdAt,
+        });
+      }
 
       // Phase 9B：canonical notification domain——title/content 由 registry
       // 按 (bizType, bizNumber) 渲染；dedupe 以 conversation 为聚合
@@ -271,7 +292,7 @@ export async function getOrCreateConversationSafe(input: ConversationCreationInp
         },
       });
 
-      return conv;
+      return { id: conv.id };
     });
 
     return created;
