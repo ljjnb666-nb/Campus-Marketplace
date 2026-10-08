@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { groupBy, findMany } = vi.hoisted(() => ({
+const { groupBy, findMany, configFindMany } = vi.hoisted(() => ({
   groupBy: vi.fn(),
   findMany: vi.fn(),
+  configFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -11,6 +12,7 @@ vi.mock("@/lib/prisma", () => ({
       groupBy,
       findMany,
     },
+    runtimeConfigOverride: { findMany: configFindMany },
   },
 }));
 
@@ -24,6 +26,7 @@ import {
 beforeEach(() => {
   groupBy.mockReset().mockResolvedValue([]);
   findMany.mockReset().mockResolvedValue([]);
+  configFindMany.mockReset().mockResolvedValue([]);
 });
 
 describe("Phase 10D explainable risk rules", () => {

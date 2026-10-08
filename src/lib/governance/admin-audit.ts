@@ -54,6 +54,12 @@ const ALLOWED_METADATA_KEYS = new Set([
   // 仅 previousIsActive/newIsActive，禁止自由文本）
   "previousIsActive",
   "newIsActive",
+  // Phase 10E: registered integer-only config; no secrets/free-text.
+  "configKey",
+  "previousConfigVersion",
+  "nextConfigVersion",
+  "previousConfigValue",
+  "nextConfigValue",
 ]);
 
 function sanitizeMetadata(
