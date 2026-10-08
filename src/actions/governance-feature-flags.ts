@@ -15,7 +15,7 @@ export type FeatureFlagActionState = {
 const inputSchema = z.object({
   key: z.enum(FEATURE_FLAG_KEYS),
   campusId: z.string().max(128),
-  expectedVersion: z.coerce.number().int().min(0).safe(),
+  expectedVersion: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
   nextValue: z.enum(["true", "false", "inherit"]),
   acknowledgement: z.literal("已确认影响范围"),
 }).strict();

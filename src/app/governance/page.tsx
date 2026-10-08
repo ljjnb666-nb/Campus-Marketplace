@@ -40,6 +40,7 @@ import {
   deriveRoleManageAccess,
   hasAnyRoleManageAccess,
 } from "@/lib/rbac/role-manage-access";
+import { deriveFeatureFlagUiAccess, hasAnyFeatureFlagUiAccess } from "@/lib/feature-flags/feature-flag-ui-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -93,6 +94,7 @@ export default async function GovernanceOverviewPage() {
   const supportAccess = deriveSupportManageAccess(context);
   const operationsOverviewAccess = deriveOperationsOverviewAccess(context);
   const campusManageAccess = deriveCampusManageAccess(context);
+  const featureFlagAccess = deriveFeatureFlagUiAccess(context);
 
   // anti-oracle：未授权域传 null → 该域聚合查询结构性不执行
   const summaries = await loadOperationsOverview({
@@ -117,6 +119,7 @@ export default async function GovernanceOverviewPage() {
     { href: "/governance/roles", label: "角色管理", visible: hasAnyRoleManageAccess(roleManageAccess) },
     { href: "/governance/campuses", label: "校区管理", visible: hasAnyCampusManageAccess(campusManageAccess) },
     { href: "/governance/system", label: "系统状态", visible: hasAnyOperationsOverviewAccess(operationsOverviewAccess) },
+    { href: "/governance/feature-flags", label: "功能开关", visible: hasAnyFeatureFlagUiAccess(featureFlagAccess) },
   ].filter((item) => item.visible);
 
   return (

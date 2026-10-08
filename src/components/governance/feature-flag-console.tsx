@@ -4,7 +4,7 @@ import { useActionState, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   Activity, AlertTriangle, ArrowRight, Building2, CheckCircle2, CircleHelp,
-  Clock3, Globe2, LockKeyhole, PauseCircle, RotateCcw, ShieldAlert,
+  Clock3, Globe2, LockKeyhole, PauseCircle, ShieldAlert,
   SlidersHorizontal,
 } from "lucide-react";
 
@@ -316,7 +316,7 @@ export function FeatureFlagConsole({
               <span className="text-xs text-slate-400">{scoped.length} 项</span>
             </div>
             <div className="grid gap-4 lg:grid-cols-2">
-              {scoped.map(row => <FlagCard key={row.key} row={row} campusId={campusId} />)}
+              {scoped.map(row => <FlagCard key={`${row.key}:${row.currentVersion}`} row={row} campusId={campusId} />)}
             </div>
           </section>
         );

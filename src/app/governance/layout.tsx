@@ -40,6 +40,7 @@ import {
   deriveCampusManageAccess,
   hasAnyCampusManageAccess,
 } from "@/lib/campus/campus-admin-access";
+import { deriveFeatureFlagUiAccess, hasAnyFeatureFlagUiAccess } from "@/lib/feature-flags/feature-flag-ui-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 
@@ -102,6 +103,7 @@ export default async function GovernanceLayout({
   const supportAccess = deriveSupportManageAccess(context);
   const operationsOverviewAccess = deriveOperationsOverviewAccess(context);
   const campusManageAccess = deriveCampusManageAccess(context);
+  const featureFlagAccess = deriveFeatureFlagUiAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
@@ -117,7 +119,8 @@ export default async function GovernanceLayout({
     !hasAnyDisputeReviewAccess(disputeAccess) &&
     !hasAnySupportManageAccess(supportAccess) &&
     !hasAnyOperationsOverviewAccess(operationsOverviewAccess) &&
-    !hasAnyCampusManageAccess(campusManageAccess)
+    !hasAnyCampusManageAccess(campusManageAccess) &&
+    !hasAnyFeatureFlagUiAccess(featureFlagAccess)
   ) {
     notFound();
   }
@@ -178,6 +181,11 @@ export default async function GovernanceLayout({
       href: "/governance/system",
       label: "系统状态",
       visible: hasAnyOperationsOverviewAccess(operationsOverviewAccess),
+    },
+    {
+      href: "/governance/feature-flags",
+      label: "功能开关",
+      visible: hasAnyFeatureFlagUiAccess(featureFlagAccess),
     },
   ].filter((item) => item.visible);
 
