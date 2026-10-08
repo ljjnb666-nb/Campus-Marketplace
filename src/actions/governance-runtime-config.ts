@@ -29,7 +29,10 @@ export async function changeGovernanceRuntimeConfig(
   _previous: RuntimeConfigActionState,
   form: FormData,
 ): Promise<RuntimeConfigActionState> {
-  const entries = [...form.entries()];
+  // Next.js Server Actions may attach $ACTION_* transport metadata to FormData.
+  // These fields are framework-owned, not user config inputs. Keep *all* other
+  // unknown/duplicate/file fields fail-closed under the strict Zod schema.
+  const entries = [...form.entries()].filter(([key]) => !key.startsWith("$ACTION_"));
   if (entries.some(([,value]) => typeof value !== "string") ||
       new Set(entries.map(([key]) => key)).size !== entries.length) {
     return { status: "error", message: "提交参数无效，请刷新后重试" };
