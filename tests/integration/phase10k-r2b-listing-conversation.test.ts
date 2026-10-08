@@ -132,9 +132,7 @@ describe.skipIf(!url)("10K-R2b listing conversation fact atomicity (real Postgre
     const eventsBefore = await db.domainEvent.count({
       where: { campusId, eventType: "LISTING_CONVERSATION_CREATED" },
     });
-    const jobsBefore = await db.asyncJob.count({
-      where: { kind: "ANALYTICS_PROJECT_DOMAIN_EVENT" },
-    });
+    let rolledBackEventId: string | null = null;
     await expect(db.$transaction(async tx => {
       const c = await tx.conversation.create({
         data: { conversationKey: key, productId: listingId },
@@ -144,15 +142,22 @@ describe.skipIf(!url)("10K-R2b listing conversation fact atomicity (real Postgre
         conversationId: c.id, listingId, listingType: "PRODUCT",
         campusId, occurredAt: c.createdAt,
       });
+      const staged = await tx.domainEvent.findUniqueOrThrow({
+        where: { occurrenceKey: "LISTING_CONVERSATION_CREATED:" + c.id },
+        select: { id: true },
+      });
+      rolledBackEventId = staged.id;
       throw new Error("TEST_ROLLBACK");
     })).rejects.toThrow("TEST_ROLLBACK");
     expect(await db.conversation.count({ where: { conversationKey: key } })).toBe(0);
     expect(await db.domainEvent.count({
       where: { campusId, eventType: "LISTING_CONVERSATION_CREATED" },
     })).toBe(eventsBefore);
+    expect(rolledBackEventId).not.toBeNull();
+    expect(await db.domainEvent.count({ where: { id: rolledBackEventId! } })).toBe(0);
     expect(await db.asyncJob.count({
-      where: { kind: "ANALYTICS_PROJECT_DOMAIN_EVENT" },
-    })).toBe(jobsBefore);
+      where: { dedupeKey: versionedJobKey(rolledBackEventId!) },
+    })).toBe(0);
   });
 
   it("same conversation cannot be reassigned to a different tenant or listing", async () => {
