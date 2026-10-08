@@ -372,6 +372,7 @@ describe("conversation actions", () => {
       expect(txConversationCreate).not.toHaveBeenCalled();
       expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("R2b deployment gate defaults to OFF without affecting conversation creation", async () => {
@@ -617,6 +618,7 @@ describe("conversation actions", () => {
         "campus-1",
         "START_NEW_MARKETPLACE_ACTIVITY",
       );
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("fails closed when the errand participant relation changed after lock（§14）", async () => {
@@ -691,6 +693,10 @@ describe("conversation actions", () => {
       const createData = txConversationCreate.mock.calls[0][0].data;
       expect(createData.serviceListingId).toBe("service-1");
       expect(createData.title).toBe("服务咨询：高数辅导");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conversation-new", listingId: "service-1", listingType: "SERVICE",
+        campusId: "campus-1", occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+      });
     });
 
     it("returns the unified counterparty denial when the provider is restricted（409 合同，service catch）", async () => {
@@ -754,6 +760,10 @@ describe("conversation actions", () => {
       const createData = txConversationCreate.mock.calls[0][0].data;
       expect(createData.rentalListingId).toBe("rental-1");
       expect(createData.title).toBe("租赁咨询：相机出租");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conversation-new", listingId: "rental-1", listingType: "RENTAL",
+        campusId: "campus-1", occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+      });
     });
 
     it("redirects for a missing rental listing or one owned by the current user", async () => {
@@ -806,6 +816,7 @@ describe("conversation actions", () => {
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
       expect(gateRequireParticipantsEligible).not.toHaveBeenCalled();
       expect(txOrderFindUnique).not.toHaveBeenCalled();
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("creates a conversation for a rental order between owner and renter", async () => {
