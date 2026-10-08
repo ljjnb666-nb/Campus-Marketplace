@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { hashSync } from "bcryptjs";
+import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
+import { loginViaUI } from "./helpers/auth";
 import { e2eDb } from "./helpers/db";
 import { uniqueTag } from "./helpers/e2e";
 import { expectHeadingSettled } from "./helpers/hydration-settlement";
@@ -9,21 +12,31 @@ test("10J-E2E01：analytics.read 多校区与 7/30 天精确隔离，非授权�
   test.setTimeout(120_000);
   const db = e2eDb();
   const tag = uniqueTag("p10j");
-  const [a, b, buyer, permission] = await Promise.all([
+  const [a, b, permission] = await Promise.all([
     db.campus.create({ data: { name: "统计甲-" + tag, slug: "p10j-a-" + tag, schoolName: "E2E-A" } }),
     db.campus.create({ data: { name: "统计乙-" + tag, slug: "p10j-b-" + tag, schoolName: "E2E-B" } }),
-    db.user.findUniqueOrThrow({ where: { email: "e2e-buyer@e2e.test" }, select: { id: true } }),
     db.permission.findUniqueOrThrow({ where: { key: "analytics.read" }, select: { id: true } }),
   ]);
+  // Never mutate the shared e2e-buyer account: concurrent security.spec tests
+  // rely on it having NO governance capabilities. Own a separate account.
+  const password = (process.env.E2E_TEST_PASSWORD_PREFIX ?? "E2e") + "Analyst#2026";
+  const analyst = await db.user.create({
+    data: {
+      name: "E2E独立校区分析员", email: "p10j-analyst-" + tag + "@e2e.test",
+      passwordHash: hashSync(password, 10), schoolName: a.schoolName,
+      campusId: a.id, role: "STUDENT", verificationStatus: "VERIFIED",
+    },
+  });
+  await createTestFixtureAcceptance(db, analyst.id);
   const role = await db.role.create({
     data: { key: "ANALYST_" + tag, name: "E2E 校区数据分析员", scope: "CAMPUS" },
   });
   await db.rolePermission.create({ data: { roleId: role.id, permissionId: permission.id } });
   await db.campusMembership.create({
-    data: { userId: buyer.id, campusId: a.id, status: "ACTIVE" },
+    data: { userId: analyst.id, campusId: a.id, status: "ACTIVE" },
   });
   await db.userRoleAssignment.create({
-    data: { userId: buyer.id, roleId: role.id, campusId: a.id, scopeKey: "CAMPUS:" + a.id },
+    data: { userId: analyst.id, roleId: role.id, campusId: a.id, scopeKey: "CAMPUS:" + a.id },
   });
 
   async function fixture(campusId: string, offsetDays: number, token: string, bookedValue?: string) {
@@ -57,7 +70,7 @@ test("10J-E2E01：analytics.read 多校区与 7/30 天精确隔离，非授权�
   await fixture(a.id, 2, tag + "-a-amount", "19.95");
 
   const admin = await browser.newContext({ storageState: "tests/e2e/.auth/admin.json" });
-  const scoped = await browser.newContext({ storageState: "tests/e2e/.auth/buyer.json" });
+  const scoped = await browser.newContext();
   const page = await admin.newPage();
   const restricted = await scoped.newPage();
   const cardTotal = () => page.getByRole("article").filter({ hasText: "新增供给（条）" }).locator("p").nth(1);
@@ -77,13 +90,18 @@ test("10J-E2E01：analytics.read 多校区与 7/30 天精确隔离，非授权�
     await expect(cardTotal()).toHaveText("1");
     await expect(page.getByRole("article").filter({ hasText: "完成交易记账对价（元）" }).locator("p").nth(1)).toHaveText("0.00");
 
+    await loginViaUI(restricted, analyst.email, password, analyst.name);
     await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: a.id, days: "7" }).toString());
     await expectHeadingSettled(restricted, "校园交易分析");
     await expect(restricted.getByRole("link", { name: "审计日志" })).toHaveCount(0);
-    const deny = await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id }).toString());
-    expect(deny?.status()).toBe(404);
-    const forged = await restricted.goto("/governance/analytics?campusId=" + a.id + "&campusId=" + b.id);
-    expect(forged?.status()).toBe(404);
+    // Next.js streamed notFound may return HTTP 200 after headers flush.
+    // Assert the actual denied UI and absence of analytics content instead.
+    await restricted.goto("/governance/analytics?" + new URLSearchParams({ campusId: b.id }).toString());
+    await expect(restricted.getByRole("heading", { name: "页面不存在" })).toBeVisible();
+    await expect(restricted.getByRole("heading", { name: "校园交易分析" })).toHaveCount(0);
+    await restricted.goto("/governance/analytics?campusId=" + a.id + "&campusId=" + b.id);
+    await expect(restricted.getByRole("heading", { name: "页面不存在" })).toBeVisible();
+    await expect(restricted.getByRole("heading", { name: "校园交易分析" })).toHaveCount(0);
   } finally {
     await Promise.all([admin.close(), scoped.close()]);
     // Seed-owned E2E DB reset handles cleanups; do not delete projection history.
