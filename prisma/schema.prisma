@@ -997,7 +997,6 @@ model RuntimeConfigOverride {
   campusId    String?
   value       Int
   version     Int      @default(1)
-  updatedById String
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   campus      Campus?  @relation(fields: [campusId], references: [id], onDelete: Restrict)
@@ -1013,7 +1012,6 @@ model RuntimeConfigRevision {
   version       Int
   previousValue Int?
   newValue      Int
-  actorId       String
   createdAt     DateTime @default(now())
   config        RuntimeConfigOverride @relation(fields: [configId], references: [id], onDelete: Restrict)
 

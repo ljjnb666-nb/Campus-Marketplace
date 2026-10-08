@@ -128,7 +128,7 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 10E runtime configuration author
         where: { scopeKey: `CAMPUS:${campus.id}` },
       })).toBe(0);
       expect(await db.runtimeConfigRevision.count({
-        where: { actorId: actor.id },
+        where: { config: { scopeKey: `CAMPUS:${campus.id}` } },
       })).toBe(0);
       expect(await db.adminLog.count({
         where: { adminId: actor.id, action: "RUNTIME_CONFIG_CHANGED" },

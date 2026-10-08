@@ -78,7 +78,7 @@ export async function setRuntimeConfigTx(
     if (existing) {
       const updated = await tx.runtimeConfigOverride.updateMany({
         where: { id: existing.id, version: input.expectedVersion },
-        data: { value, version: { increment: 1 }, updatedById: input.actorId },
+        data: { value, version: { increment: 1 } },
       });
       if (updated.count !== 1) {
         throw new Error("RUNTIME_CONFIG_VERSION_CONFLICT");
@@ -94,7 +94,6 @@ export async function setRuntimeConfigTx(
             campusId: input.campusId,
             value,
             version: 1,
-            updatedById: input.actorId,
           },
           select: { id: true },
         });
@@ -114,7 +113,6 @@ export async function setRuntimeConfigTx(
         version,
         previousValue: existing?.value ?? null,
         newValue: value,
-        actorId: input.actorId,
       },
     });
     if (input.seams?.beforeAudit) await input.seams.beforeAudit(tx);
