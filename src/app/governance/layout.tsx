@@ -41,6 +41,7 @@ import {
   hasAnyCampusManageAccess,
 } from "@/lib/campus/campus-admin-access";
 import { deriveFeatureFlagUiAccess, hasAnyFeatureFlagUiAccess } from "@/lib/feature-flags/feature-flag-ui-access";
+import { deriveRuntimeConfigUiAccess, hasAnyRuntimeConfigUiAccess } from "@/lib/runtime-config/runtime-config-ui-access";
 import { loadAuthorizationContext } from "@/lib/rbac/service";
 import { requireUser } from "@/lib/server-auth";
 
@@ -104,6 +105,7 @@ export default async function GovernanceLayout({
   const operationsOverviewAccess = deriveOperationsOverviewAccess(context);
   const campusManageAccess = deriveCampusManageAccess(context);
   const featureFlagAccess = deriveFeatureFlagUiAccess(context);
+  const runtimeConfigAccess = deriveRuntimeConfigUiAccess(context);
 
   const hasAppealAccess =
     appealAccess.global || appealAccess.campusIds.length > 0;
@@ -120,7 +122,8 @@ export default async function GovernanceLayout({
     !hasAnySupportManageAccess(supportAccess) &&
     !hasAnyOperationsOverviewAccess(operationsOverviewAccess) &&
     !hasAnyCampusManageAccess(campusManageAccess) &&
-    !hasAnyFeatureFlagUiAccess(featureFlagAccess)
+    !hasAnyFeatureFlagUiAccess(featureFlagAccess) &&
+    !hasAnyRuntimeConfigUiAccess(runtimeConfigAccess)
   ) {
     notFound();
   }
@@ -186,6 +189,11 @@ export default async function GovernanceLayout({
       href: "/governance/feature-flags",
       label: "功能开关",
       visible: hasAnyFeatureFlagUiAccess(featureFlagAccess),
+    },
+    {
+      href: "/governance/runtime-config",
+      label: "运行时配置",
+      visible: hasAnyRuntimeConfigUiAccess(runtimeConfigAccess),
     },
   ].filter((item) => item.visible);
 
