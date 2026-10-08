@@ -145,6 +145,12 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.$executeRaw`
     TRUNCATE TABLE "FeatureFlagRevision", "FeatureFlagOverride"
   `;
+  // Phase 10H: immutable 10E configuration revisions also have a RESTRICT
+  // parent FK. Reset both ONLY in this independently guarded E2E database,
+  // before Campus deletion; never delete revisions in a browser test.
+  await prisma.$executeRaw`
+    TRUNCATE TABLE "RuntimeConfigRevision", "RuntimeConfigOverride"
+  `;
   await prisma.blockedUser.deleteMany();
   await prisma.moderationKeyword.deleteMany();
   // Phase 9C-03 RB05：DataExportArtifact 对 User / PrivacyRequest 均为
