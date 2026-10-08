@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { containsBannedKeyword } from "@/lib/moderation";
 import { isEnforcementError } from "@/lib/enforcement/errors";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import {
   MessageSendDeniedError,
@@ -44,7 +45,8 @@ function revalidateConversationPages(conversationId?: string) {
 
 /** Phase 6C-3：会话 gate 的域错误（actor 专用 403 族 + 对手方统一 409 + governance）归类。 */
 function isMarketplaceGateError(error: unknown): boolean {
-  return isEnforcementError(error) || isRbacError(error) || isGovernanceError(error);
+  return error instanceof NewActivityDisabledError ||
+    isEnforcementError(error) || isRbacError(error) || isGovernanceError(error);
 }
 
 // 1. 二手商品沟通
@@ -399,7 +401,7 @@ export async function createOrOpenOrderConversation(formData: FormData) {
     redirect(`/messages/${conversation.id}`);
   } catch (error) {
     // pair blocked ∧ obligation 非 active → 沟通拒绝（fail closed 回订单中心）
-    if (isGovernanceError(error)) {
+    if (isGovernanceError(error) || error instanceof NewActivityDisabledError) {
       redirect("/my/orders");
     }
     throw error;
@@ -442,6 +444,9 @@ export async function sendMessage(
       content,
     });
   } catch (error) {
+    if (error instanceof NewActivityDisabledError) {
+      return { success: false, message: error.message };
+    }
     if (error instanceof MessageSendDeniedError) {
       return { success: false, message: error.message };
     }

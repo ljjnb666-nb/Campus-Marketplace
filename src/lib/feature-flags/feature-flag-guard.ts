@@ -28,7 +28,7 @@ export class NewActivityDisabledError extends Error {
   readonly userMessage = "该操作已由平台暂时停用，请稍后再试";
 
   constructor() {
-    super("NEW_ACTIVITY_DISABLED");
+    super("该操作已由平台暂时停用，请稍后再试");
     this.name = "NewActivityDisabledError";
   }
 }
