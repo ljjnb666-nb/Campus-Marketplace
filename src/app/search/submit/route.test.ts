@@ -59,4 +59,13 @@ describe("R2a form submit", () => {
     expect(new URL(longSearch.headers.get("location")!).searchParams.get("q")).toBe(longKeyword);
     expect(capture).not.toHaveBeenCalled();
   });
+
+  it("rejects the real body size even when content-length is missing or lies", async () => {
+    const huge = await submit("q=" + "a".repeat(10000) + "&ticket=xyz", {
+      "content-length": "10",
+    });
+    expect(huge.status).toBe(303);
+    expect(huge.headers.get("location")).toBe("https://market.example/search");
+    expect(capture).not.toHaveBeenCalled();
+  });
 });

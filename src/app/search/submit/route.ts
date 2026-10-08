@@ -17,14 +17,38 @@ export async function POST(request: NextRequest) {
     return NextResponse.redirect(fallback, { status: 303 });
   }
 
-  let q: FormDataEntryValue | null = null;
-  let ticket: FormDataEntryValue | null = null;
+  let q: string | null = null;
+  let ticket: string | null = null;
+  // Content-Length is untrusted or absent behind proxies. Bound actual bytes
+  // before parsing: a malicious POST must not force unbounded formData buffering.
+  const reader = request.body?.getReader();
+  if (!reader) return NextResponse.redirect(fallback, { status: 303 });
+  const chunks: Uint8Array[] = [];
+  let readBytes = 0;
   try {
-    const fields = await request.formData();
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      readBytes += chunk.value.byteLength;
+      if (readBytes > 4096) {
+        await reader.cancel();
+        return NextResponse.redirect(fallback, { status: 303 });
+      }
+      chunks.push(chunk.value);
+    }
+    const bytes = new Uint8Array(readBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const fields = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (fields.getAll("q").length === 1) q = fields.get("q");
     if (fields.getAll("ticket").length === 1) ticket = fields.get("ticket");
   } catch {
     return NextResponse.redirect(fallback, { status: 303 });
+  } finally {
+    reader.releaseLock();
   }
 
   if (typeof q !== "string" || !q.trim()) {
