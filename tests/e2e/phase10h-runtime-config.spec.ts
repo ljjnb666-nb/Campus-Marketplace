@@ -36,6 +36,10 @@ test("10H-E2E01：校区参数 → 二次确认 → CAS/审计 → 恢复继承"
     await expect(submit).toBeDisabled();
     await page.getByRole("checkbox", { name: /我已核对校区范围/ }).check();
     await submit.click();
+    // Surface the *actual* server response before asserting durable DB state.
+    // A rejected mutation is a real product failure, not an eventually-consistent write.
+    await expect(page.locator('form:has(input[name="key"]) [role="status"], form:has(input[name="key"]) [role="alert"]'))
+      .toContainText("配置已保存");
 
     await expect.poll(async () => db.runtimeConfigOverride.findUnique({
       where: { key_scopeKey: { key, scopeKey } },
