@@ -48,10 +48,10 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 10F feature flags (real PostgreS
         expect(campus.version).toBe(1);
         await expect(requireNewActivityAllowed(tx as Prisma.TransactionClient, {
           kind: "ORDER", campusId: a.id,
-        })).rejects.toThrow("NEW_ACTIVITY_DISABLED");
+        })).rejects.toMatchObject({ code: "NEW_ACTIVITY_DISABLED" });
         await expect(requireNewActivityAllowed(tx as Prisma.TransactionClient, {
           kind: "ORDER", campusId: b.id,
-        })).rejects.toThrow("NEW_ACTIVITY_DISABLED");
+        })).rejects.toMatchObject({ code: "NEW_ACTIVITY_DISABLED" });
 
         const inherited = await setFeatureFlagTx(tx as Prisma.TransactionClient, {
           actorId: actor.id, key: "DISABLE_NEW_ORDERS",

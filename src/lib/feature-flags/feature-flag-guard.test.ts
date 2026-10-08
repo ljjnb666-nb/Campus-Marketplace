@@ -41,21 +41,21 @@ describe("Phase 10F transaction-level flag gate", () => {
       { key: "DISABLE_NEW_MESSAGES", scopeKey: "CAMPUS:B", campusId: "B", disabled: true, version: 1 },
     ]);
     await expect(requireNewActivityAllowed(tx, { kind: "MESSAGE", campusId: "A" }))
-      .rejects.toThrow("NEW_ACTIVITY_DISABLED");
+      .rejects.toBeInstanceOf(NewActivityDisabledError);
   });
 
   it("fails closed on DB errors, invalid versions, missing campus and unknown activity", async () => {
     const tx = mockTx();
     tx.featureFlagOverride.findMany.mockRejectedValue(new Error("DATABASE_UNAVAILABLE"));
     await expect(requireNewActivityAllowed(tx, { kind: "LISTING", campusId: "A" }))
-      .rejects.toThrow("NEW_ACTIVITY_DISABLED");
+      .rejects.toBeInstanceOf(NewActivityDisabledError);
     await expect(requireNewActivityAllowed(tx, { kind: "LISTING", campusId: "" }))
-      .rejects.toThrow("NEW_ACTIVITY_DISABLED");
+      .rejects.toBeInstanceOf(NewActivityDisabledError);
 
     const bad = mockTx([{
       key: "DISABLE_NEW_LISTINGS", scopeKey: "GLOBAL", campusId: null, disabled: true, version: 0,
     }]);
     await expect(requireNewActivityAllowed(bad, { kind: "LISTING", campusId: "A" }))
-      .rejects.toThrow("NEW_ACTIVITY_DISABLED");
+      .rejects.toBeInstanceOf(NewActivityDisabledError);
   });
 });
