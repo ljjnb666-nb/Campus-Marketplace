@@ -672,3 +672,29 @@ describe("Phase 10H runtime config capability navigation", () => {
     await expect(GovernanceLayout({ children: <div>内容</div> })).rejects.toThrow("NOT_FOUND");
   });
 });
+
+
+describe("Phase 10I risk.read-only navigation", () => {
+  it("allows risk.read-only operator while hiding unrelated governance siblings", async () => {
+    requireUser.mockResolvedValue({ id: "risk-reader" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "risk-reader", accountActive: true, activeCampusIds: ["A"],
+      grants: [{ roleKey: "RISK", scope: "CAMPUS", campusId: "A", permissionKeys: ["risk.read"] }],
+    });
+    render(await GovernanceLayout({ children: <div data-testid="risk-content">内容</div> }));
+    expect(screen.getByTestId("risk-content")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "风险情报" }).getAttribute("href")).toBe("/governance/risk");
+    expect(screen.queryByRole("link", { name: "执法记录" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "审计日志" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "运行时配置" })).toBeNull();
+  });
+
+  it("inactive campus membership with only risk.read denies governance root", async () => {
+    requireUser.mockResolvedValue({ id: "risk-reader" });
+    loadAuthorizationContext.mockResolvedValue({
+      userId: "risk-reader", accountActive: true, activeCampusIds: [],
+      grants: [{ roleKey: "RISK", scope: "CAMPUS", campusId: "A", permissionKeys: ["risk.read"] }],
+    });
+    await expect(GovernanceLayout({ children: <div>内容</div> })).rejects.toThrow("NOT_FOUND");
+  });
+});
