@@ -135,6 +135,16 @@ async function wipeAll(prisma: PrismaClient): Promise<void> {
   await prisma.uploadedAsset.deleteMany();
   await prisma.userVerification.deleteMany();
   await prisma.adminLog.deleteMany();
+  // Phase 10F: revisions are deliberately append-only (BEFORE DELETE/UPDATE
+  // trigger), so ordinary deleteMany is forbidden even for test artifacts.
+  // This executes ONLY after main() asserts the E2E-isolated reset target.
+  // TRUNCATE is a full reset of THESE TWO test-owned tables, with NO CASCADE
+  // and NO production writer/service change. Include both tables because
+  // FeatureFlagRevision has a RESTRICT FK to FeatureFlagOverride.
+  // Must run before campus.deleteMany() (override also has a RESTRICT FK).
+  await prisma.$executeRaw`
+    TRUNCATE TABLE "FeatureFlagRevision", "FeatureFlagOverride"
+  `;
   await prisma.blockedUser.deleteMany();
   await prisma.moderationKeyword.deleteMany();
   // Phase 9C-03 RB05：DataExportArtifact 对 User / PrivacyRequest 均为
