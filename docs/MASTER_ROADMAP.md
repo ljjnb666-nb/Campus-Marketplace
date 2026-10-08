@@ -181,7 +181,7 @@ Phase 3B 的主要 external gates（重开时逐项执行、逐项留证）：
 | Phase 7 | Operations Admin Foundation | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-09-22，PR #20–#27 实施链收口，见 §5.3） |
 | Phase 8 | Marketplace Lifecycle Hardening | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-02，8A–8F 全部关闭；master = f6ac13d，PR #56 Phase 8F merge 后 post-merge master CI 双绿） |
 | Phase 9 | Async Jobs / Transactional Outbox / Notifications / Retention | **DONE / MERGED / MASTER-GREEN / CLOSED**（2026-10-05，9A / 9B / 9C-01 / 9C-02 / 9C-03 / 9C-04 全部 CLOSED，PR #57–#62 实施链收口；final master `e497dcde`，post-merge master CI run 37302064162 attempt=1 verify/e2e 双绿；Independent Final Acceptance PASS；closure record 见 §5.5） |
-| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | **IN_PROGRESS**（10A–10I 已合并；10I exact-master CI run 37771733142 双绿，96/96 E2E；10J 运营分析界面进行中，Phase 10 总体验收未完成） |
+| Phase 10 | Analytics / Marketplace Liquidity / Risk / Config Center / Feature Flags | **IN_PROGRESS / 10K REPAIR_REQUIRED**（10A–10J 已合并；10J PR #80 master `35ac8b339f3d3510ee46319bce6bc99c17cba335`，post-merge CI run 37777868261 verify/e2e 双绿，97/97 E2E；10K 独立审计发现 §5.6 搜索/漏斗/首互动/供需缺口/北极星指标合同缺口，详见 [PHASE_10K_ACCEPTANCE_AUDIT.md](PHASE_10K_ACCEPTANCE_AUDIT.md)；整体不得 CLOSED） |
 | Phase 11 | Pilot Readiness（11A Account Lifecycle / 11B Pilot UX / 11C Pilot Ops） | NOT_STARTED |
 | **GATE B** | Pilot Ready | NOT_REACHED（通过后才重开 Phase 3B） |
 | Phase 3B（重开） | Real Production Deployment | DEFERRED |
@@ -581,7 +581,7 @@ Feature Flags / Config Center 的生产合同至少要求：
 
 **架构约束：Analytics 与 Audit 必须保持为分离的概念。**
 
-**Phase 10 status correction（2026-10-08）**：10A（#70）、10B（#71）、10C-1（#72）、10C-2（#73）、10D（#74）、10E（#75）、10F（#76）、10G（#77）已按独立 PR 实施合并；10G 精确 master `b4567fcdd356c3b93929b03818aaa6887609a911` 的 post-merge CI run 37751166929 verify/e2e 双绿。Phase 10 保持 **IN_PROGRESS**，不得因为 10G Feature Flags UI CLOSED 而关闭整个 Phase 10。10H Runtime Config UI 已于 PR #78 合并，master `ee608a550854246eb6dc6e16a81552f5a6ed5969` 的 post-merge CI run 37765489798 verify/e2e 双绿（95/95 E2E）。10I 风险情报界面 PR #79 已合并，master `606e0d2d7108708eda8f51387e6b5f1c942f0d32` post-merge CI run 37771733142 双绿，96/96 E2E。10J 运营分析界面进入独立实施，整体 Phase 10 仍保持 IN_PROGRESS。
+**Phase 10 status correction（2026-10-08）**：10A（#70）、10B（#71）、10C-1（#72）、10C-2（#73）、10D（#74）、10E（#75）、10F（#76）、10G（#77）已按独立 PR 实施合并；10G 精确 master `b4567fcdd356c3b93929b03818aaa6887609a911` 的 post-merge CI run 37751166929 verify/e2e 双绿。Phase 10 保持 **IN_PROGRESS**，不得因为 10G Feature Flags UI CLOSED 而关闭整个 Phase 10。10H Runtime Config UI 已于 PR #78 合并，master `ee608a550854246eb6dc6e16a81552f5a6ed5969` 的 post-merge CI run 37765489798 verify/e2e 双绿（95/95 E2E）。10I 风险情报界面 PR #79 已合并，master `606e0d2d7108708eda8f51387e6b5f1c942f0d32` post-merge CI run 37771733142 双绿，96/96 E2E。10J 运营分析界面 PR #80 已合并，master `35ac8b339f3d3510ee46319bce6bc99c17cba335` post-merge CI run 37777868261 verify/e2e 双绿（97/97 E2E、4261/4261 测试）。10K 范围审计发现未完成的 §5.6 指标合同，结论 REPAIR_REQUIRED（不是新发现的运行时权限漏洞）；整体 Phase 10 保持 IN_PROGRESS，GATE B 未达到。
 
 ### 5.7 Phase 11 — Pilot Readiness
 
