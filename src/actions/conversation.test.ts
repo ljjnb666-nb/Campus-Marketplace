@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Phase 10F's real transaction guard is separately verified by
 // feature-flag-guard.test.ts and Phase 10F real-PostgreSQL contracts.
 // This legacy unit suite isolates its existing domain behavior only.
@@ -9,6 +9,11 @@ vi.mock("@/lib/feature-flags/feature-flag-guard", async (importOriginal) => ({
 
 vi.mock("@/lib/feature-flags/feature-flag-campus", () => ({
   resolveConversationCampusIdTx: vi.fn().mockResolvedValue("campus-1"),
+}));
+
+// Unit-only stub. R2b durable ledger and receipt are tested against real PG.
+vi.mock("@/lib/analytics/conversation-attribution", () => ({
+  recordListingConversationCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
 }));
 
 
@@ -280,6 +285,7 @@ import {
   enforcementError,
   type EnforcementError,
 } from "@/lib/enforcement/errors";
+import { recordListingConversationCreatedTx } from "@/lib/analytics/conversation-attribution";
 
 function p2002Error() {
   return Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
@@ -290,7 +296,11 @@ function asEnforcementError(error: EnforcementError): EnforcementError {
 }
 
 describe("conversation actions", () => {
+  afterEach(() => { vi.unstubAllEnvs(); });
   beforeEach(() => {
+    // Simulate controlled rollout only in the isolated legacy writer suite;
+    // default production remains OFF until all workers are upgraded.
+    vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "enabled");
     vi.clearAllMocks();
     userFindMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => {
       return (where?.id?.in || []).map((id: string) => ({ id }));
@@ -314,7 +324,7 @@ describe("conversation actions", () => {
     acquireGovernanceSubjectLocks.mockResolvedValue(undefined);
     gateRequireMarketplaceCapability.mockResolvedValue(undefined);
     gateRequireParticipantsEligible.mockResolvedValue(undefined);
-    txConversationCreate.mockResolvedValue({ id: "conversation-new" });
+    txConversationCreate.mockResolvedValue({ id: "conversation-new", createdAt: new Date("2026-10-08T13:10:00.000Z") });
     txMessageCreate.mockResolvedValue({ id: "message-1" });
     txConversationUpdate.mockResolvedValue({});
     txConversationParticipantUpdateMany.mockResolvedValue({ count: 1 });
@@ -362,6 +372,19 @@ describe("conversation actions", () => {
       expect(txConversationCreate).not.toHaveBeenCalled();
       expect(acquireGovernanceSubjectLocks).not.toHaveBeenCalled();
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
+    });
+
+    it("R2b deployment gate defaults to OFF without affecting conversation creation", async () => {
+      vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "");
+      productFindFirst.mockResolvedValue({ id: "product-1", title: "教材", sellerId: "seller-1" });
+      const formData = new FormData();
+      formData.set("productId", "product-1");
+      await expect(createOrOpenProductConversation(null, formData)).rejects.toThrow(
+        "REDIRECT:/messages/conversation-new",
+      );
+      expect(txConversationCreate).toHaveBeenCalledTimes(1);
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("creates a product conversation with an initial message and notification", async () => {
@@ -378,6 +401,14 @@ describe("conversation actions", () => {
       expect(createData.title).toBe("商品咨询：高数教材");
       expect(createData.productId).toBe("product-1");
       expect(createData.messages.create.senderId).toBe("user-1");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledTimes(1);
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(
+        expect.anything(), {
+          conversationId: "conversation-new", listingId: "product-1",
+          listingType: "PRODUCT", campusId: "campus-1",
+          occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+        },
+      );
       // Phase 9B：通知走 canonical emitNotificationTx（registry 渲染，不含 listing title）
       expect(txNotificationCreateMany).toHaveBeenCalledTimes(1);
       expect(txNotificationCreateMany.mock.calls[0][0].data[0]).toMatchObject({
@@ -587,6 +618,7 @@ describe("conversation actions", () => {
         "campus-1",
         "START_NEW_MARKETPLACE_ACTIVITY",
       );
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("fails closed when the errand participant relation changed after lock（§14）", async () => {
@@ -661,6 +693,10 @@ describe("conversation actions", () => {
       const createData = txConversationCreate.mock.calls[0][0].data;
       expect(createData.serviceListingId).toBe("service-1");
       expect(createData.title).toBe("服务咨询：高数辅导");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conversation-new", listingId: "service-1", listingType: "SERVICE",
+        campusId: "campus-1", occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+      });
     });
 
     it("returns the unified counterparty denial when the provider is restricted（409 合同，service catch）", async () => {
@@ -724,6 +760,10 @@ describe("conversation actions", () => {
       const createData = txConversationCreate.mock.calls[0][0].data;
       expect(createData.rentalListingId).toBe("rental-1");
       expect(createData.title).toBe("租赁咨询：相机出租");
+      expect(recordListingConversationCreatedTx).toHaveBeenCalledWith(expect.anything(), {
+        conversationId: "conversation-new", listingId: "rental-1", listingType: "RENTAL",
+        campusId: "campus-1", occurredAt: new Date("2026-10-08T13:10:00.000Z"),
+      });
     });
 
     it("redirects for a missing rental listing or one owned by the current user", async () => {
@@ -776,6 +816,7 @@ describe("conversation actions", () => {
       expect(gateRequireMarketplaceCapability).not.toHaveBeenCalled();
       expect(gateRequireParticipantsEligible).not.toHaveBeenCalled();
       expect(txOrderFindUnique).not.toHaveBeenCalled();
+      expect(recordListingConversationCreatedTx).not.toHaveBeenCalled();
     });
 
     it("creates a conversation for a rental order between owner and renter", async () => {
