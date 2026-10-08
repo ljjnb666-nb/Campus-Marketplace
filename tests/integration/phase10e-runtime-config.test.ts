@@ -55,10 +55,15 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 10E runtime configuration author
           value: 12, expectedVersion: 1,
         });
         expect(updated).toMatchObject({ previousValue: 20, value: 12, version: 2 });
+        const inherited = await setRuntimeConfigTx(tx as Prisma.TransactionClient, {
+          actorId: actor.id, key: "RISK_SIGNAL_EVIDENCE_LIMIT", campusId: campusA.id,
+          value: null, expectedVersion: 2,
+        });
+        expect(inherited).toMatchObject({ previousValue: 12, value: null, version: 3 });
 
         await expect(setRuntimeConfigTx(tx as Prisma.TransactionClient, {
           actorId: actor.id, key: "RISK_SIGNAL_EVIDENCE_LIMIT", campusId: campusA.id,
-          value: 18, expectedVersion: 1,
+          value: 18, expectedVersion: 2,
         })).rejects.toThrow("RUNTIME_CONFIG_VERSION_CONFLICT");
 
         const revisions = await tx.runtimeConfigRevision.findMany({
@@ -66,16 +71,16 @@ describe.skipIf(!integrationDatabaseUrl)("Phase 10E runtime configuration author
           orderBy: { version: "asc" },
         });
         expect(revisions.map(r => [r.version, r.previousValue, r.newValue]))
-          .toEqual([[1, null, 20], [2, 20, 12]]);
+          .toEqual([[1, null, 20], [2, 20, 12], [3, 12, null]]);
         const audits = await tx.adminLog.findMany({
           where: { adminId: actor.id, action: "RUNTIME_CONFIG_CHANGED" },
           orderBy: { createdAt: "asc" },
         });
-        expect(audits).toHaveLength(3);
+        expect(audits).toHaveLength(4);
         expect(audits.at(-1)?.metadata).toMatchObject({
           configKey: "RISK_SIGNAL_EVIDENCE_LIMIT",
-          previousConfigValue: 20, nextConfigValue: 12,
-          previousConfigVersion: 1, nextConfigVersion: 2,
+          previousConfigValue: 12, nextConfigValue: null,
+          previousConfigVersion: 2, nextConfigVersion: 3,
         });
 
         // New value remains restricted to campus A, not campus B.

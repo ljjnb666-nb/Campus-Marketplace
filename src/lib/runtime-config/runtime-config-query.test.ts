@@ -38,6 +38,28 @@ describe("10E effective runtime config lookup", () => {
     })).toMatchObject({ value: 10, source: "SAFE_FALLBACK" });
   });
 
+  it("versioned INHERIT restores CAMPUS->GLOBAL and GLOBAL->default", async () => {
+    configFindMany.mockResolvedValue([
+      { scopeKey: "GLOBAL", campusId: null, value: 35, version: 3 },
+      { scopeKey: "CAMPUS:A", campusId: "A", value: null, version: 4 },
+    ]);
+    expect(await loadEffectiveRuntimeConfig({
+      key: "RISK_SIGNAL_EVIDENCE_LIMIT", campusId: "A",
+    })).toEqual({
+      key: "RISK_SIGNAL_EVIDENCE_LIMIT", value: 35,
+      source: "GLOBAL_OVERRIDE", version: 3,
+    });
+    configFindMany.mockResolvedValue([
+      { scopeKey: "GLOBAL", campusId: null, value: null, version: 5 },
+    ]);
+    expect(await loadEffectiveRuntimeConfig({
+      key: "RISK_SIGNAL_EVIDENCE_LIMIT",
+    })).toEqual({
+      key: "RISK_SIGNAL_EVIDENCE_LIMIT", value: 50,
+      source: "DEFAULT", version: null,
+    });
+  });
+
   it("DB outage and invalid value both produce the restricted safe fallback", async () => {
     configFindMany.mockRejectedValue(new Error("DB_UNAVAILABLE"));
     expect(await loadEffectiveRuntimeConfig({

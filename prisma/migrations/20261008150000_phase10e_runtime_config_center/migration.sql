@@ -7,7 +7,7 @@ CREATE TABLE "RuntimeConfigOverride" (
     "key" TEXT NOT NULL,
     "scopeKey" TEXT NOT NULL,
     "campusId" TEXT,
-    "value" INTEGER NOT NULL,
+    "value" INTEGER,
     "version" INTEGER NOT NULL DEFAULT 1,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE "RuntimeConfigOverride" (
     ),
     CONSTRAINT "RuntimeConfigOverride_version_chk" CHECK ("version" >= 1),
     CONSTRAINT "RuntimeConfigOverride_registry_chk" CHECK (
-      "key" = 'RISK_SIGNAL_EVIDENCE_LIMIT' AND "value" BETWEEN 5 AND 50
+      "key" = 'RISK_SIGNAL_EVIDENCE_LIMIT' AND ("value" IS NULL OR "value" BETWEEN 5 AND 50)
     )
 );
 CREATE UNIQUE INDEX "RuntimeConfigOverride_key_scopeKey_key"
@@ -34,12 +34,12 @@ CREATE TABLE "RuntimeConfigRevision" (
     "configId" TEXT NOT NULL,
     "version" INTEGER NOT NULL,
     "previousValue" INTEGER,
-    "newValue" INTEGER NOT NULL,
+    "newValue" INTEGER,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "RuntimeConfigRevision_pkey" PRIMARY KEY ("id"),
     CONSTRAINT "RuntimeConfigRevision_version_chk" CHECK ("version" >= 1),
     CONSTRAINT "RuntimeConfigRevision_value_chk" CHECK (
-      "newValue" BETWEEN 5 AND 50
+      ("newValue" IS NULL OR "newValue" BETWEEN 5 AND 50)
       AND ("previousValue" IS NULL OR "previousValue" BETWEEN 5 AND 50)
     )
 );

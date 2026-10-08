@@ -995,7 +995,7 @@ model RuntimeConfigOverride {
   key         String
   scopeKey    String
   campusId    String?
-  value       Int
+  value       Int?
   version     Int      @default(1)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1011,7 +1011,7 @@ model RuntimeConfigRevision {
   configId      String
   version       Int
   previousValue Int?
-  newValue      Int
+  newValue      Int?
   createdAt     DateTime @default(now())
   config        RuntimeConfigOverride @relation(fields: [configId], references: [id], onDelete: Restrict)
 

@@ -41,25 +41,27 @@ export async function loadEffectiveRuntimeConfig(input: {
       ? rows.find((row) => row.scopeKey === `CAMPUS:${input.campusId}`)
       : undefined;
     const global = rows.find((row) => row.scopeKey === "GLOBAL");
-    const selected = campus ?? global;
-    if (!selected) {
-      return { key: input.key, value: def.defaultValue, source: "DEFAULT", version: null };
+    for (const row of rows) {
+      const validGlobal = row.scopeKey === "GLOBAL" && row.campusId === null;
+      const validCampus = !!input.campusId &&
+        row.scopeKey === `CAMPUS:${input.campusId}` &&
+        row.campusId === input.campusId;
+      if ((!validGlobal && !validCampus) ||
+          !Number.isSafeInteger(row.version) || row.version < 1) {
+        throw new Error("RUNTIME_CONFIG_ROW_CORRUPT");
+      }
     }
-    // Validate DB truth; do NOT hide malformed CAMPUS override by using GLOBAL.
-    if (
-      (selected.scopeKey === "GLOBAL" && selected.campusId !== null) ||
-      (selected.scopeKey !== "GLOBAL" &&
-        selected.scopeKey !== `CAMPUS:${selected.campusId}`) ||
-      !Number.isSafeInteger(selected.version) ||
-      selected.version < 1
-    ) {
-      throw new Error("RUNTIME_CONFIG_ROW_CORRUPT");
+    // NULL is a versioned INHERIT tombstone. The current row and immutable
+    // revision remain; never physically delete history to restore precedence.
+    const selected = campus && campus.value !== null ? campus : global;
+    if (!selected || selected.value === null) {
+      return { key: input.key, value: def.defaultValue, source: "DEFAULT", version: null };
     }
     const value = parseRuntimeConfigValue(input.key, selected.value);
     return {
       key: input.key,
       value,
-      source: campus ? "CAMPUS_OVERRIDE" : "GLOBAL_OVERRIDE",
+      source: selected === campus ? "CAMPUS_OVERRIDE" : "GLOBAL_OVERRIDE",
       version: selected.version,
     };
   } catch {

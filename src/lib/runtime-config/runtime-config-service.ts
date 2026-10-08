@@ -14,7 +14,7 @@ export type RuntimeConfigMutationInput = {
   actorId: string;
   key: RuntimeConfigKey;
   campusId: string | null; // null = GLOBAL
-  value: number;
+  value: number | null; // null = explicit versioned INHERIT
   expectedVersion: number; // 0 = create, otherwise compare-and-swap
   seams?: {
     afterAuthorization?: (tx: PrismaTypes.TransactionClient) => Promise<void>;
@@ -26,7 +26,7 @@ export type RuntimeConfigMutationResult = {
   key: RuntimeConfigKey;
   scopeKey: string;
   previousValue: number | null;
-  value: number;
+  value: number | null;
   version: number;
 };
 
@@ -43,7 +43,7 @@ export async function setRuntimeConfigTx(
   input: RuntimeConfigMutationInput,
 ): Promise<RuntimeConfigMutationResult> {
   assertRuntimeConfigKey(input.key);
-  const value = parseRuntimeConfigValue(input.key, input.value);
+  const value = input.value === null ? null : parseRuntimeConfigValue(input.key, input.value);
   if (
     !input.actorId ||
     (input.campusId !== null && !input.campusId.trim()) ||
@@ -69,6 +69,9 @@ export async function setRuntimeConfigTx(
       where: { key_scopeKey: { key: input.key, scopeKey } },
       select: { id: true, version: true, value: true },
     });
+    if (value === null && !existing) {
+      throw new Error("RUNTIME_CONFIG_OVERRIDE_NOT_FOUND");
+    }
     if ((existing?.version ?? 0) !== input.expectedVersion) {
       throw new Error("RUNTIME_CONFIG_VERSION_CONFLICT");
     }
