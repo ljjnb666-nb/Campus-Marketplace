@@ -5,6 +5,7 @@ import { PrismaClient } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import { lockFeatureFlagExclusive, requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
+import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { setFeatureFlag } from "@/lib/feature-flags/feature-flag-service";
 import { withTransaction } from "@/lib/prisma";
 
@@ -163,6 +164,68 @@ describe.skipIf(!enabled)("P10F real PostgreSQL transaction-race acceptance", ()
       }
       await writer;
       expect(await reading).toMatchObject({ code: "NEW_ACTIVITY_DISABLED" });
+    });
+  });
+
+  it("P10F-RACE-03: authority revocation waits for the writer's USER lock", async () => {
+    await withIsolatedCampus(async ({ db, campusId, actorId }) => {
+      const authorized = latch();
+      const releaseWriter = latch();
+      const revokeStarted = latch();
+      let revocationCommitted = false;
+
+      // Real setter; intentionally abort the pending mutation after authorization
+      // so the immutable history is never persisted in this disposable fixture.
+      const mutation = setFeatureFlag({
+        actorId, key: "DISABLE_NEW_ORDERS", campusId,
+        disabled: true, expectedVersion: 0,
+        seams: {
+          afterAuthorization: async () => {
+            authorized.resolve();
+            await releaseWriter.promise;
+          },
+          beforeAudit: async () => {
+            throw new Error("P10F_EXPECTED_AUDIT_ABORT");
+          },
+        },
+      }).then(
+        () => { throw new Error("P10F_UNEXPECTED_MUTATION_COMMIT"); },
+        (error: unknown) => error,
+      );
+
+      await authorized.promise;
+
+      // The canonical role-assignment service uses the same sorted USER lock.
+      // Revoke the isolated fixture grant using its real PG lock + DML seam;
+      // do not remove any permanent revision or weaken production constraints.
+      const revoke = withTransaction(async (tx) => {
+        revokeStarted.resolve();
+        await acquireGovernanceSubjectLocks(tx, [
+          { subjectType: "USER", subjectId: actorId },
+        ]);
+        await tx.userRoleAssignment.deleteMany({ where: { userId: actorId } });
+      }).then(() => { revocationCommitted = true; });
+
+      try {
+        await revokeStarted.promise;
+        await sleep(100);
+        expect(revocationCommitted).toBe(false);
+      } finally {
+        releaseWriter.resolve();
+      }
+
+      const abort = await mutation;
+      expect(abort).toBeInstanceOf(Error);
+      expect((abort as Error).message).toBe("P10F_EXPECTED_AUDIT_ABORT");
+      await revoke;
+      expect(revocationCommitted).toBe(true);
+
+      await expect(setFeatureFlag({
+        actorId, key: "DISABLE_NEW_ORDERS", campusId,
+        disabled: true, expectedVersion: 0,
+      })).rejects.toThrow();
+      expect(await db.featureFlagOverride.count({ where: { campusId } })).toBe(0);
+      expect(await db.featureFlagRevision.count({ where: { flag: { campusId } } })).toBe(0);
     });
   });
 
