@@ -52,12 +52,15 @@ describe("10H runtime config action", () => {
   });
 
   it("rejects invalid value/version and empty inheritance without DB mutations", async () => {
-    for (const overrides of [
+    const invalidCases: Record<string, string>[] = [
       { nextValue: "4" }, { nextValue: "51" }, { nextValue: "1.5" },
       { nextValue: "05" }, { nextValue: "" },
       { expectedVersion: "-1" }, { expectedVersion: "9007199254740992" },
       { acknowledgement: "" }, { nextValue: "inherit", expectedVersion: "0" },
-    ]) expect((await changeGovernanceRuntimeConfig(previous, data(overrides))).status).toBe("error");
+    ];
+    for (const overrides of invalidCases) {
+      expect((await changeGovernanceRuntimeConfig(previous, data(overrides))).status).toBe("error");
+    }
     expect(setRuntimeConfig).not.toHaveBeenCalled();
   });
 
