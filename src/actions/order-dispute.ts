@@ -6,6 +6,7 @@ import { withTransaction } from "@/lib/prisma";
 import { revalidateOrderViews } from "@/lib/revalidate";
 import { requireUser } from "@/lib/server-auth";
 import { isRbacError } from "@/lib/rbac/errors";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { orderDisputeSchema } from "@/validators/order";
 
 /**
@@ -66,7 +67,7 @@ export async function initiateGeneralOrderDispute(
 
     return { success: true, message: "纠纷已提交，订单已进入处理流程" };
   } catch (error) {
-    if (isRbacError(error)) {
+    if (isRbacError(error) || error instanceof NewActivityDisabledError) {
       // 已知治理/RBAC inactive 家族：现有安全 userMessage（无内部结构）
       return { success: false, message: error.message };
     }

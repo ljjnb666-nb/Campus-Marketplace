@@ -3,6 +3,13 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Prisma } from "@prisma/client";
 
+// Historical lifecycle tests isolate the domain transition predicates;
+// Phase 10F's real guard has dedicated unit and PostgreSQL contract tests.
+vi.mock("@/lib/feature-flags/feature-flag-guard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/feature-flags/feature-flag-guard")>()),
+  requireNewActivityAllowed: vi.fn().mockResolvedValue(undefined),
+}));
+
 const {
   assertActiveAccountMutationAllowed,
   requireMarketplaceCapability,

@@ -4,6 +4,7 @@ import { withTransaction, prisma } from "@/lib/prisma";
 import { logger } from "@/lib/logger";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { isRbacError } from "@/lib/rbac/errors";
 import { requireUser } from "@/lib/server-auth";
 import {
@@ -150,7 +151,7 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
     // 参与方/能力门域错误（Phase 5/6A/6B/6C-3）返回安全 userMessage：
     // GOVERNANCE_SUBJECT_INACTIVE / AUTH_ACCOUNT_INACTIVE / MEMBERSHIP_NOT_ACTIVE /
     // MARKETPLACE_RESTRICTED / MARKETPLACE_COUNTERPARTY_UNAVAILABLE
-    if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error)) {
+    if (isGovernanceError(error) || isRbacError(error) || isEnforcementError(error) || error instanceof NewActivityDisabledError) {
       return { success: false, message: error.message };
     }
 
@@ -522,6 +523,9 @@ export async function initiateDispute(formData: FormData): Promise<RentalOrderAc
 
     await attachOrderPhotos(user.id, orderId, evidenceTokens);
   } catch (error) {
+    if (error instanceof NewActivityDisabledError) {
+      return { success: false, message: error.message };
+    }
     logger.error("rental-order action failed", "rental-order", { action: "initiateDispute", error });
     return {
       success: false,

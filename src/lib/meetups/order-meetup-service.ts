@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { createOrderDisputeFromLockedOrderTx } from "@/lib/order-dispute-machine";
 import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-account-mutation";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
@@ -249,6 +250,8 @@ export async function proposeOrderMeetupTx(
   }
 
   const now = new Date();
+  await requireNewActivityAllowed(tx, { kind: "MEETUP", campusId });
+
   const created = await tx.orderMeetup.create({
     data: {
       orderId: input.orderId,

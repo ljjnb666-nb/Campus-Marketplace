@@ -1,5 +1,6 @@
 "use server";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { redirect } from "next/navigation";
 import { decimalValue } from "@/lib/decimal";
 import { actionErrorMessage } from "@/lib/error-handler";
@@ -114,6 +115,8 @@ export async function createService(
 
       await enforceMarketplaceCapability(tx, user.id, provider.campusId);
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: provider.campusId });
+
       const created = await tx.serviceListing.create({
         data: {
           title: parsed.data.title,
@@ -128,6 +131,21 @@ export async function createService(
         },
       });
 
+      // Phase 10F: cover attachment and public-cover write share the
+      // same transaction and flag SHARED lock as listing creation.
+      const coverImageUrl = await resolveSingleImageToken({
+        ownerId: user.id,
+        token: parsed.data.coverImageUrl,
+        target: { type: "serviceListing", id: created.id },
+        tx,
+      });
+      if (coverImageUrl) {
+        await tx.serviceListing.update({
+          where: { id: created.id },
+          data: { coverImageUrl },
+        });
+      }
+
       await recordLiquidityListingCreatedTx(tx, {
         listingId: created.id,
         listingType: "SERVICE",
@@ -137,20 +155,6 @@ export async function createService(
 
       return created;
     });
-
-    // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源
-    const coverImageUrl = await resolveSingleImageToken({
-      ownerId: user.id,
-      token: parsed.data.coverImageUrl,
-      target: { type: "serviceListing", id: service.id },
-    });
-
-    if (coverImageUrl) {
-      await prisma.serviceListing.update({
-        where: { id: service.id },
-        data: { coverImageUrl },
-      });
-    }
 
     revalidateServiceViews(service.id);
 
@@ -226,17 +230,10 @@ export async function updateService(
       return { ...initialState, message: "服务分类不存在或已停用" };
     }
 
-    // 封面 token（asset: 引用 / 外链）规范化并绑定新上传资源
-    const coverImageUrl = await resolveSingleImageToken({
-      ownerId: user.id,
-      token: parsed.data.coverImageUrl,
-      target: { type: "serviceListing", id: serviceId },
-    });
-
     // Phase 6C-3：编辑自己服务内容 = MODIFY_PUBLIC_LISTING_CONTENT 能力；
     // 原为裸写（事务外），此处做最小事务化使 gate 与写同事务（campus 取
     // ServiceListing 权威行，客户端不可伪造）
-    await withTransaction(async (tx) => {
+    const coverImageUrl = await withTransaction(async (tx) => {
       // RB-03：USER 锁 + 锁内 fresh active 复核（lifecycle 转换后不得
       // 修改公开服务内容）
       await prepareActiveAccountMutation(tx, user.id);
@@ -248,6 +245,14 @@ export async function updateService(
         "MODIFY_PUBLIC_LISTING_CONTENT",
       );
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: service.campusId });
+      // No asset may attach before the same-tx LISTING_EDIT authority check.
+      const resolvedCover = await resolveSingleImageToken({
+        ownerId: user.id,
+        token: parsed.data.coverImageUrl,
+        target: { type: "serviceListing", id: serviceId },
+        tx,
+      });
       await tx.serviceListing.update({
         where: { id: serviceId },
         data: {
@@ -258,9 +263,10 @@ export async function updateService(
           pricingUnit: parsed.data.pricingUnit,
           locationText: parsed.data.locationText,
           availableSchedule: parsed.data.availableSchedule || null,
-          coverImageUrl: coverImageUrl || null,
+          coverImageUrl: resolvedCover || null,
         },
       });
+      return resolvedCover;
     });
 
     // 封面被替换时标记旧资源待删除

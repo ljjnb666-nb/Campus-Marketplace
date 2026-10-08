@@ -1,5 +1,6 @@
 "use server";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { RentalListingStatus } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -120,6 +121,8 @@ export async function createRentalListing(
       await prepareActiveAccountMutation(tx, user.id);
 
       await enforceMarketplaceCapability(tx, user.id, owner.campusId);
+
+      await requireNewActivityAllowed(tx, { kind: "LISTING", campusId: owner.campusId });
 
       const created = await tx.rentalListing.create({
         data: {
@@ -266,6 +269,7 @@ export async function updateRentalListing(
         "MODIFY_PUBLIC_LISTING_CONTENT",
       );
 
+      await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: existingListing.campusId });
       await tx.rentalListing.update({
         where: { id: listingId },
         data: {

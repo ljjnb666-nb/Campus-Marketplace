@@ -4,6 +4,8 @@ import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-acco
 import { governanceError } from "@/lib/governance/domain-errors";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { withTransaction } from "@/lib/prisma";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
+import { resolveConversationCampusIdTx } from "@/lib/feature-flags/feature-flag-campus";
 import {
   resolveConversationCommunicationPolicyTx,
   type ConversationObligationRefs,
@@ -183,6 +185,11 @@ export async function sendMessageTx(input: SendMessageTxInput): Promise<{ messag
     if (seams?.beforeWrite) {
       await seams.beforeWrite(tx);
     }
+
+    // The conversation has no campusId; derive it exclusively from the
+    // canonical source aggregate (including Order/RentalOrder links).
+    const campusId = await resolveConversationCampusIdTx(tx, refs);
+    await requireNewActivityAllowed(tx, { kind: "MESSAGE", campusId });
 
     // 6. durable writes（同一事务边界）
     const message = await tx.message.create({

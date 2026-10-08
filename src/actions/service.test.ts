@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+// Phase 10F's real transaction guard is separately verified by
+// feature-flag-guard.test.ts and Phase 10F real-PostgreSQL contracts.
+// This legacy unit suite isolates its existing domain behavior only.
+vi.mock("@/lib/feature-flags/feature-flag-guard", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/feature-flags/feature-flag-guard")>()),
+  requireNewActivityAllowed: vi.fn().mockResolvedValue(undefined),
+}));
+
 
 vi.mock("@/lib/analytics/liquidity-domain-events", () => ({
   recordLiquidityListingCreatedTx: vi.fn().mockResolvedValue({ recorded: true }),
@@ -112,6 +120,7 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 import { createService, deleteService, updateService, updateServiceStatus } from "@/actions/service";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 
 function buildValidServiceFormData() {
   const formData = new FormData();
@@ -134,6 +143,7 @@ describe("service actions", () => {
     containsBannedKeyword.mockReset();
     uploadImageAsset.mockReset();
     resolveSingleImageToken.mockReset();
+    vi.mocked(requireNewActivityAllowed).mockReset().mockResolvedValue(undefined);
     markAssetsForValuesPendingDelete.mockReset().mockResolvedValue(0);
     userFindUnique.mockReset();
     serviceCategoryFindFirst.mockReset();
@@ -214,6 +224,47 @@ describe("service actions", () => {
         coverImageUrl: "http://localhost:9100/campus-public/public/services/user-1/cover.webp",
       },
     });
+  });
+
+  it("P10F-COVER-01: cover is attached and written under the creating flag transaction", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    const result = await createService({ success: false, message: "" }, buildValidServiceFormData());
+    expect(result.success).toBe(true);
+    expect(resolveSingleImageToken).toHaveBeenCalledWith(expect.objectContaining({
+      target: { type: "serviceListing", id: "service-1" },
+      tx: expect.objectContaining({ serviceListing: expect.objectContaining({ update: serviceListingUpdate }) }),
+    }));
+    const gate = vi.mocked(requireNewActivityAllowed).mock.invocationCallOrder[0]!;
+    const create = serviceListingCreate.mock.invocationCallOrder[0]!;
+    const attach = resolveSingleImageToken.mock.invocationCallOrder[0]!;
+    const write = serviceListingUpdate.mock.invocationCallOrder[0]!;
+    expect(gate).toBeLessThan(create);
+    expect(create).toBeLessThan(attach);
+    expect(attach).toBeLessThan(write);
+  });
+
+  it("P10F-COVER-02: denied listing creation never attaches or writes a cover", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    vi.mocked(requireNewActivityAllowed).mockRejectedValueOnce(new Error("P10F_TEST_DISABLED"));
+    const result = await createService({ success: false, message: "" }, buildValidServiceFormData());
+    expect(result.success).toBe(false);
+    expect(serviceListingCreate).not.toHaveBeenCalled();
+    expect(resolveSingleImageToken).not.toHaveBeenCalled();
+    expect(serviceListingUpdate).not.toHaveBeenCalled();
+  });
+
+  it("P10F-COVER-03: denied public edit never attaches an asset", async () => {
+    containsBannedKeyword.mockResolvedValue(null);
+    serviceListingFindFirst.mockResolvedValue({
+      id: "service-1", campusId: "campus-1", coverImageUrl: null,
+    });
+    vi.mocked(requireNewActivityAllowed).mockRejectedValueOnce(new Error("P10F_TEST_READ_ONLY"));
+    const form = buildValidServiceFormData();
+    form.set("serviceId", "service-1");
+    const result = await updateService({ success: false, message: "" }, form);
+    expect(result.success).toBe(false);
+    expect(resolveSingleImageToken).not.toHaveBeenCalled();
+    expect(serviceListingUpdate).not.toHaveBeenCalled();
   });
 
   it("rejects service update when the user does not own the listing", async () => {

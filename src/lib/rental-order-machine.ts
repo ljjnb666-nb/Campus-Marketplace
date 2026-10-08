@@ -1,4 +1,5 @@
 import { Prisma, type DepositStatus, type RentalCancellationReason, type RentalOrderStatus, type RentalPricingUnit } from "@prisma/client";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { marketplaceObligationValidator } from "@/lib/enforcement/capability-gate";
 import {
   DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE,
@@ -238,6 +239,8 @@ export async function createRentalOrderTx(
     if (domainRacePoint) {
       await domainRacePoint(tx);
     }
+
+    await requireNewActivityAllowed(tx, { kind: "ORDER", campusId: rawListing.campusId });
 
     // ⚠️ $queryRaw 返回的 Decimal 列是原始类型（string/number），pricingUnit 是 string 而非枚举。
     // 需手动包装为 Prisma.Decimal 和 as RentalPricingUnit，绕开了 TypeScript 的类型保护。
@@ -1341,6 +1344,8 @@ export async function initiateDisputeTx(
   if (input.racePoint) {
     await input.racePoint(tx);
   }
+
+  await requireNewActivityAllowed(tx, { kind: "DISPUTE", campusId: order.campusId });
 
   // ---- 步骤 5-9：dispute + source-linked holds + order 状态 + log + 通知 ----
   const now = new Date();

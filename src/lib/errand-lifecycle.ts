@@ -1,6 +1,7 @@
 import { type ErrandTaskStatus, Prisma } from "@prisma/client";
 
 import { requireMarketplaceCapability } from "@/lib/enforcement/capability-gate";
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { completeErrandOrderTx } from "@/lib/errand-completion";
 import {
   assertActiveAccountMutationAllowed,
@@ -725,6 +726,8 @@ export async function updateErrandContentTx(
     errand.campusId,
     "MODIFY_PUBLIC_LISTING_CONTENT",
   );
+
+  await requireNewActivityAllowed(tx, { kind: "LISTING_EDIT", campusId: errand.campusId });
 
   await tx.errandTask.update({
     where: { id: errand.id },

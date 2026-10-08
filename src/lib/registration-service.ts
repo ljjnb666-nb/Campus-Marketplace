@@ -1,5 +1,6 @@
 import type { User } from "@prisma/client";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { createActiveMembership } from "@/lib/campus/membership-service";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { recordSignupAcceptances } from "@/lib/legal/policy-service";
@@ -66,6 +67,8 @@ export async function registerActiveCampusUser(
     if (!campus) {
       return { ok: false, reason: "CAMPUS_NOT_AVAILABLE" as const };
     }
+
+    await requireNewActivityAllowed(tx, { kind: "REGISTRATION", campusId: campus.id });
 
     const user = await tx.user.create({
       data: {

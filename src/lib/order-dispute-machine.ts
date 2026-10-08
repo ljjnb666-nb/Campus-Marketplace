@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import {
   assertActiveAccountMutationAllowed,
   type ActiveAccountMutationSeams,
@@ -219,6 +220,8 @@ export async function createOrderDisputeFromLockedOrderTx(
   if (context.afterFreshChecks) {
     await context.afterFreshChecks(tx);
   }
+
+  await requireNewActivityAllowed(tx, { kind: "DISPUTE", campusId });
 
   // ---- dispute + holds + order/errand 状态 + 通知（原子）----
   const now = new Date();

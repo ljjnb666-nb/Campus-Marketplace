@@ -386,6 +386,7 @@ model Campus {
   userRoles            UserRoleAssignment[]
   adminLogs            AdminLog[]
   runtimeConfigOverrides RuntimeConfigOverride[]
+  featureFlagOverrides FeatureFlagOverride[]
   // Phase 6B：trust / risk / enforcement
   riskStates           RiskState[]
   riskFlags            RiskFlag[]
@@ -990,6 +991,40 @@ model ModerationKeyword {
 // Phase 10E: ONLY typed, non-secret, server-owned runtime configuration.
 // Config write authority and scope safety are enforced by the service and DB.
 // Revision rows are immutable provenance, independent from mutable current state.
+
+/**
+ * Phase 10F: restrictive feature flags. An explicit local false never bypasses
+ * a true GLOBAL disable; null is a versioned INHERIT marker, not deletion.
+ */
+model FeatureFlagOverride {
+  id         String   @id @default(cuid())
+  key        String
+  scopeKey   String
+  campusId   String?
+  disabled   Boolean?
+  version    Int      @default(1)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  campus     Campus?  @relation(fields: [campusId], references: [id], onDelete: Restrict)
+  revisions  FeatureFlagRevision[]
+
+  @@unique([key, scopeKey])
+  @@index([campusId, key])
+}
+
+model FeatureFlagRevision {
+  id               String   @id @default(cuid())
+  flagId           String
+  version          Int
+  previousDisabled Boolean?
+  nextDisabled     Boolean?
+  createdAt        DateTime @default(now())
+  flag             FeatureFlagOverride @relation(fields: [flagId], references: [id], onDelete: Restrict)
+
+  @@unique([flagId, version])
+  @@index([flagId, createdAt])
+}
+
 model RuntimeConfigOverride {
   id          String   @id @default(cuid())
   key         String

@@ -12,6 +12,7 @@ import {
 import { withTransaction } from "@/lib/prisma";
 import { revalidateOrderMeetupViews } from "@/lib/revalidate";
 import { isRbacError } from "@/lib/rbac/errors";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { requireUser } from "@/lib/server-auth";
 import {
   orderMeetupMutationSchema,
@@ -50,7 +51,7 @@ function meetupDenyMessage(code: MeetupErrorCode): string {
 
 /** unknown exception → logger + 统一兜底（raw error 不回浏览器） */
 function meetupActionFailure(error: unknown, action: string): OrderMeetupActionState {
-  if (isRbacError(error)) {
+  if (isRbacError(error) || error instanceof NewActivityDisabledError) {
     // 已知治理/RBAC inactive 家族：现有安全 userMessage（无内部结构）
     return { success: false, message: error.message };
   }

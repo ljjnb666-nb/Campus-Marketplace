@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
+import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { enqueueAsyncJobTx } from "@/lib/async/job-repository";
 import {
   PRODUCT_RESERVATION_EXPIRE_JOB_KIND,
@@ -109,6 +110,8 @@ export async function createProductOrderTx(
       }
 
       // 既有条件 update 保留为最终谓词安全带（行锁下恒真，幂等语义不变）
+      await requireNewActivityAllowed(tx, { kind: "ORDER", campusId: fresh.campusId });
+
       const reserveResult = await tx.product.updateMany({
         where: {
           id: fresh.id,
@@ -233,6 +236,8 @@ export async function createServiceOrderTx(
         await domainRacePoint(tx);
       }
 
+      await requireNewActivityAllowed(tx, { kind: "ORDER", campusId: fresh.campusId });
+
       const order = await tx.order.create({
         data: {
           orderNo: createOrderNo(),
@@ -356,6 +361,8 @@ export async function claimErrandTx(
 
       // 既有条件 update 保留为最终谓词安全带（行锁下恒真，幂等语义不变）；
       // deadline 下界一并入带（防御纵深）
+      await requireNewActivityAllowed(tx, { kind: "ORDER", campusId: fresh.campusId });
+
       const claimResult = await tx.errandTask.updateMany({
         where: {
           id: fresh.id,

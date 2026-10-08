@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { ZodError } from "zod";
 
 import { isAppealError } from "@/lib/appeals/errors";
@@ -28,6 +29,10 @@ export type HandledError = {
  * 不进入错误率告警关注面。
  */
 export function handleError(error: unknown, context: string): HandledError {
+  if (error instanceof NewActivityDisabledError) {
+    return { message: error.message, statusCode: 503 };
+  }
+
   if (error instanceof ZodError) {
     return {
       message: error.issues[0]?.message ?? "请求参数不正确",

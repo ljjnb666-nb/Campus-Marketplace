@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { registerSchema } from "@/validators/auth";
 import { isRateLimited } from "@/lib/rate-limit";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
+import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
 import { registerActiveCampusUser } from "@/lib/registration-service";
 
 export type ActionState = {
@@ -87,6 +88,9 @@ export async function registerUser(
       return { success: false, message: "校区不存在" };
     }
   } catch (error) {
+    if (error instanceof NewActivityDisabledError) {
+      return { success: false, message: error.message };
+    }
     if (isGovernanceError(error)) {
       return { success: false, message: error.message };
     }

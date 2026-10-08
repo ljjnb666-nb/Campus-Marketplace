@@ -244,11 +244,18 @@ async function createConversationFixture(input: {
   refs?: Partial<Record<"productId" | "errandTaskId" | "serviceListingId" | "rentalListingId" | "orderId" | "rentalOrderId", string>>;
   initialMessage?: { senderId: string; content: string };
 }) {
+  // P10F: every send requires immutable source-campus provenance.
+  // Legacy unit fixtures with no source now use a real linked Product instead.
+  // This preserves the blocked-user policy's purpose and never bypasses the
+  // production feature gate.
+  const refs = input.refs ?? {
+    productId: (await createProductFixture(input.participantIds[1])).id,
+  };
   const conversation = await rawClient!.conversation.create({
     data: {
       title: "8A03 fixture 会话",
       conversationKey: input.conversationKey ?? `FIXTURE:${randomUUID()}`,
-      ...input.refs,
+      ...refs,
       participants: {
         create: input.participantIds.map((userId) => ({ userId })),
       },
