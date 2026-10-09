@@ -10,12 +10,12 @@ import { recordDomainEventTx } from "@/lib/domain-events/domain-event";
 
 type ListingType = (typeof LIQUIDITY_LISTING_TYPES)[number];
 type ConversationRefs = {
-  productId: string | null;
-  errandTaskId: string | null;
-  serviceListingId: string | null;
-  rentalListingId: string | null;
-  orderId: string | null;
-  rentalOrderId: string | null;
+  productId?: string | null;
+  errandTaskId?: string | null;
+  serviceListingId?: string | null;
+  rentalListingId?: string | null;
+  orderId?: string | null;
+  rentalOrderId?: string | null;
 };
 
 export function firstReplyEventEmissionEnabled(): boolean {
