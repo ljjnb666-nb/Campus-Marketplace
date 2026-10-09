@@ -43,12 +43,12 @@ CREATE INDEX "FunnelCaptureClaim_recordedAt_idx"
 -- The insertion time is a server-owned receipt time, not an asserted field.
 -- PostgreSQL overwrites even an explicitly supplied recordedAt value.
 CREATE FUNCTION "stamp_funnel_capture_claim_recorded_at"()
-RETURNS trigger LANGUAGE plpgsql AS $
+RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   NEW."recordedAt" := statement_timestamp();
   RETURN NEW;
 END;
-$;
+$$;
 CREATE TRIGGER "FunnelCaptureClaim_recorded_at_db"
 BEFORE INSERT ON "FunnelCaptureClaim"
 FOR EACH ROW EXECUTE FUNCTION "stamp_funnel_capture_claim_recorded_at"();
