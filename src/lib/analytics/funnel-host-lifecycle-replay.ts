@@ -201,7 +201,7 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
       if (row.instance !== undefined || row.instances !== undefined) {
         reasons.add("INVALID_OBSERVATION");
       }
-      if (row.kind === "DISCONNECTED" && at < through && at >= from) {
+      if (row.kind === "DISCONNECTED" && at < through) {
         reasons.add("OBSERVER_DISCONNECTED");
       }
       if (row.kind === "HEARTBEAT" && at >= from && at < through) {
