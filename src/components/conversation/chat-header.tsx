@@ -6,6 +6,7 @@ import { ArrowLeft, ExternalLink, Flag, MoreVertical, ShieldCheck, UserX, Unlock
 import { ReportDialog } from "@/components/ui/report-dialog";
 import { BlockDialog } from "@/components/conversation/block-dialog";
 import { createReport } from "@/actions/trust";
+import { openListingFromConversation } from "@/actions/open-listing-from-conversation";
 import type { RelatedBizSnapshot } from "@/repositories/conversation-repository";
 
 interface ChatHeaderProps {
@@ -25,6 +26,7 @@ interface ChatHeaderProps {
 }
 
 export function ChatHeader({
+  conversationId,
   counterpart,
   relatedBiz,
   onBack,
@@ -153,13 +155,29 @@ export function ChatHeader({
               </div>
             </div>
 
-            <Link
-              href={relatedBiz.detailUrl}
-              className="shrink-0 inline-flex items-center gap-1 rounded-xl bg-white px-3 py-1.5 font-bold text-slate-700 border border-slate-200 shadow-2xs hover:bg-slate-100 dark:bg-slate-900 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <span>查看详情</span>
-              <ExternalLink className="size-3" />
-            </Link>
+            {conversationId &&
+            (relatedBiz.type === "PRODUCT" ||
+              relatedBiz.type === "SERVICE" ||
+              relatedBiz.type === "RENTAL") ? (
+              <form action={openListingFromConversation} className="shrink-0">
+                <input type="hidden" name="conversationId" value={conversationId} />
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1 rounded-xl bg-white px-3 py-1.5 font-bold text-slate-700 border border-slate-200 shadow-2xs hover:bg-slate-100 dark:bg-slate-900 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <span>查看详情</span>
+                  <ExternalLink className="size-3" />
+                </button>
+              </form>
+            ) : (
+              <Link
+                href={relatedBiz.detailUrl}
+                className="shrink-0 inline-flex items-center gap-1 rounded-xl bg-white px-3 py-1.5 font-bold text-slate-700 border border-slate-200 shadow-2xs hover:bg-slate-100 dark:bg-slate-900 dark:border-slate-800 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <span>查看详情</span>
+                <ExternalLink className="size-3" />
+              </Link>
+            )}
           </div>
         )}
       </div>

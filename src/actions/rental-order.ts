@@ -1,6 +1,7 @@
 "use server";
 
 import { withTransaction, prisma } from "@/lib/prisma";
+import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
@@ -131,6 +132,7 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
   }
 
   try {
+    const sourceToken = await readOrderOriginCookie();
     const result = await withTransaction((tx) =>
       createRentalOrderTx(tx, {
         userId: user.id,
@@ -139,11 +141,13 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
         endTime,
         quantity,
         renterNote: parsed.data.renterNote,
+        ...(sourceToken ? { attributionSourceToken: sourceToken } : {}),
       }),
     );
 
     if ('error' in result) return { success: false, message: result.error as string };
 
+    if (sourceToken) await clearOrderOriginCookie();
     revalidateRentalOrderCreationViews();
 
     return { success: true, message: '租赁申请已提交', redirectTo: `/rental-orders/${result.orderId}` };

@@ -11,6 +11,10 @@ const { createReport, ReportDialog, BlockDialog } = vi.hoisted(() => ({
   ),
 }));
 
+vi.mock("@/actions/open-listing-from-conversation", () => ({
+  openListingFromConversation: vi.fn(),
+}));
+
 vi.mock("@/actions/trust", () => ({
   createReport,
 }));
@@ -56,6 +60,25 @@ afterEach(() => {
 });
 
 describe("ChatHeader", () => {
+  it("uses explicit POST rather than GET for attributable listing chat navigation", () => {
+    render(
+      <ChatHeader
+        conversationId="conversation-1"
+        counterpart={counterpart}
+        relatedBiz={{
+          type: "PRODUCT",
+          id: "product-1",
+          title: "二手教材",
+          detailUrl: "/products/product-1",
+        }}
+      />,
+    );
+    expect(screen.queryByRole("link", { name: /查看详情/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /查看详情/ })).toHaveAttribute("type", "submit");
+    expect(document.querySelector('input[name="conversationId"]')).toHaveValue("conversation-1");
+    expect(document.querySelector('input[name="listingId"]')).toBeNull();
+  });
+
   it("renders counterpart identity with verified badge and biz card", () => {
     render(
       <ChatHeader
