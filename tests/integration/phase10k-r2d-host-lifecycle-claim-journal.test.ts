@@ -72,6 +72,8 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
       { hostId: "../spoof" },
       { sessionId: "" },
       { kind: "START", baselineJson: data.baselineJson },
+      { kind: "START", baselineJson: null, instanceId: null, releaseSha: null, role: null },
+      { kind: "STOP", baselineJson: null, instanceId: null, releaseSha: null, role: null },
       { kind: "BASELINE", baselineJson: "{}" },
       { kind: "BASELINE", baselineJson: "INVALID JSON" },
       { kind: "BASELINE", baselineJson: JSON.stringify(Array(129).fill(app)) },
