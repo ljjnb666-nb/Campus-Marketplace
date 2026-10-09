@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { recordListingConversationCreatedTx } from "@/lib/analytics/conversation-attribution";
+import { computeProductReservationExpiresAt } from "@/lib/product-reservation";
 import {
   mintOrderOriginToken, recordAttributedOrderIfEligibleTx,
 } from "@/lib/analytics/order-conversation-attribution";
@@ -106,6 +107,8 @@ describe.skipIf(!url)("10K-R2c-02A order origin (real PostgreSQL)", () => {
       const order = await tx.order.create({ data: {
         orderNo: "r2co-" + randomUUID(), type: "PRODUCT", amount: "12.00",
         buyerId, sellerId, productId: listingId,
+        paymentStatus: "OFFLINE_PENDING",
+        productReservationExpiresAt: computeProductReservationExpiresAt(new Date()),
       } });
       const state = await recordAttributedOrderIfEligibleTx(tx, {
         sourceToken: token, orderId: order.id, orderType: "PRODUCT", actorUserId: buyerId,
@@ -140,6 +143,8 @@ describe.skipIf(!url)("10K-R2c-02A order origin (real PostgreSQL)", () => {
       const newOrder = await tx.order.create({ data: {
         orderNo: "r2co-" + randomUUID(), type: "PRODUCT", amount: "12.00",
         buyerId, sellerId, productId: listingId,
+        paymentStatus: "OFFLINE_PENDING",
+        productReservationExpiresAt: computeProductReservationExpiresAt(new Date()),
       } });
       const result = await recordAttributedOrderIfEligibleTx(tx, {
         orderId: newOrder.id, orderType: "PRODUCT", actorUserId: buyerId,
@@ -164,6 +169,8 @@ describe.skipIf(!url)("10K-R2c-02A order origin (real PostgreSQL)", () => {
     await expect(db.$transaction(async tx => {
       const order = await tx.order.create({ data: {
         orderNo, type: "PRODUCT", amount: "12.00", buyerId, sellerId, productId: listingId,
+        paymentStatus: "OFFLINE_PENDING",
+        productReservationExpiresAt: computeProductReservationExpiresAt(new Date()),
       } });
       expect(await recordAttributedOrderIfEligibleTx(tx, {
         sourceToken: token, orderId: order.id,
