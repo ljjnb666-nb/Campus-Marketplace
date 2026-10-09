@@ -19,18 +19,24 @@ export async function readOrderOriginCookie(): Promise<string | null> {
 }
 
 export async function setOrderOriginCookie(token: string | null): Promise<void> {
-  const jar = await cookies();
-  if (!token || !orderAttributionEnabled()) {
-    jar.delete(ORDER_ORIGIN_COOKIE);
-    return;
+  try {
+    const jar = await cookies();
+    if (!token || !orderAttributionEnabled()) {
+      jar.delete(ORDER_ORIGIN_COOKIE);
+      return;
+    }
+    jar.set(ORDER_ORIGIN_COOKIE, token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      path: "/",
+      maxAge: MAX_AGE_SECONDS,
+    });
+  } catch {
+    // Optional analytics state must not prevent ordinary navigation.
+    // This request does NOT claim an attribution event; any stale cookie is
+    // additionally bound to actor, listing and a short validity window.
   }
-  jar.set(ORDER_ORIGIN_COOKIE, token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
-    path: "/",
-    maxAge: MAX_AGE_SECONDS,
-  });
 }
 
 export async function clearOrderOriginCookie(): Promise<void> {
