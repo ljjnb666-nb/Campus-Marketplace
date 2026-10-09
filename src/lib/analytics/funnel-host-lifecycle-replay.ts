@@ -112,6 +112,19 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
   let lastAt: number | null = null;
   const running = new Map<string, CandidateFleetInstance>();
 
+  // Test the state over actual half-open intervals, not just heartbeat instants.
+  // STOP at t, START at t+1ms is a real 1ms gap; simultaneous transitions
+  // at the same timestamp have no elapsed uncovered interval.
+  function checkActiveInterval(fromAt: number, toAt: number) {
+    if (Math.max(fromAt, from) >= Math.min(toAt, through)) return;
+    if (![...running.values()].some(i => i.role === "APP")) {
+      reasons.add("APP_ABSENT");
+    }
+    if (![...running.values()].some(i => i.role === "ASYNC_WORKER")) {
+      reasons.add("WORKER_ABSENT");
+    }
+  }
+
   for (const row of input.observations) {
     if (!row || typeof row !== "object" ||
         row.origin !== "UNVERIFIED_HOST_OBSERVER" ||
@@ -125,6 +138,7 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
       continue;
     }
     const at = row.observedAt.getTime();
+    if (lastAt !== null && at > lastAt) checkActiveInterval(lastAt, at);
     if (first) {
       first = false;
       if (row.kind !== "BASELINE") reasons.add("MISSING_INITIAL_BASELINE");
@@ -200,6 +214,7 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
       }
     }
   }
+  if (lastAt !== null && lastAt < through) checkActiveInterval(lastAt, through);
   if (lastAt === null || lastAt < through) reasons.add("POST_WINDOW_UNKNOWN");
   if (lastAt !== null && lastAt < through && through - lastAt > MAX_GAP) {
     reasons.add("OBSERVER_SILENCE");
