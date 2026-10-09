@@ -94,6 +94,23 @@ describe.skipIf(!url)("10K-R2d-03B-01 real-PG immutable capture claim journal", 
     })).toBe(0);
   });
 
+  it("PostgreSQL ignores forged recordedAt so receipt time belongs to the database", async () => {
+    const c = prepareUnverifiedCaptureClaim(sample());
+    const forged = new Date("2000-01-01T00:00:00.000Z");
+    await expect(db.$transaction(async tx => {
+      const written = await tx.funnelCaptureClaim.create({
+        data: { ...c, recordedAt: forged },
+      });
+      expect(written.recordedAt.getTime()).not.toBe(forged.getTime());
+      const fetched = await tx.funnelCaptureClaim.findUniqueOrThrow({
+        where: { claimKey: c.claimKey },
+      });
+      expect(fetched.recordedAt).toEqual(written.recordedAt);
+      throw new Error("ROLLBACK_RECEIPT_TIME_FIXTURE");
+    })).rejects.toThrow("ROLLBACK_RECEIPT_TIME_FIXTURE");
+    expect(await db.funnelCaptureClaim.count({ where: { campusId } })).toBe(0);
+  });
+
   it("database constraints reject invalid streams, instance IDs and release SHAs", async () => {
     const c = prepareUnverifiedCaptureClaim(sample());
     for (const invalid of [
