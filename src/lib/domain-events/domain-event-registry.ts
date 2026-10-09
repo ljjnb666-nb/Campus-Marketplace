@@ -42,6 +42,13 @@ export const LISTING_CONVERSATION_CREATED_EVENT_TYPE = "LISTING_CONVERSATION_CRE
 export const LISTING_CONVERSATION_CREATED_EVENT_SCHEMA_VERSION = 1;
 export const LISTING_CONVERSATION_CREATED_AGGREGATE_TYPE = "CONVERSATION";
 
+// Phase 10K-R2c-01: first canonical DIRECT reply by the non-initiating
+// participant in a newly created R2b listing conversation. An event is
+// NOT emitted for order-first conversations, old conversations or system text.
+export const LISTING_CONVERSATION_FIRST_REPLY_EVENT_TYPE = "LISTING_CONVERSATION_FIRST_REPLY";
+export const LISTING_CONVERSATION_FIRST_REPLY_EVENT_SCHEMA_VERSION = 1;
+export const LISTING_CONVERSATION_FIRST_REPLY_AGGREGATE_TYPE = "CONVERSATION";
+
 export const LIQUIDITY_LISTING_TYPES = ["PRODUCT", "SERVICE", "RENTAL"] as const;
 export const LIQUIDITY_DEMAND_TYPES = [
   "PRODUCT_ORDER",
@@ -92,6 +99,14 @@ const listingConversationCreatedPayloadSchema = z
   })
   .strict();
 
+const listingConversationFirstReplyPayloadSchema = z.object({
+  conversationId: boundedId,
+  listingId: boundedId,
+  listingType: z.enum(LIQUIDITY_LISTING_TYPES),
+  replyMessageId: boundedId,
+  elapsedMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+
 const liquidityDemandCreatedPayloadSchema = z
   .object({
     demandId: boundedId,
@@ -129,6 +144,21 @@ type DomainEventDefinition = {
 };
 
 const DOMAIN_EVENT_DEFINITIONS = new Map<string, Map<number, DomainEventDefinition>>([
+  [
+    LISTING_CONVERSATION_FIRST_REPLY_EVENT_TYPE,
+    new Map([
+      [
+        LISTING_CONVERSATION_FIRST_REPLY_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LISTING_CONVERSATION_FIRST_REPLY_AGGREGATE_TYPE,
+          payloadSchema: listingConversationFirstReplyPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.conversationId as string,
+          occurrenceKey: (aggregateId) =>
+            "LISTING_CONVERSATION_FIRST_REPLY:" + aggregateId,
+        },
+      ],
+    ]),
+  ],
   [
     LISTING_CONVERSATION_CREATED_EVENT_TYPE,
     new Map([
