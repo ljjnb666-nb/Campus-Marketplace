@@ -8,6 +8,7 @@ import {
 } from "@/lib/privacy/data-hold-service";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { hasActiveListingModeration } from "@/lib/moderation/listing-moderation-query";
+import { recordAttributedOrderIfEligibleTx } from "@/lib/analytics/order-conversation-attribution";
 import type { ListingModerationRacePoint } from "@/lib/order-creation";
 import { emitNotificationsTx } from "@/lib/notifications/notification-service";
 import {
@@ -147,6 +148,7 @@ export async function createRentalOrderTx(
     endTime: Date;
     quantity: number;
     renterNote?: string;
+    attributionSourceToken?: string | null;
   },
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
@@ -313,6 +315,12 @@ export async function createRentalOrderTx(
       campusId: listing.campusId,
       occurredAt: order.createdAt,
     });
+    if (input.attributionSourceToken) {
+      await recordAttributedOrderIfEligibleTx(tx, {
+        sourceToken: input.attributionSourceToken, orderId: order.id,
+        orderType: "RENTAL", actorUserId: userId,
+      });
+    }
 
     await writeStatusLog(tx, {
       orderId: order.id,

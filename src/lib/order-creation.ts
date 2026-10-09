@@ -15,6 +15,7 @@ import {
   emitNotificationsTx,
 } from "@/lib/notifications/notification-service";
 import { recordLiquidityDemandCreatedTx } from "@/lib/analytics/liquidity-domain-events";
+import { recordAttributedOrderIfEligibleTx } from "@/lib/analytics/order-conversation-attribution";
 import {
   ERRAND_ORDER_CLAIMED_KIND,
   PRODUCT_ORDER_CREATED_KIND,
@@ -64,6 +65,7 @@ export async function createProductOrderTx(
     product: { id: string; price: string; sellerId: string; campusId: string };
     meetingLocation: string;
     note: string | null;
+    attributionSourceToken?: string | null;
   },
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
@@ -151,6 +153,12 @@ export async function createProductOrderTx(
         campusId: fresh.campusId,
         occurredAt: order.createdAt,
       });
+      if (input.attributionSourceToken) {
+        await recordAttributedOrderIfEligibleTx(tx, {
+          sourceToken: input.attributionSourceToken, orderId: order.id,
+          orderType: "PRODUCT", actorUserId: input.buyerId,
+        });
+      }
 
       // Phase 9A（§8/§9）：Order exists ⇔ expiry job durable intent exists。
       // AsyncJob 与 Order 在同一业务事务内原子落盘——严禁事务后 enqueue
@@ -196,6 +204,7 @@ export async function createServiceOrderTx(
     service: { id: string; price: string; providerId: string; campusId: string };
     meetingLocation: string;
     note: string | null;
+    attributionSourceToken?: string | null;
   },
   racePoint?: ObligationRacePoint,
   /** Phase 7C：listing 行锁 + 复查后、写入前的测试 seam（生产不传）。 */
@@ -258,6 +267,12 @@ export async function createServiceOrderTx(
         campusId: fresh.campusId,
         occurredAt: order.createdAt,
       });
+      if (input.attributionSourceToken) {
+        await recordAttributedOrderIfEligibleTx(tx, {
+          sourceToken: input.attributionSourceToken, orderId: order.id,
+          orderType: "SERVICE", actorUserId: input.buyerId,
+        });
+      }
 
       await emitNotificationsTx(tx, [
         {

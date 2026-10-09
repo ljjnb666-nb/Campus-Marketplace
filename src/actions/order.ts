@@ -10,6 +10,7 @@ import {
 } from "@/lib/order-creation";
 import { prisma, withTransaction } from "@/lib/prisma";
 import { revalidateOrderViews } from "@/lib/revalidate";
+import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { requireUser } from "@/lib/server-auth";
 import { orderStatusSchema, productOrderFormSchema, serviceOrderFormSchema } from "@/validators/order";
 
@@ -109,6 +110,7 @@ export async function createProductOrder(
       return { ...initialState, message: "该商品已有进行中的订单" };
     }
 
+    const sourceToken = await readOrderOriginCookie();
     const order = await withTransaction(async (tx) =>
       createProductOrderTx(tx, {
         buyerId: user.id,
@@ -120,6 +122,7 @@ export async function createProductOrder(
         },
         meetingLocation: parsed.data.meetingLocation,
         note: parsed.data.note || null,
+        ...(sourceToken ? { attributionSourceToken: sourceToken } : {}),
       }),
     );
 
@@ -130,6 +133,7 @@ export async function createProductOrder(
       return { ...initialState, message: "商品不存在或当前不可购买" };
     }
 
+    if (sourceToken) await clearOrderOriginCookie();
     revalidateOrderViews({ productId: product.id });
 
     return {
@@ -186,6 +190,7 @@ export async function createServiceOrder(
 
     // Phase 7C FR-02：canonical 锁内 gate（moderation/现势状态/参与方/
     // campus 失配）拒绝时返回 null——统一映射 SAFE 文案，不泄漏治理状态。
+    const sourceToken = await readOrderOriginCookie();
     const order = await withTransaction(async (tx) =>
       createServiceOrderTx(tx, {
         buyerId: user.id,
@@ -197,6 +202,7 @@ export async function createServiceOrder(
         },
         meetingLocation: parsed.data.meetingLocation,
         note: parsed.data.note || null,
+        ...(sourceToken ? { attributionSourceToken: sourceToken } : {}),
       }),
     );
 
@@ -204,6 +210,7 @@ export async function createServiceOrder(
       return { ...initialState, message: "服务不存在或当前不可预约" };
     }
 
+    if (sourceToken) await clearOrderOriginCookie();
     revalidateOrderViews({ serviceId: service.id });
 
     return {
