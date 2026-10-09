@@ -131,6 +131,22 @@ describe("10K-R2d-03B-02B-01 unverified host lifecycle candidate replay", () => 
     expect(reasonsFor(unknownStop)).toContain("LIFECYCLE_CONFLICT");
   });
 
+  it("detects a 1ms process absence between healthy heartbeats but not a zero-time handover", () => {
+    const rows = complete();
+    const at = moment(151);
+    const stop: Observation = { ...rows[10]!, kind: "STOP",
+      observedAt: at, instance: app };
+    const restart: Observation = { ...rows[10]!, kind: "START",
+      observedAt: new Date(at.getTime() + 1), instance: app };
+    const split = renumber([...rows.slice(0, 11), stop, restart, ...rows.slice(11)]);
+    expect(reasonsFor(split)).toContain("APP_ABSENT");
+
+    const sameInstant = renumber([...rows.slice(0, 11), stop,
+      { ...restart, observedAt: at }, ...rows.slice(11)]);
+    expect(replayUnverifiedHostLifecycle(input(sameInstant))
+      .candidateHistoryInternallyConsistent).toBe(true);
+  });
+
   it("detects zero-app or zero-worker candidate snapshots during heartbeats", () => {
     const noApp = complete();
     noApp[0] = { ...noApp[0]!, instances: [worker] };
