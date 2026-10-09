@@ -40,6 +40,46 @@ describe.skipIf(!url)("10K-R2d-03B-01 real-PG immutable capture claim journal", 
     expect(await db.funnelCaptureClaim.count({ where: { campusId } })).toBe(0);
   });
 
+  it("concurrent same-key writes survive an uncommitted writer rollback without orphan claims", async () => {
+    const claimKey = prepareUnverifiedCaptureClaim(sample()).claimKey;
+    let firstInserted!: () => void;
+    const firstReady = new Promise<void>(resolve => { firstInserted = resolve; });
+    let releaseFirst!: () => void;
+    const release = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    // Keep transaction A's unique-key insert uncommitted while B begins.
+    const first = db.$transaction(async tx => {
+      expect(await recordUnverifiedCaptureClaimTx(tx, sample()))
+        .toEqual({ claimKey, recorded: true });
+      firstInserted();
+      await release;
+      throw new Error("ROLLBACK_CONCURRENT_FIRST");
+    }, { timeout: 10_000 }).then(
+      () => "UNEXPECTED_FIRST_COMMIT", (error: unknown) => String(error),
+    );
+    await firstReady;
+
+    let secondStarted!: () => void;
+    const secondReady = new Promise<void>(resolve => { secondStarted = resolve; });
+    const second = db.$transaction(async tx => {
+      secondStarted();
+      // After A rolls back, B must insert rather than silently skip a lost row.
+      expect(await recordUnverifiedCaptureClaimTx(tx, sample()))
+        .toEqual({ claimKey, recorded: true });
+      throw new Error("ROLLBACK_CONCURRENT_SECOND");
+    }, { timeout: 10_000 }).then(
+      () => "UNEXPECTED_SECOND_COMMIT", (error: unknown) => String(error),
+    );
+
+    // Transactions overlap while A holds the uncommitted unique-key entry.
+    await secondReady;
+    releaseFirst();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult).toContain("ROLLBACK_CONCURRENT_FIRST");
+    expect(secondResult).toContain("ROLLBACK_CONCURRENT_SECOND");
+    expect(await db.funnelCaptureClaim.count({ where: { claimKey } })).toBe(0);
+  }, 20_000);
+
   it("PostgreSQL rejects a forged DEPLOY_LOG attestation; no fixture persists", async () => {
     const c = prepareUnverifiedCaptureClaim(sample());
     await expect(db.funnelCaptureClaim.create({
