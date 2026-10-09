@@ -2692,3 +2692,24 @@ model SearchTelemetryHour {
 
   @@index([expiresAt])
 }
+
+
+// Phase 10K-R2d-03B-01 — durable UNVERIFIED capture-interval claims.
+// An append-only claim is NOT a release attestation, fleet census, or proof
+// that every producer was running. There is intentionally no public ingest.
+model FunnelCaptureClaim {
+  claimKey        String   @id @db.VarChar(64)
+  campusId        String
+  stream          String
+  instanceId      String
+  releaseSha      String   @db.VarChar(40)
+  claimedFrom     DateTime
+  claimedUntil    DateTime
+  captureEnabled  Boolean
+  // DB CHECK freezes the only accepted source to UNVERIFIED in this phase.
+  source          String   @default("UNVERIFIED")
+  recordedAt      DateTime @default(now())
+
+  @@index([campusId, stream, claimedFrom, claimedUntil])
+  @@index([recordedAt])
+}
