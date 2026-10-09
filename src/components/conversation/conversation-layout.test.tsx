@@ -12,6 +12,10 @@ vi.mock("@/actions/conversation", () => ({
   sendMessage,
 }));
 
+vi.mock("@/actions/open-listing-from-conversation", () => ({
+  openListingFromConversation: vi.fn(),
+}));
+
 vi.mock("@/actions/trust", () => ({
   createReport,
   blockUser,
