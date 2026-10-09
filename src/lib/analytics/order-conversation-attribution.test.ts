@@ -38,7 +38,7 @@ describe("10K-R2c-02A signed order provenance contract", () => {
       token, actorId: "buyer1", asOf: new Date(t.getTime() - 1),
     })).toBeNull();
     expect(verifyOrderOriginToken({
-      token: token!.replace(/.$/, "Z"), actorId: "buyer1", asOf: t,
+      token: (token![0] === "A" ? "B" : "A") + token!.slice(1), actorId: "buyer1", asOf: t,
     })).toBeNull();
   });
 
