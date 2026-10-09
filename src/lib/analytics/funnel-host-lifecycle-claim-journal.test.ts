@@ -24,7 +24,7 @@ describe("10K-R2d-03B-02B-02A unverified host observation journal input contract
   it("only emits machine allowlisted fields with unverified provenance", () => {
     const record = prepare(baseline());
     expect(record).toMatchObject({
-      hostId: "host.01", sessionId: "boot.01", sequence: 1n,
+      hostId: "host.01", sessionId: "boot.01", sequence: BigInt(1),
       kind: "BASELINE", instanceId: null, releaseSha: null, role: null,
       source: "UNVERIFIED",
     });
