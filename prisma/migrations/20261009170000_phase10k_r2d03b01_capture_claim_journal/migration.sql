@@ -40,6 +40,19 @@ CREATE INDEX "FunnelCaptureClaim_campusId_stream_claimedFrom_claimedUntil_idx"
 CREATE INDEX "FunnelCaptureClaim_recordedAt_idx"
   ON "FunnelCaptureClaim"("recordedAt");
 
+-- The insertion time is a server-owned receipt time, not an asserted field.
+-- PostgreSQL overwrites even an explicitly supplied recordedAt value.
+CREATE FUNCTION "stamp_funnel_capture_claim_recorded_at"()
+RETURNS trigger LANGUAGE plpgsql AS $
+BEGIN
+  NEW."recordedAt" := statement_timestamp();
+  RETURN NEW;
+END;
+$;
+CREATE TRIGGER "FunnelCaptureClaim_recorded_at_db"
+BEFORE INSERT ON "FunnelCaptureClaim"
+FOR EACH ROW EXECUTE FUNCTION "stamp_funnel_capture_claim_recorded_at"();
+
 -- A normal application transaction cannot rewrite or erase observations.
 -- This trigger is DB integrity defense, not tamper-proof against a superuser.
 CREATE FUNCTION "reject_funnel_capture_claim_mutation"()
