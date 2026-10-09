@@ -77,6 +77,10 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
       { kind: "BASELINE", baselineJson: "{}" },
       { kind: "BASELINE", baselineJson: "INVALID JSON" },
       { kind: "BASELINE", baselineJson: JSON.stringify(Array(129).fill(app)) },
+      { kind: "BASELINE", baselineJson: JSON.stringify([{ ...app, ip: "10.0.0.1" }]) },
+      { kind: "BASELINE", baselineJson: JSON.stringify([{ ...app, releaseSha: "bad" }]) },
+      { kind: "BASELINE", baselineJson: JSON.stringify([app, app]) },
+      { kind: "BASELINE", baselineJson: JSON.stringify([null]) },
       { claimKey: "bad" },
     ];
     for (const delta of invalid) {
