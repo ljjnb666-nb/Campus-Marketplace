@@ -207,10 +207,10 @@ export function diagnoseCandidateFleetRoster(input: Readonly<{
     if (from < cursor) reasons.add("CANDIDATE_ROSTER_OVERLAP");
     cursor = Math.max(cursor, to);
 
-    if (!frame.instances.some(i => i.role === "APP")) {
+    if (!frame.instances.some((i: CandidateFleetInstance) => i.role === "APP")) {
       reasons.add("APP_INSTANCE_ABSENT");
     }
-    if (!frame.instances.some(i => i.role === "ASYNC_WORKER")) {
+    if (!frame.instances.some((i: CandidateFleetInstance) => i.role === "ASYNC_WORKER")) {
       reasons.add("WORKER_INSTANCE_ABSENT");
     }
 
