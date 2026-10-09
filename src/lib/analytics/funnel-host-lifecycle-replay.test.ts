@@ -88,6 +88,23 @@ describe("10K-R2d-03B-02B-01 unverified host lifecycle candidate replay", () => 
     expect(reasonsFor(rows)).toContain("OBSERVER_DISCONNECTED");
   });
 
+  it("keeps a pre-window disconnect unknown even if ordinary heartbeats resume without a baseline", () => {
+    const beforeStart = new Date(start.getTime() - MIN);
+    const preWindowLoss = new Date(start.getTime() - 1);
+    const historic: Observation[] = [
+      { ...BASE, observedAt: beforeStart },
+      { ...heartbeat(0, 2), observedAt: preWindowLoss, kind: "DISCONNECTED" },
+      heartbeat(0, 3),
+      ...complete().slice(1).map((row, index) => ({ ...row, sequence: index + 4 })),
+    ];
+    // No 15-minute silence or sequence gap: prior code incorrectly returned
+    // candidateHistoryInternallyConsistent=true for this unclosed outage.
+    const result = replayUnverifiedHostLifecycle(input(historic));
+    expect(result.reasons).toContain("OBSERVER_DISCONNECTED");
+    expect(result.candidateHistoryInternallyConsistent).toBe(false);
+    expect(result.canPublish).toBe(false);
+  });
+
   it("rejects session switch or same-session midstream baseline reset", () => {
     const session = complete();
     session[15] = { ...session[15]!, sessionId: "boot.02" };
