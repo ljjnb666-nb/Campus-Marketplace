@@ -49,6 +49,12 @@ export const LISTING_CONVERSATION_FIRST_REPLY_EVENT_TYPE = "LISTING_CONVERSATION
 export const LISTING_CONVERSATION_FIRST_REPLY_EVENT_SCHEMA_VERSION = 1;
 export const LISTING_CONVERSATION_FIRST_REPLY_AGGREGATE_TYPE = "CONVERSATION";
 
+// Phase 10K-R2c-02A: verified user-initiated chat -> ORDER/RENTAL_ORDER fact.
+// Merely sharing a listing or participants with an order is never proof.
+export const LISTING_CONVERSATION_ORDER_ATTRIBUTED_EVENT_TYPE = "LISTING_CONVERSATION_ORDER_ATTRIBUTED";
+export const LISTING_CONVERSATION_ORDER_ATTRIBUTED_EVENT_SCHEMA_VERSION = 1;
+export const LISTING_CONVERSATION_ORDER_ATTRIBUTED_AGGREGATE_TYPE = "ORDER_ATTRIBUTION";
+
 export const LIQUIDITY_LISTING_TYPES = ["PRODUCT", "SERVICE", "RENTAL"] as const;
 export const LIQUIDITY_DEMAND_TYPES = [
   "PRODUCT_ORDER",
@@ -107,6 +113,13 @@ const listingConversationFirstReplyPayloadSchema = z.object({
   elapsedMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 }).strict();
 
+const listingConversationOrderAttributedPayloadSchema = z.object({
+  conversationId: boundedId,
+  orderId: boundedId,
+  listingId: boundedId,
+  listingType: z.enum(LIQUIDITY_LISTING_TYPES),
+}).strict();
+
 const liquidityDemandCreatedPayloadSchema = z
   .object({
     demandId: boundedId,
@@ -144,6 +157,23 @@ type DomainEventDefinition = {
 };
 
 const DOMAIN_EVENT_DEFINITIONS = new Map<string, Map<number, DomainEventDefinition>>([
+  [
+    LISTING_CONVERSATION_ORDER_ATTRIBUTED_EVENT_TYPE,
+    new Map([
+      [
+        LISTING_CONVERSATION_ORDER_ATTRIBUTED_EVENT_SCHEMA_VERSION,
+        {
+          aggregateType: LISTING_CONVERSATION_ORDER_ATTRIBUTED_AGGREGATE_TYPE,
+          payloadSchema: listingConversationOrderAttributedPayloadSchema,
+          aggregateIdFromPayload: (payload) => payload.orderId as string,
+          // Order and RentalOrder have different DB authorities. Preserve the
+          // machine listingType in key to avoid any cross-domain identity reuse.
+          occurrenceKey: (_aggregateId, payload) =>
+            "LISTING_CONVERSATION_ORDER_ATTRIBUTED:" + payload.listingType + ":" + payload.orderId,
+        },
+      ],
+    ]),
+  ],
   [
     LISTING_CONVERSATION_FIRST_REPLY_EVENT_TYPE,
     new Map([
