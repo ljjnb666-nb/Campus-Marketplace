@@ -197,6 +197,35 @@ describe("10K-R2d-03B-02A candidate fleet census gaps remain negative-only", () 
       Array(10001).fill(claim("FIRST_REPLY", app())))).status).toBe("INVALID_WINDOW");
   });
 
+  it("fails closed for null, wrong-type or boxed-string roster identities without throwing", () => {
+    const malformed = [
+      null as unknown as CandidateFleetInstance,
+      { ...app(), instanceId: new String("app.01") as unknown as string },
+      { ...app(), releaseSha: new String(shaA) as unknown as string },
+      { ...app(), releaseSha: null as unknown as string },
+    ];
+    for (const candidate of malformed) {
+      const result = diagnoseCandidateFleetRoster(input([
+        epoch([app(), worker(), candidate]),
+      ]));
+      expect(result.reasons).toContain("INVALID_CANDIDATE_ROSTER");
+      expect(result.candidateRosterCoversWindow).toBe(false);
+      expect(result.allListedInstancesHaveClaims).toBe(false);
+      expect(result.canPublish).toBe(false);
+    }
+  });
+
+  it("rejects a boxed-string claim identity instead of coercing it to an authorized key", () => {
+    const claims = claimsFor([app(), worker()]).map(c =>
+      c.stream === "FIRST_REPLY"
+        ? { ...c, instanceId: new String(c.instanceId) as unknown as string }
+        : c);
+    const result = diagnoseCandidateFleetRoster(input(undefined, claims));
+    expect(result.reasons).toContain("INVALID_UNVERIFIED_CLAIM");
+    expect(result.reasons).toContain("INSTANCE_STREAM_CLAIM_GAP");
+    expect(result.allListedInstancesHaveClaims).toBe(false);
+  });
+
   it("denies immature and non-7/30-day cohort windows", () => {
     expect(diagnoseCandidateFleetRoster({
       ...input(), observedThrough: new Date(through.getTime() - 1),
