@@ -40,7 +40,7 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
         where: { claimKey: expected.claimKey },
       });
       expect(row.source).toBe("UNVERIFIED");
-      expect(row.sequence).toBe(1n);
+      expect(row.sequence).toBe(BigInt(1));
       expect(JSON.parse(row.baselineJson!)).toEqual([app, worker]);
       throw new Error("ROLLBACK_HOST_CLAIM");
     })).rejects.toThrow("ROLLBACK_HOST_CLAIM");
@@ -68,7 +68,7 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
   it("fails DB CHECK constraints for invalid sequence, host or payload shape", async () => {
     const data = prepareUnverifiedHostLifecycleClaim(sample());
     const invalid = [
-      { sequence: 0n },
+      { sequence: BigInt(0) },
       { hostId: "../spoof" },
       { sessionId: "" },
       { kind: "START", baselineJson: data.baselineJson },
