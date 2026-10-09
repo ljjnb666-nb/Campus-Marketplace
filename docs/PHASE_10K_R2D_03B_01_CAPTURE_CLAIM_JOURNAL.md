@@ -14,8 +14,12 @@ deployment instance ran for the claimed interval, or that an event was emitted.
   for **full semantic identity** after conflict-skipping insertion.
 - Database constraints independently refuse malformed type/instance/SHA,
   missing campus, zero/inverted windows, and any source except `UNVERIFIED`.
-- Database trigger refuses UPDATE and DELETE (normal application privilege);
-  it is *not* cryptographic tamper-resistance against database superusers.
+- PostgreSQL row triggers refuse UPDATE and DELETE and a statement trigger refuses
+  TRUNCATE (including CASCADE). Table-owner/privileged roles can disable or drop
+  triggers; this is an ordinary-DML safety boundary, **not** cryptographic
+  tamper resistance or an independently audited data source.
+- The migration wraps table, indexes, function and both triggers in a single
+  PostgreSQL DDL transaction; failure cannot leave a partly guarded journal.
 - Immutable `recordedAt` is **when PostgreSQL saw the claim**, never proof that
   the claimed past interval was actually operating. No backfill is performed.
 - No actor names, user IDs, email addresses, message content, IPs, search
@@ -41,6 +45,6 @@ measurements stay UNAVAILABLE, all production capture flags stay OFF.
 ## Verification
 
 Unit contracts for identity, malformed payloads and duplicate semantics;
-real PostgreSQL tests that rollback fixtures and verify immutable database
-triggers and CHECK constraints; exact-head PR CI and independently reviewed
+real PostgreSQL tests that rollback fixtures and verify UPDATE/DELETE/TRUNCATE
+triggers, CHECK constraints and semantic conflict detection; exact-head PR CI and independently reviewed
 migration before explicit merge approval.
