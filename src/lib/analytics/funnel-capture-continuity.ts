@@ -67,7 +67,6 @@ const DAY_MS = 86_400_000;
 const ATTRIBUTION_MS = 7 * DAY_MS;
 const SHA = /^[0-9a-f]{40}$/;
 const INSTANCE = /^[A-Za-z0-9_.:-]{1,128}$/;
-const STREAMS: ReadonlySet<string> = new Set(FUNNEL_CAPTURE_STREAMS);
 const isDate = (value: unknown): value is Date =>
   value instanceof Date && Number.isFinite(value.getTime());
 
@@ -79,6 +78,7 @@ function claimValid(
 ): boolean {
   return claim.campusId === campusId && claim.stream === stream &&
     INSTANCE.test(claim.instanceId) && SHA.test(claim.releaseSha) &&
+    typeof claim.captureEnabled === "boolean" &&
     isDate(claim.from) && isDate(claim.until) &&
     claim.from.getTime() < claim.until.getTime() &&
     claim.until.getTime() <= observedMs &&
@@ -154,7 +154,10 @@ export function diagnoseUnverifiedCaptureContinuity(input: Readonly<{
     const valid = scoped.filter(row =>
       claimValid(row, input.campusId, stream, observed));
     if (valid.length !== scoped.length) reasons.push("INVALID_CLAIM");
-    if (valid.some(row => !row.captureEnabled)) reasons.push("DISABLED_CLAIM");
+    if (valid.some(row => !row.captureEnabled &&
+      row.until.getTime() > from && row.from.getTime() < until)) {
+      reasons.push("DISABLED_CLAIM");
+    }
 
     const enabled = valid.filter(row =>
       row.captureEnabled &&
