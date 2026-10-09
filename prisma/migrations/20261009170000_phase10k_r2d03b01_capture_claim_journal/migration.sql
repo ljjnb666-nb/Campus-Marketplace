@@ -1,6 +1,9 @@
 -- Phase 10K-R2d-03B-01 — append-only UNVERIFIED capture claims.
 -- This is NOT a rollout/instance-completeness authority; never authorize
 -- public KPI publication from these records. No historical backfill.
+-- Atomic PostgreSQL DDL: a mid-migration failure must not strand a table or
+-- function without its complete integrity triggers.
+BEGIN;
 CREATE TABLE "FunnelCaptureClaim" (
   "claimKey" VARCHAR(64) NOT NULL,
   "campusId" TEXT NOT NULL,
@@ -49,3 +52,11 @@ $$;
 CREATE TRIGGER "FunnelCaptureClaim_append_only"
 BEFORE UPDATE OR DELETE ON "FunnelCaptureClaim"
 FOR EACH ROW EXECUTE FUNCTION "reject_funnel_capture_claim_mutation"();
+
+-- TRUNCATE does not fire row-level DELETE triggers. Block the statement path
+-- as well, including TRUNCATE ... CASCADE, for normal application DML roles.
+CREATE TRIGGER "FunnelCaptureClaim_no_truncate"
+BEFORE TRUNCATE ON "FunnelCaptureClaim"
+FOR EACH STATEMENT EXECUTE FUNCTION "reject_funnel_capture_claim_mutation"();
+
+COMMIT;
