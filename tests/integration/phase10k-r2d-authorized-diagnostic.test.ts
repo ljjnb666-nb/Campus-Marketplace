@@ -87,6 +87,7 @@ describe.skipIf(!url)("10K-R2d-02 real PostgreSQL exact-campus MVCC diagnostic",
   });
 
   it("counts only same-campus events and missing projection receipts without publishing a rate", async () => {
+    vi.stubEnv("ANALYTICS_FUNNEL_DIAGNOSTICS", "enabled");
     vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "enabled");
     vi.stubEnv("ANALYTICS_FIRST_REPLY_EVENT_EMISSION", "enabled");
     vi.stubEnv("ANALYTICS_ORDER_ATTRIBUTION_EMISSION", "enabled");

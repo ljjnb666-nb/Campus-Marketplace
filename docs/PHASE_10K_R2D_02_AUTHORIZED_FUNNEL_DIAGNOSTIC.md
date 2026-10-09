@@ -16,31 +16,34 @@ legitimate conversion-rate denominators. All six R1 metrics stay UNAVAILABLE.
    permission for this exact campus, with active account and membership.
    No exposed API route, server action, UI widget, scheduled job or dashboard
    accessor is added.
-2. It refuses immature time windows (the 7-day conversion period has not
+2. A separate diagnostic opt-in, `ANALYTICS_FUNNEL_DIAGNOSTICS=enabled`,
+   is required even for an authorized operator. The checked-in default is OFF;
+   without opt-in, no tenant fact, receipt or event is queried.
+3. It refuses immature time windows (the 7-day conversion period has not
    fully elapsed). Client-provided `now` or arbitrary "coverage complete"
    booleans cannot publish any metric; `now` exists only for deterministic
    test fixtures.
-3. PostgreSQL reads DomainEvent with exact campusId, strict four-event-type
+4. PostgreSQL reads DomainEvent with exact campusId, strict four-event-type
    list and bounded occurredAt range, **inside a single REPEATABLE READ**
    transaction. The query is ordered deterministically and limited to
    MAX_FACTS+1 = 5,001, with no unbounded scan transferred to Node.
    Greater than 5,000 records is an explicit unavailable state, never a
    truncated/misleading cohort.
-4. In the same snapshot, count missing current-version ProjectionReceipts
+5. In the same snapshot, count missing current-version ProjectionReceipts
    against DOMAIN_TX events in the exact scope. The receipt gate diagnoses
    worker lag/corruption; a zero missing count proves only that all **observed**
    events have receipts, NOT that all user activity was observed.
-5. Reuse R2d-01 registry validation for schema/aggregate/occurrence payload,
+6. Reuse R2d-01 registry validation for schema/aggregate/occurrence payload,
    same campus/type, first reply, unique conversion and 7-day maturation.
    No raw message text, actor email, user identity, IP or search keyword is
    read. Never return record IDs, source events or PII to callers.
-6. Flag check for R2b conversation, R2c first reply, R2c order attribution
+7. Flag check for R2b conversation, R2c first reply, R2c order attribution
    and 32-byte signing secret is a negative gate only. Even when all four
    are enabled and receipt lag is zero, the result is unconditionally
    `UNAVAILABLE_CAPTURE_CONTINUITY_UNPROVEN`.
    **There is no evidence store for which deployment versions, exact
    timestamps and worker epochs emitted the facts throughout the cohort.**
-7. Query/driver failure, load >5,000, immature cohort, flags disabled,
+8. Query/driver failure, load >5,000, immature cohort, flags disabled,
    missing receipts or lack of historical coverage can never silently become
    a 0% or a published median. The internal response has diagnostics only.
 

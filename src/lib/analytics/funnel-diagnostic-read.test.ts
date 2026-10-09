@@ -53,6 +53,7 @@ const conv = {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.stubEnv("ANALYTICS_FUNNEL_DIAGNOSTICS", "enabled");
   vi.stubEnv("ANALYTICS_CONVERSATION_EVENT_EMISSION", "");
   vi.stubEnv("ANALYTICS_FIRST_REPLY_EVENT_EMISSION", "");
   vi.stubEnv("ANALYTICS_ORDER_ATTRIBUTION_EMISSION", "");
@@ -66,6 +67,13 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("R2d-02 authorized PostgreSQL diagnostic and coverage fence", () => {
+  it("diagnostics are default OFF even with analytics.read and cannot query the ledger", async () => {
+    vi.stubEnv("ANALYTICS_FUNNEL_DIAGNOSTICS", "");
+    const result = await loadAuthorizedFunnelDiagnostic(request());
+    expect(result).toMatchObject({ status: "DISABLED", candidate: null });
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects missing/inactive grant before accessing any event or transaction", async () => {
     mocks.loadAuthorizationContext.mockResolvedValue(null);
     await expect(loadAuthorizedFunnelDiagnostic(request())).rejects.toThrow("ANALYTICS_SCOPE_DENIED");

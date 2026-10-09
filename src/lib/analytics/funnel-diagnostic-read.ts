@@ -35,6 +35,7 @@ const EVENT_TYPES = [
 export type AuthorizedFunnelDiagnostic = Readonly<{
   // Internal QA only; NEVER exposed as a rate, percentile or user-facing KPI.
   status:
+    | "DISABLED"
     | "INVALID_WINDOW"
     | "IMMATURE_COHORT"
     | "UNAVAILABLE_QUERY_FAILURE"
@@ -42,8 +43,7 @@ export type AuthorizedFunnelDiagnostic = Readonly<{
     | "UNAVAILABLE_CAPTURE_DISABLED"
     | "UNAVAILABLE_INCOMPLETE_PROJECTION"
     | "UNAVAILABLE_CAPTURE_CONTINUITY_UNPROVEN";
-  candidate: FunnelCandidateResult extends infer R
-    ? R extends { candidate: infer C } ? C : never : never;
+  candidate: FunnelCandidateResult["candidate"];
   eventRows: number | null;
   unprojectedRows: number | null;
   // This snapshot is NOT evidence that every earlier deployment emitted events.
@@ -91,6 +91,11 @@ export async function loadAuthorizedFunnelDiagnostic(input: {
     captureSnapshotReady: false,
     captureContinuityProven: false,
   });
+  // Separate internal diagnostic opt-in, default OFF even for authorized admins.
+  // Missing this switch prevents ALL diagnostic ledger reads.
+  if (process.env.ANALYTICS_FUNNEL_DIAGNOSTICS !== "enabled") {
+    return empty("DISABLED");
+  }
   const now = input.now ?? new Date();
   if (![7, 30].includes(input.periodDays) ||
       !["PRODUCT", "SERVICE", "RENTAL"].includes(input.listingType) ||
