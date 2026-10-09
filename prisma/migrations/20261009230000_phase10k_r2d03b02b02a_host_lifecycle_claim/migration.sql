@@ -41,8 +41,96 @@ CREATE TABLE "HostLifecycleClaim" (
         AND jsonb_array_length("baselineJson"::jsonb) <= 128
       ) OR (
         "kind" IN ('START', 'STOP')
-        AND "instanceId" ~ '^[A-Za-z0-9_.:-]{1,128}$'
-        AND "releaseSha" ~ '^[0-9a-f]{40}$'
+        -- PostgreSQL CHECK treats UNKNOWN/NULL as PASS. Explicit IS NOT NULL
+        -- is required before applying regex/IN predicates to nullable columns.
+        AND "instanceId" IS NOT NULL AND "releaseSha" IS NOT NULL
+        AND "role" IS NOT NULL
+        AND "instanceId" ~ '^[A-Za-z0-9_.:-]{1,128}
+      ) OR (
+        "kind" IN ('HEARTBEAT', 'DISCONNECTED')
+        AND "instanceId" IS NULL AND "releaseSha" IS NULL
+        AND "role" IS NULL AND "baselineJson" IS NULL
+      )
+    )
+);
+CREATE UNIQUE INDEX "HostLifecycleClaim_hostId_sessionId_sequence_key"
+  ON "HostLifecycleClaim" ("hostId", "sessionId", "sequence");
+CREATE INDEX "HostLifecycleClaim_hostId_sessionId_observedAt_idx"
+  ON "HostLifecycleClaim" ("hostId", "sessionId", "observedAt");
+CREATE INDEX "HostLifecycleClaim_recordedAt_idx"
+  ON "HostLifecycleClaim" ("recordedAt");
+
+CREATE FUNCTION "stamp_host_lifecycle_claim_recorded_at"()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- The application cannot backdate the receipt timestamp.
+  NEW."recordedAt" := statement_timestamp();
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "HostLifecycleClaim_recorded_at_db"
+BEFORE INSERT ON "HostLifecycleClaim"
+FOR EACH ROW EXECUTE FUNCTION "stamp_host_lifecycle_claim_recorded_at"();
+
+CREATE FUNCTION "reject_host_lifecycle_claim_mutation"()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'HOST_LIFECYCLE_CLAIM_APPEND_ONLY'
+    USING ERRCODE = '23514';
+END;
+$$;
+CREATE TRIGGER "HostLifecycleClaim_append_only"
+BEFORE UPDATE OR DELETE ON "HostLifecycleClaim"
+FOR EACH ROW EXECUTE FUNCTION "reject_host_lifecycle_claim_mutation"();
+-- DELETE triggers do NOT protect TRUNCATE or TRUNCATE CASCADE.
+CREATE TRIGGER "HostLifecycleClaim_no_truncate"
+BEFORE TRUNCATE ON "HostLifecycleClaim"
+FOR EACH STATEMENT EXECUTE FUNCTION "reject_host_lifecycle_claim_mutation"();
+COMMIT;
+
+        AND "releaseSha" ~ '^[0-9a-f]{40}
+      ) OR (
+        "kind" IN ('HEARTBEAT', 'DISCONNECTED')
+        AND "instanceId" IS NULL AND "releaseSha" IS NULL
+        AND "role" IS NULL AND "baselineJson" IS NULL
+      )
+    )
+);
+CREATE UNIQUE INDEX "HostLifecycleClaim_hostId_sessionId_sequence_key"
+  ON "HostLifecycleClaim" ("hostId", "sessionId", "sequence");
+CREATE INDEX "HostLifecycleClaim_hostId_sessionId_observedAt_idx"
+  ON "HostLifecycleClaim" ("hostId", "sessionId", "observedAt");
+CREATE INDEX "HostLifecycleClaim_recordedAt_idx"
+  ON "HostLifecycleClaim" ("recordedAt");
+
+CREATE FUNCTION "stamp_host_lifecycle_claim_recorded_at"()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- The application cannot backdate the receipt timestamp.
+  NEW."recordedAt" := statement_timestamp();
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "HostLifecycleClaim_recorded_at_db"
+BEFORE INSERT ON "HostLifecycleClaim"
+FOR EACH ROW EXECUTE FUNCTION "stamp_host_lifecycle_claim_recorded_at"();
+
+CREATE FUNCTION "reject_host_lifecycle_claim_mutation"()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'HOST_LIFECYCLE_CLAIM_APPEND_ONLY'
+    USING ERRCODE = '23514';
+END;
+$$;
+CREATE TRIGGER "HostLifecycleClaim_append_only"
+BEFORE UPDATE OR DELETE ON "HostLifecycleClaim"
+FOR EACH ROW EXECUTE FUNCTION "reject_host_lifecycle_claim_mutation"();
+-- DELETE triggers do NOT protect TRUNCATE or TRUNCATE CASCADE.
+CREATE TRIGGER "HostLifecycleClaim_no_truncate"
+BEFORE TRUNCATE ON "HostLifecycleClaim"
+FOR EACH STATEMENT EXECUTE FUNCTION "reject_host_lifecycle_claim_mutation"();
+COMMIT;
+
         AND "role" IN ('APP', 'ASYNC_WORKER')
         AND "baselineJson" IS NULL
       ) OR (
