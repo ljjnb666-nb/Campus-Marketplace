@@ -105,13 +105,18 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
     expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
   });
 
-  it("blocks TRUNCATE including CASCADE, not only row-level DELETE", async () => {
+  it("blocks both ordinary TRUNCATE and TRUNCATE CASCADE", async () => {
     const data = prepareUnverifiedHostLifecycleClaim(sample());
-    await expect(db.$transaction(async tx => {
-      await tx.hostLifecycleClaim.create({ data });
-      await tx.$executeRawUnsafe('TRUNCATE TABLE "HostLifecycleClaim"');
-    })).rejects.toThrow("HOST_LIFECYCLE_CLAIM_APPEND_ONLY");
-    expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    for (const sql of [
+      'TRUNCATE TABLE "HostLifecycleClaim"',
+      'TRUNCATE TABLE "HostLifecycleClaim" CASCADE',
+    ]) {
+      await expect(db.$transaction(async tx => {
+        await tx.hostLifecycleClaim.create({ data });
+        await tx.$executeRawUnsafe(sql);
+      })).rejects.toThrow("HOST_LIFECYCLE_CLAIM_APPEND_ONLY");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    }
   });
 
   it("server overwrites forged recordedAt and rollback leaves no claims", async () => {
@@ -127,6 +132,46 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
     })).rejects.toThrow("ROLLBACK_HOST_RECORDED_AT");
     expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
   });
+
+  it("handles competing same-sequence inserts after an uncommitted writer rollback", async () => {
+    const key = prepareUnverifiedHostLifecycleClaim(sample()).claimKey;
+    let firstInserted!: () => void;
+    const firstReady = new Promise<void>(resolve => { firstInserted = resolve; });
+    let releaseFirst!: () => void;
+    const release = new Promise<void>(resolve => { releaseFirst = resolve; });
+
+    const first = db.$transaction(async tx => {
+      expect(await recordUnverifiedHostLifecycleClaimTx(tx, sample()))
+        .toEqual({ recorded: true, claimKey: key });
+      firstInserted();
+      await release;
+      throw new Error("ROLLBACK_FIRST_HOST_WRITER");
+    }, { timeout: 10_000 }).then(
+      () => "UNEXPECTED_FIRST_COMMIT",
+      (error: unknown) => String(error),
+    );
+    await firstReady;
+
+    let secondStarted!: () => void;
+    const secondReady = new Promise<void>(resolve => { secondStarted = resolve; });
+    const second = db.$transaction(async tx => {
+      secondStarted();
+      // No lost idempotency marker: after A's rollback the exact event is
+      // newly inserted by B, never treated as already durably recorded.
+      expect(await recordUnverifiedHostLifecycleClaimTx(tx, sample()))
+        .toEqual({ recorded: true, claimKey: key });
+      throw new Error("ROLLBACK_SECOND_HOST_WRITER");
+    }, { timeout: 10_000 }).then(
+      () => "UNEXPECTED_SECOND_COMMIT",
+      (error: unknown) => String(error),
+    );
+    await secondReady;
+    releaseFirst();
+    const [one, two] = await Promise.all([first, second]);
+    expect(one).toContain("ROLLBACK_FIRST_HOST_WRITER");
+    expect(two).toContain("ROLLBACK_SECOND_HOST_WRITER");
+    expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+  }, 20_000);
 
   it("same session key is unique even if an unrelated digest is directly injected", async () => {
     const data = prepareUnverifiedHostLifecycleClaim(sample());
