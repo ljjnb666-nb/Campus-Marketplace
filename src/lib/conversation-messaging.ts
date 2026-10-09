@@ -4,6 +4,7 @@ import { assertActiveAccountMutationAllowed } from "@/lib/governance/active-acco
 import { governanceError } from "@/lib/governance/domain-errors";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
 import { withTransaction } from "@/lib/prisma";
+import { recordFirstListingReplyIfEligibleTx } from "@/lib/analytics/first-interaction-attribution";
 import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { resolveConversationCampusIdTx } from "@/lib/feature-flags/feature-flag-campus";
 import {
@@ -131,6 +132,7 @@ export async function sendMessageTx(input: SendMessageTxInput): Promise<{ messag
         rentalListingId: true,
         orderId: true,
         rentalOrderId: true,
+        createdAt: true,
         participants: { select: { userId: true } },
       },
     });
@@ -199,7 +201,7 @@ export async function sendMessageTx(input: SendMessageTxInput): Promise<{ messag
         type: "DIRECT",
         content,
       },
-      select: { id: true },
+      select: { id: true, createdAt: true },
     });
 
     await tx.conversation.update({
@@ -212,6 +214,13 @@ export async function sendMessageTx(input: SendMessageTxInput): Promise<{ messag
       data: { lastReadAt: new Date() },
     });
 
+    // R2c-01 facts are strictly fenced; default-off production has no new
+    // writes or reads. The pre-existing R2b source fact must match exactly.
+    await recordFirstListingReplyIfEligibleTx(tx, {
+      conversationId, senderId, replyMessageId: message.id,
+      replyAt: message.createdAt, conversationCreatedAt: fresh.createdAt,
+      campusId, refs,
+    });
     return { messageId: message.id };
   });
 }

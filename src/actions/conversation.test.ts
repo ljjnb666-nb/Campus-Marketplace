@@ -1030,7 +1030,7 @@ describe("conversation actions", () => {
           type: "DIRECT",
           content: "明天下午可以吗？",
         },
-        select: { id: true },
+        select: { id: true, createdAt: true },
       });
       expect(txConversationParticipantUpdateMany).toHaveBeenCalledWith({
         where: { conversationId: "conversation-1", userId: "user-1" },
