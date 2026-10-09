@@ -20,8 +20,11 @@ deployment instance ran for the claimed interval, or that an event was emitted.
   tamper resistance or an independently audited data source.
 - The migration wraps table, indexes, function and both triggers in a single
   PostgreSQL DDL transaction; failure cannot leave a partly guarded journal.
-- Immutable `recordedAt` is **when PostgreSQL saw the claim**, never proof that
-  the claimed past interval was actually operating. No backfill is performed.
+- PostgreSQL's BEFORE INSERT trigger overwrites any caller-supplied `recordedAt`
+  with the database statement timestamp. `recordedAt` is the **database receipt
+  time**, never proof that the claimed past interval was actually operating.
+  It is protected against ordinary DML, not privileged database operators.
+  No backfill is performed.
 - No actor names, user IDs, email addresses, message content, IPs, search
   keywords or secret tokens stored.
 - No API route, Server Action, UI, scheduler, automatic rollout producer or
@@ -46,5 +49,6 @@ measurements stay UNAVAILABLE, all production capture flags stay OFF.
 
 Unit contracts for identity, malformed payloads and duplicate semantics;
 real PostgreSQL tests that rollback fixtures and verify UPDATE/DELETE/TRUNCATE
-triggers, CHECK constraints and semantic conflict detection; exact-head PR CI and independently reviewed
-migration before explicit merge approval.
+triggers, server-owned receipt time, CHECK constraints and semantic conflict
+rejection; exact-head PR CI and independently reviewed migration before explicit
+merge approval.
