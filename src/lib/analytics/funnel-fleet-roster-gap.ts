@@ -71,12 +71,21 @@ const ORDER: readonly FleetGapReason[] = [
 const validDate = (date: unknown): date is Date =>
   date instanceof Date && Number.isFinite(date.getTime());
 
+function validInstance(value: unknown): value is CandidateFleetInstance {
+  if (value === null || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return typeof row.instanceId === "string" && INSTANCE.test(row.instanceId) &&
+    typeof row.releaseSha === "string" && SHA.test(row.releaseSha) &&
+    (row.role === "APP" || row.role === "ASYNC_WORKER");
+}
+
 function validClaim(c: ClaimedCaptureInterval, observed: number): boolean {
   return c !== null && typeof c === "object" &&
     typeof c.campusId === "string" && c.campusId.length > 0 &&
     c.campusId.length <= 191 &&
     FUNNEL_CAPTURE_STREAMS.includes(c.stream) &&
-    INSTANCE.test(c.instanceId) && SHA.test(c.releaseSha) &&
+    typeof c.instanceId === "string" && INSTANCE.test(c.instanceId) &&
+    typeof c.releaseSha === "string" && SHA.test(c.releaseSha) &&
     typeof c.captureEnabled === "boolean" && c.source === "UNVERIFIED" &&
     validDate(c.from) && validDate(c.until) &&
     c.from.getTime() >= 0 && c.from.getTime() < c.until.getTime() &&
@@ -172,10 +181,7 @@ export function diagnoseCandidateFleetRoster(input: Readonly<{
     if (count > MAX_INSTANCE_EPOCHS) return invalidResult("INVALID_WINDOW");
     const seen = new Set<string>();
     for (const i of f.instances) {
-      if (!i || typeof i.instanceId !== "string" ||
-          !INSTANCE.test(i.instanceId) || !SHA.test(i.releaseSha) ||
-          (i.role !== "APP" && i.role !== "ASYNC_WORKER") ||
-          seen.has(i.instanceId)) {
+      if (!validInstance(i) || seen.has(i.instanceId)) {
         reasons.add("INVALID_CANDIDATE_ROSTER");
       } else {
         seen.add(i.instanceId);
@@ -207,17 +213,15 @@ export function diagnoseCandidateFleetRoster(input: Readonly<{
     if (from < cursor) reasons.add("CANDIDATE_ROSTER_OVERLAP");
     cursor = Math.max(cursor, to);
 
-    if (!frame.instances.some((i: CandidateFleetInstance) => i.role === "APP")) {
+    if (!frame.instances.some((i: CandidateFleetInstance) => validInstance(i) && i.role === "APP")) {
       reasons.add("APP_INSTANCE_ABSENT");
     }
-    if (!frame.instances.some((i: CandidateFleetInstance) => i.role === "ASYNC_WORKER")) {
+    if (!frame.instances.some((i: CandidateFleetInstance) => validInstance(i) && i.role === "ASYNC_WORKER")) {
       reasons.add("WORKER_INSTANCE_ABSENT");
     }
 
     for (const instance of frame.instances) {
-      if (!instance || !INSTANCE.test(instance.instanceId) ||
-          !SHA.test(instance.releaseSha) ||
-          (instance.role !== "APP" && instance.role !== "ASYNC_WORKER")) continue;
+      if (!validInstance(instance)) continue;
       const required = instance.role === "ASYNC_WORKER"
         ? (["PROJECTION_WORKER"] as const)
         : APP_STREAMS;
