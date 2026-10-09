@@ -105,6 +105,29 @@ describe("10K-R2d-03B-02B-01 unverified host lifecycle candidate replay", () => 
     expect(result.canPublish).toBe(false);
   });
 
+  it("detects long pre-window silence ending exactly at the cohort start", () => {
+    const rows = complete();
+    const stream: Observation[] = [
+      { ...BASE, observedAt: new Date(start.getTime() - 30 * MIN) },
+      heartbeat(0, 2),
+      ...rows.slice(1).map((row, index) => ({ ...row, sequence: index + 3 })),
+    ];
+    // The observer has no fresh baseline after this lost interval; before
+    // the fix, the at > from boundary silently accepted this as consistent.
+    const found = replayUnverifiedHostLifecycle(input(stream));
+    expect(found.reasons).toContain("OBSERVER_SILENCE");
+    expect(found.candidateHistoryInternallyConsistent).toBe(false);
+    expect(found.canPublish).toBe(false);
+
+    const allowed: Observation[] = [
+      { ...BASE, observedAt: new Date(start.getTime() - 15 * MIN) },
+      heartbeat(0, 2),
+      ...rows.slice(1).map((row, index) => ({ ...row, sequence: index + 3 })),
+    ];
+    expect(replayUnverifiedHostLifecycle(input(allowed))
+      .candidateHistoryInternallyConsistent).toBe(true);
+  });
+
   it("rejects session switch or same-session midstream baseline reset", () => {
     const session = complete();
     session[15] = { ...session[15]!, sessionId: "boot.02" };
