@@ -154,7 +154,7 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
       }
       if (lastAt !== null) {
         if (at < lastAt) reasons.add("CLOCK_NONMONOTONIC");
-        if (at - lastAt > MAX_GAP && at > from && lastAt < through) {
+        if (at - lastAt > MAX_GAP && at >= from && lastAt < through) {
           reasons.add("OBSERVER_SILENCE");
         }
       }
