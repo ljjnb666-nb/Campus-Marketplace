@@ -70,4 +70,44 @@ describe.skipIf(!url)("10K-R2d-03B-01 real-PG immutable capture claim journal", 
     })).rejects.toThrow();
     expect(await db.funnelCaptureClaim.count({ where: { campusId } })).toBe(0);
   });
+
+  it("PostgreSQL statement trigger rejects TRUNCATE, including an ordinary transactional truncation", async () => {
+    const c = prepareUnverifiedCaptureClaim(sample());
+    await expect(db.$transaction(async tx => {
+      await tx.funnelCaptureClaim.create({ data: c });
+      // DELETE row triggers cannot intercept TRUNCATE; this must fail on its own.
+      await tx.$executeRawUnsafe('TRUNCATE TABLE "FunnelCaptureClaim"');
+    })).rejects.toThrow("FUNNEL_CAPTURE_CLAIM_APPEND_ONLY");
+    expect(await db.funnelCaptureClaim.count({ where: { campusId } })).toBe(0);
+  });
+
+  it("real PostgreSQL detects a conflicting row sharing a claimKey rather than silently deduping", async () => {
+    const c = prepareUnverifiedCaptureClaim(sample());
+    await expect(db.$transaction(async tx => {
+      await tx.funnelCaptureClaim.create({
+        data: { ...c, campusId: campusId + "-conflict" },
+      });
+      await recordUnverifiedCaptureClaimTx(tx, sample());
+    })).rejects.toThrow("FUNNEL_CAPTURE_CLAIM_INVALID");
+    expect(await db.funnelCaptureClaim.count({
+      where: { claimKey: c.claimKey },
+    })).toBe(0);
+  });
+
+  it("database constraints reject invalid streams, instance IDs and release SHAs", async () => {
+    const c = prepareUnverifiedCaptureClaim(sample());
+    for (const invalid of [
+      { stream: "NOT_A_CAPTURE_STREAM" },
+      { instanceId: "../unsafe" },
+      { releaseSha: "INVALID" },
+      { campusId: "" },
+      { claimKey: "bad" },
+    ]) {
+      await expect(db.funnelCaptureClaim.create({
+        data: { ...c, ...invalid },
+      })).rejects.toThrow();
+    }
+    expect(await db.funnelCaptureClaim.count({ where: { campusId } })).toBe(0);
+  });
+
 });
