@@ -2713,3 +2713,29 @@ model FunnelCaptureClaim {
   @@index([campusId, stream, claimedFrom, claimedUntil])
   @@index([recordedAt])
 }
+
+
+// Phase 10K-R2d-03B-02B-02A — internal-only immutable UNVERIFIED
+// host-lifecycle observation candidates. This model is NOT an independent
+// host authenticator, complete fleet census, or KPI publication evidence.
+// No HTTP ingress or producer is introduced by this schema.
+model HostLifecycleClaim {
+  claimKey       String   @id @db.VarChar(64)
+  hostId         String   @db.VarChar(128)
+  sessionId      String   @db.VarChar(128)
+  sequence       BigInt
+  observedAt     DateTime
+  kind           String   @db.VarChar(16)
+  instanceId     String?  @db.VarChar(128)
+  releaseSha     String?  @db.VarChar(40)
+  role           String?  @db.VarChar(16)
+  // Canonical, strictly validated machine-only baseline JSON; no PII or logs.
+  baselineJson   String?  @db.Text
+  // Only UNVERIFIED is DB-accepted. Credential authority is a later phase.
+  source         String   @default("UNVERIFIED")
+  recordedAt     DateTime @default(now())
+
+  @@unique([hostId, sessionId, sequence])
+  @@index([hostId, sessionId, observedAt])
+  @@index([recordedAt])
+}
