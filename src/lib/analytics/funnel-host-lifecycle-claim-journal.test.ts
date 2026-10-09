@@ -82,7 +82,7 @@ describe("10K-R2d-03B-02B-02A unverified host observation journal input contract
       releaseSha: app.releaseSha, baselineJson: null, source: "UNVERIFIED",
     });
     expect(a.claimKey).not.toBe(b.claimKey);
-    expect(JSON.stringify(a)).not.toContain("ignored");
+    expect(JSON.stringify({ ...a, sequence: String(a.sequence) })).not.toContain("ignored");
     fails({ ...event, instances: [] });
   });
 
