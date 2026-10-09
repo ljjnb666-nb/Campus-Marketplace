@@ -204,13 +204,6 @@ export function replayUnverifiedHostLifecycle(input: Readonly<{
   if (lastAt !== null && lastAt < through && through - lastAt > MAX_GAP) {
     reasons.add("OBSERVER_SILENCE");
   }
-  if (lastAt !== null && lastAt >= through &&
-      input.observations[0]?.observedAt instanceof Date &&
-      input.observations[0].observedAt.getTime() <= from &&
-      lastSeq !== null && lastSeq < 1) {
-    reasons.add("INVALID_OBSERVATION");
-  }
-
   return {
     status: "UNAVAILABLE_INDEPENDENT_HOST_OBSERVER_MISSING",
     canPublish: false, deploymentMembershipComplete: false,
