@@ -62,9 +62,39 @@ CREATE INDEX "HostLifecycleClaim_recordedAt_idx"
 
 CREATE FUNCTION "stamp_host_lifecycle_claim_recorded_at"()
 RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  member jsonb;
+  member_keys integer;
+  seen_ids text[] := ARRAY[]::text[];
+  member_id text;
 BEGIN
-  -- The application cannot backdate the receipt timestamp.
+  -- Application-supplied recordedAt never establishes real receipt time.
   NEW."recordedAt" := statement_timestamp();
+  -- Direct SQL cannot inject arbitrary metadata/PII into baseline members.
+  IF NEW."kind" = 'BASELINE' AND NEW."baselineJson" IS NOT NULL THEN
+    FOR member IN SELECT value
+      FROM jsonb_array_elements(NEW."baselineJson"::jsonb) AS entry(value)
+    LOOP
+      IF jsonb_typeof(member) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'HOST_LIFECYCLE_BASELINE_INVALID'
+          USING ERRCODE = '23514';
+      END IF;
+      SELECT count(*) INTO member_keys FROM jsonb_object_keys(member);
+      member_id := member->>'instanceId';
+      IF member_keys <> 3
+        OR jsonb_typeof(member->'instanceId') IS DISTINCT FROM 'string'
+        OR jsonb_typeof(member->'releaseSha') IS DISTINCT FROM 'string'
+        OR jsonb_typeof(member->'role') IS DISTINCT FROM 'string'
+        OR NOT COALESCE(member_id ~ '^[A-Za-z0-9_.:-]{1,128}$', FALSE)
+        OR NOT COALESCE((member->>'releaseSha') ~ '^[0-9a-f]{40}$', FALSE)
+        OR (member->>'role') NOT IN ('APP', 'ASYNC_WORKER')
+        OR member_id = ANY(seen_ids) THEN
+        RAISE EXCEPTION 'HOST_LIFECYCLE_BASELINE_INVALID'
+          USING ERRCODE = '23514';
+      END IF;
+      seen_ids := array_append(seen_ids, member_id);
+    END LOOP;
+  END IF;
   RETURN NEW;
 END;
 $$;
