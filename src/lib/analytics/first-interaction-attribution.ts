@@ -80,21 +80,25 @@ export async function recordFirstListingReplyIfEligibleTx(
   // First DIRECT message proves the original initiator. System messages do not.
   // Both reads happen AFTER the just-written reply in the same canonical tx.
   const firstDirect = await tx.message.findFirst({
-    where: { conversationId: input.conversationId, type: "DIRECT" },
+    where: { conversationId: input.conversationId, type: "DIRECT", id: { not: input.replyMessageId } },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: { id: true, senderId: true, createdAt: true },
   });
   if (!firstDirect || !firstDirect.senderId || firstDirect.senderId === input.senderId
-    || firstDirect.id === input.replyMessageId
     || firstDirect.createdAt.getTime() < input.conversationCreatedAt.getTime()) {
     return "INELIGIBLE";
   }
-  const firstReply = await tx.message.findFirst({
-    where: { conversationId: input.conversationId, type: "DIRECT", senderId: input.senderId },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  // Check every other prior reply by this sender, not the timestamp/ID sort.
+  // DB millisecond clock ties make lexicographic CUID order a bad chronology.
+  // Pair locks serialize sendMessageTx, so all other sender rows are earlier.
+  const priorReply = await tx.message.findFirst({
+    where: {
+      conversationId: input.conversationId, type: "DIRECT",
+      senderId: input.senderId, id: { not: input.replyMessageId },
+    },
     select: { id: true },
   });
-  if (firstReply?.id !== input.replyMessageId) return "INELIGIBLE";
+  if (priorReply) return "INELIGIBLE";
 
   const elapsedMilliseconds = input.replyAt.getTime() - input.conversationCreatedAt.getTime();
   if (!Number.isSafeInteger(elapsedMilliseconds) || elapsedMilliseconds < 0) return "INELIGIBLE";
