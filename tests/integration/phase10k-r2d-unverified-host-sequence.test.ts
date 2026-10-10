@@ -134,7 +134,60 @@ describe.skipIf(!url)(
       expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
     });
 
-    it("serializes competing writers with a bounded PG advisory lock", async () => {
+    it("preserves caller transaction lock_timeout after a successful guarded write", async () => {
+      await expect(db.$transaction(async tx => {
+        // Existing caller policy must not be relaxed or shortened by this seam.
+        await tx.$executeRaw`SET LOCAL lock_timeout = '7s'`;
+        const before = await tx.$queryRaw<Array<{ setting: string }>>`
+          SELECT current_setting('lock_timeout') AS setting
+        `;
+        expect(before).toEqual([{ setting: "7s" }]);
+        const result = await recordContiguousUnverifiedHostClaimTx(tx, observation());
+        expect(result).toMatchObject({ recorded: true, source: "UNVERIFIED", canPublish: false });
+        const after = await tx.$queryRaw<Array<{ setting: string }>>`
+          SELECT current_setting('lock_timeout') AS setting
+        `;
+        expect(after).toEqual(before);
+        throw new Error("ROLLBACK_LOCK_TIMEOUT_OWNER");
+      })).rejects.toThrow("ROLLBACK_LOCK_TIMEOUT_OWNER");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("does not serialize an unrelated host behind another scope's held lock", async () => {
+      let ready!: () => void;
+      const firstReady = new Promise<void>(resolve => { ready = resolve; });
+      let release!: () => void;
+      const unblock = new Promise<void>(resolve => { release = resolve; });
+      const otherHostId = hostId + ".other";
+      const first = db.$transaction(async tx => {
+        await recordContiguousUnverifiedHostClaimTx(tx, observation());
+        ready();
+        await unblock;
+        throw new Error("ROLLBACK_FIRST_SCOPE");
+      }, { timeout: 10_000 }).then(
+        () => "UNEXPECTED_FIRST_COMMIT",
+        (error: unknown) => String(error),
+      );
+      await firstReady;
+      try {
+        await expect(db.$transaction(async tx => {
+          const other = { ...observation(), hostId: otherHostId };
+          const result = await recordContiguousUnverifiedHostClaimTx(tx, other);
+          expect(result).toMatchObject({
+            recorded: true, source: "UNVERIFIED", canPublish: false,
+          });
+          throw new Error("ROLLBACK_OTHER_SCOPE");
+        }, { timeout: 8_000 })).rejects.toThrow("ROLLBACK_OTHER_SCOPE");
+      } finally {
+        release();
+      }
+      expect(await first).toContain("ROLLBACK_FIRST_SCOPE");
+      expect(await db.hostLifecycleClaim.count({
+        where: { hostId: { in: [hostId, otherHostId] } },
+      })).toBe(0);
+    }, 20_000);
+
+    it("refuses contended writers without modifying caller SQL timeouts", async () => {
       let ready!: () => void;
       const firstReady = new Promise<void>(resolve => { ready = resolve; });
       let release!: () => void;

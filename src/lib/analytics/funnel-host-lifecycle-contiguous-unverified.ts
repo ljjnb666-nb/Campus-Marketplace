@@ -104,14 +104,18 @@ export async function recordContiguousUnverifiedHostClaimTx(
     if (isolation.length !== 1 || isolation[0].level !== "read committed") {
       throw new UnverifiedHostSequenceError();
     }
-    // Bound contention; an unavailable lock cannot silently prove continuity.
-    await tx.$executeRaw`SET LOCAL lock_timeout = '1500ms'`;
+    // The transaction belongs to the caller: never override its
+    // lock_timeout (or any other SET LOCAL setting). Fail closed immediately
+    // if another cooperating writer owns this host/session scope.
     const scope = JSON.stringify([
       "UnverifiedHostLifecycleSequence:v1", data.hostId, data.sessionId,
     ]);
-    await tx.$queryRaw<Array<{ locked: string }>>`
-      SELECT pg_advisory_xact_lock(hashtextextended(${scope}::text, 0))::text AS locked
+    const lock = await tx.$queryRaw<Array<{ acquired: boolean }>>`
+      SELECT pg_try_advisory_xact_lock(hashtextextended(${scope}::text, 0)) AS acquired
     `;
+    if (lock.length !== 1 || lock[0]?.acquired !== true) {
+      throw new UnverifiedHostSequenceError();
+    }
 
     const existing = await tx.hostLifecycleClaim.findUnique({
       where: { hostId_sessionId_sequence: {
