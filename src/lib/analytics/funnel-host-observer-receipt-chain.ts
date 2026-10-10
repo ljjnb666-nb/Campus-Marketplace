@@ -90,10 +90,16 @@ function plainData(
 }
 
 function immutableDate(value: unknown): Date {
-  if (!(value instanceof Date) || Object.getPrototypeOf(value) !== Date.prototype) {
+  // The native Date internal-slot brand check rejects forged objects and
+  // Proxy(Date) values, but accepts genuine Dates created before fake timers
+  // replace the global Date constructor (or across supported realms).
+  // Prototype equality would wrongly reject those genuine Date instances.
+  let ms: number;
+  try {
+    ms = Date.prototype.getTime.call(value);
+  } catch {
     throw new Error("INVALID_RECEIPT");
   }
-  const ms = Date.prototype.getTime.call(value);
   if (!Number.isFinite(ms) || ms < 0) throw new Error("INVALID_RECEIPT");
   return new Date(ms);
 }
