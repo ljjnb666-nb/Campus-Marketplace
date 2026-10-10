@@ -125,16 +125,21 @@ export function verifyCandidateHostObserverSignature(
       key.hostId !== envelope.observation.hostId) {
     return result("DENIED_KEY_NOT_FOUND_OR_SCOPE");
   }
+  // Both signature creation AND this validation must occur during the
+  // independently provisioned key's validity interval. Do not grant a
+  // five-minute post-expiry grace period via a still-recent signedAt.
+  const now = Date.now();
   if (key.revoked !== false ||
       !finiteDate(key.validFrom) || !finiteDate(key.validUntil) ||
       key.validUntil.getTime() <= key.validFrom.getTime() ||
       envelope.signedAt.getTime() < key.validFrom.getTime() ||
-      envelope.signedAt.getTime() >= key.validUntil.getTime()) {
+      envelope.signedAt.getTime() >= key.validUntil.getTime() ||
+      now < key.validFrom.getTime() ||
+      now >= key.validUntil.getTime()) {
     return result("DENIED_KEY_EXPIRED_OR_REVOKED");
   }
   // No caller-controlled 'now' or tolerance. No acceptance of stale replay
   // just because a caller can supply a signed timestamp from the past.
-  const now = Date.now();
   const signed = envelope.signedAt.getTime();
   const observed = envelope.observation.observedAt.getTime();
   if (Math.abs(now - signed) > MAX_SIGNED_CLOCK_SKEW_MS ||
@@ -148,6 +153,12 @@ export function verifyCandidateHostObserverSignature(
     if (signature.length !== 64 ||
         signature.toString("base64url") !== envelope.signatureBase64url) {
       return result("DENIED_MALFORMED_ENVELOPE");
+    }
+    // Bound parsing of a registry-supplied key, not just the signature.
+    // A malformed or unexpectedly large credential must fail closed.
+    if (typeof key.publicKeyPem !== "string" ||
+        key.publicKeyPem.length < 64 || key.publicKeyPem.length > 2048) {
+      return result("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
     }
     const publicKey = createPublicKey(key.publicKeyPem);
     if (publicKey.asymmetricKeyType !== "ed25519") {
