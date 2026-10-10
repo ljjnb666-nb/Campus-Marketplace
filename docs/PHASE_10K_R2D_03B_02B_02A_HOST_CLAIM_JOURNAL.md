@@ -27,10 +27,15 @@ production deployment milestone, emission proof, or KPI publication grant.
   throws and rolls back. Ingestion does not invent a missing sequence or
   repair gaps. Phase 02B-01's replay diagnostic remains responsible for
   negative gap detection, and is not driven by a new production read path.
-- DB CHECK freezes `source='UNVERIFIED'` and exact kind-specific payload
-  shape. A PostgreSQL insert trigger overwrites `recordedAt` with server
-  statement time. UPDATE/DELETE/TRUNCATE are explicitly refused for ordinary
-  application DML roles. This defense is not tamper-proof against DB
+- DB CHECK freezes `source='UNVERIFIED'`, requires finite observed
+  timestamps, and enforces kind-specific payload shape. A PostgreSQL insert
+  trigger overwrites `recordedAt` with server statement time, validates each
+  baseline member, and **replaces raw JSON TEXT with the validated JSONB
+  normalized serialization**. This prevents shadowed duplicate JSON keys
+  from retaining a sensitive value discarded during validation. The internal
+  writer compares semantic canonical member identity instead of the raw JSON
+  whitespace/key order. UPDATE/DELETE/TRUNCATE are explicitly refused for
+  ordinary application DML roles. This defense is not tamper-proof against DB
   superusers or privileged schema operators; separate audit and role control
   are still required.
 - Table/constraints/indexes/triggers are created inside one BEGIN/COMMIT
