@@ -278,7 +278,10 @@ describe("10K-R2d-03B-02B-02B-04 unverified checkpoint transition proposal", () 
       },
     });
     expect(propose(p).reason).toBe("DENIED_INVALID_CANDIDATE_CHECKPOINT_OR_RECEIPTS");
-    expect(propose([{ ...a, email: "private@school.edu" }]).reason)
+    // The deliberately malformed runtime object must remain untyped input:
+    // TypeScript correctly forbids such an extra field in a DTO literal.
+    const withExtra = { ...a, email: "private@school.edu" };
+    expect(propose([withExtra]).reason)
       .toBe("DENIED_INVALID_CANDIDATE_CHECKPOINT_OR_RECEIPTS");
   });
 
