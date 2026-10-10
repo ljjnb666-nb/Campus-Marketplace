@@ -176,6 +176,64 @@ describe.skipIf(!url)(
       expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
     });
 
+    it("denies legacy repeated BASELINE in an otherwise contiguous historical prefix", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(2, "BASELINE", 1000));
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_REPEAT_BASELINE");
+      })).rejects.toThrow("ROLLBACK_REPEAT_BASELINE");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("denies a legacy historical clock rollback even when the next timestamp increases", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(2, "HEARTBEAT", -1000));
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_CLOCK_PREFIX");
+      })).rejects.toThrow("ROLLBACK_CLOCK_PREFIX");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("denies a legacy historical silence over 15 minutes", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(
+          tx, observation(2, "HEARTBEAT", 15 * 60_000 + 1),
+        );
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 15 * 60_000 + 1000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_SILENCE_PREFIX");
+      })).rejects.toThrow("ROLLBACK_SILENCE_PREFIX");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("denies an older writer's continuation after a historical DISCONNECTED", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(
+          tx, observation(2, "DISCONNECTED", 1000),
+        );
+        await recordUnverifiedHostLifecycleClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        );
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(4, "HEARTBEAT", 3000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_DISCONNECTED_PREFIX");
+      })).rejects.toThrow("ROLLBACK_DISCONNECTED_PREFIX");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
     it("refuses non-READ-COMMITTED transactions instead of trusting stale snapshots", async () => {
       await expect(db.$transaction(async tx => {
         await recordContiguousUnverifiedHostClaimTx(tx, observation());

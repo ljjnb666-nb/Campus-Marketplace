@@ -143,6 +143,32 @@ export async function recordContiguousUnverifiedHostClaimTx(
       if (BigInt(count) !== tip.sequence || genesis?.kind !== "BASELINE") {
         throw new UnverifiedHostSequenceError();
       }
+
+      // A gap-free numeric prefix is not enough: the older writer could
+      // persist a second BASELINE, backwards clock, oversized silence, or a
+      // continuation after DISCONNECTED. Audit the bounded local prefix
+      // before either an append or an exact-slot idempotent retry.
+      const semantic = await tx.$queryRaw<Array<{ invalid: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1 FROM (
+            SELECT "sequence", "kind", "observedAt",
+                   LAG("kind") OVER (ORDER BY "sequence") AS "previousKind",
+                   LAG("observedAt") OVER (ORDER BY "sequence") AS "previousAt"
+            FROM "HostLifecycleClaim"
+            WHERE "hostId" = ${data.hostId} AND "sessionId" = ${data.sessionId}
+          ) AS "history"
+          WHERE "sequence" > 1
+            AND (
+              "kind" = 'BASELINE'
+              OR "previousKind" = 'DISCONNECTED'
+              OR "observedAt" < "previousAt"
+              OR "observedAt" > "previousAt" + INTERVAL '15 minutes'
+            )
+        ) AS "invalid"
+      `;
+      if (semantic.length !== 1 || semantic[0]?.invalid !== false) {
+        throw new UnverifiedHostSequenceError();
+      }
     }
 
     const existing = await tx.hostLifecycleClaim.findUnique({
