@@ -227,23 +227,25 @@ describe("10K-R2d-03B-02B-02B-01 observer signature: negative-only authority", (
     // MUST be reviewed in a separate ingestion/credential stage.
   });
   it("binds the pinned host to the SAME claim snapshot that was signed", () => {
-    // Runtime JS objects can have getters even if their TS shape is readonly.
-    // The old verifier hashed host.01 but then read host.02 from the original
-    // object during key-scope checking, falsely reporting a scoped match.
-    const original = signed();
-    let reads = 0;
-    const observation = { ...original.observation };
-    Object.defineProperty(observation, "hostId", {
-      enumerable: true,
-      get: () => (++reads <= 4 ? "host.01" : "host.02"),
-    });
-    const matchedToWrongHost = verify(
-      { ...original, observation },
-      { ...pinned(), hostId: "host.02" },
-    );
-    expect(matchedToWrongHost.reason).toBe("DENIED_KEY_NOT_FOUND_OR_SCOPE");
-    expect(matchedToWrongHost.cryptographicSignatureMatches).toBe(false);
-    expect(matchedToWrongHost.canPublish).toBe(false);
+    // Stateful getters can change during normalization or after it. Neither
+    // the claim digest nor the key-scope comparison may use a second hostId.
+    for (const switchAfter of [3, 4]) {
+      const original = signed();
+      let reads = 0;
+      const observation = { ...original.observation };
+      Object.defineProperty(observation, "hostId", {
+        enumerable: true,
+        get: () => (++reads <= switchAfter ? "host.01" : "host.02"),
+      });
+      const outcome = verify(
+        { ...original, observation },
+        { ...pinned(), hostId: "host.02" },
+      );
+      expect(outcome.reason).toBe("DENIED_KEY_NOT_FOUND_OR_SCOPE");
+      expect(outcome.cryptographicSignatureMatches).toBe(false);
+      expect(outcome.canPublish).toBe(false);
+      expect(reads).toBe(1);
+    }
   });
 
   it("rejects malformed or throwing caller-injected key registries without leaking", () => {
