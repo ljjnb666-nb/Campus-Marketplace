@@ -233,7 +233,7 @@ describe("10K-R2d-03B-02B-02B-10 authorized read cannot promote candidates", () 
     expect(inspectUnverifiedCandidateCheckpointForks(windows().earlier.tips)
       .candidateSubmittedSetInternallyConsistent).toBe(true);
     await expect(loadAuthorizedFunnelDiagnostic({
-      ...request(), deploymentMembershipComplete: true,
+      ...request(), ...{ deploymentMembershipComplete: true },
     })).rejects.toThrow("ANALYTICS_SCOPE_DENIED");
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.findMany).not.toHaveBeenCalled();
@@ -241,7 +241,7 @@ describe("10K-R2d-03B-02B-02B-10 authorized read cannot promote candidates", () 
 
   it("candidate evidence cannot bypass exact campus grant", async () => {
     await expect(loadAuthorizedFunnelDiagnostic({
-      ...request(), campusId: "CAMPUS-B", captureContinuityProven: true,
+      ...request(), campusId: "CAMPUS-B", ...{ captureContinuityProven: true },
     })).rejects.toThrow("ANALYTICS_SCOPE_DENIED");
     expect(mocks.transaction).not.toHaveBeenCalled();
   });
