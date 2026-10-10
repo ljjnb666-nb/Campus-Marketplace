@@ -131,12 +131,12 @@ export async function recordContiguousUnverifiedHostClaimTx(
       select: { sequence: true, observedAt: true, kind: true },
     });
     if (!tip) {
-      if (data.sequence !== 1n || data.kind !== "BASELINE") {
+      if (data.sequence !== BigInt(1) || data.kind !== "BASELINE") {
         throw new UnverifiedHostSequenceError();
       }
     } else {
       const elapsed = data.observedAt.getTime() - tip.observedAt.getTime();
-      if (data.sequence !== tip.sequence + 1n ||
+      if (data.sequence !== tip.sequence + BigInt(1) ||
           data.kind === "BASELINE" || tip.kind === "DISCONNECTED" ||
           elapsed < 0 || elapsed > MAX_SILENCE_MS) {
         throw new UnverifiedHostSequenceError();
