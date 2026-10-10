@@ -1,6 +1,6 @@
 # Phase 10K-R2d-03B-02B-02B-12A — UNVERIFIED Host Journal Transaction Sequencing
 
-**STATUS: INTERNAL UNVERIFIED SAFETY SEAM / NOT TRUSTED CAS / NO ROLLOUT.**
+**STATUS: INTERNAL UNVERIFIED SAFETY SEAM / NOT TRUSTED CAS / NO ROLLOUT.** See Phase 12B for the follow-up caller-transaction lock setting ownership repair.
 
 ## Scope and rationale
 
@@ -11,7 +11,7 @@ Exactly three additive files: `funnel-host-lifecycle-contiguous-unverified.ts`, 
 ## Safety model
 
 - The new helper must be called **inside a caller-owned READ COMMITTED Prisma transaction**. It snapshots/canonicalizes a candidate observation once, then reads only its sanitized copy to avoid input-mutation TOCTOU.
-- It acquires a per-`(hostId,sessionId)` PostgreSQL *transaction* advisory lock using a length-framed JSON scope and bounded lock wait (1.5s). Hash collisions only serialize unrelated scopes; they cannot merge keys. It then reads the already-persisted journal and performs all checks and writes within the caller's transaction.
+- It acquires a per-`(hostId,sessionId)` PostgreSQL *transaction* advisory lock using a length-framed JSON scope. **Phase 12B changes lock acquisition to a fail-fast `pg_try_advisory_xact_lock`**, without changing caller-owned `lock_timeout`. Hash collisions may reject/serialize unrelated scopes but cannot merge their data. It then reads the already-persisted journal and performs all checks and writes within the caller's transaction.
 - Genesis requires BASELINE at sequence 1. Fresh writes require exactly latest sequence + 1, monotonic observation timestamps, ≤15m between observations, no repeated BASELINE and no continuation after DISCONNECTED. Same-slot replay is idempotent only when the persisted immutable claim matches in full; different content is rejected. Unknown-commit callers can repeat their exact input without inventing history.
 - Existing immutable journal DB unique constraints and regular-DML append-only enforcement remain intact; all test fixtures roll back. DB/lock errors are refused generically without exposing raw SQL errors or host identities.
 - A committed DISCONNECTED claim does not prove subsequent coverage. Missing or failed writes **cannot** become evidence of continuity, and the helper is not a trusted checkpoint authority.
