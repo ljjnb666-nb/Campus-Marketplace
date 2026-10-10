@@ -120,7 +120,7 @@ describe("10K-R2d-03B-02B-02B-01 observer signature: negative-only authority", (
       },
     };
     expect(verify(tampered).reason).toBe("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
-    expect(hostObserverSigningBytes(original)).toContain(Buffer.from("campus-marketplace-host-observer/v1"));
+    expect(hostObserverSigningBytes(original).toString("utf8")).toContain("campus-marketplace-host-observer/v1");
   });
 
   it("rejects revoked and expired, or not-yet-valid observer key epochs", () => {
