@@ -143,6 +143,23 @@ describe("10K-R2d-03B-02B-02B-07 candidate window edges", () => {
       .toBe("DENIED_INVALID_CANDIDATE_WINDOW");
   });
 
+  it("classifies invalid window Date objects without echoing their contents", () => {
+    for (const boundary of [
+      new Date("invalid"), new Date(-1),
+      { getTime: () => NOW.getTime() } as unknown as Date,
+      new Proxy(new Date(NOW), {}),
+    ]) {
+      for (const result of [
+        scan(trio(), boundary, minute(-5)),
+        scan(trio(), minute(-20), boundary),
+      ]) {
+        expect(result.reason).toBe("DENIED_INVALID_CANDIDATE_WINDOW");
+        expect(result.canPublish).toBe(false);
+        expect(result.submittedUniqueTips).toBe(0);
+      }
+    }
+  });
+
   it("rejects malformed timestamps and fake Date impersonators", () => {
     for (const timestamp of [
       new Date("invalid"),
