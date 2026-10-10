@@ -71,6 +71,21 @@ function normalizeBaseline(rows: unknown): string {
   return snapshot;
 }
 
+/**
+ * SQL stores only a jsonb-normalized, validated representation, not the raw
+ * JSON text (which can hide sensitive values behind duplicate keys).
+ * Compare semantic allowlisted membership rather than JSON whitespace/key
+ * ordering. A malformed persisted value must fail closed, not be accepted.
+ */
+function storedBaselineMatches(stored: string | null, expected: string | null): boolean {
+  if (stored === null || expected === null) return stored === expected;
+  try {
+    return normalizeBaseline(JSON.parse(stored)) === expected;
+  } catch {
+    return false;
+  }
+}
+
 /** Canonical payload identity is deterministic and is NOT a signature. */
 export function prepareUnverifiedHostLifecycleClaim(
   input: UnverifiedHostLifecycleObservation,
@@ -153,7 +168,7 @@ export async function recordUnverifiedHostLifecycleClaimTx(
       persisted.instanceId !== data.instanceId ||
       persisted.releaseSha !== data.releaseSha ||
       persisted.role !== data.role ||
-      persisted.baselineJson !== data.baselineJson ||
+      !storedBaselineMatches(persisted.baselineJson, data.baselineJson) ||
       persisted.source !== "UNVERIFIED") {
     throw new HostLifecycleClaimContractError();
   }
