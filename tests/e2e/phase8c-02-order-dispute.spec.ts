@@ -159,7 +159,7 @@ test("8C-02 买家发起普通订单纠纷 → reviewer 统一队列处理（真
   await resolveForm.locator('textarea[name="adminNote"]').fill(adminNoteText);
   // 提交前「处理结果」是表单标签；异步刷新期间可能与终局标题共存。
   // 因此不能用全页 getByText("处理结果") 断言提交已经完成。
-  await expect(resolveForm.getByText("处理结果", { exact: true })).toBeVisible();
+  await expect(resolveForm.getByRole("combobox", { name: "处理结果" })).toBeVisible();
   await resolveForm.getByRole("button", { name: "标记已解决" }).click();
 
   // 先观察旧表单卸载，再精确锁定 resolved-only 的 h2 标题所在 section。
