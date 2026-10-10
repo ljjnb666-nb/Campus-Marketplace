@@ -89,6 +89,32 @@ type CanonicalSigningSnapshot = Readonly<{
  * mutation must never change the host scope being checked against the key:
  * it must be the hostId that was hashed into claimKey.
  */
+/**
+ * Read each allowlisted observation field once into plain data properties.
+ * prepareUnverifiedHostLifecycleClaim validates this snapshot, not potentially
+ * stateful getters on the original object. Copy only safe machine fields.
+ */
+function snapshotObservation(
+  observation: UnverifiedHostLifecycleObservation,
+): UnverifiedHostLifecycleObservation {
+  const { origin, hostId, sessionId, sequence, observedAt, kind } = observation;
+  const instance = observation.instance;
+  const instances = observation.instances;
+  const copyInstance = (row: typeof instance) => {
+    if (!row) throw new Error("HOST_OBSERVER_INSTANCE_INVALID");
+    const { instanceId, releaseSha, role } = row;
+    return { instanceId, releaseSha, role };
+  };
+  return {
+    origin, hostId, sessionId, sequence,
+    observedAt: new Date(observedAt.getTime()), kind,
+    ...(instance === undefined ? {} : { instance: copyInstance(instance) }),
+    ...(instances === undefined ? {} : {
+      instances: instances.map(row => copyInstance(row)),
+    }),
+  };
+}
+
 function canonicalSigningSnapshot(
   envelope: Pick<CandidateSignedHostObservation,
     "principalId" | "keyId" | "signedAt" | "observation">,
@@ -101,7 +127,7 @@ function canonicalSigningSnapshot(
     throw new Error("HOST_OBSERVER_SIGNING_ENVELOPE_INVALID");
   }
   const signedAtMs = signedAt.getTime();
-  const claim = prepareUnverifiedHostLifecycleClaim(observation);
+  const claim = prepareUnverifiedHostLifecycleClaim(snapshotObservation(observation));
   return {
     bytes: Buffer.from(JSON.stringify([
       "campus-marketplace-host-observer/v1",
