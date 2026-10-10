@@ -16,7 +16,7 @@ identities remain caller-controlled and untrusted.
 - The request supplies a `windowStart` and `windowEnd` with an elapsed
   interval greater than zero and no more than 60 minutes, plus 2–128
   candidate checkpoint tips. All input is plain-data machine DTO shape.
-- Dates use native Date internal-slot reads; forged getters, symbols,
+- Dates use native Date internal-slot reads; malformed bounds receive a\n  dedicated invalid-window reason code. Forged getters, symbols,
   unexpected fields, null/negative/invalid timestamps, malicious proxies,
   missing sparse-array entries, malformed IDs, sequences and hashes fail
   closed with reason-only diagnostics and no echoed personal or host data.
@@ -71,7 +71,7 @@ host census, capture-gap drill evidence and explicit release approval.
 
 ## Review requirements
 
-Exactly 3 additive files: pure candidate-bracketing module, 21 adversarial
+Exactly 3 additive files: pure candidate-bracketing module, 22 adversarial
 tests and this trust-boundary document. Require exact-HEAD Typecheck, Lint,
 Vitest/coverage, Build and Playwright, independent security review and
 explicit user merge authorization. On authorized Merge Commit check
