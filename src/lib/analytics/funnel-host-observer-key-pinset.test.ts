@@ -180,6 +180,15 @@ describe("10K-R2d-03B-02B-02B-02 candidate pin catalog", () => {
     const response = check([throwing]);
     expect(response.status).toBe(denied);
     expect(JSON.stringify(response)).not.toContain("private-key-hidden");
+    const badArray = new Proxy([candidate()], {
+      get(target, prop, receiver) {
+        if (prop === "length") throw new Error("secret-array-length");
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const deniedArray = check(badArray);
+    expect(deniedArray.status).toBe(denied);
+    expect(JSON.stringify(deniedArray)).not.toContain("secret-array-length");
   });
 
   it("can supply a candidate verifier key but never promote cryptographic match to auth", () => {
