@@ -22,7 +22,10 @@ trusted, and the primitive does not prove independent host ownership.
   `["campus-marketplace-host-observer/v1", principalId, keyId,
   signedAt.toISOString(), claimKey]`, where claimKey is the canonical
   SHA-256 content digest of the full normalized observation.
-- Signature message and key host-scope validation use the **same normalized\n  claim snapshot**, never a second read of a mutable caller-supplied host ID.\n  A malformed or throwing caller-injected registry fails closed.\n- Signature must be a canonical 64-byte Ed25519 detached signature encoded
+- Signature message and key host-scope validation use the **same normalized
+  claim snapshot**, never a second read of a mutable caller-supplied host ID.
+  A malformed or throwing caller-injected registry fails closed.
+- Signature must be a canonical 64-byte Ed25519 detached signature encoded
   as unpadded base64url. Public key must be Ed25519 SPKI PEM.
 - Key record scope must match both the claimed principal and host. Key
   lifetime must include both `signedAt` **and verifier runtime time**; expired
