@@ -90,6 +90,40 @@ describe.skipIf(!url)("10K-R2d-03B-02B-02A real-PG immutable unverified host cla
     expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
   });
 
+  it("never persists shadowed duplicate JSON keys with sensitive values", async () => {
+    const data = prepareUnverifiedHostLifecycleClaim({
+      ...sample(), instances: [app],
+    });
+    // Direct SQL/ORM callers can bypass the TypeScript JSON allowlist.
+    // jsonb validation discards duplicate keys, so never store raw TEXT.
+    const injected = `[{"instanceId":"secret-user@example.com","instanceId":"${app.instanceId}","releaseSha":"${app.releaseSha}","role":"APP"}]`;
+    await expect(db.$transaction(async tx => {
+      const row = await tx.hostLifecycleClaim.create({
+        data: { ...data, baselineJson: injected },
+      });
+      expect(row.baselineJson).not.toContain("secret-user@example.com");
+      expect(JSON.parse(row.baselineJson!)).toEqual([app]);
+      // Canonical ORM writes remain retriable against JSONB-normalized text.
+      expect(await recordUnverifiedHostLifecycleClaimTx(tx, {
+        ...sample(), instances: [app],
+      })).toEqual({ recorded: false, claimKey: data.claimKey });
+      throw new Error("ROLLBACK_SHADOWED_BASELINE");
+    })).rejects.toThrow("ROLLBACK_SHADOWED_BASELINE");
+    expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+  });
+
+  it("rejects PostgreSQL infinite timestamps at the raw SQL boundary", async () => {
+    for (const value of ["infinity", "-infinity"]) {
+      await expect(db.$executeRawUnsafe(
+        `INSERT INTO "HostLifecycleClaim"
+           ("claimKey","hostId","sessionId","sequence","observedAt","kind")
+           VALUES ($1,$2,'session.02',2,$3::timestamp,'HEARTBEAT')`,
+        "f".repeat(64), hostId, value,
+      )).rejects.toThrow();
+    }
+    expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+  });
+
   it("blocks UPDATE and DELETE within rolled-back transactions", async () => {
     const data = prepareUnverifiedHostLifecycleClaim(sample());
     await expect(db.$transaction(async tx => {
