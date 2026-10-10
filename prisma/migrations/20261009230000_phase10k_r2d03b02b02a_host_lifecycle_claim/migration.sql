@@ -27,7 +27,7 @@ CREATE TABLE "HostLifecycleClaim" (
   CONSTRAINT "HostLifecycleClaim_sequence_check"
     CHECK ("sequence" >= 1),
   CONSTRAINT "HostLifecycleClaim_observed_check"
-    CHECK ("observedAt" >= TIMESTAMP '1970-01-01 00:00:00'),
+    CHECK (isfinite("observedAt") AND "observedAt" >= TIMESTAMP '1970-01-01 00:00:00'),
   CONSTRAINT "HostLifecycleClaim_source_check"
     CHECK ("source" = 'UNVERIFIED'),
   CONSTRAINT "HostLifecycleClaim_kind_payload_check"
@@ -97,6 +97,10 @@ BEGIN
       END IF;
       seen_ids := array_append(seen_ids, member_id);
     END LOOP;
+    -- JSONB strips shadowed duplicate keys. Persist ONLY this validated
+    -- canonicalized representation, never the raw TEXT, which might retain
+    -- sensitive duplicate-key values discarded by jsonb validation.
+    NEW."baselineJson" := (NEW."baselineJson"::jsonb)::text;
   END IF;
   RETURN NEW;
 END;
