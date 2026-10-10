@@ -225,7 +225,6 @@ describe("10K-R2d-03B-02B-02B-08 candidate overlapping windows", () => {
     const original = pair();
     const first = inspectUnverifiedCandidateWindowOverlap(original);
     const unrelated = pair();
-    unrelated.earlier.tips = unrelated.earlier.tips as never;
     // A second call can claim a separate host with a self-consistent chain.
     const changed: UnverifiedCandidateWindow = {
       ...unrelated.later,
