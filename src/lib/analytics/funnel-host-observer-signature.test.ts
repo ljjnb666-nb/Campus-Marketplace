@@ -134,6 +134,32 @@ describe("10K-R2d-03B-02B-02B-01 observer signature: negative-only authority", (
     }).reason).toBe("DENIED_KEY_EXPIRED_OR_REVOKED");
   });
 
+  it("rejects a signed-before-expiry payload after the key expires", () => {
+    // A once-valid signature is not eligible for a grace period after
+    // key expiry, even when its signedAt is inside the 5-minute skew window.
+    const beforeExpiry = signed({
+      signedAt: new Date(NOW.getTime() - 30_000),
+    });
+    const alreadyExpired = {
+      ...pinned(), validUntil: new Date(NOW.getTime() - 1),
+    };
+    expect(verify(beforeExpiry, alreadyExpired).reason)
+      .toBe("DENIED_KEY_EXPIRED_OR_REVOKED");
+    // The end is exclusive even when signedAt was legitimately in range.
+    const atBoundary = { ...pinned(), validUntil: new Date(NOW) };
+    expect(verify(beforeExpiry, atBoundary).reason)
+      .toBe("DENIED_KEY_EXPIRED_OR_REVOKED");
+  });
+
+  it("rejects oversized or non-string PEM from an injected registry", () => {
+    expect(verify(signed(), {
+      ...pinned(), publicKeyPem: "x".repeat(2049),
+    }).reason).toBe("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
+    expect(verify(signed(), {
+      ...pinned(), publicKeyPem: null as unknown as string,
+    }).reason).toBe("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
+  });
+
   it("rejects malformed public key and wrong asymmetric algorithm", () => {
     expect(verify(signed(), {
       ...pinned(), publicKeyPem: "not a key",
