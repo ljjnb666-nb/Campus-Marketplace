@@ -238,7 +238,7 @@ describe("10K-R2d-03B-02B-02B-03 candidate signed receipt chain", () => {
       expect(JSON.stringify(response)).not.toContain("secret");
     }
     expect(check([{ ...a, envelope: { ...a.envelope,
-      observation: { ...a.envelope.observation, email: "secret@example.com" },
+      observation: { ...a.envelope.observation, email: "secret@example.com" } as unknown as UnverifiedHostLifecycleObservation,
     } }]).reason).toBe("DENIED_MALFORMED_CANDIDATE_CHAIN");
   });
 
