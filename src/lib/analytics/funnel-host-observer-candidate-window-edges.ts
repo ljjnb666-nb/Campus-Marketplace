@@ -120,8 +120,14 @@ export function inspectUnverifiedCandidateWindowEdges(input: Readonly<{
 }>): CandidateWindowEdgeDiagnostic {
   try {
     const args = exactDataObject(input, ["windowStart", "windowEnd", "tips"]);
-    const from = dateMs(args.windowStart);
-    const through = dateMs(args.windowEnd);
+    let from: number;
+    let through: number;
+    try {
+      from = dateMs(args.windowStart);
+      through = dateMs(args.windowEnd);
+    } catch {
+      return outcome("DENIED_INVALID_CANDIDATE_WINDOW");
+    }
     if (through <= from || through - from > MAX_WINDOW_MS ||
         !Number.isSafeInteger(through)) {
       return outcome("DENIED_INVALID_CANDIDATE_WINDOW");
