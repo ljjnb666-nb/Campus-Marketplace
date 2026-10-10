@@ -75,24 +75,54 @@ function result(
  *
  * This function never incorporates raw Docker payloads, metadata or secrets.
  */
+type CanonicalSigningSnapshot = Readonly<{
+  bytes: Buffer;
+  principalId: string;
+  keyId: string;
+  hostId: string;
+  signedAtMs: number;
+  observedAtMs: number;
+}>;
+
+/**
+ * Snapshot untrusted candidate fields only once. A later hostId getter or
+ * mutation must never change the host scope being checked against the key:
+ * it must be the hostId that was hashed into claimKey.
+ */
+function canonicalSigningSnapshot(
+  envelope: Pick<CandidateSignedHostObservation,
+    "principalId" | "keyId" | "signedAt" | "observation">,
+): CanonicalSigningSnapshot {
+  if (!envelope) throw new Error("HOST_OBSERVER_SIGNING_ENVELOPE_INVALID");
+  const { principalId, keyId, signedAt, observation } = envelope;
+  if (typeof principalId !== "string" || !ID.test(principalId) ||
+      typeof keyId !== "string" || !ID.test(keyId) ||
+      !finiteDate(signedAt)) {
+    throw new Error("HOST_OBSERVER_SIGNING_ENVELOPE_INVALID");
+  }
+  const signedAtMs = signedAt.getTime();
+  const claim = prepareUnverifiedHostLifecycleClaim(observation);
+  return {
+    bytes: Buffer.from(JSON.stringify([
+      "campus-marketplace-host-observer/v1",
+      principalId,
+      keyId,
+      new Date(signedAtMs).toISOString(),
+      claim.claimKey,
+    ]), "utf8"),
+    principalId,
+    keyId,
+    hostId: claim.hostId,
+    signedAtMs,
+    observedAtMs: claim.observedAt.getTime(),
+  };
+}
+
 export function hostObserverSigningBytes(
   envelope: Pick<CandidateSignedHostObservation,
     "principalId" | "keyId" | "signedAt" | "observation">,
 ): Buffer {
-  if (!envelope || typeof envelope.principalId !== "string" ||
-      !ID.test(envelope.principalId) ||
-      typeof envelope.keyId !== "string" || !ID.test(envelope.keyId) ||
-      !finiteDate(envelope.signedAt)) {
-    throw new Error("HOST_OBSERVER_SIGNING_ENVELOPE_INVALID");
-  }
-  const claim = prepareUnverifiedHostLifecycleClaim(envelope.observation);
-  return Buffer.from(JSON.stringify([
-    "campus-marketplace-host-observer/v1",
-    envelope.principalId,
-    envelope.keyId,
-    envelope.signedAt.toISOString(),
-    claim.claimKey,
-  ]), "utf8");
+  return canonicalSigningSnapshot(envelope).bytes;
 }
 
 /**
@@ -106,65 +136,68 @@ export function verifyCandidateHostObserverSignature(
   registry: ReadonlyMap<string, CandidateObserverKey> | null | undefined,
 ): ObserverSignatureDiagnostic {
   if (!registry) return result("UNAVAILABLE_NO_INDEPENDENT_KEY_REGISTRY");
-  if (!envelope || !finiteDate(envelope.signedAt) ||
-      typeof envelope.signatureBase64url !== "string" ||
-      !SIGNATURE_BASE64URL.test(envelope.signatureBase64url)) {
-    return result("DENIED_MALFORMED_ENVELOPE");
-  }
 
-  let bytes: Buffer;
+  let snapshot: CanonicalSigningSnapshot;
+  let signatureBase64url: string;
   try {
-    bytes = hostObserverSigningBytes(envelope);
+    signatureBase64url = envelope.signatureBase64url;
+    if (typeof signatureBase64url !== "string" ||
+        !SIGNATURE_BASE64URL.test(signatureBase64url)) {
+      return result("DENIED_MALFORMED_ENVELOPE");
+    }
+    snapshot = canonicalSigningSnapshot(envelope);
   } catch {
     return result("DENIED_MALFORMED_ENVELOPE");
   }
 
-  const key = registry.get(envelope.keyId);
-  if (!key || key.keyId !== envelope.keyId ||
-      key.principalId !== envelope.principalId ||
-      key.hostId !== envelope.observation.hostId) {
+  let key: CandidateObserverKey | undefined;
+  try {
+    key = registry.get(snapshot.keyId);
+    if (!key || key.keyId !== snapshot.keyId ||
+        key.principalId !== snapshot.principalId ||
+        key.hostId !== snapshot.hostId) {
+      return result("DENIED_KEY_NOT_FOUND_OR_SCOPE");
+    }
+  } catch {
+    // A malformed caller-injected registry must not crash verification.
     return result("DENIED_KEY_NOT_FOUND_OR_SCOPE");
   }
-  // Both signature creation AND this validation must occur during the
-  // independently provisioned key's validity interval. Do not grant a
-  // five-minute post-expiry grace period via a still-recent signedAt.
+
   const now = Date.now();
-  if (key.revoked !== false ||
-      !finiteDate(key.validFrom) || !finiteDate(key.validUntil) ||
-      key.validUntil.getTime() <= key.validFrom.getTime() ||
-      envelope.signedAt.getTime() < key.validFrom.getTime() ||
-      envelope.signedAt.getTime() >= key.validUntil.getTime() ||
-      now < key.validFrom.getTime() ||
-      now >= key.validUntil.getTime()) {
+  try {
+    // The key must be valid at BOTH signing and checking time, with no grace.
+    if (key.revoked !== false ||
+        !finiteDate(key.validFrom) || !finiteDate(key.validUntil) ||
+        key.validUntil.getTime() <= key.validFrom.getTime() ||
+        snapshot.signedAtMs < key.validFrom.getTime() ||
+        snapshot.signedAtMs >= key.validUntil.getTime() ||
+        now < key.validFrom.getTime() ||
+        now >= key.validUntil.getTime()) {
+      return result("DENIED_KEY_EXPIRED_OR_REVOKED");
+    }
+  } catch {
     return result("DENIED_KEY_EXPIRED_OR_REVOKED");
   }
-  // No caller-controlled 'now' or tolerance. No acceptance of stale replay
-  // just because a caller can supply a signed timestamp from the past.
-  const signed = envelope.signedAt.getTime();
-  const observed = envelope.observation.observedAt.getTime();
-  if (Math.abs(now - signed) > MAX_SIGNED_CLOCK_SKEW_MS ||
-      observed > signed + MAX_SIGNED_CLOCK_SKEW_MS ||
-      signed - observed > MAX_OBSERVED_TO_SIGNED_MS) {
+
+  // Never accept caller-controlled clocks or stale/implausible timestamps.
+  if (Math.abs(now - snapshot.signedAtMs) > MAX_SIGNED_CLOCK_SKEW_MS ||
+      snapshot.observedAtMs > snapshot.signedAtMs + MAX_SIGNED_CLOCK_SKEW_MS ||
+      snapshot.signedAtMs - snapshot.observedAtMs > MAX_OBSERVED_TO_SIGNED_MS) {
     return result("DENIED_TIME_SKEW");
   }
-  let signature: Buffer;
   try {
-    signature = Buffer.from(envelope.signatureBase64url, "base64url");
+    const signature = Buffer.from(signatureBase64url, "base64url");
     if (signature.length !== 64 ||
-        signature.toString("base64url") !== envelope.signatureBase64url) {
+        signature.toString("base64url") !== signatureBase64url) {
       return result("DENIED_MALFORMED_ENVELOPE");
     }
-    // Bound parsing of a registry-supplied key, not just the signature.
-    // A malformed or unexpectedly large credential must fail closed.
     if (typeof key.publicKeyPem !== "string" ||
         key.publicKeyPem.length < 64 || key.publicKeyPem.length > 2048) {
       return result("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
     }
     const publicKey = createPublicKey(key.publicKeyPem);
-    if (publicKey.asymmetricKeyType !== "ed25519") {
-      return result("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
-    }
-    if (!cryptoVerify(null, bytes, publicKey, signature)) {
+    if (publicKey.asymmetricKeyType !== "ed25519" ||
+        !cryptoVerify(null, snapshot.bytes, publicKey, signature)) {
       return result("DENIED_INVALID_PUBLIC_KEY_OR_SIGNATURE");
     }
   } catch {
