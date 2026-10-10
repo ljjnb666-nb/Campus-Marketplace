@@ -34,6 +34,7 @@ export type CandidateCheckpointReason =
   | "DENIED_PREDECESSOR_OR_RECEIPT_HASH"
   | "DENIED_SEQUENCE_GAP_OR_REPLAY"
   | "DENIED_HOST_SESSION_OR_PRINCIPAL_CHANGE"
+  | "DENIED_DISCONNECTED_OR_BASELINE_RESET"
   | "DENIED_CLOCK_ROLLBACK_OR_SILENCE"
   | "CANDIDATE_CHECKPOINT_PROPOSAL_ONLY";
 
@@ -223,6 +224,13 @@ export function proposeUnverifiedCandidateCheckpointAdvance(input: Readonly<{
       if (expected !== row.receiptHash ||
           row.previousReceiptHash !== (checkpoint?.lastReceiptHash ?? null)) {
         return outcome("DENIED_PREDECESSOR_OR_RECEIPT_HASH");
+      }
+      // A disconnect is an explicit observation gap, never checkpoint
+      // continuity. A subsequent baseline is not the same boot-session
+      // continuity: it requires a separately reviewed recovery boundary.
+      if (claim.kind === "DISCONNECTED" ||
+          (checkpoint !== null && claim.kind === "BASELINE")) {
+        return outcome("DENIED_DISCONNECTED_OR_BASELINE_RESET");
       }
       if (checkpoint === null) {
         if (claim.sequence !== BigInt(1) || claim.kind !== "BASELINE") {
