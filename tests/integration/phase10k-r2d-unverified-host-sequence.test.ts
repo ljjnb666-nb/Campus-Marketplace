@@ -234,6 +234,99 @@ describe.skipIf(!url)(
       expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
     });
 
+    it("denies a legacy duplicate START hidden inside a contiguous prefix", async () => {
+      const start = (sequence: number, offsetMs: number) => ({
+        ...observation(sequence, "HEARTBEAT", offsetMs),
+        kind: "START" as const, instance: member,
+      });
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, start(2, 1000));
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_DUPLICATE_START");
+      })).rejects.toThrow("ROLLBACK_DUPLICATE_START");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("rejects a legacy orphan STOP or mismatched release identity", async () => {
+      const bad = [
+        { instanceId: "worker.99", releaseSha: "b".repeat(40), role: "ASYNC_WORKER" as const },
+        { ...member, releaseSha: "b".repeat(40) },
+      ];
+      for (const instance of bad) {
+        await expect(db.$transaction(async tx => {
+          await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+          await recordUnverifiedHostLifecycleClaimTx(tx, {
+            ...observation(2, "HEARTBEAT", 1000),
+            kind: "STOP", instance,
+          });
+          await expect(recordContiguousUnverifiedHostClaimTx(
+            tx, observation(3, "HEARTBEAT", 2000),
+          )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+          throw new Error("ROLLBACK_BAD_STOP");
+        })).rejects.toThrow("ROLLBACK_BAD_STOP");
+      }
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("checks proposed STOP/START state without producing trusted authority", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordContiguousUnverifiedHostClaimTx(tx, observation());
+        await expect(recordContiguousUnverifiedHostClaimTx(tx, {
+          ...observation(2, "HEARTBEAT", 1000),
+          kind: "START", instance: member,
+        })).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        await expect(recordContiguousUnverifiedHostClaimTx(tx, {
+          ...observation(2, "HEARTBEAT", 1000),
+          kind: "STOP", instance: { ...member, releaseSha: "b".repeat(40) },
+        })).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        const stop = await recordContiguousUnverifiedHostClaimTx(tx, {
+          ...observation(2, "HEARTBEAT", 1000), kind: "STOP", instance: member,
+        });
+        expect(stop).toMatchObject({ recorded: true, source: "UNVERIFIED", canPublish: false });
+        const start = await recordContiguousUnverifiedHostClaimTx(tx, {
+          ...observation(3, "HEARTBEAT", 2000), kind: "START", instance: member,
+        });
+        expect(start).toMatchObject({
+          recorded: true, source: "UNVERIFIED",
+          independentProvisioningVerified: false,
+          independentHostAuthenticated: false,
+          deploymentMembershipComplete: false,
+          captureContinuityProven: false, canPublish: false,
+        });
+        expect(await recordContiguousUnverifiedHostClaimTx(tx, {
+          ...observation(2, "HEARTBEAT", 1000), kind: "STOP", instance: member,
+        })).toMatchObject({ recorded: false, claimKey: stop.claimKey, canPublish: false });
+        throw new Error("ROLLBACK_VALID_TRANSITIONS");
+      })).rejects.toThrow("ROLLBACK_VALID_TRANSITIONS");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("accepts a clean legacy START/STOP state prefix as UNVERIFIED only", async () => {
+      const worker = {
+        instanceId: "worker.01", releaseSha: "c".repeat(40), role: "ASYNC_WORKER" as const,
+      };
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, {
+          ...observation(2, "HEARTBEAT", 1000), kind: "START", instance: worker,
+        });
+        await recordUnverifiedHostLifecycleClaimTx(tx, {
+          ...observation(3, "HEARTBEAT", 2000), kind: "STOP", instance: member,
+        });
+        expect(await recordContiguousUnverifiedHostClaimTx(
+          tx, observation(4, "HEARTBEAT", 3000),
+        )).toMatchObject({ recorded: true, source: "UNVERIFIED", canPublish: false });
+        throw new Error("ROLLBACK_LEGACY_VALID_TRANSITIONS");
+      })).rejects.toThrow("ROLLBACK_LEGACY_VALID_TRANSITIONS");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
     it("refuses non-READ-COMMITTED transactions instead of trusting stale snapshots", async () => {
       await expect(db.$transaction(async tx => {
         await recordContiguousUnverifiedHostClaimTx(tx, observation());
