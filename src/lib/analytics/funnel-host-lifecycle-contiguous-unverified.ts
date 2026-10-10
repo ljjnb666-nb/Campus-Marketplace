@@ -53,6 +53,34 @@ function result(value: { recorded: boolean; claimKey: string }): UnverifiedHostS
   };
 }
 
+type CandidateInstanceIdentity = Readonly<{
+  releaseSha: string;
+  role: "APP" | "ASYNC_WORKER";
+}>;
+
+/** Local candidate-state check only: neither an identity nor a producer authority. */
+function applyCandidateInstanceTransition(
+  running: Map<string, CandidateInstanceIdentity>,
+  kind: "START" | "STOP",
+  instanceId: string | null,
+  releaseSha: string | null,
+  role: string | null,
+): void {
+  if (!instanceId || !releaseSha || (role !== "APP" && role !== "ASYNC_WORKER")) {
+    throw new UnverifiedHostSequenceError();
+  }
+  const prior = running.get(instanceId);
+  if (kind === "START") {
+    if (prior) throw new UnverifiedHostSequenceError();
+    running.set(instanceId, { releaseSha, role });
+  } else {
+    if (!prior || prior.releaseSha !== releaseSha || prior.role !== role) {
+      throw new UnverifiedHostSequenceError();
+    }
+    running.delete(instanceId);
+  }
+}
+
 /** Never reread a caller-mutable observation after its canonical snapshot. */
 function toSafeObservation(
   data: PreparedUnverifiedHostLifecycleClaim,
@@ -171,6 +199,53 @@ export async function recordContiguousUnverifiedHostClaimTx(
       }
     }
 
+    // 12E: an unguarded legacy writer can preserve numerical/time ordering
+    // while claiming impossible START/STOP transitions. Reconstruct just the
+    // bounded machine-only instance state before accepting a replay or append.
+    const running = new Map<string, CandidateInstanceIdentity>();
+    if (tip) {
+      const lifecycle = await tx.hostLifecycleClaim.findMany({
+        where: {
+          ...scopeWhere,
+          kind: { in: ["BASELINE", "START", "STOP"] },
+        },
+        orderBy: { sequence: "asc" },
+        select: {
+          sequence: true, kind: true, observedAt: true, baselineJson: true,
+          instanceId: true, releaseSha: true, role: true,
+        },
+      });
+      if (lifecycle.length < 1 || lifecycle[0]?.sequence !== BigInt(1) ||
+          lifecycle[0].kind !== "BASELINE" || !lifecycle[0].baselineJson) {
+        throw new UnverifiedHostSequenceError();
+      }
+      // Reuse the existing allowlisted baseline normalizer; do not trust a
+      // malformed persisted snapshot even when its sequence looks valid.
+      const verified = prepareUnverifiedHostLifecycleClaim({
+        origin: "UNVERIFIED_HOST_OBSERVER",
+        hostId: data.hostId, sessionId: data.sessionId,
+        sequence: 1, kind: "BASELINE",
+        observedAt: lifecycle[0].observedAt,
+        instances: JSON.parse(lifecycle[0].baselineJson) as NonNullable<
+          UnverifiedHostLifecycleObservation["instances"]
+        >,
+      });
+      const baseline = JSON.parse(verified.baselineJson!) as Array<{
+        instanceId: string; releaseSha: string; role: "APP" | "ASYNC_WORKER";
+      }>;
+      for (const item of baseline) {
+        running.set(item.instanceId, { releaseSha: item.releaseSha, role: item.role });
+      }
+      for (const item of lifecycle.slice(1)) {
+        if (item.kind !== "START" && item.kind !== "STOP") {
+          throw new UnverifiedHostSequenceError();
+        }
+        applyCandidateInstanceTransition(
+          running, item.kind, item.instanceId, item.releaseSha, item.role,
+        );
+      }
+    }
+
     const existing = await tx.hostLifecycleClaim.findUnique({
       where: { hostId_sessionId_sequence: {
         ...scopeWhere, sequence: data.sequence,
@@ -193,6 +268,13 @@ export async function recordContiguousUnverifiedHostClaimTx(
           elapsed < 0 || elapsed > MAX_SILENCE_MS) {
         throw new UnverifiedHostSequenceError();
       }
+    }
+    // Proposed transition must be possible in the already-persisted state.
+    // Existing exact-slot retries returned above without double-applying.
+    if (data.kind === "START" || data.kind === "STOP") {
+      applyCandidateInstanceTransition(
+        running, data.kind, data.instanceId, data.releaseSha, data.role,
+      );
     }
     const written = await recordUnverifiedHostLifecycleClaimTx(tx, safe);
     if (!written.recorded) throw new UnverifiedHostSequenceError();
