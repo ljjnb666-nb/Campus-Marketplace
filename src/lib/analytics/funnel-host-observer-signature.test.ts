@@ -226,4 +226,40 @@ describe("10K-R2d-03B-02B-02B-01 observer signature: negative-only authority", (
     // Durable nonce/sequence authority and independent host provisioning
     // MUST be reviewed in a separate ingestion/credential stage.
   });
+  it("binds the pinned host to the SAME claim snapshot that was signed", () => {
+    // Runtime JS objects can have getters even if their TS shape is readonly.
+    // The old verifier hashed host.01 but then read host.02 from the original
+    // object during key-scope checking, falsely reporting a scoped match.
+    const original = signed();
+    let reads = 0;
+    const observation = { ...original.observation };
+    Object.defineProperty(observation, "hostId", {
+      enumerable: true,
+      get: () => (++reads <= 4 ? "host.01" : "host.02"),
+    });
+    const matchedToWrongHost = verify(
+      { ...original, observation },
+      { ...pinned(), hostId: "host.02" },
+    );
+    expect(matchedToWrongHost.reason).toBe("DENIED_KEY_NOT_FOUND_OR_SCOPE");
+    expect(matchedToWrongHost.cryptographicSignatureMatches).toBe(false);
+    expect(matchedToWrongHost.canPublish).toBe(false);
+  });
+
+  it("rejects malformed or throwing caller-injected key registries without leaking", () => {
+    const envelope = signed();
+    const exploding = {
+      get: () => { throw new Error("secret-registry-value"); },
+    } as unknown as ReadonlyMap<string, CandidateObserverKey>;
+    const malformed = {} as ReadonlyMap<string, CandidateObserverKey>;
+    for (const registry of [exploding, malformed]) {
+      const output = verifyCandidateHostObserverSignature(envelope, registry);
+      expect(output.reason).toBe("DENIED_KEY_NOT_FOUND_OR_SCOPE");
+      expect(output.cryptographicSignatureMatches).toBe(false);
+      expect(output.independentHostAuthenticated).toBe(false);
+      expect(output.canPublish).toBe(false);
+      expect(JSON.stringify(output)).not.toContain("secret-registry-value");
+    }
+  });
+
 });
