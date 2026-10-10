@@ -25,7 +25,9 @@ trusted, and the primitive does not prove independent host ownership.
 - Signature must be a canonical 64-byte Ed25519 detached signature encoded
   as unpadded base64url. Public key must be Ed25519 SPKI PEM.
 - Key record scope must match both the claimed principal and host. Key
-  lifetime must include `signedAt`; revoked keys fail closed.
+  lifetime must include both `signedAt` **and verifier runtime time**; expired
+  or revoked keys fail closed without post-expiry grace periods. Public-key
+  PEM parsing is bounded (64–2048 characters), and only Ed25519 is accepted.
 - The verifier uses runtime `Date.now()`, not caller-provided `now`.
   The signed clock may deviate by at most 5 minutes; the observation may
   be at most 15 minutes older than the signed timestamp and at most 5
