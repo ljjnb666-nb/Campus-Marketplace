@@ -97,10 +97,12 @@ function invalid(): CandidateObserverPinCatalog {
  * Pins are never persisted and cannot be used as an independent trust root.
  */
 export function prepareCandidateObserverPinCatalog(input: unknown): CandidateObserverPinCatalog {
-  if (!Array.isArray(input) || input.length < 1 || input.length > MAX_PINS) {
-    return invalid();
-  }
   try {
+    // A proxy of an array can throw while reading length or iteration.
+    // Bound checks belong inside this fail-closed exception boundary.
+    if (!Array.isArray(input) || input.length < 1 || input.length > MAX_PINS) {
+      return invalid();
+    }
     const keys = new Map<string, InternalPin>();
     const fingerprints = new Set<string>();
     const principals = new Map<string, string>();
