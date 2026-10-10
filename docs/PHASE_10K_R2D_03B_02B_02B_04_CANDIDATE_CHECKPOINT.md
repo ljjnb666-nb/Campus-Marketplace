@@ -26,8 +26,11 @@ advance any trusted clock or persist anything across process restarts.
   by exactly one without gaps or duplicates.
 - A batch starting from null must begin with candidate BASELINE sequence 1.
   When continuing a supplied checkpoint, host, principal and boot-session
-  identity cannot change. Signer/key rotation within the same principal
-  remains merely a candidate consistency result.
+  identity cannot change. A DISCONNECTED event is an explicit unknown
+  interval, so the proposal fails closed even if signed and sequential.
+  Repeated BASELINE after genesis is a session reset and cannot be promoted
+  to continuous in-session evidence. Signer/key rotation within the same
+  principal remains merely a candidate consistency result.
 - Observed and signed times may not roll back, and adjacent observed
   intervals cannot exceed 15 minutes. Every signature must pass the
   existing at-check-time key validity and bounded-clock checks.
@@ -76,7 +79,7 @@ production authorization changes.
 
 ## CI, review and merge policy
 
-Scope exactly three additive files: pure proposal module, 18 adversarial
+Scope exactly three additive files: pure proposal module, 20 adversarial
 tests (including a **two-fork demonstration** that stays untrusted) and this
 contract. Exact-HEAD typecheck, lint, full Vitest/coverage, production build,
 Playwright and independent security review are mandatory. PR remains DRAFT
