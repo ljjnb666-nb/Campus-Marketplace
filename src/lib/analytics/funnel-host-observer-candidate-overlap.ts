@@ -45,7 +45,8 @@ const TIP = [
   "source", "principalId", "hostId", "sessionId", "sequence",
   "lastReceiptHash", "observedAt", "signedAt",
 ] as const;
-const MAX_TIPS = 128;
+// Two batches together must fit the existing 128-tip fork scanner.
+const MAX_TIPS = 64;
 
 function result(
   reason: CandidateOverlapReason,
