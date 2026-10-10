@@ -61,17 +61,17 @@
 
 计划独立存储两个概念：
 
-- 不可变 receipt journal：`authorityVersion, principalId, hostId, sessionId, sequence, previousHash, receiptHash, signedAt, observedAt, receivedAt, verificationOutcome`。绝不存原始 Docker payload、用户 ID、IP、认证令牌、私钥或不必要业务内容。
+- 仅已准入 receipt 的不可变 journal：`authorityVersion, principalId, hostId, sessionId, sequence, previousHash, receiptHash, signedAt, observedAt, receivedAt, verifiedRegistryDigest`。拒绝或冲突的输入只能进入独立的、严格脱敏的 quarantine/audit 记录，不得混入连续性权威日志或推进 cursor。绝不存原始 Docker payload、用户 ID、IP、认证令牌、私钥或不必要业务内容。
 - 单一权威 cursor：以 `(authorityId, principalId, hostId, sessionId)` 为 key，记录上次已确认 `sequence, receiptHash`、DB 收到时间及明确状态（`CONTIGUOUS / GAP / QUARANTINED / REVOKED`）。允许新 session 仅通过经过审计的 session-start 边界，绝不把 reset 隐性接到旧窗口。
 
-**原子提交不变量：** 同一数据库事务内验证已钉住的签发版本和密钥、锁定该唯一 cursor、校验前驱 hash 与精确 `lastSequence+1`、插入不可变 receipt、CAS 更新 cursor，最后一次性提交；任何一项失败则全事务回滚。优先明确 PostgreSQL row lock + 唯一约束 + 条件更新的线性化点；应用侧内存锁或 Redis TTL 不得替代数据库事务。
+**原子提交不变量：** 签名的规范化及 Ed25519 校验在数据库事务**之外**对已钉住的注册快照完成；事务内必须锁住同一权威版本的数据库镜像/epoch fence，重新检查主体、host-scope、有效期与吊销状态，以及快照 digest 未被更新或回滚，然后锁定唯一 cursor、校验前驱 hash 与精确 `lastSequence+1`、插入不可变 receipt、CAS 更新 cursor，最后一次性提交；任何一项失败则全事务回滚。外部注册版本同步必须单调且可审计，过期/无法确认新鲜度的快照 fail closed，吊销生效/传播的最大时限须先由运营方冻结并演练（不能声称跨网络存在瞬时原子吊销）。优先明确 PostgreSQL row lock + 唯一约束 + 条件更新的线性化点；应用侧内存锁或 Redis TTL 不得替代数据库事务。
 
 - 相同 receipt 的重复请求只能得到已入账的幂等结果；同一 slot 不同 digest、相同 digest 跨 scope、不同前驱或签发版本冲突一律拒绝并隔离，**不能覆盖已有证据**。
 - 两个进程从同一旧 cursor 并发写入，只能有一个成功前进；失败方重读权威 cursor 后冲突拒绝，不能静默重写链。
 - 数据库提交结果未知（例如响应丢失）时以严格 semantic identity 查询判断已提交/未提交，然后安全重试；不得靠覆盖 cursor 或猜测 commit 成功。
 - 缺序号、失联、签发中断、时钟倒退、超过 15 分钟的静默、reboot/new session 及 observer 自身停机必须产生不可逆的 `UNKNOWN/GAP` 区间，不能靠事后 baseline 清除。
 - 时间线同时保留签发时间、观察时间及数据库接收时间；系统时钟或延迟记录本身不构成采集连续性，外部 anchor 与版本/UTC 边界须单独检查。
-- 需要实测跨连接的 `READ COMMITTED`/显式锁与恢复语义，或选择隔离级别更高的替代方案并论证活锁、重试预算；不允许长事务处理宿主机网络请求。
+- 需要实测跨连接的 `READ COMMITTED`/显式锁与恢复语义，或选择隔离级别更高的替代方案并论证活锁、重试预算；不允许在数据库事务内处理宿主机、注册签发服务或异地锚的网络请求；任何跨系统失败必须留下未知区间，不得把无确认当作连续。
 
 此方案只会把**已认证来源的已接收记录**变成可核验的持久历史。即使 CAS 完全通过，也不能推出宿主机 inventory 完整或业务事件从未遗漏。
 
