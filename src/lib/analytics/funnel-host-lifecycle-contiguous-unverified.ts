@@ -17,6 +17,9 @@ import type { UnverifiedHostLifecycleObservation } from
  * Existing/privileged writers can bypass this opt-in internal seam.
  */
 const MAX_SILENCE_MS = 15 * 60_000;
+// Candidate-only cost gate. A trusted scalable checkpoint requires an
+// independently managed cursor, not an unbounded scan of local journal rows.
+const MAX_SESSION_SEQUENCE = BigInt(4096);
 const ERROR_CODE = "UNVERIFIED_HOST_SEQUENCE_REFUSED" as const;
 
 export class UnverifiedHostSequenceError extends Error {
@@ -117,23 +120,42 @@ export async function recordContiguousUnverifiedHostClaimTx(
       throw new UnverifiedHostSequenceError();
     }
 
+    if (data.sequence > MAX_SESSION_SEQUENCE) throw new UnverifiedHostSequenceError();
+
+    const scopeWhere = { hostId: data.hostId, sessionId: data.sessionId };
+    const tip = await tx.hostLifecycleClaim.findFirst({
+      where: scopeWhere,
+      orderBy: { sequence: "desc" },
+      select: { sequence: true, observedAt: true, kind: true },
+    });
+    if (tip) {
+      if (tip.sequence > MAX_SESSION_SEQUENCE) throw new UnverifiedHostSequenceError();
+      // Older internal writers could skip sequence numbers. Unique positive
+      // sequence slots imply an exact 1..tip prefix only when COUNT == tip.
+      // Keep the verification bounded and fail closed for oversized sessions.
+      const count = await tx.hostLifecycleClaim.count({ where: scopeWhere });
+      const genesis = await tx.hostLifecycleClaim.findUnique({
+        where: { hostId_sessionId_sequence: {
+          ...scopeWhere, sequence: BigInt(1),
+        } },
+        select: { kind: true },
+      });
+      if (BigInt(count) !== tip.sequence || genesis?.kind !== "BASELINE") {
+        throw new UnverifiedHostSequenceError();
+      }
+    }
+
     const existing = await tx.hostLifecycleClaim.findUnique({
       where: { hostId_sessionId_sequence: {
-        hostId: data.hostId, sessionId: data.sessionId, sequence: data.sequence,
+        ...scopeWhere, sequence: data.sequence,
       } },
       select: { claimKey: true },
     });
     if (existing) {
       if (existing.claimKey !== data.claimKey) throw new UnverifiedHostSequenceError();
-      // Existing journal helper also checks full canonical persisted semantics.
+      // Even exact retries cannot launder a known corrupt historical prefix.
       return result(await recordUnverifiedHostLifecycleClaimTx(tx, safe));
     }
-
-    const tip = await tx.hostLifecycleClaim.findFirst({
-      where: { hostId: data.hostId, sessionId: data.sessionId },
-      orderBy: { sequence: "desc" },
-      select: { sequence: true, observedAt: true, kind: true },
-    });
     if (!tip) {
       if (data.sequence !== BigInt(1) || data.kind !== "BASELINE") {
         throw new UnverifiedHostSequenceError();

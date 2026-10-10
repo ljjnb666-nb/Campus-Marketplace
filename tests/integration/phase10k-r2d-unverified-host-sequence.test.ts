@@ -126,6 +126,56 @@ describe.skipIf(!url)(
       expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
     });
 
+    it("refuses to append after a legacy writer left a hidden historical sequence hole", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(4, "HEARTBEAT", 4000));
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(5, "HEARTBEAT", 5000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        // Exact replay must not disguise a broken prefix either.
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(4, "HEARTBEAT", 4000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        expect(await tx.hostLifecycleClaim.count({ where: { hostId } })).toBe(2);
+        throw new Error("ROLLBACK_CORRUPT_PREFIX");
+      })).rejects.toThrow("ROLLBACK_CORRUPT_PREFIX");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("rejects historical prefix without a BASELINE at sequence one", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(1, "HEARTBEAT"));
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(2, "HEARTBEAT", 1000));
+        await expect(recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        )).rejects.toThrow("UNVERIFIED_HOST_SEQUENCE_REFUSED");
+        throw new Error("ROLLBACK_NO_GENESIS");
+      })).rejects.toThrow("ROLLBACK_NO_GENESIS");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
+    it("accepts a valid legacy prefix without promoting its authority", async () => {
+      await expect(db.$transaction(async tx => {
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation());
+        await recordUnverifiedHostLifecycleClaimTx(tx, observation(2, "HEARTBEAT", 1000));
+        expect(await recordContiguousUnverifiedHostClaimTx(
+          tx, observation(3, "HEARTBEAT", 2000),
+        )).toMatchObject({
+          recorded: true, source: "UNVERIFIED",
+          independentProvisioningVerified: false,
+          independentHostAuthenticated: false,
+          deploymentMembershipComplete: false,
+          captureContinuityProven: false,
+          canPublish: false,
+        });
+        expect(await recordContiguousUnverifiedHostClaimTx(tx, observation()))
+          .toMatchObject({ recorded: false, source: "UNVERIFIED", canPublish: false });
+        throw new Error("ROLLBACK_VALID_PREFIX");
+      })).rejects.toThrow("ROLLBACK_VALID_PREFIX");
+      expect(await db.hostLifecycleClaim.count({ where: { hostId } })).toBe(0);
+    });
+
     it("refuses non-READ-COMMITTED transactions instead of trusting stale snapshots", async () => {
       await expect(db.$transaction(async tx => {
         await recordContiguousUnverifiedHostClaimTx(tx, observation());
