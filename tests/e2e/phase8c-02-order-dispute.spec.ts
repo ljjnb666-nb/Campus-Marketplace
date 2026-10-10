@@ -157,11 +157,22 @@ test("8C-02 买家发起普通订单纠纷 → reviewer 统一队列处理（真
   await resolveForm.locator('select[name="resolutionCode"]').selectOption("MUTUAL_AGREEMENT");
   await resolveForm.locator('select[name="resolutionAction"]').selectOption("RESTORE_PREVIOUS");
   await resolveForm.locator('textarea[name="adminNote"]').fill(adminNoteText);
+  // 提交前「处理结果」是表单标签；异步刷新期间可能与终局标题共存。
+  // 因此不能用全页 getByText("处理结果") 断言提交已经完成。
+  await expect(resolveForm.getByRole("combobox", { name: "处理结果" })).toBeVisible();
   await resolveForm.getByRole("button", { name: "标记已解决" }).click();
-  await expect(reviewerPage.getByText("处理结果")).toBeVisible({ timeout: 20_000 });
-  // resolve 表单卸载是异步的：负载下旧表单（含 hidden option 文本）可能仍
-  // 挂载——与相邻步骤同一 20s 约定，等待结果面板成为唯一可见匹配
-  await expect(reviewerPage.getByText(/双方协商一致/)).toBeVisible({ timeout: 20_000 });
+
+  // 先观察旧表单卸载，再精确锁定 resolved-only 的 h2 标题所在 section。
+  // 不使用 .first()、sleep 或全页宽泛文本匹配掩盖状态竞争。
+  await expect(resolveForm).toHaveCount(0, { timeout: 20_000 });
+  const resolvedSection = reviewerPage.locator("section", {
+    has: reviewerPage.getByRole("heading", { name: "处理结果", level: 2, exact: true }),
+  });
+  await expect(resolvedSection).toHaveCount(1);
+  await expect(
+    resolvedSection.getByRole("heading", { name: "处理结果", level: 2, exact: true }),
+  ).toBeVisible();
+  await expect(resolvedSection.getByText(/双方协商一致/)).toBeVisible({ timeout: 20_000 });
 
   // DB 不变量：dispute RESOLVED + Order 恢复 ACCEPTED + 双方 holds RELEASED
   await expect
