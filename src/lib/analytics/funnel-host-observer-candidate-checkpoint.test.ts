@@ -172,6 +172,27 @@ describe("10K-R2d-03B-02B-02B-04 unverified checkpoint transition proposal", () 
     ], prev).reason).toBe("DENIED_SEQUENCE_GAP_OR_REPLAY");
   });
 
+  it("rejects a correctly signed DISCONNECTED event as a terminal unknown gap", () => {
+    const prev = anchor();
+    const disconnected: UnverifiedHostLifecycleObservation = {
+      ...observation(), kind: "DISCONNECTED",
+    };
+    const row = receipt(disconnected, prev.lastReceiptHash);
+    const response = propose([row], prev);
+    expect(response.reason).toBe("DENIED_DISCONNECTED_OR_BASELINE_RESET");
+    expect(response.proposedCheckpoint).toBeNull();
+    expect(response.captureContinuityProven).toBe(false);
+  });
+
+  it("rejects in-session BASELINE reset even with a correct sequence and signature", () => {
+    const prev = anchor();
+    const row = receipt(observation("BASELINE", 2), prev.lastReceiptHash);
+    const response = propose([row], prev);
+    expect(response.reason).toBe("DENIED_DISCONNECTED_OR_BASELINE_RESET");
+    expect(response.proposedCheckpoint).toBeNull();
+    expect(response.canPublish).toBe(false);
+  });
+
   it("rejects changed session even if the receipt is correctly signed", () => {
     const prev = anchor();
     const row = receipt({
