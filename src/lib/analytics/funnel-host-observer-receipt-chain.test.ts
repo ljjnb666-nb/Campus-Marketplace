@@ -107,6 +107,24 @@ describe("10K-R2d-03B-02B-02B-03 candidate signed receipt chain", () => {
       .toBe(rows[1].receiptHash);
   });
 
+  it("accepts a real Date created before fake timers and rejects Date impostors", () => {
+    // NOW was created under the original global Date before useFakeTimers().
+    // A prototype-equality check incorrectly rejects that genuine Date.
+    const a = make(baseline());
+    expect(check([a]).candidateChainInternallyConsistent).toBe(true);
+    const forgedTimestamp = {
+      getTime: () => NOW.getTime(),
+      [Symbol.toStringTag]: "Date",
+    } as unknown as Date;
+    expect(check([{
+      ...a, envelope: { ...a.envelope, signedAt: forgedTimestamp },
+    }]).reason).toBe("DENIED_MALFORMED_CANDIDATE_CHAIN");
+    const proxiedDate = new Proxy(new Date(NOW), {});
+    expect(check([{
+      ...a, envelope: { ...a.envelope, signedAt: proxiedDate },
+    }]).reason).toBe("DENIED_MALFORMED_CANDIDATE_CHAIN");
+  });
+
   it("refuses absent candidate key registry", () => {
     expect(check(chain(), null).reason).toBe("UNAVAILABLE_CANDIDATE_KEY_REGISTRY");
   });
