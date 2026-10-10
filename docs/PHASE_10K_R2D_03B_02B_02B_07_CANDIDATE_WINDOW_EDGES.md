@@ -16,7 +16,8 @@ identities remain caller-controlled and untrusted.
 - The request supplies a `windowStart` and `windowEnd` with an elapsed
   interval greater than zero and no more than 60 minutes, plus 2–128
   candidate checkpoint tips. All input is plain-data machine DTO shape.
-- Dates use native Date internal-slot reads; malformed bounds receive a\n  dedicated invalid-window reason code. Forged getters, symbols,
+- Dates use native Date internal-slot reads; malformed bounds receive a
+  dedicated invalid-window reason code. Forged getters, symbols,
   unexpected fields, null/negative/invalid timestamps, malicious proxies,
   missing sparse-array entries, malformed IDs, sequences and hashes fail
   closed with reason-only diagnostics and no echoed personal or host data.
