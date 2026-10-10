@@ -213,7 +213,7 @@ export function auditCandidateHostReceiptChain(
       const observed = claim.observedAt.getTime();
       const signed = envelope.signedAt.getTime();
       if (host === null) {
-        if (claim.sequence !== 1n || claim.kind !== "BASELINE") {
+        if (claim.sequence !== BigInt(1) || claim.kind !== "BASELINE") {
           return result("DENIED_SEQUENCE_GAP_OR_REPLAY");
         }
         host = claim.hostId;
