@@ -16,14 +16,20 @@ export async function loginViaUI(
   await page.goto("/login");
   await page.locator('input[name="email"]').first().fill(email);
   await page.locator('input[name="password"]').first().fill(password);
+  const loginOrigin = new URL(page.url()).origin;
+  let callbackStarted = false;
   let callbackStatus = "none";
   let callbackTransportFailure = false;
   const isCredentialsCallback = (url: string): boolean => {
     try {
-      return new URL(url).pathname.endsWith("/api/auth/callback/credentials");
+      const target = new URL(url);
+      return target.origin === loginOrigin && target.pathname === "/api/auth/callback/credentials";
     } catch {
       return false;
     }
+  };
+  const onRequest = (request: import("@playwright/test").Request) => {
+    if (isCredentialsCallback(request.url())) callbackStarted = true;
   };
   const onResponse = (response: import("@playwright/test").Response) => {
     if (!isCredentialsCallback(response.url())) return;
@@ -35,6 +41,7 @@ export async function loginViaUI(
   const onRequestFailed = (request: import("@playwright/test").Request) => {
     if (isCredentialsCallback(request.url())) callbackTransportFailure = true;
   };
+  page.on("request", onRequest);
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
   let loginStage: "submit" | "redirect" = "submit";
@@ -67,10 +74,11 @@ export async function loginViaUI(
         /^(?:__Secure-)?(?:next-auth|authjs)\.session-token(?:\.\d+)?$/.test(cookie.name)))
       .catch(() => false);
     console.error(
-      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0}`,
+      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0}`,
     );
     throw error;
   } finally {
+    page.off("request", onRequest);
     page.off("response", onResponse);
     page.off("requestfailed", onRequestFailed);
   }

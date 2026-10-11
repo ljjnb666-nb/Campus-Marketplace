@@ -12,9 +12,10 @@ vi.mock("@playwright/test", () => ({
   }),
 }));
 
-function fixture(clickFailure: boolean) {
-  type EventName = "response" | "requestfailed";
+function fixture(clickFailure: boolean, callbackMode: "complete" | "pending" | "foreign" = "complete") {
+  type EventName = "request" | "response" | "requestfailed";
   const listeners: Record<EventName, Set<(event: unknown) => void>> = {
+    request: new Set(),
     response: new Set(),
     requestfailed: new Set(),
   };
@@ -26,8 +27,14 @@ function fixture(clickFailure: boolean) {
       click: async () => {
         if (options.name !== "登录") throw new Error("UNEXPECTED_BUTTON");
         if (clickFailure) throw new Error("CLICK_PROBE");
-        for (const cb of listeners.response) {
-          cb({ url: () => "http://localhost:3000/api/auth/callback/credentials", status: () => 302 });
+        const callbackUrl = callbackMode === "foreign"
+          ? "http://other.invalid/api/auth/callback/credentials"
+          : "http://localhost:3000/api/auth/callback/credentials";
+        for (const cb of listeners.request) cb({ url: () => callbackUrl });
+        if (callbackMode !== "pending") {
+          for (const cb of listeners.response) {
+            cb({ url: () => callbackUrl, status: () => 302 });
+          }
         }
       },
       isVisible: async () => options.name === "登录中...",
@@ -61,7 +68,8 @@ describe("Issue #115 login timeout diagnostics", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
       .rejects.toThrow("CLICK_PROBE");
-    expect(page.off).toHaveBeenCalledTimes(2);
+    expect(page.off).toHaveBeenCalledTimes(3);
+    expect(listeners.request.size).toBe(0);
     expect(listeners.response.size).toBe(0);
     expect(listeners.requestfailed.size).toBe(0);
     const message = String(log.mock.calls[0]?.[0]);
@@ -77,15 +85,49 @@ describe("Issue #115 login timeout diagnostics", () => {
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
       .rejects.toThrow("URL_PROBE");
-    expect(page.off).toHaveBeenCalledTimes(2);
+    expect(page.off).toHaveBeenCalledTimes(3);
+    expect(listeners.request.size).toBe(0);
     expect(listeners.response.size).toBe(0);
     expect(listeners.requestfailed.size).toBe(0);
     expect(getCookieScope()).toBe("http://localhost:3000/login");
     const message = String(log.mock.calls[0]?.[0]);
     expect(message).toContain("stage=redirect path=login");
-    expect(message).toContain("callback_status=3xx callback_transport_failed=0 session_cookie_present=1");
+    expect(message).toContain("callback_started=1 callback_status=3xx callback_transport_failed=0 session_cookie_present=1");
     expect(message).not.toContain("SECRET_NEVER_LOG");
     expect(message).not.toContain("private@example.test");
     expect(message).not.toContain("SECRET_PASSWORD");
   });
+  it("distinguishes an in-flight credentials callback from no callback", async () => {
+    navigation.shouldFail = true;
+    const { page, listeners } = fixture(false, "pending");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
+      .rejects.toThrow("URL_PROBE");
+    expect(page.off).toHaveBeenCalledTimes(3);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("callback_started=1 callback_status=none callback_transport_failed=0");
+    expect(message).not.toContain("private@example.test");
+    expect(message).not.toContain("SECRET_PASSWORD");
+  });
+
+  it("ignores matching callback paths on unrelated origins", async () => {
+    navigation.shouldFail = true;
+    const { page, listeners } = fixture(false, "foreign");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
+      .rejects.toThrow("URL_PROBE");
+    expect(page.off).toHaveBeenCalledTimes(3);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("callback_started=0 callback_status=none callback_transport_failed=0");
+    expect(message).not.toContain("other.invalid");
+    expect(message).not.toContain("private@example.test");
+    expect(message).not.toContain("SECRET_PASSWORD");
+  });
+
 });
