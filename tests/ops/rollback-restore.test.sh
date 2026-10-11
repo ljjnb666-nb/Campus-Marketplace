@@ -48,7 +48,7 @@ assert_log_contains() {
     pass_test
   elif [[ "$1" == app_up_called* ]]; then
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
-    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$$"
   else
     fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"
   fi
@@ -299,15 +299,15 @@ echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=
 RESTORE_STUB_MODE=success make_sandbox
 # 故障注入：在隔离的命令替换子 shell 中实际触发缺失 app_up 的
 # assert_log_contains 分支；只允许固定阶段标志进入输出。该子 shell 的
-# FAIL 计数不会污染主测试计数；$ 始终对应 rb-out 写入文件的 shell PID。
+# FAIL 计数不会污染主测试计数；$$ 始终对应 rb-out 写入文件的 shell PID。
 DIAG_RESULT="$(
   CALL_LOG='docker image inspect;docker compose config --images'
   LAST_ROLLBACK_RC=17
   printf '%s\n' '[rollback] resolved app image = ignored' \
-    'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "/tmp/rb-out.$"
-  assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
-  rm -f "/tmp/rb-out.$"
-) 2>&1"
+    'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "/tmp/rb-out.$$"
+  assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
 if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
       "$DIAG_RESULT" == *'RB_DIAG exit=17'* &&
       "$DIAG_RESULT" == *'image_inspect=1'* && "$DIAG_RESULT" == *'config_images=1'* &&
