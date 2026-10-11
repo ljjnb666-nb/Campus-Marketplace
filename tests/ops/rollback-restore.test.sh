@@ -44,21 +44,18 @@ safe_rollback_failure_evidence() {
 }
 
 assert_log_contains() {
-  # grep -q 提前匹配会关闭管道读端；在 pipefail 下，上游 printf 的
-  # SIGPIPE(141) 会让“真实存在的标志”被误判为缺失（Issue #97）。
-  # here-string 保留逐行 literal grep 语义，移除生产无关的管道竞态。
   if grep -qF -- "$1" <<< "$CALL_LOG"; then
     pass_test
   elif [[ "$1" == app_up_called* ]]; then
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
     safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$$"
   else
-    # 非 app_up 断言失败也不回显 Docker 参数/可能含敏感值的原始 log。
-    fail_test "log 缺少: $1（CALL_LOG 原文不输出）"
+    # 通用缺失断言只输出固定阶段标志，不回显 calls.log 中的凭据/URL/参数。
+    fail_test "log 缺少指定阶段标志（详见 RB_DIAG 固定阶段标志）"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$$"
   fi
 }
 assert_log_not_contains() {
-  # 反向断言同样不可用 pipefail + grep -q 管道，否则可能产生假阴性。
   if grep -qF -- "$1" <<< "$CALL_LOG"; then fail_test "log 不应包含: $1"; else pass_test; fi
 }
 assert_contains_file() {
@@ -300,17 +297,879 @@ PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
 
-# Issue #97 故障注入：在 pipefail + 前部命中 + 后部大日志时，
-# 正向必须命中，反向禁止匹配必须失败；否则是错误的 PASS/FAIL。
-echo "== 0. pipefail + 长日志：CALL_LOG 正反断言无 SIGPIPE 假阴性 =="
+# Issue #97：262144 字节长日志且前部匹配，验证 pipefail 下正向和反向断言。
+# 故障注入只使用合成字符串，隔离 PASS/FAIL，不输出 CALL_LOG 原文。
+echo "== 0. pipefail 长日志断言无假阴性 =="
 PIPEFAIL_ASSERT_RESULT="$(
   PASS=0 FAIL=0
   BULK_LOG="$(printf '%262144s' '' | tr ' ' 'X')"
-  CALL_LOG="app_up_called GIT_SHA=${PREV_SHA}"$'\n'"${BULK_LOG}"
+  CALL_LOG="app_up_called GIT_SHA=${PREV_SHA}"
+RESTORE_STUB_MODE=success make_sandbox
+# 故障注入：在隔离的命令替换子 shell 中实际触发缺失 app_up 的
+# assert_log_contains 分支；只允许固定阶段标志进入输出。该子 shell 的
+# FAIL 计数不会污染主测试计数；$$ 始终对应 rb-out 写入文件的 shell PID。
+DIAG_RESULT="$(
+  CALL_LOG='docker image inspect;docker compose config --images'
+  LAST_ROLLBACK_RC=17
+  printf '%s\n' '[rollback] resolved app image = ignored' \
+    'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "/tmp/rb-out.$$"
+  assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
+      "$DIAG_RESULT" == *'RB_DIAG exit=17'* &&
+      "$DIAG_RESULT" == *'image_inspect=1'* && "$DIAG_RESULT" == *'config_images=1'* &&
+      "$DIAG_RESULT" == *'resolved_app=1'* && "$DIAG_RESULT" == *'app_up=0'* &&
+      "$DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
+fi
+# 故障注入：通用缺失断言不得泄露原始 Docker 参数。
+GENERIC_DIAG_RESULT="$(
+  CALL_LOG='docker image inspect CANARY_SECRET_SHOULD_NOT_LEAK=private'
+  LAST_ROLLBACK_RC=23
+  printf '%s\n' '[rollback] resolved app image = ignored' > "/tmp/rb-out.$$"
+  assert_log_contains "restore_called" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$GENERIC_DIAG_RESULT" == *'log 缺少指定阶段标志'* &&
+      "$GENERIC_DIAG_RESULT" == *'RB_DIAG exit=23'* &&
+      "$GENERIC_DIAG_RESULT" == *'image_inspect=1'* &&
+      "$GENERIC_DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* &&
+      "$GENERIC_DIAG_RESULT" != *'docker image inspect'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 通用缺失断言须使用固定阶段标志且不得回显原始调用日志"
+fi
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "safe rollback"
+assert_log_contains "app_up_called"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+
+echo "== 1b. safe rollback 最终选择 EXACT PREVIOUS_SHA（先 resolve 断言再 up）=="
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "config --images"
+config_line="$(printf '%s' "$CALL_LOG" | grep -n "config --images" | head -1 | cut -d: -f1)"
+up_line="$(printf '%s' "$CALL_LOG" | grep -n "app_up_called" | head -1 | cut -d: -f1)"
+if [[ -n "$config_line" && -n "$up_line" && "$config_line" -lt "$up_line" ]]; then
+  pass_test
+else
+  fail_test "config --images 必须先于 up 执行（resolved-image assert 前置）"
+fi
+
+echo "== 1c. shell 中残留错误 GIT_SHA 时，rollback 参数必须 authoritative =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+EXTRA_ENV=(GIT_SHA=WRONG_SHA_IN_SHELL)
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+EXTRA_ENV=()
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "safe rollback with poisoned GIT_SHA"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_not_contains "GIT_SHA=WRONG_SHA_IN_SHELL"
+
+echo "== 2. hard restore 失败 → app 回滚不执行 =="
+printf 'DUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "deadbeef  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+CALL_LOG=""; rm -f "${SANDBOX}/calls.log"
+RESTORE_STUB_MODE=failure \
+OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" OPS_SLEEP_SECONDS=0 \
+PATH="${SANDBOX}/bin:${PATH}" \
+bash "${REPO_ROOT}/scripts/ops/rollback.sh" 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c --hard >/tmp/rb-hard-fail.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "hard rollback with restore failure"
+assert_log_contains "restore_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+
+echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA（真实 gate 全绿）=="
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}" --hard; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "hard rollback with restore success"
+assert_log_contains "restore_called"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "config --images"
+# post-worker 目标：cleanup 必须与 app 同 SHA 成对切换
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+
+echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
+make_sandbox   # 新沙箱，BACKUP_DIR 为空
+run_rollback "${PREV_SHA}" --hard; rc=$?
+assert_exit 1 "$rc" "missing backup"
+assert_log_not_contains "restore_called"
+
+echo "== 5. SHA256 不一致 → 失败（真实 restore 脚本）=="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "0000000000000000000000000000000000000000000000000000000000000000  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-sha.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "sha mismatch"
+assert_log_not_contains "app_stop_called"
+
+echo "== 5b. restore 成功 → 顺序 = stop app → stop cleanup → 验证停止 → terminate → DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-ok.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore success"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
+# 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
+stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
+stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
+first_psql_line="$(printf '%s' "$CALL_LOG" | grep -n "psql_called" | head -1 | cut -d: -f1)"
+if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$first_psql_line" \
+      && "$stop_app_line" -lt "$first_psql_line" && "$stop_cleanup_line" -lt "$first_psql_line" ]]; then
+  pass_test
+else
+  fail_test "必须在 terminate DB connections 之前停止 app 与 storage-cleanup"
+fi
+
+echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  STOP_FAILURE_STUB_MODE=storage-cleanup \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-stopfail.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "cleanup cannot stop must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+
+echo "== 5d. pre-worker release（cleanup 容器不存在）→ restore 仍成功 =="
+DOCKER_STUB_INITIAL="app" make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  DOCKER_STUB_INITIAL="app" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-preworker.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore with pre-worker topology"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
+
+echo "== 5e. PS_QUERY_FAILURE（无法确认 writer 状态）→ FAIL CLOSED：不停止、不 terminate、不 DROP =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=query \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psq.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps query failure must fail closed"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app writer 状态" /tmp/rp-psq.$$; then pass_test; else fail_test "缺少 writer 状态确认失败原因"; fi
+
+echo "== 5f. PS_VERIFY_FAILURE（停止后无法验证状态）→ FAIL CLOSED：unknown state ≠ stopped =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=verify \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psv.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps verify failure must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app 停止状态" /tmp/rp-psv.$$; then pass_test; else fail_test "缺少停止状态确认失败原因"; fi
+
+echo "== 6. 缺少 --production-restore 显式确认 → 失败 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-noflag.$$ 2>&1; rc=$?
+assert_exit 1 "$rc" "missing --production-restore"
+
+echo "== 7. --target-db 与生产库名不一致 → 失败 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db some_other_db >/tmp/rp-mismatch.$$ 2>&1; rc=$?
+assert_exit 1 "$rc" "target-db mismatch"
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_log_not_contains "app_stop_called"
+
+echo "== 8. resolved app image != PREVIOUS_SHA → 在切换应用前 fail =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(CONFIG_STUB_MODE=broken)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "resolved image mismatch must abort rollback"
+assert_log_contains "config --images"
+assert_log_not_contains "app_up_called"
+
+echo "== 9. PREVIOUS_SHA 非法（短 SHA）→ INVALID_EXPECTED_SHA，零 side effect =="
+RESTORE_STUB_MODE=success make_sandbox
+CALL_LOG=""; rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
+  OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/rollback.sh" "abc123" >/tmp/rb-invalid.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "invalid PREVIOUS_SHA must fail rollback"
+if grep -q "INVALID_EXPECTED_SHA" /tmp/rb-invalid.$$; then pass_test; else fail_test "缺少 INVALID_EXPECTED_SHA 原因"; fi
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "invalid SHA 不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9b. release gate（真实 verifier × fake app 全绿，大写 SHA 正常化）→ 成功日志含 READINESS=ready =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UPPER_PREV_SHA="$(printf '%s' "${PREV_SHA}" | tr 'a-f' 'A-F')"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${UPPER_PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier pass rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 成功日志"
+assert_contains_file "READINESS=ready" "${SANDBOX}/.releases.log" "rollback 成功日志 readiness"
+
+echo "== 9c. release gate（真实 verifier）：ready.release != PREVIOUS_SHA → fail =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${OTHER_SHA}" wrong-release "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier release mismatch must fail rollback"
+assert_log_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "release mismatch 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9d. release gate（真实 verifier）：health+ready 全绿（exact PREVIOUS_SHA）→ SUCCESS =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier all-green rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "real verifier 通过后写成功日志"
+
+echo "== 9e. release gate（真实 verifier）：ready degraded（HTTP 200）→ fail（HTTP 200 ≠ ROLLBACK SUCCESS）=="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" degraded "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier degraded must fail rollback"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "degraded 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9f. post-worker rollback：cleanup 与 app 成对切换到 EXACT PREVIOUS_SHA + 日志记录 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "post-worker rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_contains_file "CLEANUP_IMAGE=campus-marketplace-cleanup:${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 日志 cleanup image"
+assert_contains_file "CLEANUP=running" "${SANDBOX}/.releases.log" "rollback 日志 cleanup 状态"
+
+echo "== 9g. pre-worker 目标（cleanup 镜像不存在）→ 停止 cleanup 而非失败 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "pre-worker target rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+assert_contains_file "CLEANUP=stopped_pre_worker_release" "${SANDBOX}/.releases.log" "pre-worker rollback 日志"
+if grep -qF "CLEANUP_IMAGE" "${SANDBOX}/.releases.log" 2>/dev/null; then
+  fail_test "pre-worker rollback 日志不应记录 CLEANUP_IMAGE（目标无该 artifact）"
+else
+  pass_test
+fi
+
+echo "== 9h. cleanup 切换失败 → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UP_FAILURE_STUB_MODE=storage-cleanup run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "cleanup switch failure must fail rollback"
+assert_log_contains "app_up_called"
+# 切换尝试已发生（被 stub 以 exit 1 拒绝），rollback 必须整体失败
+assert_log_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "cleanup 切换失败后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9i. post-worker 运行容器镜像非目标 SHA → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+WORKER_RUNNING_WRONG_IMAGE=1 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "wrong runtime image must fail rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+# run_rollback 的输出文件路径中 $$ 为本测试脚本 PID（整个运行期恒定）
+if grep -qF "运行中的 storage-cleanup 容器镜像不是" "/tmp/rb-out.$$"; then
+  pass_test
+else
+  fail_test "缺少运行容器镜像失败原因"
+fi
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "wrong runtime image 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9j. pre-worker + PS verify failure（无法确认 cleanup 停止状态）→ FAIL CLOSED =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker PS_FAILURE_STUB_MODE=verify run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "pre-worker ps verify failure must fail rollback"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "pre-worker ps failure 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 10. optional_env_var：retention 遵守统一 env contract =="
+make_sandbox
+source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
+sed -i 's/^BACKUP_RETENTION_DAYS=.*/BACKUP_RETENTION_DAYS=30/' "${SANDBOX}/.env.production"
+# shell unset + env file 30 → 30
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"30\" ]]"; then pass_test; else fail_test "retention: env file 30 应生效"; fi
+# shell explicit 7 → 7（shell 优先）
+if OPS_PROJECT_DIR="${SANDBOX}" BACKUP_RETENTION_DAYS=7 bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"7\" ]]"; then pass_test; else fail_test "retention: shell 显式 7 应优先"; fi
+# 完全未配置 → 14
+sed -i '/^BACKUP_RETENTION_DAYS=/d' "${SANDBOX}/.env.production"
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"14\" ]]"; then pass_test; else fail_test "retention: 未配置应默认 14"; fi
+
+# 清理沙箱
+rm -rf "${SANDBOX}" /tmp/rb-out.$$ /tmp/rb-hard-fail.$$ /tmp/rb-invalid.$$ /tmp/rp-sha.$$ /tmp/rp-noflag.$$ /tmp/rp-mismatch.$$ 2>/dev/null
+
+echo "=============================="
+echo "PASS=${PASS} FAIL=${FAIL}"
+if [[ "${FAIL}" != "0" ]]; then exit 1; fi
+exit 0
+\n'"${BULK_LOG}"
   assert_log_contains "app_up_called GIT_SHA=${PREV_SHA}" 2>&1
   printf 'positive_pass=%s positive_fail=%s\n' "$PASS" "$FAIL"
   PASS=0 FAIL=0
-  CALL_LOG="restore_called"$'\n'"${BULK_LOG}"
+  CALL_LOG="restore_called"
+RESTORE_STUB_MODE=success make_sandbox
+# 故障注入：在隔离的命令替换子 shell 中实际触发缺失 app_up 的
+# assert_log_contains 分支；只允许固定阶段标志进入输出。该子 shell 的
+# FAIL 计数不会污染主测试计数；$$ 始终对应 rb-out 写入文件的 shell PID。
+DIAG_RESULT="$(
+  CALL_LOG='docker image inspect;docker compose config --images'
+  LAST_ROLLBACK_RC=17
+  printf '%s\n' '[rollback] resolved app image = ignored' \
+    'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "/tmp/rb-out.$$"
+  assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
+      "$DIAG_RESULT" == *'RB_DIAG exit=17'* &&
+      "$DIAG_RESULT" == *'image_inspect=1'* && "$DIAG_RESULT" == *'config_images=1'* &&
+      "$DIAG_RESULT" == *'resolved_app=1'* && "$DIAG_RESULT" == *'app_up=0'* &&
+      "$DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
+fi
+# 故障注入：通用缺失断言不得泄露原始 Docker 参数。
+GENERIC_DIAG_RESULT="$(
+  CALL_LOG='docker image inspect CANARY_SECRET_SHOULD_NOT_LEAK=private'
+  LAST_ROLLBACK_RC=23
+  printf '%s\n' '[rollback] resolved app image = ignored' > "/tmp/rb-out.$$"
+  assert_log_contains "restore_called" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$GENERIC_DIAG_RESULT" == *'log 缺少指定阶段标志'* &&
+      "$GENERIC_DIAG_RESULT" == *'RB_DIAG exit=23'* &&
+      "$GENERIC_DIAG_RESULT" == *'image_inspect=1'* &&
+      "$GENERIC_DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* &&
+      "$GENERIC_DIAG_RESULT" != *'docker image inspect'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 通用缺失断言须使用固定阶段标志且不得回显原始调用日志"
+fi
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "safe rollback"
+assert_log_contains "app_up_called"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+
+echo "== 1b. safe rollback 最终选择 EXACT PREVIOUS_SHA（先 resolve 断言再 up）=="
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "config --images"
+config_line="$(printf '%s' "$CALL_LOG" | grep -n "config --images" | head -1 | cut -d: -f1)"
+up_line="$(printf '%s' "$CALL_LOG" | grep -n "app_up_called" | head -1 | cut -d: -f1)"
+if [[ -n "$config_line" && -n "$up_line" && "$config_line" -lt "$up_line" ]]; then
+  pass_test
+else
+  fail_test "config --images 必须先于 up 执行（resolved-image assert 前置）"
+fi
+
+echo "== 1c. shell 中残留错误 GIT_SHA 时，rollback 参数必须 authoritative =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+EXTRA_ENV=(GIT_SHA=WRONG_SHA_IN_SHELL)
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+EXTRA_ENV=()
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "safe rollback with poisoned GIT_SHA"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_not_contains "GIT_SHA=WRONG_SHA_IN_SHELL"
+
+echo "== 2. hard restore 失败 → app 回滚不执行 =="
+printf 'DUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "deadbeef  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+CALL_LOG=""; rm -f "${SANDBOX}/calls.log"
+RESTORE_STUB_MODE=failure \
+OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" OPS_SLEEP_SECONDS=0 \
+PATH="${SANDBOX}/bin:${PATH}" \
+bash "${REPO_ROOT}/scripts/ops/rollback.sh" 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c --hard >/tmp/rb-hard-fail.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "hard rollback with restore failure"
+assert_log_contains "restore_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+
+echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA（真实 gate 全绿）=="
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}" --hard; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "hard rollback with restore success"
+assert_log_contains "restore_called"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "config --images"
+# post-worker 目标：cleanup 必须与 app 同 SHA 成对切换
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+
+echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
+make_sandbox   # 新沙箱，BACKUP_DIR 为空
+run_rollback "${PREV_SHA}" --hard; rc=$?
+assert_exit 1 "$rc" "missing backup"
+assert_log_not_contains "restore_called"
+
+echo "== 5. SHA256 不一致 → 失败（真实 restore 脚本）=="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "0000000000000000000000000000000000000000000000000000000000000000  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-sha.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "sha mismatch"
+assert_log_not_contains "app_stop_called"
+
+echo "== 5b. restore 成功 → 顺序 = stop app → stop cleanup → 验证停止 → terminate → DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-ok.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore success"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
+# 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
+stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
+stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
+first_psql_line="$(printf '%s' "$CALL_LOG" | grep -n "psql_called" | head -1 | cut -d: -f1)"
+if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$first_psql_line" \
+      && "$stop_app_line" -lt "$first_psql_line" && "$stop_cleanup_line" -lt "$first_psql_line" ]]; then
+  pass_test
+else
+  fail_test "必须在 terminate DB connections 之前停止 app 与 storage-cleanup"
+fi
+
+echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  STOP_FAILURE_STUB_MODE=storage-cleanup \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-stopfail.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "cleanup cannot stop must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+
+echo "== 5d. pre-worker release（cleanup 容器不存在）→ restore 仍成功 =="
+DOCKER_STUB_INITIAL="app" make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  DOCKER_STUB_INITIAL="app" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-preworker.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 0 "$rc" "restore with pre-worker topology"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_contains "pg_restore_called"
+
+echo "== 5e. PS_QUERY_FAILURE（无法确认 writer 状态）→ FAIL CLOSED：不停止、不 terminate、不 DROP =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=query \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psq.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps query failure must fail closed"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app writer 状态" /tmp/rp-psq.$$; then pass_test; else fail_test "缺少 writer 状态确认失败原因"; fi
+
+echo "== 5f. PS_VERIFY_FAILURE（停止后无法验证状态）→ FAIL CLOSED：unknown state ≠ stopped =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  PS_FAILURE_STUB_MODE=verify \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-psv.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "ps verify failure must fail closed"
+assert_log_contains "app_stop_called"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+if grep -qF "无法确认 app 停止状态" /tmp/rp-psv.$$; then pass_test; else fail_test "缺少停止状态确认失败原因"; fi
+
+echo "== 6. 缺少 --production-restore 显式确认 → 失败 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-noflag.$$ 2>&1; rc=$?
+assert_exit 1 "$rc" "missing --production-restore"
+
+echo "== 7. --target-db 与生产库名不一致 → 失败 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db some_other_db >/tmp/rp-mismatch.$$ 2>&1; rc=$?
+assert_exit 1 "$rc" "target-db mismatch"
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_log_not_contains "app_stop_called"
+
+echo "== 8. resolved app image != PREVIOUS_SHA → 在切换应用前 fail =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(CONFIG_STUB_MODE=broken)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "resolved image mismatch must abort rollback"
+assert_log_contains "config --images"
+assert_log_not_contains "app_up_called"
+
+echo "== 9. PREVIOUS_SHA 非法（短 SHA）→ INVALID_EXPECTED_SHA，零 side effect =="
+RESTORE_STUB_MODE=success make_sandbox
+CALL_LOG=""; rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_RESTORE_SCRIPT="${SANDBOX}/bin/restore-stub" \
+  OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  bash "${REPO_ROOT}/scripts/ops/rollback.sh" "abc123" >/tmp/rb-invalid.$$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "invalid PREVIOUS_SHA must fail rollback"
+if grep -q "INVALID_EXPECTED_SHA" /tmp/rb-invalid.$$; then pass_test; else fail_test "缺少 INVALID_EXPECTED_SHA 原因"; fi
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "invalid SHA 不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9b. release gate（真实 verifier × fake app 全绿，大写 SHA 正常化）→ 成功日志含 READINESS=ready =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UPPER_PREV_SHA="$(printf '%s' "${PREV_SHA}" | tr 'a-f' 'A-F')"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${UPPER_PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier pass rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 成功日志"
+assert_contains_file "READINESS=ready" "${SANDBOX}/.releases.log" "rollback 成功日志 readiness"
+
+echo "== 9c. release gate（真实 verifier）：ready.release != PREVIOUS_SHA → fail =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${OTHER_SHA}" wrong-release "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier release mismatch must fail rollback"
+assert_log_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "release mismatch 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9d. release gate（真实 verifier）：health+ready 全绿（exact PREVIOUS_SHA）→ SUCCESS =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=15 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "real verifier all-green rollback"
+assert_contains_file "ROLLBACK RELEASE_SHA=${PREV_SHA}" "${SANDBOX}/.releases.log" "real verifier 通过后写成功日志"
+
+echo "== 9e. release gate（真实 verifier）：ready degraded（HTTP 200）→ fail（HTTP 200 ≠ ROLLBACK SUCCESS）=="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" degraded "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+OPS_HEALTH_TIMEOUT=8 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "real verifier degraded must fail rollback"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "degraded 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9f. post-worker rollback：cleanup 与 app 成对切换到 EXACT PREVIOUS_SHA + 日志记录 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "post-worker rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_contains_file "CLEANUP_IMAGE=campus-marketplace-cleanup:${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 日志 cleanup image"
+assert_contains_file "CLEANUP=running" "${SANDBOX}/.releases.log" "rollback 日志 cleanup 状态"
+
+echo "== 9g. pre-worker 目标（cleanup 镜像不存在）→ 停止 cleanup 而非失败 =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "pre-worker target rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+assert_contains_file "CLEANUP=stopped_pre_worker_release" "${SANDBOX}/.releases.log" "pre-worker rollback 日志"
+if grep -qF "CLEANUP_IMAGE" "${SANDBOX}/.releases.log" 2>/dev/null; then
+  fail_test "pre-worker rollback 日志不应记录 CLEANUP_IMAGE（目标无该 artifact）"
+else
+  pass_test
+fi
+
+echo "== 9h. cleanup 切换失败 → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UP_FAILURE_STUB_MODE=storage-cleanup run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "cleanup switch failure must fail rollback"
+assert_log_contains "app_up_called"
+# 切换尝试已发生（被 stub 以 exit 1 拒绝），rollback 必须整体失败
+assert_log_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "cleanup 切换失败后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9i. post-worker 运行容器镜像非目标 SHA → ROLLBACK FAIL，不写 release log =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+WORKER_RUNNING_WRONG_IMAGE=1 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "wrong runtime image must fail rollback"
+assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+# run_rollback 的输出文件路径中 $$ 为本测试脚本 PID（整个运行期恒定）
+if grep -qF "运行中的 storage-cleanup 容器镜像不是" "/tmp/rb-out.$$"; then
+  pass_test
+else
+  fail_test "缺少运行容器镜像失败原因"
+fi
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "wrong runtime image 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 9j. pre-worker + PS verify failure（无法确认 cleanup 停止状态）→ FAIL CLOSED =="
+RESTORE_STUB_MODE=success make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+CLEANUP_STUB_MODE=pre-worker PS_FAILURE_STUB_MODE=verify run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "pre-worker ps verify failure must fail rollback"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "pre-worker ps failure 后不得写 .releases.log"
+else
+  pass_test
+fi
+
+echo "== 10. optional_env_var：retention 遵守统一 env contract =="
+make_sandbox
+source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
+sed -i 's/^BACKUP_RETENTION_DAYS=.*/BACKUP_RETENTION_DAYS=30/' "${SANDBOX}/.env.production"
+# shell unset + env file 30 → 30
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"30\" ]]"; then pass_test; else fail_test "retention: env file 30 应生效"; fi
+# shell explicit 7 → 7（shell 优先）
+if OPS_PROJECT_DIR="${SANDBOX}" BACKUP_RETENTION_DAYS=7 bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"7\" ]]"; then pass_test; else fail_test "retention: shell 显式 7 应优先"; fi
+# 完全未配置 → 14
+sed -i '/^BACKUP_RETENTION_DAYS=/d' "${SANDBOX}/.env.production"
+if OPS_PROJECT_DIR="${SANDBOX}" bash -c "
+  source '${source_lib}' && load_production_env &&
+  v=\"\$(optional_env_var BACKUP_RETENTION_DAYS 14)\" &&
+  [[ \"\$v\" == \"14\" ]]"; then pass_test; else fail_test "retention: 未配置应默认 14"; fi
+
+# 清理沙箱
+rm -rf "${SANDBOX}" /tmp/rb-out.$$ /tmp/rb-hard-fail.$$ /tmp/rb-invalid.$$ /tmp/rp-sha.$$ /tmp/rp-noflag.$$ /tmp/rp-mismatch.$$ 2>/dev/null
+
+echo "=============================="
+echo "PASS=${PASS} FAIL=${FAIL}"
+if [[ "${FAIL}" != "0" ]]; then exit 1; fi
+exit 0
+\n'"${BULK_LOG}"
   assert_log_not_contains "restore_called" 2>&1
   printf 'negative_pass=%s negative_fail=%s\n' "$PASS" "$FAIL"
 )"
@@ -342,6 +1201,23 @@ if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
   pass_test
 else
   fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
+fi
+# 故障注入：通用缺失断言不得泄露原始 Docker 参数。
+GENERIC_DIAG_RESULT="$(
+  CALL_LOG='docker image inspect CANARY_SECRET_SHOULD_NOT_LEAK=private'
+  LAST_ROLLBACK_RC=23
+  printf '%s\n' '[rollback] resolved app image = ignored' > "/tmp/rb-out.$$"
+  assert_log_contains "restore_called" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$GENERIC_DIAG_RESULT" == *'log 缺少指定阶段标志'* &&
+      "$GENERIC_DIAG_RESULT" == *'RB_DIAG exit=23'* &&
+      "$GENERIC_DIAG_RESULT" == *'image_inspect=1'* &&
+      "$GENERIC_DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* &&
+      "$GENERIC_DIAG_RESULT" != *'docker image inspect'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 通用缺失断言须使用固定阶段标志且不得回显原始调用日志"
 fi
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
