@@ -16,6 +16,27 @@ export async function loginViaUI(
   await page.goto("/login");
   await page.locator('input[name="email"]').first().fill(email);
   await page.locator('input[name="password"]').first().fill(password);
+  let callbackStatus = "none";
+  let callbackTransportFailure = false;
+  const isCredentialsCallback = (url: string): boolean => {
+    try {
+      return new URL(url).pathname.endsWith("/api/auth/callback/credentials");
+    } catch {
+      return false;
+    }
+  };
+  const onResponse = (response: import("@playwright/test").Response) => {
+    if (!isCredentialsCallback(response.url())) return;
+    const status = response.status();
+    callbackStatus = status >= 200 && status < 300 ? "2xx"
+      : status >= 300 && status < 400 ? "3xx"
+      : status >= 400 && status < 500 ? "4xx" : "5xx";
+  };
+  const onRequestFailed = (request: import("@playwright/test").Request) => {
+    if (isCredentialsCallback(request.url())) callbackTransportFailure = true;
+  };
+  page.on("response", onResponse);
+  page.on("requestfailed", onRequestFailed);
   await page.getByRole("button", { name: "登录" }).click();
 
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
@@ -39,10 +60,17 @@ export async function loginViaUI(
       .isVisible().catch(() => false);
     const invalidCredentials = await page.getByText("邮箱或密码错误", { exact: true })
       .isVisible().catch(() => false);
+    const sessionCookiePresent = await page.context().cookies()
+      .then((cookies) => cookies.some((cookie) =>
+        /^(?:__Secure-)?(?:next-auth|authjs)\.session-token(?:\.\d+)?$/.test(cookie.name)))
+      .catch(() => false);
     console.error(
-      `LOGIN_E2E_DIAG path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0}`,
+      `LOGIN_E2E_DIAG path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0}`,
     );
     throw error;
+  } finally {
+    page.off("response", onResponse);
+    page.off("requestfailed", onRequestFailed);
   }
   await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
 }
