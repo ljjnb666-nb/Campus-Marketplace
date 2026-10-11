@@ -21,9 +21,29 @@ export async function loginViaUI(
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
   // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
   // 真实认证失败或 URL 不变仍会超时，不提高超时或 Playwright retry。
-  await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
-    timeout: 15_000,
-  });
+  try {
+    await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
+      timeout: 15_000,
+    });
+  } catch (error) {
+    // Issue #115: only bounded, non-sensitive state classifications on failure.
+    // Never log email, password, cookies, URLs, response bodies, or token values.
+    const loginPath = (() => {
+      try {
+        return new URL(page.url()).pathname.startsWith("/login") ? "login" : "other";
+      } catch {
+        return "unknown";
+      }
+    })();
+    const pending = await page.getByRole("button", { name: "登录中..." })
+      .isVisible().catch(() => false);
+    const invalidCredentials = await page.getByText("邮箱或密码错误", { exact: true })
+      .isVisible().catch(() => false);
+    console.error(
+      `LOGIN_E2E_DIAG path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0}`,
+    );
+    throw error;
+  }
   await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
 }
 
