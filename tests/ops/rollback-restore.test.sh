@@ -48,7 +48,7 @@ assert_log_contains() {
     pass_test
   elif [[ "$1" == app_up_called* ]]; then
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
-    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.${BASHPID}"
   else
     fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"
   fi
