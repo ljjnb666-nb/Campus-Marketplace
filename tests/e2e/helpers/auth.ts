@@ -18,8 +18,12 @@ export async function loginViaUI(
   await page.locator('input[name="password"]').first().fill(password);
   await page.getByRole("button", { name: "登录" }).click();
 
-  // 登录成功后 window.location.href 跳转首页
-  await page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 15_000 });
+  // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
+  // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
+  // 真实认证失败或 URL 不变仍会超时，不提高超时或 Playwright retry。
+  await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
+    timeout: 15_000,
+  });
   await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
 }
 
