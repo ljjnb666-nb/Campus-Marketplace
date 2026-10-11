@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { loginViaUI } from "./helpers/auth";
-import { uniqueTag } from "./helpers/e2e";
+import { E2E_ACCOUNTS, uniqueTag } from "./helpers/e2e";
 import { flushRateLimits } from "./helpers/rate-limit";
 
 /**
@@ -78,4 +78,39 @@ test("认证与个人资料：错误密码登录被拒绝", async ({ page }) => 
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.getByText("邮箱或密码错误")).toBeVisible();
   await expect(page).toHaveURL(/\/login/);
+});
+
+test("认证与个人资料：登录回调网络失败后提示并允许原表单重试", async ({ page }) => {
+  await page.goto("/login");
+
+  const origin = new URL(page.url()).origin;
+  const credentialsCallback = (url: URL) =>
+    url.origin === origin && url.pathname === "/api/auth/callback/credentials";
+  let interruptedCallbacks = 0;
+  await page.route(credentialsCallback, async (route) => {
+    interruptedCallbacks += 1;
+    await route.abort("failed");
+  });
+
+  // Use a pre-seeded E2E-only identity. The interception is page-local,
+  // so no other worker or auth-setup request is affected.
+  await page.locator('input[name="email"]').first().fill(E2E_ACCOUNTS.buyer.email);
+  await page.locator('input[name="password"]').first().fill(E2E_ACCOUNTS.buyer.password);
+  await page.getByRole("button", { name: "登录" }).click();
+
+  await expect(page.getByText("登录暂时不可用，请稍后重试", { exact: true }))
+    .toBeVisible();
+  await expect(page.getByRole("button", { name: "登录" })).toBeEnabled();
+  await expect(page).toHaveURL((url) => url.pathname === "/login");
+  expect(interruptedCallbacks).toBe(1);
+
+  // Stop fault injection, then retry on the very same form. This is a real
+  // credentials -> JWT cookie -> authenticated UI round trip.
+  await page.unroute(credentialsCallback);
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
+    timeout: 15_000,
+  });
+  await expect(page.getByRole("button", { name: E2E_ACCOUNTS.buyer.name }))
+    .toBeVisible();
 });
