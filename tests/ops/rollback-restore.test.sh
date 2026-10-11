@@ -25,8 +25,33 @@ log() { CALL_LOG="${CALL_LOG}$1"$'\n'; }
 fail_test() { echo "FAIL: $1" >&2; FAIL=$((FAIL + 1)); }
 pass_test() { PASS=$((PASS + 1)); }
 
+# Issue #97: 仅打印固定布尔量/退出码，避免失败时将脚本原始输出、
+# env、URL 或 Docker 参数直接带入 CI 日志。此处只是诊断，不能放宽 fail-closed。
+LAST_ROLLBACK_RC="unknown"
+safe_rollback_failure_evidence() {
+  local rc="$1" calls="$2" out_file="$3"
+  local inspect=0 config=0 app_up=0 resolved_app=0 image_mismatch=0 config_failure=0
+  [[ "$calls" == *"image inspect"* ]] && inspect=1
+  [[ "$calls" == *"config --images"* ]] && config=1
+  [[ "$calls" == *"app_up_called"* ]] && app_up=1
+  if [[ -f "$out_file" ]]; then
+    grep -qF '[rollback] resolved app image =' "$out_file" && resolved_app=1
+    grep -qF '[rollback][FAIL] 解析后的 app 镜像不是' "$out_file" && image_mismatch=1
+    grep -qF '[rollback][FAIL] compose config --images 解析失败' "$out_file" && config_failure=1
+  fi
+  printf 'RB_DIAG exit=%s image_inspect=%s config_images=%s app_up=%s resolved_app=%s image_mismatch=%s config_failure=%s\n' \
+    "$rc" "$inspect" "$config" "$app_up" "$resolved_app" "$image_mismatch" "$config_failure" >&2
+}
+
 assert_log_contains() {
-  if printf '%s' "$CALL_LOG" | grep -qF "$1"; then pass_test; else fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"; fi
+  if printf '%s' "$CALL_LOG" | grep -qF "$1"; then
+    pass_test
+  elif [[ "$1" == app_up_called* ]]; then
+    fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$"
+  else
+    fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"
+  fi
 }
 assert_log_not_contains() {
   if printf '%s' "$CALL_LOG" | grep -qF "$1"; then fail_test "log 不应包含: $1"; else pass_test; fi
@@ -220,6 +245,7 @@ run_rollback() {
     APP_URL="${TEST_APP_URL:-}" \
     bash "${REPO_ROOT}/scripts/ops/rollback.sh" "${sha}" "${mode}" > /tmp/rb-out.$$ 2>&1
   local rc=$?
+  LAST_ROLLBACK_RC="$rc"
   [[ -f "${SANDBOX}/calls.log" ]] && CALL_LOG="$(cat "${SANDBOX}/calls.log")"
   return "${rc}"
 }
@@ -271,6 +297,18 @@ EXTRA_ENV=()
 
 echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=="
 RESTORE_STUB_MODE=success make_sandbox
+# 自检：即使原始回滚输出含有类似凭据的任意文本，也只允许固定标志进 stderr。
+DIAG_FIXTURE="${SANDBOX}/diagnostic-canary.log"
+printf '%s\n' '[rollback] resolved app image = ignored' 'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "$DIAG_FIXTURE"
+DIAG_RESULT="$(safe_rollback_failure_evidence 17 'docker image inspect;docker compose config --images' "$DIAG_FIXTURE" 2>&1)"
+if [[ "$DIAG_RESULT" == *'exit=17'* && "$DIAG_RESULT" == *'image_inspect=1'* &&
+      "$DIAG_RESULT" == *'config_images=1'* && "$DIAG_RESULT" == *'resolved_app=1'* &&
+      "$DIAG_RESULT" == *'app_up=0'* && "$DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 仅允许输出固定标志，禁止输出原始敏感文本"
+fi
+rm -f "$DIAG_FIXTURE"
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
