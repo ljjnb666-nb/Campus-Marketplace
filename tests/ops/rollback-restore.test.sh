@@ -50,7 +50,9 @@ assert_log_contains() {
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
     safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$$"
   else
-    fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"
+    # 通用缺失断言只输出固定阶段标志，不回显 calls.log 中的凭据/URL/参数。
+    fail_test "log 缺少指定阶段标志（详见 RB_DIAG 固定阶段标志）"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$$"
   fi
 }
 assert_log_not_contains() {
@@ -316,6 +318,23 @@ if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
   pass_test
 else
   fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
+fi
+# 故障注入：通用缺失断言不得泄露原始 Docker 参数。
+GENERIC_DIAG_RESULT="$(
+  CALL_LOG='docker image inspect CANARY_SECRET_SHOULD_NOT_LEAK=private'
+  LAST_ROLLBACK_RC=23
+  printf '%s\n' '[rollback] resolved app image = ignored' > "/tmp/rb-out.$$"
+  assert_log_contains "restore_called" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$GENERIC_DIAG_RESULT" == *'log 缺少指定阶段标志'* &&
+      "$GENERIC_DIAG_RESULT" == *'RB_DIAG exit=23'* &&
+      "$GENERIC_DIAG_RESULT" == *'image_inspect=1'* &&
+      "$GENERIC_DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* &&
+      "$GENERIC_DIAG_RESULT" != *'docker image inspect'* ]]; then
+  pass_test
+else
+  fail_test "RB_DIAG 通用缺失断言须使用固定阶段标志且不得回显原始调用日志"
 fi
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
