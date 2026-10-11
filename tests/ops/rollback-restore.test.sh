@@ -48,7 +48,7 @@ assert_log_contains() {
     pass_test
   elif [[ "$1" == app_up_called* ]]; then
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
-    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.${BASHPID}"
+    safe_rollback_failure_evidence "$LAST_ROLLBACK_RC" "$CALL_LOG" "/tmp/rb-out.$"
   else
     fail_test "log 缺少: $1（实际: $(printf '%s' "$CALL_LOG" | tr '\n' ';')）"
   fi
@@ -297,18 +297,26 @@ EXTRA_ENV=()
 
 echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=="
 RESTORE_STUB_MODE=success make_sandbox
-# 自检：即使原始回滚输出含有类似凭据的任意文本，也只允许固定标志进 stderr。
-DIAG_FIXTURE="${SANDBOX}/diagnostic-canary.log"
-printf '%s\n' '[rollback] resolved app image = ignored' 'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "$DIAG_FIXTURE"
-DIAG_RESULT="$(safe_rollback_failure_evidence 17 'docker image inspect;docker compose config --images' "$DIAG_FIXTURE" 2>&1)"
-if [[ "$DIAG_RESULT" == *'exit=17'* && "$DIAG_RESULT" == *'image_inspect=1'* &&
-      "$DIAG_RESULT" == *'config_images=1'* && "$DIAG_RESULT" == *'resolved_app=1'* &&
-      "$DIAG_RESULT" == *'app_up=0'* && "$DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* ]]; then
+# 故障注入：在隔离的命令替换子 shell 中实际触发缺失 app_up 的
+# assert_log_contains 分支；只允许固定阶段标志进入输出。该子 shell 的
+# FAIL 计数不会污染主测试计数；$ 始终对应 rb-out 写入文件的 shell PID。
+DIAG_RESULT="$(
+  CALL_LOG='docker image inspect;docker compose config --images'
+  LAST_ROLLBACK_RC=17
+  printf '%s\n' '[rollback] resolved app image = ignored' \
+    'CANARY_SECRET_SHOULD_NOT_LEAK=private' > "/tmp/rb-out.$"
+  assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+  rm -f "/tmp/rb-out.$"
+) 2>&1"
+if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
+      "$DIAG_RESULT" == *'RB_DIAG exit=17'* &&
+      "$DIAG_RESULT" == *'image_inspect=1'* && "$DIAG_RESULT" == *'config_images=1'* &&
+      "$DIAG_RESULT" == *'resolved_app=1'* && "$DIAG_RESULT" == *'app_up=0'* &&
+      "$DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* ]]; then
   pass_test
 else
-  fail_test "RB_DIAG 仅允许输出固定标志，禁止输出原始敏感文本"
+  fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
 fi
-rm -f "$DIAG_FIXTURE"
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
