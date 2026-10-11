@@ -34,8 +34,13 @@ export function LoginForm() {
             setError("邮箱或密码错误");
             return;
           }
+          // A non-error object still needs a successful result and a target URL.
+          if (result.ok === false || !result.url) {
+            setError("登录暂时不可用，请稍后重试");
+            return;
+          }
 
-          window.location.href = result.url ?? "/";
+          window.location.href = result.url;
         } catch {
           // A rejected auth request must not strand the form in the pending state.
           // Never surface raw exceptions or credential details to the UI/logs.
