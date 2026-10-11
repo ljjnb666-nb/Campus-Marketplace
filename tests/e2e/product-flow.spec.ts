@@ -28,7 +28,8 @@ test("商品发布到下单：卖家上传图片发布 → 买家搜索 → 收�
   await expect(seller.getByAltText("预览 1").first()).toBeVisible({ timeout: 20_000 });
 
   await seller.getByRole("button", { name: "确认发布商品" }).first().click();
-  await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
+  // router.push() 改变 URL 不代表 document load 完成；单独断言详情页的真实内容。
+  await expect(seller).toHaveURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
   const productPath = new URL(seller.url()).pathname;
   const productId = productPath.split("/").pop() ?? "";
 

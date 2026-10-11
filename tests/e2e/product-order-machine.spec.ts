@@ -22,8 +22,16 @@ test("商品订单：买家下单 → 卖家接受 → 买家确认完成 → �
   await seller.locator('input[name="locationText"]').first().fill("E2E 教学楼 B");
   await seller.locator('textarea[name="description"]').first().fill(`E2E 状态机测试 ${tag}`);
   await seller.getByRole("button", { name: "确认发布商品" }).first().click();
-  await seller.waitForURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
+  // ProductForm 通过 router.push() 客户端导航；发布成功不要求 document load 完成。
+  // 用 URL 自动重试 + 详情内容就绪判定，不提高 30s 超时，也不依赖 Playwright retry。
+  await expect(seller).toHaveURL(/\/products\/(?!new)[^/]+$/, { timeout: 30_000 });
+  await expect(seller.getByRole("heading", { name: title })).toBeVisible();
   const productId = new URL(seller.url()).pathname.split("/").pop() ?? "";
+  const published = await e2eDb().product.findUnique({
+    where: { id: productId },
+    select: { title: true, status: true },
+  });
+  expect(published).toMatchObject({ title, status: "ACTIVE" });
 
   // ---------- 买家下单 ----------
   const buyerContext = await browser.newContext({ storageState: storageStatePath("buyer") });
