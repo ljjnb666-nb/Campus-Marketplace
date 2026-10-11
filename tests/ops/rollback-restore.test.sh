@@ -44,7 +44,7 @@ safe_rollback_failure_evidence() {
 }
 
 assert_log_contains() {
-  if printf '%s' "$CALL_LOG" | grep -qF "$1"; then
+  if grep -qF -- "$1" <<< "$CALL_LOG"; then
     pass_test
   elif [[ "$1" == app_up_called* ]]; then
     fail_test "rollback app_up 调用缺失（详见 RB_DIAG 固定阶段标志）"
@@ -56,7 +56,7 @@ assert_log_contains() {
   fi
 }
 assert_log_not_contains() {
-  if printf '%s' "$CALL_LOG" | grep -qF "$1"; then fail_test "log 不应包含: $1"; else pass_test; fi
+  if grep -qF -- "$1" <<< "$CALL_LOG"; then fail_test "log 不应包含: $1"; else pass_test; fi
 }
 assert_contains_file() {
   if grep -qF "$1" "$2" 2>/dev/null; then pass_test; else fail_test "$3: 文件缺少 $1"; fi
@@ -296,6 +296,25 @@ PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 # 与 PREV_SHA 不同的合法 40-hex（release mismatch 用例的 fake app 自报值）
 OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
+
+# Issue #97: verify early hit with large log without pipefail/SIGPIPE false-negative.
+echo "== 0. pipefail 长日志断言无假阴性 =="
+PIPEFAIL_ASSERT_RESULT="$(
+  PASS=0 FAIL=0
+  BULK_LOG="$(printf '%262144s' '' | tr ' ' 'X')"
+  CALL_LOG="app_up_called GIT_SHA=${PREV_SHA}"$'\n'"${BULK_LOG}"
+  assert_log_contains "app_up_called GIT_SHA=${PREV_SHA}" 2>&1
+  printf 'positive_pass=%s positive_fail=%s\n' "$PASS" "$FAIL"
+  PASS=0 FAIL=0
+  assert_log_not_contains "app_up_called GIT_SHA=${PREV_SHA}" 2>&1
+  printf 'negative_pass=%s negative_fail=%s\n' "$PASS" "$FAIL"
+)"
+if [[ "$PIPEFAIL_ASSERT_RESULT" == *'positive_pass=1 positive_fail=0'* &&
+      "$PIPEFAIL_ASSERT_RESULT" == *'negative_pass=0 negative_fail=1'* ]]; then
+  pass_test
+else
+  fail_test "CALL_LOG 长日志正反向断言须正确（原文不输出）"
+fi
 
 echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=="
 RESTORE_STUB_MODE=success make_sandbox
