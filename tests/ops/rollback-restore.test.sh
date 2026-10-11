@@ -297,23 +297,43 @@ PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
 
-# Issue #97: verify early hit with large log without pipefail/SIGPIPE false-negative.
-echo "== 0. pipefail 长日志断言无假阴性 =="
+# Issue #97: validate both assertions in every synthetic large-log scenario.
+echo "== 0. pipefail 长日志位置矩阵 =="
 PIPEFAIL_ASSERT_RESULT="$(
-  PASS=0 FAIL=0
   BULK_LOG="$(printf '%262144s' '' | tr ' ' 'X')"
-  CALL_LOG="app_up_called GIT_SHA=${PREV_SHA}"$'\n'"${BULK_LOG}"
-  assert_log_contains "app_up_called GIT_SHA=${PREV_SHA}" 2>&1
-  printf 'positive_pass=%s positive_fail=%s\n' "$PASS" "$FAIL"
-  PASS=0 FAIL=0
-  assert_log_not_contains "app_up_called GIT_SHA=${PREV_SHA}" 2>&1
-  printf 'negative_pass=%s negative_fail=%s\n' "$PASS" "$FAIL"
+  MARKER="app_up_called GIT_SHA=${PREV_SHA}"
+  MATRIX_CASES=0 MATRIX_ERRORS=0
+  for position in first middle last absent; do
+    for iteration in 1 2 3 4 5 6 7 8; do
+      case "$position" in
+        first) CALL_LOG="${MARKER}${BULK_LOG}" ;;
+        middle) CALL_LOG="${BULK_LOG:0:131072}${MARKER}${BULK_LOG:131072}" ;;
+        last) CALL_LOG="${BULK_LOG}${MARKER}" ;;
+        absent) CALL_LOG="${BULK_LOG}" ;;
+      esac
+      PASS=0 FAIL=0
+      assert_log_contains "$MARKER" >/dev/null 2>&1
+      if [[ "$position" == absent ]]; then
+        [[ "$PASS" == 0 && "$FAIL" == 1 ]] || MATRIX_ERRORS=$((MATRIX_ERRORS + 1))
+      else
+        [[ "$PASS" == 1 && "$FAIL" == 0 ]] || MATRIX_ERRORS=$((MATRIX_ERRORS + 1))
+      fi
+      PASS=0 FAIL=0
+      assert_log_not_contains "$MARKER" >/dev/null 2>&1
+      if [[ "$position" == absent ]]; then
+        [[ "$PASS" == 1 && "$FAIL" == 0 ]] || MATRIX_ERRORS=$((MATRIX_ERRORS + 1))
+      else
+        [[ "$PASS" == 0 && "$FAIL" == 1 ]] || MATRIX_ERRORS=$((MATRIX_ERRORS + 1))
+      fi
+      MATRIX_CASES=$((MATRIX_CASES + 1))
+    done
+  done
+  printf 'matrix_cases=%s matrix_errors=%s\n' "$MATRIX_CASES" "$MATRIX_ERRORS"
 )"
-if [[ "$PIPEFAIL_ASSERT_RESULT" == *'positive_pass=1 positive_fail=0'* &&
-      "$PIPEFAIL_ASSERT_RESULT" == *'negative_pass=0 negative_fail=1'* ]]; then
+if [[ "$PIPEFAIL_ASSERT_RESULT" == *'matrix_cases=32 matrix_errors=0'* ]]; then
   pass_test
 else
-  fail_test "CALL_LOG 长日志正反向断言须正确（原文不输出）"
+  fail_test "CALL_LOG 长日志矩阵每种场景的正反断言须正确（原文不输出）"
 fi
 
 echo "== 1. safe rollback 不碰 DB（真实 release gate × fake app 全绿）=="
