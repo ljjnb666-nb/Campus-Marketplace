@@ -17,21 +17,37 @@ export function LoginForm() {
         setError("");
 
         const formData = new FormData(event.currentTarget);
-        const result = await signIn("credentials", {
-          email: formData.get("email"),
-          password: formData.get("password"),
-          redirect: false,
-          callbackUrl: "/",
-        });
+        try {
+          const result = await signIn("credentials", {
+            email: formData.get("email"),
+            password: formData.get("password"),
+            redirect: false,
+            callbackUrl: "/",
+          });
 
-        setPending(false);
+          // No response is not a successful authentication.
+          if (!result) {
+            setError("登录暂时不可用，请稍后重试");
+            return;
+          }
+          if (result.error) {
+            setError("邮箱或密码错误");
+            return;
+          }
+          // A non-error object still needs a successful result and a target URL.
+          if (result.ok === false || !result.url) {
+            setError("登录暂时不可用，请稍后重试");
+            return;
+          }
 
-        if (result?.error) {
-          setError("邮箱或密码错误");
-          return;
+          window.location.href = result.url;
+        } catch {
+          // A rejected auth request must not strand the form in the pending state.
+          // Never surface raw exceptions or credential details to the UI/logs.
+          setError("登录暂时不可用，请稍后重试");
+        } finally {
+          setPending(false);
         }
-
-        window.location.href = result?.url ?? "/";
       }}
     >
       <label className="flex flex-col gap-2 text-sm">
