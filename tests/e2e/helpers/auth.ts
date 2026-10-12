@@ -2,6 +2,13 @@ import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 
 /**
+ * Issue #115 R7: a passive per-document signal probe. It records only bounded
+ * event counts and boolean UI transitions, never field values or request data.
+ * Install before /login loads so clicking before hydration is observable too.
+ */
+const loginProbeInstalled = new WeakSet<Page>();
+
+/**
  * 真实 UI 登录：走 /login 表单 → NextAuth credentials → JWT session。
  * storageState 由 auth-setup 在测试运行时生成，禁止提交任何 cookie。
  *
@@ -13,6 +20,57 @@ export async function loginViaUI(
   password: string,
   expectedName: string,
 ): Promise<void> {
+  if (!loginProbeInstalled.has(page)) {
+    await page.addInitScript(() => {
+      if (window.location.pathname !== "/login") return;
+      const probe = {
+        clicks: 0,
+        submits: 0,
+        preventedSubmits: 0,
+        pendingSeen: false,
+        formCountAtClick: -1,
+      };
+      (window as Window & { __campusE2ELoginProbe?: typeof probe }).__campusE2ELoginProbe = probe;
+      const isCredentialForm = (form: HTMLFormElement | null) =>
+        !!form?.querySelector('input[name="email"]') &&
+        !!form.querySelector('input[name="password"]');
+      document.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const button = target.closest('button[type="submit"]');
+        if (!button || !isCredentialForm(button.closest("form"))) return;
+        probe.clicks = Math.min(probe.clicks + 1, 9);
+        probe.formCountAtClick = Math.min(
+          [...document.querySelectorAll("form")].filter(isCredentialForm).length,
+          9,
+        );
+      }, true);
+      document.addEventListener("submit", (event) => {
+        if (!(event.target instanceof HTMLFormElement) ||
+            !isCredentialForm(event.target)) return;
+        probe.submits = Math.min(probe.submits + 1, 9);
+        // Observe React's preventDefault after event dispatch without changing it.
+        queueMicrotask(() => {
+          if (event.defaultPrevented) {
+            probe.preventedSubmits = Math.min(probe.preventedSubmits + 1, 9);
+          }
+        });
+      }, true);
+      const inspectPending = () => {
+        if ([...document.querySelectorAll('form button[type="submit"]')].some(
+          (button) => button.textContent?.trim() === "登录中..." &&
+            (button as HTMLButtonElement).disabled,
+        )) probe.pendingSeen = true;
+      };
+      new MutationObserver(inspectPending).observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      });
+    });
+    loginProbeInstalled.add(page);
+  }
   await page.goto("/login");
   await page.locator('input[name="email"]').first().fill(email);
   await page.locator('input[name="password"]').first().fill(password);
@@ -73,8 +131,25 @@ export async function loginViaUI(
       .then((cookies) => cookies.some((cookie) =>
         /^(?:__Secure-)?(?:next-auth|authjs)\.session-token(?:\.\d+)?$/.test(cookie.name)))
       .catch(() => false);
+    const nativeSignals = await page.evaluate(() => {
+      const probe = (window as Window & { __campusE2ELoginProbe?: {
+        clicks: number;
+        submits: number;
+        preventedSubmits: number;
+        pendingSeen: boolean;
+        formCountAtClick: number;
+      } }).__campusE2ELoginProbe;
+      return probe ? {
+        clicks: probe.clicks,
+        submits: probe.submits,
+        preventedSubmits: probe.preventedSubmits,
+        pendingSeen: probe.pendingSeen,
+        formCountAtClick: probe.formCountAtClick,
+      } : null;
+    }).catch(() => null);
+    // Unknown is distinct from zero (page/context may have navigated away).
     console.error(
-      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0}`,
+      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0} native_clicks=${nativeSignals?.clicks ?? "unknown"} native_submits=${nativeSignals?.submits ?? "unknown"} native_submit_prevented=${nativeSignals?.preventedSubmits ?? "unknown"} native_pending_seen=${nativeSignals ? Number(nativeSignals.pendingSeen) : "unknown"} native_forms_at_click=${nativeSignals?.formCountAtClick ?? "unknown"}`,
     );
     throw error;
   } finally {
