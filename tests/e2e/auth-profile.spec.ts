@@ -129,11 +129,20 @@ test("认证与个人资料：凭据回调等待期间保持提交态，响应�
     releaseCallback = resolve;
   });
   let interceptedCallbacks = 0;
-  await page.route(credentialsCallback, async (route) => {
-    interceptedCallbacks += 1;
-    await callbackGate;
-    await route.continue();
+  let markContinuationSettled: (() => void) | undefined;
+  const continuationSettled = new Promise<void>((resolve) => {
+    markContinuationSettled = resolve;
   });
+  const gateRequest = async (route: import("@playwright/test").Route) => {
+    interceptedCallbacks += 1;
+    try {
+      await callbackGate;
+      await route.continue();
+    } finally {
+      markContinuationSettled?.();
+    }
+  };
+  await page.route(credentialsCallback, gateRequest);
 
   try {
     await page.locator('input[name="email"]').first().fill(E2E_ACCOUNTS.buyer.email);
@@ -146,8 +155,13 @@ test("认证与个人资料：凭据回调等待期间保持提交态，响应�
     await expect(page.getByRole("button", { name: "登录中..." })).toBeDisabled();
     await expect(page).toHaveURL((url) => url.pathname === "/login");
   } finally {
+    // Do not unroute a still-pending Route: Playwright may auto-handle it,
+    // making route.continue() fail with "Route is already handled".
     releaseCallback?.();
-    await page.unroute(credentialsCallback);
+    if (interceptedCallbacks > 0) {
+      await continuationSettled;
+    }
+    await page.unroute(credentialsCallback, gateRequest);
   }
 
   // The original request resumes: real credentials, session cookie, and the
