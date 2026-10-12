@@ -17,7 +17,7 @@ vi.mock("@playwright/test", () => ({
 
 function fixture(
   clickFailure: boolean,
-  callbackMode: "complete" | "pending" | "foreign" = "complete",
+  callbackMode: "complete" | "pending" | "foreign" | "none" = "complete",
   mainFrameNavigation = false,
 ) {
   type EventName = "request" | "response" | "requestfailed" | "framenavigated";
@@ -49,6 +49,7 @@ function fixture(
           for (const cb of listeners.framenavigated) cb(mainFrame);
         }
         if (clickFailure) throw new Error("CLICK_PROBE");
+        if (callbackMode === "none") return;
         const callbackUrl = callbackMode === "foreign"
           ? "http://other.invalid/api/auth/callback/credentials"
           : "http://localhost:3000/api/auth/callback/credentials";
@@ -223,6 +224,52 @@ describe("Issue #115 login timeout diagnostics", () => {
     expect(message).toContain("LOGIN_E2E_DIAG stage=ready-ui path=other");
     expect(message).toContain("callback_started=1 callback_status=3xx callback_transport_failed=0");
     expect(message).toContain("session_cookie_present=1");
+    expect(message).not.toContain("private@example.test");
+    expect(message).not.toContain("SECRET_PASSWORD");
+    expect(message).not.toContain("SECRET_DISPLAY_NAME");
+    expect(message).not.toContain("SECRET_NEVER_LOG");
+  });
+
+  it.each([
+    {
+      label: "click without native submit",
+      native: { clicks: 1, submits: 0, preventedSubmits: 0, pendingSeen: false, formCountAtClick: 1 },
+      expected: "native_clicks=1 native_submits=0 native_submit_prevented=0",
+    },
+    {
+      label: "native submit prevented without callback",
+      native: { clicks: 1, submits: 1, preventedSubmits: 1, pendingSeen: true, formCountAtClick: 2 },
+      expected: "native_clicks=1 native_submits=1 native_submit_prevented=1",
+    },
+  ])("preserves separate callback_started=0 and native signals: $label", async ({ native, expected }) => {
+    navigation.shouldFail = true;
+    const { page, listeners } = fixture(false, "none");
+    page.evaluate.mockResolvedValueOnce(native);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("URL_PROBE");
+
+    expect(page.evaluate).toHaveBeenCalledTimes(1);
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("LOGIN_E2E_DIAG stage=redirect path=login");
+    expect(message).toContain(
+      "callback_started=0 callback_status=none callback_transport_failed=0",
+    );
+    expect(message).toContain(expected);
+    expect(message).toContain(`native_forms_at_click=${native.formCountAtClick}`);
+    expect(message).toContain("native_main_frame_navigated=0");
     expect(message).not.toContain("private@example.test");
     expect(message).not.toContain("SECRET_PASSWORD");
     expect(message).not.toContain("SECRET_DISPLAY_NAME");
