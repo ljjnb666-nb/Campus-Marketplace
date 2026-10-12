@@ -174,18 +174,35 @@ test("认证与个人资料：凭据回调等待期间保持提交态，响应�
 });
 
 /**
- * Issue #115 R8: SSR credentials form must not fall back to native GET before
- * hydration; no test credentials are entered in this no-JS browser context.
+ * Issue #115 R8: preserve Next.js's inline streaming/SSR scripts, while
+ * withholding external client JS chunks so the credentials handler cannot
+ * hydrate. A fully JS-disabled App Router document may keep streamed content
+ * in a pending segment rather than insert the form at all; that is not an
+ * observation of the pre-hydration form's disabled attribute.
  */
-test("认证：未执行 JavaScript 时禁止原生登录提交且表单非 GET", async ({ browser, baseURL }) => {
-  const context = await browser.newContext({ javaScriptEnabled: false, baseURL });
+test("认证：客户端脚本未加载时登录表单禁止原生提交且使用 POST", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL });
   try {
     const page = await context.newPage();
+    let blockedClientScripts = 0;
+    await page.route("**/_next/static/**", async (route) => {
+      if (route.request().resourceType() !== "script") {
+        await route.continue();
+        return;
+      }
+      blockedClientScripts += 1;
+      // Keep inline server-stream insertion runnable but prevent hydration.
+      await route.fulfill({
+        status: 200,
+        contentType: "text/javascript",
+        body: "",
+      });
+    });
     await page.goto("/login");
-    const submit = page.getByRole("button", { name: "登录" });
-    await expect(submit).toBeDisabled();
-    await expect(page.locator("form", { has: page.locator('input[name="password"]') }))
-      .toHaveAttribute("method", "post");
+    expect(blockedClientScripts).toBeGreaterThan(0);
+    const form = page.locator("form", { has: page.locator('input[name="password"]') });
+    await expect(form.locator('button[type="submit"]')).toBeDisabled();
+    await expect(form).toHaveAttribute("method", "post");
     await expect(page).toHaveURL((url) =>
       url.pathname === "/login" && url.search === "",
     );
