@@ -172,3 +172,31 @@ test("认证与个人资料：凭据回调等待期间保持提交态，响应�
   await expect(page.getByRole("button", { name: E2E_ACCOUNTS.buyer.name }))
     .toBeVisible();
 });
+
+/**
+ * Issue #115 R8: SSR credentials form must not fall back to native GET before
+ * hydration; no test credentials are entered in this no-JS browser context.
+ */
+test("认证：未执行 JavaScript 时禁止原生登录提交且表单非 GET", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ javaScriptEnabled: false, baseURL });
+  try {
+    const page = await context.newPage();
+    await page.goto("/login");
+    const submit = page.getByRole("button", { name: "登录" });
+    await expect(submit).toBeDisabled();
+    await expect(page.locator("form", { has: page.locator('input[name="password"]') }))
+      .toHaveAttribute("method", "post");
+    await expect(page).toHaveURL((url) =>
+      url.pathname === "/login" && url.search === "",
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("认证：正常水合后登录按钮可用且保留安全原生表单方法", async ({ page }) => {
+  await page.goto("/login");
+  await expect(page.getByRole("button", { name: "登录" })).toBeEnabled();
+  await expect(page.locator("form", { has: page.locator('input[name="password"]') }))
+    .toHaveAttribute("method", "post");
+});
