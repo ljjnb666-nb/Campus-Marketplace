@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginForm } from "@/components/auth/login-form";
 
@@ -37,6 +38,22 @@ afterEach(() => {
 });
 
 describe("LoginForm", () => {
+  it("renders SSR credentials form with native POST and submit disabled before hydration", () => {
+    const html = renderToString(<LoginForm />);
+    expect(html).toMatch(/<form\b[^>]*method="post"/);
+    expect(html).toMatch(/<button\b[^>]*type="submit"[^>]*disabled=""/);
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
+  it("enables credentials submission when mounted client-side", async () => {
+    render(<LoginForm />);
+    await waitFor(() => {
+      expect((screen.getByRole("button", { name: "登录" }) as HTMLButtonElement).disabled)
+        .toBe(false);
+    });
+    expect(signIn).not.toHaveBeenCalled();
+  });
+
   it("submits credentials through next-auth signIn", async () => {
     signIn.mockResolvedValue({ url: "/" });
 

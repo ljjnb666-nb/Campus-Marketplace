@@ -172,3 +172,50 @@ test("认证与个人资料：凭据回调等待期间保持提交态，响应�
   await expect(page.getByRole("button", { name: E2E_ACCOUNTS.buyer.name }))
     .toBeVisible();
 });
+
+/**
+ * Issue #115 R8: preserve Next.js's inline streaming/SSR scripts, while
+ * withholding external client JS chunks so the credentials handler cannot
+ * hydrate. A fully JS-disabled App Router document may keep streamed content
+ * in a pending segment rather than insert the form at all; that is not an
+ * observation of the pre-hydration form's disabled attribute.
+ */
+test("认证：客户端脚本未加载时登录表单禁止原生提交且使用 POST", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL });
+  try {
+    const page = await context.newPage();
+    let blockedClientScripts = 0;
+    await page.route("**/_next/static/**", async (route) => {
+      if (route.request().resourceType() !== "script") {
+        await route.continue();
+        return;
+      }
+      blockedClientScripts += 1;
+      // Keep inline server-stream insertion runnable but prevent hydration.
+      await route.fulfill({
+        status: 200,
+        contentType: "text/javascript",
+        body: "",
+      });
+    });
+    await page.goto("/login");
+    expect(blockedClientScripts).toBeGreaterThan(0);
+    const form = page.locator("form", { has: page.locator('input[name="password"]') });
+    await expect(form.locator('button[type="submit"]')).toBeDisabled();
+    await expect(form).toHaveAttribute("method", "post");
+    await expect(page).toHaveURL((url) =>
+      url.pathname === "/login" && url.search === "",
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test("认证：正常水合后登录按钮可用且保留安全原生表单方法", async ({ page }) => {
+  await page.goto("/login");
+  await expect(page.getByRole("button", { name: "登录" })).toBeEnabled();
+  // The Next.js streamed boundary may temporarily expose two matching forms.
+  // Check the active form without assuming unique DOM nodes across hydration.
+  await expect(page.locator("form", { has: page.locator('input[name="password"]') }).first())
+    .toHaveAttribute("method", "post");
+});
