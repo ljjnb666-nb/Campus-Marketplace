@@ -22,7 +22,8 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
   const tag = uniqueTag("gf-p7b");
   const candidateEmail = `p7b-reviewer-${tag}@e2e.test`;
   const candidatePassword = `${TEST_PASSWORD_PREFIX}Candidate#2026`;
-  const candidateName = "E2E角色目标";
+  // Distinct display name per attempt: aborted first runs must not contaminate retry UI assertions.
+  const candidateName = `E2E角色目标${tag.slice(-6)}`;
 
   // ---------- DB fixture：候选用户（ACTIVE membership，零角色）----------
   const db = e2eDb();

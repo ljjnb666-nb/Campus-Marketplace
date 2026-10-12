@@ -114,3 +114,61 @@ test("认证与个人资料：登录回调网络失败后提示并允许原表�
   await expect(page.getByRole("button", { name: E2E_ACCOUNTS.buyer.name }))
     .toBeVisible();
 });
+
+test("认证与个人资料：凭据回调等待期间保持提交态，响应后登录成功", async ({ page }) => {
+  await page.goto("/login");
+
+  const origin = new URL(page.url()).origin;
+  const credentialsCallback = (url: URL) =>
+    url.origin === origin && url.pathname === "/api/auth/callback/credentials";
+
+  // Gate only the current page's credentials callback. No timer, global
+  // network interception, shared user mutation, or altered login timeout.
+  let releaseCallback: (() => void) | undefined;
+  const callbackGate = new Promise<void>((resolve) => {
+    releaseCallback = resolve;
+  });
+  let interceptedCallbacks = 0;
+  let markContinuationSettled: (() => void) | undefined;
+  const continuationSettled = new Promise<void>((resolve) => {
+    markContinuationSettled = resolve;
+  });
+  const gateRequest = async (route: import("@playwright/test").Route) => {
+    interceptedCallbacks += 1;
+    try {
+      await callbackGate;
+      await route.continue();
+    } finally {
+      markContinuationSettled?.();
+    }
+  };
+  await page.route(credentialsCallback, gateRequest);
+
+  try {
+    await page.locator('input[name="email"]').first().fill(E2E_ACCOUNTS.buyer.email);
+    await page.locator('input[name="password"]').first().fill(E2E_ACCOUNTS.buyer.password);
+    await page.getByRole("button", { name: "登录" }).click();
+
+    // Assert an actual in-flight callback before checking pending UI. If this
+    // fails, finally still releases the gated request.
+    await expect.poll(() => interceptedCallbacks).toBe(1);
+    await expect(page.getByRole("button", { name: "登录中..." })).toBeDisabled();
+    await expect(page).toHaveURL((url) => url.pathname === "/login");
+  } finally {
+    // Do not unroute a still-pending Route: Playwright may auto-handle it,
+    // making route.continue() fail with "Route is already handled".
+    releaseCallback?.();
+    if (interceptedCallbacks > 0) {
+      await continuationSettled;
+    }
+    await page.unroute(credentialsCallback, gateRequest);
+  }
+
+  // The original request resumes: real credentials, session cookie, and the
+  // authenticated navigation/UI must complete without a second submission.
+  await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
+    timeout: 15_000,
+  });
+  await expect(page.getByRole("button", { name: E2E_ACCOUNTS.buyer.name }))
+    .toBeVisible();
+});
