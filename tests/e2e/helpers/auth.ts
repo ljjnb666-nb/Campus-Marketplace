@@ -109,7 +109,7 @@ export async function loginViaUI(
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
   page.on("framenavigated", onMainFrameNavigated);
-  let loginStage: "submit" | "redirect" = "submit";
+  let loginStage: "submit" | "redirect" | "ready-ui" = "submit";
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
   // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
   // 真实认证失败或 URL 不变仍会超时，不提高超时或 Playwright retry。
@@ -120,6 +120,10 @@ export async function loginViaUI(
     await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
       timeout: 15_000,
     });
+    // URL change is not sufficient: the role-specific authenticated UI must appear.
+    // Keep the same diagnostic listeners active until this final assertion settles.
+    loginStage = "ready-ui";
+    await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
   } catch (error) {
     // Issue #115: only bounded, non-sensitive state classifications on failure.
     // Never log email, password, cookies, URLs, response bodies, or token values.
@@ -166,7 +170,6 @@ export async function loginViaUI(
     page.off("requestfailed", onRequestFailed);
     page.off("framenavigated", onMainFrameNavigated);
   }
-  await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
 }
 
 /** 真实 UI 登出：点开用户菜单 → 退出登录 → 回到 /login */
