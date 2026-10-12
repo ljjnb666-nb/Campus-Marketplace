@@ -19,6 +19,7 @@ function fixture(
   clickFailure: boolean,
   callbackMode: "complete" | "pending" | "foreign" = "complete",
   mainFrameNavigation = false,
+  fillFailure = false,
 ) {
   type EventName = "request" | "response" | "requestfailed" | "framenavigated";
   const mainFrame = {};
@@ -41,7 +42,9 @@ function fixture(
       formCountAtClick: number;
     } | null),
     goto: vi.fn(async () => undefined),
-    locator: () => ({ first: () => ({ fill: async () => undefined }) }),
+    locator: () => ({ first: () => ({ fill: async () => {
+      if (fillFailure) throw new Error("FILL_PROBE");
+    } }) }),
     getByRole: (_role: string, options: { name: string }) => ({
       click: async () => {
         if (options.name !== "登录") throw new Error("UNEXPECTED_BUTTON");
@@ -87,6 +90,29 @@ afterEach(() => {
 });
 
 describe("Issue #115 login timeout diagnostics", () => {
+  it("logs a bounded fill-stage classification and cleans up all listeners", async () => {
+    const { page, listeners } = fixture(false, "complete", false, true);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("FILL_PROBE");
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("LOGIN_E2E_DIAG stage=fill path=login");
+    expect(message).toContain("callback_started=0 callback_status=none");
+    for (const sensitive of ["private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME", "SECRET_NEVER_LOG"]) {
+      expect(message).not.toContain(sensitive);
+    }
+  });
+
   it("unbinds callbacks even when the login click fails, without leaking input", async () => {
     const { page, listeners } = fixture(true);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
