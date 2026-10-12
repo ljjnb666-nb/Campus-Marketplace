@@ -40,8 +40,8 @@ afterEach(() => {
 describe("LoginForm", () => {
   it("renders SSR credentials form with native POST and submit disabled before hydration", () => {
     const html = renderToString(<LoginForm />);
-    expect(html).toMatch(/<form\\b[^>]*method="post"/);
-    expect(html).toMatch(/<button\\b[^>]*type="submit"[^>]*disabled=""/);
+    expect(html).toMatch(/<form\b[^>]*method="post"/);
+    expect(html).toMatch(/<button\b[^>]*type="submit"[^>]*disabled=""/);
     expect(signIn).not.toHaveBeenCalled();
   });
 
