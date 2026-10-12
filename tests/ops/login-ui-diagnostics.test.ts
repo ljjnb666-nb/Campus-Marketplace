@@ -20,6 +20,7 @@ function fixture(
   callbackMode: "complete" | "pending" | "foreign" = "complete",
   mainFrameNavigation = false,
   fillFailure = false,
+  navigationFailure = false,
 ) {
   type EventName = "request" | "response" | "requestfailed" | "framenavigated";
   const mainFrame = {};
@@ -41,7 +42,12 @@ function fixture(
       pendingSeen: boolean;
       formCountAtClick: number;
     } | null),
-    goto: vi.fn(async () => undefined),
+    goto: vi.fn(async () => {
+      if (navigationFailure) throw new Error("NAVIGATION_PROBE");
+      // The initial login navigation also emits framenavigated: it must not
+      // be confused with a post-submit native document replacement.
+      for (const cb of listeners.framenavigated) cb(mainFrame);
+    }),
     locator: () => ({ first: () => ({ fill: async () => {
       if (fillFailure) throw new Error("FILL_PROBE");
     } }) }),
@@ -65,10 +71,12 @@ function fixture(
       isVisible: async () => options.name === "登录中...",
     }),
     getByText: () => ({ isVisible: async () => false }),
-    url: () => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
+    url: () => navigationFailure ? "about:blank"
+      : navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
     context: () => ({
       cookies: async (url: string) => {
         cookieScope = url;
+        if (url === "about:blank") throw new Error("INVALID_COOKIE_SCOPE");
         return [{ name: "next-auth.session-token", value: "SECRET_NEVER_LOG" }];
       },
     }),
@@ -90,6 +98,34 @@ afterEach(() => {
 });
 
 describe("Issue #115 login timeout diagnostics", () => {
+
+  it("classifies failed initial navigation as unknown without leaking secrets or listeners", async () => {
+    const { page, listeners, getCookieScope } = fixture(false, "complete", false, false, true);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("NAVIGATION_PROBE");
+    expect(page.goto).toHaveBeenCalledWith("/login");
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(getCookieScope()).toBe("about:blank");
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("LOGIN_E2E_DIAG stage=navigate path=unknown");
+    expect(message).toContain("callback_started=0 callback_status=none");
+    expect(message).toContain("session_cookie_present=0");
+    expect(message).toContain("native_main_frame_navigated=0");
+    for (const secret of ["private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME", "SECRET_NEVER_LOG"]) {
+      expect(message).not.toContain(secret);
+    }
+  });
+
   it("logs a bounded fill-stage classification and cleans up all listeners", async () => {
     const { page, listeners } = fixture(false, "complete", false, true);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
