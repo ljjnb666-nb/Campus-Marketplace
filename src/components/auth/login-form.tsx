@@ -2,14 +2,26 @@
 
 import Link from "next/link";
 import { signIn } from "next-auth/react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+
+// SSR and the initial hydration render must agree: submit stays disabled until
+// React has attached the credentials onSubmit handler in the browser.
+const subscribeToHydration = () => () => {};
+const getClientHydration = () => true;
+const getServerHydration = () => false;
 
 export function LoginForm() {
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const hydrated = useSyncExternalStore(
+    subscribeToHydration,
+    getClientHydration,
+    getServerHydration,
+  );
 
   return (
     <form
+      method="post"
       className="flex flex-col gap-4"
       onSubmit={async (event) => {
         event.preventDefault();
@@ -77,7 +89,7 @@ export function LoginForm() {
       <div className="flex items-center justify-between gap-4">
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || !hydrated}
           className="rounded-full bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
         >
           {pending ? "登录中..." : "登录"}
