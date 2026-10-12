@@ -78,6 +78,12 @@ export async function loginViaUI(
   let callbackStarted = false;
   let callbackStatus = "none";
   let callbackTransportFailure = false;
+  // A native submission before hydration can replace the entire document.
+  // The new document would reset window probe counters: never report that as zero.
+  let mainFrameNavigated = false;
+  const onMainFrameNavigated = (frame: import("@playwright/test").Frame) => {
+    if (frame === page.mainFrame()) mainFrameNavigated = true;
+  };
   const isCredentialsCallback = (url: string): boolean => {
     try {
       const target = new URL(url);
@@ -102,6 +108,7 @@ export async function loginViaUI(
   page.on("request", onRequest);
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
+  page.on("framenavigated", onMainFrameNavigated);
   let loginStage: "submit" | "redirect" = "submit";
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
   // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
@@ -131,7 +138,7 @@ export async function loginViaUI(
       .then((cookies) => cookies.some((cookie) =>
         /^(?:__Secure-)?(?:next-auth|authjs)\.session-token(?:\.\d+)?$/.test(cookie.name)))
       .catch(() => false);
-    const nativeSignals = await page.evaluate(() => {
+    const nativeSignals = mainFrameNavigated ? null : await page.evaluate(() => {
       const probe = (window as Window & { __campusE2ELoginProbe?: {
         clicks: number;
         submits: number;
@@ -147,15 +154,17 @@ export async function loginViaUI(
         formCountAtClick: probe.formCountAtClick,
       } : null;
     }).catch(() => null);
+    // If the main frame navigated, its new probe starts from zero: report unknown.
     // Unknown is distinct from zero (page/context may have navigated away).
     console.error(
-      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0} native_clicks=${nativeSignals?.clicks ?? "unknown"} native_submits=${nativeSignals?.submits ?? "unknown"} native_submit_prevented=${nativeSignals?.preventedSubmits ?? "unknown"} native_pending_seen=${nativeSignals ? Number(nativeSignals.pendingSeen) : "unknown"} native_forms_at_click=${nativeSignals?.formCountAtClick ?? "unknown"}`,
+      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0} native_clicks=${nativeSignals?.clicks ?? "unknown"} native_submits=${nativeSignals?.submits ?? "unknown"} native_submit_prevented=${nativeSignals?.preventedSubmits ?? "unknown"} native_pending_seen=${nativeSignals ? Number(nativeSignals.pendingSeen) : "unknown"} native_forms_at_click=${nativeSignals?.formCountAtClick ?? "unknown"} native_main_frame_navigated=${mainFrameNavigated ? 1 : 0}`,
     );
     throw error;
   } finally {
     page.off("request", onRequest);
     page.off("response", onResponse);
     page.off("requestfailed", onRequestFailed);
+    page.off("framenavigated", onMainFrameNavigated);
   }
   await expect(page.getByRole("button", { name: expectedName })).toBeVisible();
 }
