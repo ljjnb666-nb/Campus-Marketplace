@@ -2,13 +2,16 @@ import type { Page } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loginViaUI } from "../e2e/helpers/auth";
 
-const navigation = vi.hoisted(() => ({ shouldFail: false }));
+const navigation = vi.hoisted(() => ({ shouldFail: false, shouldFailReady: false, redirected: false }));
 vi.mock("@playwright/test", () => ({
   expect: () => ({
     toHaveURL: async () => {
       if (navigation.shouldFail) throw new Error("URL_PROBE");
+      navigation.redirected = true;
     },
-    toBeVisible: async () => undefined,
+    toBeVisible: async () => {
+      if (navigation.shouldFailReady) throw new Error("READY_UI_PROBE");
+    },
   }),
 }));
 
@@ -59,7 +62,7 @@ function fixture(
       isVisible: async () => options.name === "登录中...",
     }),
     getByText: () => ({ isVisible: async () => false }),
-    url: () => "http://localhost:3000/login",
+    url: () => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
     context: () => ({
       cookies: async (url: string) => {
         cookieScope = url;
@@ -78,6 +81,8 @@ function fixture(
 
 afterEach(() => {
   navigation.shouldFail = false;
+  navigation.shouldFailReady = false;
+  navigation.redirected = false;
   vi.restoreAllMocks();
 });
 
@@ -194,6 +199,48 @@ describe("Issue #115 login timeout diagnostics", () => {
     expect(message).toContain("native_main_frame_navigated=1");
     expect(message).not.toContain("private@example.test");
     expect(message).not.toContain("SECRET_PASSWORD");
+  });
+
+  it("diagnoses authenticated UI readiness failure after successful URL redirect", async () => {
+    navigation.shouldFailReady = true;
+    const { page, listeners } = fixture(false);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("READY_UI_PROBE");
+
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(navigation.redirected).toBe(true);
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("LOGIN_E2E_DIAG stage=ready-ui path=other");
+    expect(message).toContain("callback_started=1 callback_status=3xx callback_transport_failed=0");
+    expect(message).toContain("session_cookie_present=1");
+    expect(message).not.toContain("private@example.test");
+    expect(message).not.toContain("SECRET_PASSWORD");
+    expect(message).not.toContain("SECRET_DISPLAY_NAME");
+    expect(message).not.toContain("SECRET_NEVER_LOG");
+  });
+
+  it("does not emit an error diagnostic when redirect and authenticated UI both succeed", async () => {
+    const { page, listeners } = fixture(false);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer");
+
+    expect(navigation.redirected).toBe(true);
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(log).not.toHaveBeenCalled();
   });
 
 });
