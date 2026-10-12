@@ -211,6 +211,62 @@ test("认证：客户端脚本未加载时登录表单禁止原生提交且使�
   }
 });
 
+/**
+ * Issue #115 R10: a disabled SSR submit button must also block the keyboard
+ * implicit-submit path before React attaches onSubmit. Keep Next's inline
+ * streamed-HTML scripts while withholding external hydration chunks.
+ */
+test("认证：未水合登录表单按 Enter 不触发原生提交或凭据 URL", async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL });
+  try {
+    const page = await context.newPage();
+    let blockedClientScripts = 0;
+    await page.route("**/_next/static/**", async (route) => {
+      if (route.request().resourceType() !== "script") {
+        await route.continue();
+        return;
+      }
+      blockedClientScripts += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/javascript",
+        body: "",
+      });
+    });
+
+    await page.goto("/login");
+    expect(blockedClientScripts).toBeGreaterThan(0);
+
+    const form = page.locator("form", { has: page.locator('input[name="password"]') });
+    const submit = form.locator('button[type="submit"]');
+    await expect(submit).toBeDisabled();
+    await expect(form).toHaveAttribute("method", "post");
+
+    // Count native submit events synchronously. No credentials, URLs, response
+    // bodies or auth tokens are ever logged; values below are synthetic only.
+    await page.evaluate(() => {
+      const probe = window as Window & { __campusNativeSubmitCount?: number };
+      probe.__campusNativeSubmitCount = 0;
+      document.addEventListener("submit", () => {
+        probe.__campusNativeSubmitCount = (probe.__campusNativeSubmitCount ?? 0) + 1;
+      }, true);
+    });
+    await form.locator('input[name="email"]').fill("unregistered@example.invalid");
+    await form.locator('input[name="password"]').fill("SyntheticOnlyNotARealPassword2026!");
+    await form.locator('input[name="password"]').press("Enter");
+
+    expect(await page.evaluate(() =>
+      (window as Window & { __campusNativeSubmitCount?: number }).__campusNativeSubmitCount,
+    )).toBe(0);
+    await expect(page).toHaveURL((url) =>
+      url.pathname === "/login" && url.search === "",
+    );
+    await expect(submit).toBeDisabled();
+  } finally {
+    await context.close();
+  }
+});
+
 test("认证：正常水合后登录按钮可用且保留安全原生表单方法", async ({ page }) => {
   await page.goto("/login");
   await expect(page.getByRole("button", { name: "登录" })).toBeEnabled();
