@@ -214,6 +214,8 @@ test("认证：客户端脚本未加载时登录表单禁止原生提交且使�
 test("认证：正常水合后登录按钮可用且保留安全原生表单方法", async ({ page }) => {
   await page.goto("/login");
   await expect(page.getByRole("button", { name: "登录" })).toBeEnabled();
-  await expect(page.locator("form", { has: page.locator('input[name="password"]') }))
+  // The Next.js streamed boundary may temporarily expose two matching forms.
+  // Check the active form without assuming unique DOM nodes across hydration.
+  await expect(page.locator("form", { has: page.locator('input[name="password"]') }).first())
     .toHaveAttribute("method", "post");
 });
