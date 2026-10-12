@@ -71,8 +71,9 @@ export async function loginViaUI(
     });
     loginProbeInstalled.add(page);
   }
-  await page.goto("/login");
-  const loginOrigin = new URL(page.url()).origin;
+  // Resolve callback origin after navigation succeeds. Navigation failure may
+  // leave about:blank; no callback should match before a valid origin exists.
+  let loginOrigin: string | null = null;
   let callbackStarted = false;
   let callbackStatus = "none";
   let callbackTransportFailure = false;
@@ -107,12 +108,17 @@ export async function loginViaUI(
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
   page.on("framenavigated", onMainFrameNavigated);
-  let loginStage: "fill" | "submit" | "redirect" | "ready-ui" = "fill";
+  let loginStage: "navigate" | "fill" | "submit" | "redirect" | "ready-ui" = "navigate";
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
   // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
   // 真实认证失败或 URL 不变仍会超时，不提高超时或 Playwright retry。
   // 包含 click() 在内的每个 await 都必须受 finally 保护，以免泄露监听器。
   try {
+    await page.goto("/login");
+    loginOrigin = new URL(page.url()).origin;
+    // Do not treat the initial login-page navigation as a post-submit reload.
+    mainFrameNavigated = false;
+    loginStage = "fill";
     await page.locator('input[name="email"]').first().fill(email);
     await page.locator('input[name="password"]').first().fill(password);
     loginStage = "submit";
@@ -130,7 +136,9 @@ export async function loginViaUI(
     // Never log email, password, cookies, URLs, response bodies, or token values.
     const loginPath = (() => {
       try {
-        return new URL(page.url()).pathname.startsWith("/login") ? "login" : "other";
+        const current = new URL(page.url());
+        if (current.protocol !== "http:" && current.protocol !== "https:") return "unknown";
+        return current.pathname.startsWith("/login") ? "login" : "other";
       } catch {
         return "unknown";
       }
