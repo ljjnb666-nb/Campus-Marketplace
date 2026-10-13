@@ -19,6 +19,8 @@ function fixture(
   clickFailure: boolean,
   callbackMode: "complete" | "pending" | "foreign" | "none" = "complete",
   mainFrameNavigation = false,
+  fillFailure = false,
+  navigateFailure = false,
 ) {
   type EventName = "request" | "response" | "requestfailed" | "framenavigated";
   const mainFrame = {};
@@ -40,8 +42,12 @@ function fixture(
       pendingSeen: boolean;
       formCountAtClick: number;
     } | null),
-    goto: vi.fn(async () => undefined),
-    locator: () => ({ first: () => ({ fill: async () => undefined }) }),
+    goto: vi.fn(async () => {
+      if (navigateFailure) throw new Error("NAVIGATION_PROBE");
+    }),
+    locator: () => ({ first: () => ({ fill: async () => {
+      if (fillFailure) throw new Error("FILL_PROBE");
+    } }) }),
     getByRole: (_role: string, options: { name: string }) => ({
       click: async () => {
         if (options.name !== "登录") throw new Error("UNEXPECTED_BUTTON");
@@ -63,7 +69,7 @@ function fixture(
       isVisible: async () => options.name === "登录中...",
     }),
     getByText: () => ({ isVisible: async () => false }),
-    url: () => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
+    url: (): string => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
     context: () => ({
       cookies: async (url: string) => {
         cookieScope = url;
@@ -88,6 +94,72 @@ afterEach(() => {
 });
 
 describe("Issue #115 login timeout diagnostics", () => {
+  it("classifies failed initial /login navigation as unknown callback, not false zero", async () => {
+    const { page, listeners } = fixture(false, "complete", false, false, true);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("NAVIGATION_PROBE");
+
+    expect(page.addInitScript).toHaveBeenCalledTimes(1);
+    expect(page.on).not.toHaveBeenCalled();
+    expect(page.off).not.toHaveBeenCalled();
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toBe(
+      "LOGIN_E2E_DIAG stage=navigate path=login callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown",
+    );
+    for (const sensitive of ["private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME", "SECRET_NEVER_LOG"]) {
+      expect(message).not.toContain(sensitive);
+    }
+  });
+
+  it("uses unknown path for a failed navigation from an about:blank document", async () => {
+    const { page, listeners } = fixture(false, "complete", false, false, true);
+    page.url = vi.fn(() => "about:blank");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "Reviewer",
+    )).rejects.toThrow("NAVIGATION_PROBE");
+
+    expect(log).toHaveBeenCalledWith(
+      "LOGIN_E2E_DIAG stage=navigate path=unknown callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown",
+    );
+    expect(page.on).not.toHaveBeenCalled();
+    expect(page.off).not.toHaveBeenCalled();
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
+  });
+
+  it("logs a bounded fill-stage classification and cleans up all listeners", async () => {
+    const { page, listeners } = fixture(false, "complete", false, true);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("FILL_PROBE");
+    expect(page.off).toHaveBeenCalledTimes(4);
+    expect(listeners.request.size).toBe(0);
+    expect(listeners.response.size).toBe(0);
+    expect(listeners.requestfailed.size).toBe(0);
+    expect(listeners.framenavigated.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("LOGIN_E2E_DIAG stage=fill path=login");
+    expect(message).toContain("callback_started=0 callback_status=none");
+    for (const sensitive of ["private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME", "SECRET_NEVER_LOG"]) {
+      expect(message).not.toContain(sensitive);
+    }
+  });
+
   it("unbinds callbacks even when the login click fails, without leaking input", async () => {
     const { page, listeners } = fixture(true);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);

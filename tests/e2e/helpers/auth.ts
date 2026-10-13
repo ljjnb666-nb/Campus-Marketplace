@@ -71,9 +71,26 @@ export async function loginViaUI(
     });
     loginProbeInstalled.add(page);
   }
-  await page.goto("/login");
-  await page.locator('input[name="email"]').first().fill(email);
-  await page.locator('input[name="password"]').first().fill(password);
+  try {
+    await page.goto("/login");
+  } catch (error) {
+    // No callback listeners exist until /login has loaded. In this stage
+    // absence of a recorded callback must be UNKNOWN, never a false zero.
+    // Classify only the current path; never log a URL, credentials or tokens.
+    const path = (() => {
+      try {
+        const current = new URL(page.url());
+        if (current.protocol !== "http:" && current.protocol !== "https:") return "unknown";
+        return current.pathname.startsWith("/login") ? "login" : "other";
+      } catch {
+        return "unknown";
+      }
+    })();
+    console.error(
+      `LOGIN_E2E_DIAG stage=navigate path=${path} callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown`,
+    );
+    throw error;
+  }
   const loginOrigin = new URL(page.url()).origin;
   let callbackStarted = false;
   let callbackStatus = "none";
@@ -109,12 +126,15 @@ export async function loginViaUI(
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
   page.on("framenavigated", onMainFrameNavigated);
-  let loginStage: "submit" | "redirect" | "ready-ui" = "submit";
+  let loginStage: "fill" | "submit" | "redirect" | "ready-ui" = "fill";
   // 登录使用 window.location.href，但 URL 变化不等于全页 load 已结束。
   // 对 URL 做自动重试断言而非等待所有资源加载；成功仍由角色专属菜单证明。
   // 真实认证失败或 URL 不变仍会超时，不提高超时或 Playwright retry。
   // 包含 click() 在内的每个 await 都必须受 finally 保护，以免泄露监听器。
   try {
+    await page.locator('input[name="email"]').first().fill(email);
+    await page.locator('input[name="password"]').first().fill(password);
+    loginStage = "submit";
     await page.getByRole("button", { name: "登录" }).click();
     loginStage = "redirect";
     await expect(page).toHaveURL((url) => !url.pathname.startsWith("/login"), {
