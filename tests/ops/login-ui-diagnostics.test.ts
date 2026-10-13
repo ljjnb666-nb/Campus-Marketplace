@@ -41,6 +41,7 @@ function fixture(
       preventedSubmits: number;
       pendingSeen: boolean;
       formCountAtClick: number;
+      executed?: boolean;
     } | null),
     goto: vi.fn(async () => {
       if (navigateFailure) throw new Error("NAVIGATION_PROBE");
@@ -307,6 +308,54 @@ describe("Issue #115 login timeout diagnostics", () => {
     expect(message).not.toContain("private@example.test");
     expect(message).not.toContain("SECRET_PASSWORD");
     expect(message).not.toContain("SECRET_NEVER_LOG");
+  });
+
+  it.each([
+    { installed: true, expected: "probe_executed=1" },
+    { installed: false, expected: "probe_executed=0" },
+  ])("identifies completed browser probe execution from an observable document: $expected", async ({ installed, expected }) => {
+    navigation.shouldFail = true;
+    const { page, listeners } = fixture(false, "none");
+    page.evaluate.mockResolvedValueOnce({
+      executed: installed,
+      clicks: 0,
+      submits: 0,
+      preventedSubmits: 0,
+      pendingSeen: false,
+      formCountAtClick: -1,
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toThrow("URL_PROBE");
+    expect(page.evaluate).toHaveBeenCalledTimes(1);
+    expect(page.off).toHaveBeenCalledTimes(4);
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain(expected);
+    expect(message).toContain("callback_started=0 callback_status=none");
+    expect(message).toContain("native_clicks=0 native_submits=0");
+    for (const secret of ["private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME", "SECRET_NEVER_LOG"]) {
+      expect(message).not.toContain(secret);
+    }
+  });
+
+  it("keeps probe execution unknown when page evaluation cannot observe a probe", async () => {
+    navigation.shouldFail = true;
+    const { page } = fixture(false, "none");
+    page.evaluate.mockRejectedValueOnce(new Error("PAGE_UNAVAILABLE_SECRET_NEVER_LOG"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
+      .rejects.toThrow("URL_PROBE");
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("probe_executed=unknown");
+    expect(message).toContain("native_clicks=unknown native_submits=unknown");
+    expect(message).not.toContain("PAGE_UNAVAILABLE_SECRET_NEVER_LOG");
   });
 
   it("reports unknown instead of false zero when navigation replaces the observed document", async () => {
