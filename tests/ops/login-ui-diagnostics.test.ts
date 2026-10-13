@@ -22,6 +22,7 @@ function fixture(
   mainFrameNavigation = false,
   fillFailure = false,
   navigateFailure = false,
+  beforeClickEvents: "none" | "callback" | "navigation" | "both" = "none",
 ) {
   type EventName = "request" | "response" | "requestfailed" | "framenavigated";
   const mainFrame = {};
@@ -32,6 +33,7 @@ function fixture(
     framenavigated: new Set(),
   };
   let cookieScope: string | undefined;
+  let beforeClickInjected = false;
   const page = {
     // The browser executes this script in /login; mock the installation only.
     addInitScript: vi.fn(async (_script: () => void) => undefined),
@@ -49,6 +51,19 @@ function fixture(
     }),
     locator: () => ({ first: () => ({ fill: async () => {
       if (fillFailure) throw new Error("FILL_PROBE");
+      if (!beforeClickInjected && beforeClickEvents !== "none") {
+        beforeClickInjected = true;
+        if (beforeClickEvents === "callback" || beforeClickEvents === "both") {
+          const priorRequest = { url: () => "http://localhost:3000/api/auth/callback/credentials" };
+          for (const cb of listeners.request) cb(priorRequest);
+          for (const cb of listeners.response) cb({
+            request: () => priorRequest, status: () => 302,
+          });
+        }
+        if (beforeClickEvents === "navigation" || beforeClickEvents === "both") {
+          for (const cb of listeners.framenavigated) cb(mainFrame);
+        }
+      }
     } }) }),
     getByRole: (_role: string, options: { name: string }) => ({
       click: async () => {
@@ -582,6 +597,29 @@ describe("Issue #115 login timeout diagnostics", () => {
     expect(message).not.toContain("SECRET_PASSWORD");
     expect(message).not.toContain("SECRET_DISPLAY_NAME");
     expect(message).not.toContain("SECRET_NEVER_LOG");
+  });
+
+  it("does not attribute a prior-fill callback or navigation to this helper's click window", async () => {
+    navigation.shouldFail = true;
+    const { page, listeners } = fixture(false, "none", false, false, false, "both");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "Reviewer",
+    )).rejects.toThrow("URL_PROBE");
+
+    expect(log).toHaveBeenCalledTimes(1);
+    const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("callback_started=0 callback_status=none callback_transport_failed=0");
+    expect(message).toContain("native_main_frame_navigated=0");
+    expect(message).toContain("callback_phase=not_observed");
+    expect(message).toContain("callback_pre_attempt_seen=1");
+    expect(message).toContain("callback_orphan_response_seen=1");
+    expect(message).not.toContain("private@example.test");
+    expect(message).not.toContain("SECRET_PASSWORD");
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
   });
 
   it("does not emit an error diagnostic when redirect and authenticated UI both succeed", async () => {
