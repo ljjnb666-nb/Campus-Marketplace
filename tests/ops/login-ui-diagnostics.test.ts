@@ -184,6 +184,20 @@ describe("Issue #115 R16 scoped credentials callback lifecycle", () => {
     });
   });
 
+  it("does not present the last response class as authoritative when multiple callbacks disagree", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    const first = request();
+    const second = request();
+    observer.onRequest(first);
+    observer.onRequest(second);
+    observer.onResponse(response(first, 200));
+    observer.onResponse(response(second, 401));
+    expect(observer.snapshot()).toMatchObject({
+      started: true, status: "mixed", phase: "response_observed",
+    });
+  });
+
   it("ignores foreign origin, lookalike path, and malformed URLs", () => {
     const observer = createLoginAttemptNetworkEvidence(origin);
     observer.begin();
