@@ -8,7 +8,7 @@
  */
 type ObservedRequest = { url(): string };
 type ObservedResponse = { request(): ObservedRequest; status(): number };
-type CallbackStatus = "none" | "2xx" | "3xx" | "4xx" | "5xx";
+type CallbackStatus = "none" | "2xx" | "3xx" | "4xx" | "5xx" | "mixed";
 type CallbackPhase =
   | "not_observed"
   | "request_pending"
@@ -64,9 +64,13 @@ export function createLoginAttemptNetworkEvidence(loginOrigin: string) {
       if (responses.has(request)) return;
       responses.add(request);
       const status = response.status();
-      callbackStatus = status >= 200 && status < 300 ? "2xx"
+      const category: CallbackStatus = status >= 200 && status < 300 ? "2xx"
         : status >= 300 && status < 400 ? "3xx"
         : status >= 400 && status < 500 ? "4xx" : "5xx";
+      // Multiple callbacks may return different classes. Never imply that the
+      // last observed status alone describes the whole login attempt.
+      callbackStatus = callbackStatus === "none" ? category
+        : callbackStatus === category ? callbackStatus : "mixed";
     },
     onRequestFailed(request: ObservedRequest): void {
       if (!isCredentialsCallback(request) || !armed || !requests.has(request)) return;
