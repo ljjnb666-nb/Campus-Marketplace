@@ -71,7 +71,26 @@ export async function loginViaUI(
     });
     loginProbeInstalled.add(page);
   }
-  await page.goto("/login");
+  try {
+    await page.goto("/login");
+  } catch (error) {
+    // No callback listeners exist until /login has loaded. In this stage
+    // absence of a recorded callback must be UNKNOWN, never a false zero.
+    // Classify only the current path; never log a URL, credentials or tokens.
+    const path = (() => {
+      try {
+        const current = new URL(page.url());
+        if (current.protocol !== "http:" && current.protocol !== "https:") return "unknown";
+        return current.pathname.startsWith("/login") ? "login" : "other";
+      } catch {
+        return "unknown";
+      }
+    })();
+    console.error(
+      `LOGIN_E2E_DIAG stage=navigate path=${path} callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown`,
+    );
+    throw error;
+  }
   const loginOrigin = new URL(page.url()).origin;
   let callbackStarted = false;
   let callbackStatus = "none";
