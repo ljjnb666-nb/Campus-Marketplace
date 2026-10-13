@@ -87,7 +87,7 @@ test("认证与个人资料：错误密码登录被拒绝", async ({ page }) => 
     await page.locator('input[name="password"]').first().fill("WrongPassword#1");
     await page.getByRole("button", { name: "登录" }).click();
     await expect(page.getByText("邮箱或密码错误")).toBeVisible();
-    await expect(page).toHaveURL(/\\/login/);
+    await expect(page).toHaveURL((url) => url.pathname === "/login");
 
     const evidence = await page.evaluate(() => {
       const probe = (window as Window & { __campusE2ELoginProbe?: {
