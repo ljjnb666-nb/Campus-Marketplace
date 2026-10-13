@@ -68,7 +68,7 @@ function fixture(
       isVisible: async () => options.name === "登录中...",
     }),
     getByText: () => ({ isVisible: async () => false }),
-    url: () => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
+    url: (): string => navigation.redirected ? "http://localhost:3000/" : "http://localhost:3000/login",
     context: () => ({
       cookies: async (url: string) => {
         cookieScope = url;
