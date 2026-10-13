@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { loginViaUI } from "./helpers/auth";
+import { classifyLoginFailureEvidence, installLoginProbeOnDocument, loginViaUI } from "./helpers/auth";
 import { E2E_ACCOUNTS, uniqueTag } from "./helpers/e2e";
 import { flushRateLimits } from "./helpers/rate-limit";
 
@@ -72,12 +72,37 @@ test("认证与个人资料：注册 → 登录 → 修改资料 → 刷新持�
 });
 
 test("认证与个人资料：错误密码登录被拒绝", async ({ page }) => {
+  // Real rejected auth request correlated with bounded per-document signals.
+  await page.addInitScript(installLoginProbeOnDocument);
+  let callbackObserved = false;
   await page.goto("/login");
-  await page.locator('input[name="email"]').first().fill("e2e-buyer@e2e.test");
-  await page.locator('input[name="password"]').first().fill("WrongPassword#1");
-  await page.getByRole("button", { name: "登录" }).click();
-  await expect(page.getByText("邮箱或密码错误")).toBeVisible();
-  await expect(page).toHaveURL(/\/login/);
+  const origin = new URL(page.url()).origin;
+  const onRequest = (request: import("@playwright/test").Request) => {
+    const url = new URL(request.url());
+    if (url.origin === origin && url.pathname === "/api/auth/callback/credentials") callbackObserved = true;
+  };
+  page.on("request", onRequest);
+  try {
+    await page.locator('input[name="email"]').first().fill("e2e-buyer@e2e.test");
+    await page.locator('input[name="password"]').first().fill("WrongPassword#1");
+    await page.getByRole("button", { name: "登录" }).click();
+    await expect(page.getByText("邮箱或密码错误")).toBeVisible();
+    await expect(page).toHaveURL(/\\/login/);
+
+    const evidence = await page.evaluate(() => {
+      const probe = (window as Window & { __campusE2ELoginProbe?: {
+        installed: boolean; clicks: number; submits: number;
+      } }).__campusE2ELoginProbe;
+      return probe ? { executed: probe.installed, clicks: probe.clicks, submits: probe.submits } : null;
+    });
+    expect(evidence?.executed).toBe(true);
+    expect(evidence?.clicks).toBeGreaterThanOrEqual(1);
+    expect(evidence?.submits).toBeGreaterThanOrEqual(1);
+    expect(callbackObserved).toBe(true);
+    expect(classifyLoginFailureEvidence(callbackObserved, false, evidence)).toBe("callback_observed");
+  } finally {
+    page.off("request", onRequest);
+  }
 });
 
 test("认证与个人资料：登录回调网络失败后提示并允许原表单重试", async ({ page }) => {
