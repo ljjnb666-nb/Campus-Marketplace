@@ -94,6 +94,58 @@ afterEach(() => {
 });
 
 describe("Issue #115 login timeout diagnostics", () => {
+  it("diagnoses failed init-script registration without manufacturing callback evidence", async () => {
+    const { page, listeners } = fixture(false);
+    const injected = new Error("INIT_SCRIPT_PROBE private@example.test SECRET_PASSWORD SECRET_NEVER_LOG");
+    page.addInitScript.mockRejectedValueOnce(injected);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(loginViaUI(
+      page as unknown as Page,
+      "private@example.test",
+      "SECRET_PASSWORD",
+      "SECRET_DISPLAY_NAME",
+    )).rejects.toBe(injected);
+
+    expect(page.addInitScript).toHaveBeenCalledTimes(1);
+    expect(page.goto).not.toHaveBeenCalled();
+    expect(page.on).not.toHaveBeenCalled();
+    expect(page.off).not.toHaveBeenCalled();
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(
+      "LOGIN_E2E_DIAG stage=init-script path=unknown callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown",
+    );
+    const message = String(log.mock.calls[0]?.[0]);
+    for (const sensitive of [
+      "private@example.test", "SECRET_PASSWORD", "SECRET_DISPLAY_NAME",
+      "SECRET_NEVER_LOG", "INIT_SCRIPT_PROBE",
+    ]) expect(message).not.toContain(sensitive);
+  });
+
+  it("does not mark a failed init-script installation as complete on retry", async () => {
+    const { page, listeners } = fixture(false);
+    const injected = new Error("INIT_SCRIPT_FIRST_FAILURE");
+    page.addInitScript.mockRejectedValueOnce(injected);
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer"))
+      .rejects.toBe(injected);
+    expect(page.goto).not.toHaveBeenCalled();
+    await loginViaUI(page as unknown as Page, "private@example.test", "SECRET_PASSWORD", "Reviewer");
+
+    expect(page.addInitScript).toHaveBeenCalledTimes(2);
+    expect(page.goto).toHaveBeenCalledTimes(1);
+    expect(page.on).toHaveBeenCalledTimes(4);
+    expect(page.off).toHaveBeenCalledTimes(4);
+    for (const registered of Object.values(listeners)) expect(registered.size).toBe(0);
+    expect(navigation.redirected).toBe(true);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(
+      "LOGIN_E2E_DIAG stage=init-script path=unknown callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown",
+    );
+  });
+
   it("classifies failed initial /login navigation as unknown callback, not false zero", async () => {
     const { page, listeners } = fixture(false, "complete", false, false, true);
     const log = vi.spyOn(console, "error").mockImplementation(() => undefined);

@@ -21,54 +21,64 @@ export async function loginViaUI(
   expectedName: string,
 ): Promise<void> {
   if (!loginProbeInstalled.has(page)) {
-    await page.addInitScript(() => {
-      if (window.location.pathname !== "/login") return;
-      const probe = {
-        clicks: 0,
-        submits: 0,
-        preventedSubmits: 0,
-        pendingSeen: false,
-        formCountAtClick: -1,
-      };
-      (window as Window & { __campusE2ELoginProbe?: typeof probe }).__campusE2ELoginProbe = probe;
-      const isCredentialForm = (form: HTMLFormElement | null) =>
-        !!form?.querySelector('input[name="email"]') &&
-        !!form.querySelector('input[name="password"]');
-      document.addEventListener("click", (event) => {
-        const target = event.target;
-        if (!(target instanceof Element)) return;
-        const button = target.closest('button[type="submit"]');
-        if (!button || !isCredentialForm(button.closest("form"))) return;
-        probe.clicks = Math.min(probe.clicks + 1, 9);
-        probe.formCountAtClick = Math.min(
-          [...document.querySelectorAll("form")].filter(isCredentialForm).length,
-          9,
-        );
-      }, true);
-      document.addEventListener("submit", (event) => {
-        if (!(event.target instanceof HTMLFormElement) ||
-            !isCredentialForm(event.target)) return;
-        probe.submits = Math.min(probe.submits + 1, 9);
-        // Observe React's preventDefault after event dispatch without changing it.
-        queueMicrotask(() => {
-          if (event.defaultPrevented) {
-            probe.preventedSubmits = Math.min(probe.preventedSubmits + 1, 9);
-          }
+    try {
+      await page.addInitScript(() => {
+        if (window.location.pathname !== "/login") return;
+        const probe = {
+          clicks: 0,
+          submits: 0,
+          preventedSubmits: 0,
+          pendingSeen: false,
+          formCountAtClick: -1,
+        };
+        (window as Window & { __campusE2ELoginProbe?: typeof probe }).__campusE2ELoginProbe = probe;
+        const isCredentialForm = (form: HTMLFormElement | null) =>
+          !!form?.querySelector('input[name="email"]') &&
+          !!form.querySelector('input[name="password"]');
+        document.addEventListener("click", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest('button[type="submit"]');
+          if (!button || !isCredentialForm(button.closest("form"))) return;
+          probe.clicks = Math.min(probe.clicks + 1, 9);
+          probe.formCountAtClick = Math.min(
+            [...document.querySelectorAll("form")].filter(isCredentialForm).length,
+            9,
+          );
+        }, true);
+        document.addEventListener("submit", (event) => {
+          if (!(event.target instanceof HTMLFormElement) ||
+              !isCredentialForm(event.target)) return;
+          probe.submits = Math.min(probe.submits + 1, 9);
+          // Observe React's preventDefault after event dispatch without changing it.
+          queueMicrotask(() => {
+            if (event.defaultPrevented) {
+              probe.preventedSubmits = Math.min(probe.preventedSubmits + 1, 9);
+            }
+          });
+        }, true);
+        const inspectPending = () => {
+          if ([...document.querySelectorAll('form button[type="submit"]')].some(
+            (button) => button.textContent?.trim() === "登录中..." &&
+              (button as HTMLButtonElement).disabled,
+          )) probe.pendingSeen = true;
+        };
+        new MutationObserver(inspectPending).observe(document, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          characterData: true,
         });
-      }, true);
-      const inspectPending = () => {
-        if ([...document.querySelectorAll('form button[type="submit"]')].some(
-          (button) => button.textContent?.trim() === "登录中..." &&
-            (button as HTMLButtonElement).disabled,
-        )) probe.pendingSeen = true;
-      };
-      new MutationObserver(inspectPending).observe(document, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        characterData: true,
       });
-    });
+    } catch (error) {
+      // No login navigation or callback listener exists at this stage.
+      // Failed registration does not prove that the browser probe ran.
+      // Do not log the browser's error, URL, credentials or session values.
+      console.error(
+        "LOGIN_E2E_DIAG stage=init-script path=unknown callback_started=unknown callback_status=unknown native_main_frame_navigated=unknown",
+      );
+      throw error;
+    }
     loginProbeInstalled.add(page);
   }
   try {
