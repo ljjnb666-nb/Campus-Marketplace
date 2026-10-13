@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyLoginFailureEvidence, loginViaUI } from "../e2e/helpers/auth";
+import { createLoginAttemptNetworkEvidence } from "../e2e/helpers/login-callback-evidence";
 
 const navigation = vi.hoisted(() => ({ shouldFail: false, shouldFailReady: false, redirected: false }));
 vi.mock("@playwright/test", () => ({
@@ -60,10 +61,11 @@ function fixture(
         const callbackUrl = callbackMode === "foreign"
           ? "http://other.invalid/api/auth/callback/credentials"
           : "http://localhost:3000/api/auth/callback/credentials";
-        for (const cb of listeners.request) cb({ url: () => callbackUrl });
+        const callbackRequest = { url: () => callbackUrl };
+        for (const cb of listeners.request) cb(callbackRequest);
         if (callbackMode !== "pending") {
           for (const cb of listeners.response) {
-            cb({ url: () => callbackUrl, status: () => 302 });
+            cb({ request: () => callbackRequest, url: () => callbackUrl, status: () => 302 });
           }
         }
       },
@@ -92,6 +94,122 @@ afterEach(() => {
   navigation.shouldFailReady = false;
   navigation.redirected = false;
   vi.restoreAllMocks();
+});
+
+
+describe("Issue #115 R16 scoped credentials callback lifecycle", () => {
+  const origin = "http://localhost:3000";
+  const request = (url = origin + "/api/auth/callback/credentials") => ({ url: () => url });
+  const response = (r: ReturnType<typeof request>, status = 302) =>
+    ({ request: () => r, status: () => status });
+
+  it("does not attribute a callback request or its response from before the current click", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    const earlier = request();
+    observer.onRequest(earlier);
+    observer.onResponse(response(earlier));
+    observer.begin();
+    expect(observer.snapshot()).toEqual({
+      started: false, status: "none", transportFailed: false, phase: "not_observed",
+      preAttemptSeen: true, orphanResponseSeen: true, trackingSaturated: false,
+    });
+  });
+
+  it("accepts a callback only after arming and correlates its exact response request object", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    const current = request();
+    observer.onRequest(current);
+    observer.onResponse(response(request(), 500)); // same URL, different request
+    expect(observer.snapshot()).toMatchObject({
+      started: true, status: "none", phase: "request_pending", orphanResponseSeen: true,
+    });
+    observer.onResponse(response(current, 302));
+    expect(observer.snapshot()).toMatchObject({
+      started: true, status: "3xx", transportFailed: false, phase: "response_observed",
+    });
+  });
+
+  it("cannot manufacture positive callback evidence from an orphan response alone", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    observer.onResponse(response(request(), 200));
+    expect(observer.snapshot()).toMatchObject({
+      started: false, status: "none", phase: "not_observed", orphanResponseSeen: true,
+    });
+  });
+
+  it("tracks failed request identity rather than an unrelated same-path failure", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    const current = request();
+    observer.onRequest(current);
+    observer.onRequestFailed(request());
+    expect(observer.snapshot()).toMatchObject({
+      started: true, transportFailed: false, phase: "request_pending",
+    });
+    observer.onRequestFailed(current);
+    expect(observer.snapshot()).toMatchObject({
+      started: true, transportFailed: true, phase: "request_failed",
+    });
+  });
+
+  it("reports pending and mixed results without treating a pending request as completed", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    const first = request();
+    const second = request();
+    observer.onRequest(first);
+    observer.onRequest(second);
+    observer.onResponse(response(first, 401));
+    expect(observer.snapshot()).toMatchObject({ status: "4xx", phase: "request_pending" });
+    observer.onRequestFailed(second);
+    expect(observer.snapshot()).toMatchObject({
+      status: "4xx", transportFailed: true, phase: "mixed_outcomes",
+    });
+  });
+
+  it("ignores foreign origin, lookalike path, and malformed URLs", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    for (const r of [
+      request("http://elsewhere.invalid/api/auth/callback/credentials"),
+      request(origin + "/api/auth/callback/credentials-other"),
+      request("not-a-url"),
+    ]) {
+      observer.onRequest(r);
+      observer.onResponse(response(r));
+      observer.onRequestFailed(r);
+    }
+    expect(observer.snapshot()).toMatchObject({
+      started: false, status: "none", preAttemptSeen: false,
+      orphanResponseSeen: false, phase: "not_observed",
+    });
+  });
+
+  it("bounds request tracking rather than retaining unbounded callback identities", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    for (let i = 0; i < 10; i++) observer.onRequest(request());
+    expect(observer.snapshot()).toMatchObject({
+      started: true, status: "none", phase: "tracking_saturated",
+      trackingSaturated: true,
+    });
+  });
+
+  it("deduplicates duplicate request and response notifications", () => {
+    const observer = createLoginAttemptNetworkEvidence(origin);
+    observer.begin();
+    const current = request();
+    observer.onRequest(current);
+    observer.onRequest(current);
+    observer.onResponse(response(current, 200));
+    observer.onResponse(response(current, 500));
+    expect(observer.snapshot()).toMatchObject({
+      started: true, status: "2xx", phase: "response_observed",
+      trackingSaturated: false,
+    });
+  });
 });
 
 describe("Issue #115 R15 bounded login event evidence", () => {
