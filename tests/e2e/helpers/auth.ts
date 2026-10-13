@@ -57,6 +57,32 @@ export function installLoginProbeOnDocument(): void {
   probe.installed = true;
 }
 
+
+/**
+ * Bounded observed event relationship, never a root-cause verdict.
+ * Positive network evidence outranks absent or replaced DOM observations.
+ */
+export function classifyLoginFailureEvidence(
+  callbackObserved: boolean,
+  mainFrameNavigated: boolean,
+  nativeSignals: { executed?: boolean; clicks: number; submits: number } | null,
+):
+  | "callback_observed"
+  | "document_replaced"
+  | "probe_unobserved"
+  | "probe_incomplete"
+  | "native_submit_observed_no_callback"
+  | "native_click_observed_no_submit"
+  | "native_interaction_unobserved" {
+  if (callbackObserved) return "callback_observed";
+  if (mainFrameNavigated) return "document_replaced";
+  if (nativeSignals?.executed === false) return "probe_incomplete";
+  if (nativeSignals?.executed !== true) return "probe_unobserved";
+  if (nativeSignals.submits > 0) return "native_submit_observed_no_callback";
+  if (nativeSignals.clicks > 0) return "native_click_observed_no_submit";
+  return "native_interaction_unobserved";
+}
+
 const loginProbeInstalled = new WeakSet<Page>();
 
 /**
@@ -194,10 +220,17 @@ export async function loginViaUI(
         formCountAtClick: probe.formCountAtClick,
       } : null;
     }).catch(() => null);
+    // Join scoped network events and bounded in-document native evidence.
+    // Do not infer historical root cause, user identity, or credentials.
+    const loginEventRelation = classifyLoginFailureEvidence(
+      callbackStarted || callbackStatus !== "none" || callbackTransportFailure,
+      mainFrameNavigated,
+      nativeSignals,
+    );
     // If the main frame navigated, its new probe starts from zero: report unknown.
     // Unknown is distinct from zero (page/context may have navigated away).
     console.error(
-      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0} probe_executed=${nativeSignals?.executed === true ? 1 : nativeSignals?.executed === false ? 0 : "unknown"} native_clicks=${nativeSignals?.clicks ?? "unknown"} native_submits=${nativeSignals?.submits ?? "unknown"} native_submit_prevented=${nativeSignals?.preventedSubmits ?? "unknown"} native_pending_seen=${nativeSignals ? Number(nativeSignals.pendingSeen) : "unknown"} native_forms_at_click=${nativeSignals?.formCountAtClick ?? "unknown"} native_main_frame_navigated=${mainFrameNavigated ? 1 : 0}`,
+      `LOGIN_E2E_DIAG stage=${loginStage} path=${loginPath} pending=${pending ? 1 : 0} invalid_credentials=${invalidCredentials ? 1 : 0} callback_started=${callbackStarted ? 1 : 0} callback_status=${callbackStatus} callback_transport_failed=${callbackTransportFailure ? 1 : 0} session_cookie_present=${sessionCookiePresent ? 1 : 0} login_event_relation=${loginEventRelation} probe_executed=${nativeSignals?.executed === true ? 1 : nativeSignals?.executed === false ? 0 : "unknown"} native_clicks=${nativeSignals?.clicks ?? "unknown"} native_submits=${nativeSignals?.submits ?? "unknown"} native_submit_prevented=${nativeSignals?.preventedSubmits ?? "unknown"} native_pending_seen=${nativeSignals ? Number(nativeSignals.pendingSeen) : "unknown"} native_forms_at_click=${nativeSignals?.formCountAtClick ?? "unknown"} native_main_frame_navigated=${mainFrameNavigated ? 1 : 0}`,
     );
     throw error;
   } finally {

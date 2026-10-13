@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loginViaUI } from "../e2e/helpers/auth";
+import { classifyLoginFailureEvidence, loginViaUI } from "../e2e/helpers/auth";
 
 const navigation = vi.hoisted(() => ({ shouldFail: false, shouldFailReady: false, redirected: false }));
 vi.mock("@playwright/test", () => ({
@@ -92,6 +92,20 @@ afterEach(() => {
   navigation.shouldFailReady = false;
   navigation.redirected = false;
   vi.restoreAllMocks();
+});
+
+describe("Issue #115 R15 bounded login event evidence", () => {
+  it.each([
+    { label: "callback evidence", callback: true, navigated: false, probe: { executed: false, clicks: 0, submits: 0 }, expected: "callback_observed" },
+    { label: "document replaced", callback: false, navigated: true, probe: { executed: true, clicks: 1, submits: 1 }, expected: "document_replaced" },
+    { label: "probe absent", callback: false, navigated: false, probe: null, expected: "probe_unobserved" },
+    { label: "probe incomplete", callback: false, navigated: false, probe: { executed: false, clicks: 0, submits: 0 }, expected: "probe_incomplete" },
+    { label: "native submit only", callback: false, navigated: false, probe: { executed: true, clicks: 1, submits: 1 }, expected: "native_submit_observed_no_callback" },
+    { label: "native click only", callback: false, navigated: false, probe: { executed: true, clicks: 1, submits: 0 }, expected: "native_click_observed_no_submit" },
+    { label: "no recorded interaction", callback: false, navigated: false, probe: { executed: true, clicks: 0, submits: 0 }, expected: "native_interaction_unobserved" },
+  ])("distinguishes $label without assigning cause", ({ callback, navigated, probe, expected }) => {
+    expect(classifyLoginFailureEvidence(callback, navigated, probe)).toBe(expected);
+  });
 });
 
 describe("Issue #115 login timeout diagnostics", () => {
@@ -247,6 +261,7 @@ describe("Issue #115 login timeout diagnostics", () => {
     expect(getCookieScope()).toBe("http://localhost:3000/login");
     const message = String(log.mock.calls[0]?.[0]);
     expect(message).toContain("stage=redirect path=login");
+    expect(message).toContain("login_event_relation=callback_observed");
     expect(message).toContain("callback_started=1 callback_status=3xx callback_transport_failed=0 session_cookie_present=1");
     expect(message).not.toContain("SECRET_NEVER_LOG");
     expect(message).not.toContain("private@example.test");
@@ -353,6 +368,7 @@ describe("Issue #115 login timeout diagnostics", () => {
       .rejects.toThrow("URL_PROBE");
     expect(log).toHaveBeenCalledTimes(1);
     const message = String(log.mock.calls[0]?.[0]);
+    expect(message).toContain("login_event_relation=probe_unobserved");
     expect(message).toContain("probe_executed=unknown");
     expect(message).toContain("native_clicks=unknown native_submits=unknown");
     expect(message).not.toContain("PAGE_UNAVAILABLE_SECRET_NEVER_LOG");
@@ -406,12 +422,12 @@ describe("Issue #115 login timeout diagnostics", () => {
   it.each([
     {
       label: "click without native submit",
-      native: { clicks: 1, submits: 0, preventedSubmits: 0, pendingSeen: false, formCountAtClick: 1 },
+      native: { executed: true, clicks: 1, submits: 0, preventedSubmits: 0, pendingSeen: false, formCountAtClick: 1 },
       expected: "native_clicks=1 native_submits=0 native_submit_prevented=0",
     },
     {
       label: "native submit prevented without callback",
-      native: { clicks: 1, submits: 1, preventedSubmits: 1, pendingSeen: true, formCountAtClick: 2 },
+      native: { executed: true, clicks: 1, submits: 1, preventedSubmits: 1, pendingSeen: true, formCountAtClick: 2 },
       expected: "native_clicks=1 native_submits=1 native_submit_prevented=1",
     },
   ])("preserves separate callback_started=0 and native signals: $label", async ({ native, expected }) => {
@@ -441,6 +457,7 @@ describe("Issue #115 login timeout diagnostics", () => {
       "callback_started=0 callback_status=none callback_transport_failed=0",
     );
     expect(message).toContain(expected);
+    expect(message).toContain(`login_event_relation=${native.submits > 0 ? "native_submit_observed_no_callback" : "native_click_observed_no_submit"}`);
     expect(message).toContain(`native_forms_at_click=${native.formCountAtClick}`);
     expect(message).toContain("native_main_frame_navigated=0");
     expect(message).not.toContain("private@example.test");
