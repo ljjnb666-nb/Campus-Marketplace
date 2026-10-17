@@ -82,8 +82,19 @@ echo "[rollback] cleanup target mode = ${CLEANUP_TARGET_MODE}（${CLEANUP_TARGET
 # 保持它停止；旧版本有镜像时必须切换并验证其运行镜像，不能遗留 newer
 # worker。镜像缺失模式沿用 cleanup 的早期 release 兼容策略。
 ASYNC_TARGET_IMAGE="campus-marketplace-async-worker:${PREVIOUS_SHA}"
-if docker image inspect "${ASYNC_TARGET_IMAGE}" >/dev/null 2>&1; then
+# A missing local image is NOT proof that the target release never had the
+# service. Prove its topology against the exact immutable Git commit before
+# allowing any production side effect. A pruned post-async image must block.
+if ! git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+  echo "[rollback][FAIL] 无法验证目标 release commit；拒绝推断 async-worker 拓扑" >&2
+  exit 1
+fi
+if git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}:scripts/ops/async-worker.ts" 2>/dev/null; then
   ASYNC_TARGET_MODE="post-async"
+  if ! docker image inspect "${ASYNC_TARGET_IMAGE}" >/dev/null 2>&1; then
+    echo "[rollback][FAIL] 目标 release 包含 async-worker，但其 immutable image 不存在，禁止降级为 pre-async" >&2
+    exit 1
+  fi
 else
   ASYNC_TARGET_MODE="pre-async"
 fi
