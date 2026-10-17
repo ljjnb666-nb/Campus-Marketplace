@@ -26,6 +26,21 @@ import type {
 
 const KNOWN_DEV_CREDENTIALS = "minioadmin";
 
+// Untrusted SDK/HTTP exceptions may carry arbitrary text in name/code,
+// including private bucket paths or presigned URLs. Only fixed, audited
+// diagnostic tokens may cross the storage logging boundary.
+const SAFE_STORAGE_ERROR_NAMES = new Set([
+  "Error", "TypeError", "AbortError", "TimeoutError", "NetworkingError",
+  "CredentialsProviderError", "S3ServiceException", "AccessDenied",
+  "NoSuchKey", "NoSuchBucket", "SlowDown", "ServiceUnavailable",
+  "RequestTimeout", "InternalError",
+]);
+const SAFE_STORAGE_ERROR_CODES = new Set([
+  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "EPIPE",
+  "ETIMEDOUT", "AccessDenied", "NoSuchKey", "NoSuchBucket", "SlowDown",
+  "ServiceUnavailable", "RequestTimeout", "InternalError",
+]);
+
 /**
  * S3 兼容实现：MinIO（本地/CI）、AWS S3、Cloudflare R2 等共用同一套
  * 标准 S3 API。业务代码通过 StorageClient 接口访问，不直接依赖 SDK。
@@ -151,8 +166,11 @@ export class S3Storage implements StorageClient {
       errorClass: classification.errorClass,
       ambiguous: !classification.definitePreCommitFailure,
       attempts: classification.attempts,
-      errorName: classification.errorName,
-      errorCode: classification.errorCode,
+      // Never log unknown, attacker-controlled name/code strings verbatim.
+      errorName: classification.errorName && SAFE_STORAGE_ERROR_NAMES.has(classification.errorName)
+        ? classification.errorName : null,
+      errorCode: classification.errorCode && SAFE_STORAGE_ERROR_CODES.has(classification.errorCode)
+        ? classification.errorCode : null,
       durationMs: Date.now() - startedAt,
     });
   }
