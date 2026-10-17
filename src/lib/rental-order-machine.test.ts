@@ -52,7 +52,9 @@ import {
   EXTENSION_ALLOWED_ORDER_STATUSES,
   approveExtensionTx,
   approveRentalOrderTx,
+  cancelRentalOrderTx,
   canCancelRentalOrder,
+  confirmPickupTx,
   counterpartyId,
   createRentalOrderTx,
   depositStatusAfterCompletion,
@@ -74,10 +76,12 @@ const mockAssertActive = vi.mocked(assertActiveAccountMutationAllowed);
 
 function buildTx() {
   return {
-    rentalOrder: { findFirst: vi.fn(), update: vi.fn() },
+    rentalOrder: { findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     rentalOrderStatusLog: { create: vi.fn() },
-    rentalDamageClaim: { findFirst: vi.fn(), update: vi.fn() },
+    rentalDamageClaim: { findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     rentalReview: { count: vi.fn() },
+    rentalHandoverRecord: { upsert: vi.fn() },
+    $queryRaw: vi.fn().mockResolvedValue([{ id: "order-1" }]),
     user: { update: vi.fn() },
     campusMembership: {
       findMany: vi.fn(async ({ where }: { where: { userId: { in: string[] } } }) =>
@@ -342,14 +346,15 @@ describe("rental-order-machine", () => {
     });
 
     expect(result).toEqual({ success: true });
-    expect(tx.rentalDamageClaim.update).toHaveBeenCalledWith(
+    expect(tx.rentalDamageClaim.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "claim-1" },
         data: expect.objectContaining({ renterAgreed: false }),
       }),
     );
-    expect(tx.rentalOrder.update).toHaveBeenCalledWith(
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: { id: "order-1", status: "PENDING_INSPECTION" },
         data: expect.objectContaining({ status: "COMPLETED", depositStatus: "PENDING_REFUND" }),
       }),
     );
@@ -389,8 +394,101 @@ describe("rental-order-machine", () => {
     });
 
     expect(result).toEqual({ error: "无效请求" });
-    expect(tx.rentalDamageClaim.update).not.toHaveBeenCalled();
-    expect(tx.rentalOrder.update).not.toHaveBeenCalled();
+    expect(tx.rentalDamageClaim.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("blocks resolving a historical claim after the order entered IN_DISPUTE", async () => {
+    const tx = buildTx();
+    tx.rentalDamageClaim.findFirst.mockResolvedValue({
+      id: "claim-old", orderId: "order-1",
+      requestedDeduction: new Prisma.Decimal("10"),
+      order: { id: "order-1", status: "IN_DISPUTE", ownerId: "user-owner",
+        renterId: "user-renter", rentalListing: { campusId: "campus-1" } },
+    });
+    const result = await respondDamageClaimTx(asTx(tx), {
+      claimId: "claim-old", userId: "user-renter", agreed: true,
+    });
+    expect(result).toEqual({ error: "订单已进入其他处理状态，不能处理旧索赔" });
+    expect(tx.rentalDamageClaim.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("a concurrent dispute wins before claim completion: conflict aborts the transaction", async () => {
+    const tx = buildTx();
+    tx.rentalDamageClaim.findFirst.mockResolvedValue({
+      id: "claim-old", orderId: "order-1",
+      requestedDeduction: new Prisma.Decimal("10"),
+      order: { id: "order-1", status: "PENDING_INSPECTION", ownerId: "user-owner",
+        renterId: "user-renter", depositAmount: new Prisma.Decimal("20"),
+        depositStatus: "PAID", rentalListing: { campusId: "campus-1" } },
+    });
+    tx.rentalOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(respondDamageClaimTx(asTx(tx), {
+      claimId: "claim-old", userId: "user-renter", agreed: false,
+    })).rejects.toThrow("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
+    expect(tx.rentalDamageClaim.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "claim-old", resolvedAt: null } }),
+    );
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "order-1", status: "PENDING_INSPECTION" } }),
+    );
+    expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("cancellation refuses stale confirmed pickup after locking the order", async () => {
+    const tx = buildTx();
+    tx.rentalOrder.findFirst.mockResolvedValue({
+      id: "order-1", status: "IN_RENTAL", ownerId: "user-owner", renterId: "user-renter",
+    });
+    const result = await cancelRentalOrderTx(asTx(tx), {
+      orderId: "order-1", userId: "user-renter", cancellationReason: "OTHER",
+    });
+    expect(result).toEqual({ error: "当前状态不允许取消" });
+    expect(tx.$queryRaw).toHaveBeenCalledOnce();
+    expect(tx.rentalOrder.updateMany).not.toHaveBeenCalled();
+    expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
+  });
+
+  it("cancellation CAS race loss cannot emit log or notification", async () => {
+    const tx = buildTx();
+    tx.rentalOrder.findFirst.mockResolvedValue({
+      id: "order-1", status: "PENDING_PICKUP", ownerId: "user-owner", renterId: "user-renter",
+    });
+    tx.rentalOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+    const result = await cancelRentalOrderTx(asTx(tx), {
+      orderId: "order-1", userId: "user-renter", cancellationReason: "OTHER",
+    });
+    expect(result).toEqual({ error: "订单状态已变化，请重试" });
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "order-1", status: "PENDING_PICKUP" },
+    }));
+    expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("pickup CAS mismatch throws so a handover upsert is rolled back with the transaction", async () => {
+    const tx = buildTx();
+    tx.rentalOrder.findFirst.mockResolvedValue({
+      id: "order-1", status: "PENDING_PICKUP", ownerId: "user-owner",
+      renterId: "user-renter", handoverRecord: null,
+    });
+    tx.rentalHandoverRecord.upsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: true,
+    });
+    tx.rentalOrder.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(confirmPickupTx(asTx(tx), {
+      orderId: "order-1", userId: "user-renter", role: "renter", photos: [],
+    })).rejects.toThrow("RENTAL_PICKUP_STATE_CONFLICT");
+    expect(tx.$queryRaw).toHaveBeenCalledOnce();
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "order-1", status: "PENDING_PICKUP" },
+    }));
+    expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
+    expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
   it("quantity safety belt rejects malformed direct calls before discovery/locks", async () => {
