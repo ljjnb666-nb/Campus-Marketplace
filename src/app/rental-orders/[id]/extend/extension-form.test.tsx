@@ -58,6 +58,30 @@ describe("RentalExtensionForm", () => {
     expect(screen.getByRole("button", { name: "提交续租申请" })).toBeEnabled();
   });
 
+  it("R08: extension input minimum and fee remain campus-local through client DST changes", () => {
+    try {
+      for (const timezone of ["UTC", "America/Los_Angeles", "Asia/Shanghai"]) {
+        vi.stubEnv("TZ", timezone);
+        renderForm({
+          currentEndTime: "2026-03-07T02:00:00.000Z",
+          pricingUnit: "PER_HOUR",
+        });
+        expect(screen.getByText("2026/3/7 10:00"), `TZ=${timezone}`).toBeInTheDocument();
+        expect(endTimeField().min, `TZ=${timezone}`).toBe("2026-03-07T10:00");
+        fireEvent.change(endTimeField(), {
+          target: { value: "2026-03-08T10:00" },
+        });
+        expect(screen.getByText("24 小时"), `TZ=${timezone}`).toBeInTheDocument();
+        expect(screen.getByText("¥480.00"), `TZ=${timezone}`).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "提交续租申请" })).toBeEnabled();
+        cleanup();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      cleanup();
+    }
+  });
+
   it("shows no estimate when the chosen time is not after the current end", () => {
     renderForm();
 
