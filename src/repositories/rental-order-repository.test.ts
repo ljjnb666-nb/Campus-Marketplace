@@ -7,6 +7,7 @@ const {
   rentalOrderFindFirst,
   rentalListingFindUnique,
   rentalOrderAggregate,
+  peakQueryRaw,
 } = vi.hoisted(() => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
@@ -15,6 +16,7 @@ const {
   rentalOrderFindFirst: vi.fn(),
   rentalListingFindUnique: vi.fn(),
   rentalOrderAggregate: vi.fn(),
+  peakQueryRaw: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({ notFound }));
@@ -137,176 +139,83 @@ describe("getRentalOrderDetail", () => {
   });
 });
 
-describe("checkTimeConflict", () => {
+describe("checkTimeConflict - R07 peak occupancy", () => {
   const tx = {
     rentalListing: { findUnique: rentalListingFindUnique },
-    rentalOrder: { aggregate: rentalOrderAggregate },
+    $queryRaw: peakQueryRaw,
   } as unknown as Prisma.TransactionClient;
   const start = new Date("2026-09-01T10:00:00Z");
-  const end = new Date("2026-09-03T10:00:00Z");
+  const end = new Date("2026-09-01T12:00:00Z");
 
   beforeEach(() => {
     vi.clearAllMocks();
+    rentalListingFindUnique.mockResolvedValue({ totalQuantity: 2 });
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(0) }]);
   });
 
-  function mockReservedQuantity(reserved: number | null, totalQuantity: number) {
-    rentalListingFindUnique.mockResolvedValue({ totalQuantity });
-    rentalOrderAggregate.mockResolvedValue({ _sum: { quantity: reserved } });
-  }
-
-  it("reports unavailable when the listing no longer exists", async () => {
+  it("does not query occupancy when listing is absent", async () => {
     rentalListingFindUnique.mockResolvedValue(null);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    expect(result).toEqual({ available: false, reservedQuantity: 0 });
-    expect(rentalOrderAggregate).not.toHaveBeenCalled();
+    expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
+      .toEqual({ available: false, reservedQuantity: 0 });
+    expect(peakQueryRaw).not.toHaveBeenCalled();
   });
 
-  it("aggregates overlapping quantities via _sum on quantity", async () => {
-    mockReservedQuantity(0, 3);
-
-    await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    const args = rentalOrderAggregate.mock.calls[0][0];
-    expect(args.where.rentalListingId).toBe("listing-1");
-    expect(args._sum).toEqual({ quantity: true });
-    expect(args.where.status.notIn).toEqual(["CANCELLED", "REJECTED", "CLOSED"]);
-    expect(args.where.AND).toEqual([
-      { startTime: { lt: end } },
-      { endTime: { gt: start } },
-    ]);
-  });
-
-  // TEST 1 — RB-02 原始确定性回归：total=3、已有 quantity=3、请求 1。
-  // 旧 count 模型：1+1<=3 误判可租；SUM 模型：3+1>3 必须拒绝。
-  it("TEST 1: rejects when a single existing order already reserves the full quantity", async () => {
-    mockReservedQuantity(3, 3);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    expect(result).toEqual({ available: false, reservedQuantity: 3 });
-  });
-
-  // TEST 2 — 审计原始场景：total=3、已有 quantity=2、请求 2（旧模型 1+2<=3 误判）。
-  it("TEST 2: rejects when reserved plus requested exceeds capacity (2+2>3)", async () => {
-    mockReservedQuantity(2, 3);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 2);
-
-    expect(result).toEqual({ available: false, reservedQuantity: 2 });
-  });
-
-  // TEST 3 — 恰好装满：total=3、已订 1、请求 2 => true
-  it("TEST 3: accepts an exact fit (1+2=3)", async () => {
-    mockReservedQuantity(1, 3);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 2);
-
-    expect(result).toEqual({ available: true, reservedQuantity: 1 });
-  });
-
-  // TEST 4 — 多订单重叠：total=5、两条各 quantity=2（合计 4）、请求 2 => false
-  it("TEST 4: rejects when multiple overlapping orders exceed capacity (4+2>5)", async () => {
-    mockReservedQuantity(4, 5);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 2);
-
-    expect(result).toEqual({ available: false, reservedQuantity: 4 });
-  });
-
-  // TEST 5 — 多订单恰好装满：total=5、已订 2+1=3、请求 2 => true
-  it("TEST 5: accepts when multiple overlapping orders exactly fit (3+2=5)", async () => {
-    mockReservedQuantity(3, 5);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 2);
-
-    expect(result).toEqual({ available: true, reservedQuantity: 3 });
-  });
-
-  // TEST 6 — 首尾相接不算重叠：既有 09:00-10:00、请求 10:00-11:00。
-  // 严格不等号（lt/gt）保证 [end A] == [start B] 不匹配，保留既有语义。
-  it("TEST 6: keeps strict interval bounds so back-to-back intervals do not conflict", async () => {
-    // 既有订单 09:00-10:00（quantity=3），其结束时刻 == 请求开始时刻
-    const requestedStart = new Date("2026-09-01T10:00:00Z");
-    const requestedEnd = new Date("2026-09-01T11:00:00Z");
-    mockReservedQuantity(0, 3);
-
-    const result = await checkTimeConflict(tx, "listing-1", requestedStart, requestedEnd, 3);
-
-    expect(result).toEqual({ available: true, reservedQuantity: 0 });
-    const and = rentalOrderAggregate.mock.calls[0][0].where.AND;
-    // 既有订单必须满足 endTime > 请求开始 才重叠：首尾相接（==）不满足 gt
-    expect(and).toContainEqual({ endTime: { gt: requestedStart } });
-    expect(and).toContainEqual({ startTime: { lt: requestedEnd } });
-  });
-
-  // TEST 7 — 终态不占容量：CANCELLED/REJECTED/CLOSED 的 quantity 不得进入 SUM
-  it("TEST 7: excludes only terminal statuses from the reserved quantity", async () => {
-    mockReservedQuantity(0, 3);
-
-    await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    const notIn = rentalOrderAggregate.mock.calls[0][0].where.status.notIn;
-    expect(notIn).toEqual(["CANCELLED", "REJECTED", "CLOSED"]);
-  });
-
-  // TEST 8 — 其余全部活跃状态占容量：notIn 恰为三个终态，即
-  // PENDING_APPROVAL/PENDING_PAYMENT/PENDING_PICKUP/PICKED_UP/IN_RENTAL/
-  // PENDING_RETURN/PENDING_INSPECTION/COMPLETED/OVERDUE/IN_DISPUTE 均计入
-  // （状态全集见 schema RentalOrderStatus；行为级覆盖见集成测试）。
-  it("TEST 8: counts every non-terminal status toward capacity", async () => {
-    const activeStatuses = [
-      "PENDING_APPROVAL",
-      "PENDING_PAYMENT",
-      "PENDING_PICKUP",
-      "PICKED_UP",
-      "IN_RENTAL",
-      "PENDING_RETURN",
-      "PENDING_INSPECTION",
-      "COMPLETED",
-      "OVERDUE",
-      "IN_DISPUTE",
-    ] as const;
-    mockReservedQuantity(activeStatuses.length, 10);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    // 10 个活跃状态各占 1 个容量：10+1 > 10
-    expect(result).toEqual({ available: false, reservedQuantity: 10 });
-    const notIn = rentalOrderAggregate.mock.calls[0][0].where.status.notIn;
-    for (const status of activeStatuses) {
-      expect(notIn).not.toContain(status);
+  it("rejects malformed requested quantity or interval before querying", async () => {
+    for (const q of [0, -1, 1.5, Number.NaN]) {
+      expect((await checkTimeConflict(tx, "listing-1", start, end, q)).available).toBe(false);
     }
+    expect((await checkTimeConflict(tx, "listing-1", end, start, 1)).available).toBe(false);
+    expect(peakQueryRaw).not.toHaveBeenCalled();
   });
 
-  // TEST 9 — excludeOrderId：编辑/续租时不得把自己重复计入
-  it("TEST 9: excludes the given order id from the reserved quantity", async () => {
-    mockReservedQuantity(1, 3);
-
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 2, "order-to-exclude");
-
-    expect(result).toEqual({ available: true, reservedQuantity: 1 });
-    expect(rentalOrderAggregate.mock.calls[0][0].where.id).toEqual({
-      not: "order-to-exclude",
-    });
+  it("rejects occupancy peak exceeding stock and accepts exact fit", async () => {
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(2) }]);
+    expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
+      .toEqual({ available: false, reservedQuantity: 2 });
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(1) }]);
+    expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
+      .toEqual({ available: true, reservedQuantity: 1 });
   });
 
-  it("does not filter by id when no order is excluded", async () => {
-    mockReservedQuantity(0, 3);
+  it("R07: consecutive 10–11 and 11–12 reservations each occupy one of two units", async () => {
+    // SQL 聚合总量会是 2，峰值却仅为 1：申请 10–12 的 quantity=1 必须放行。
+    // 原始端点是否真算对由下面的 real-PG integration fixture 验证。
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(1) }]);
+    expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
+      .toEqual({ available: true, reservedQuantity: 1 });
+  });
 
+  it("uses half-open bounds, terminal exclusion and end-before-start window order", async () => {
     await checkTimeConflict(tx, "listing-1", start, end, 1);
-
-    expect(rentalOrderAggregate.mock.calls[0][0].where.id).toBeUndefined();
+    // Prisma.$queryRaw is called as a tagged template: the stub receives
+    // TemplateStringsArray as argument 0 and interpolated values as the rest.
+    // It does not receive an already materialized Prisma.Sql object.
+    const [parts, ...values] = peakQueryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    const sql = parts.join("?");
+    expect(sql).toContain('ro."startTime" <');
+    expect(sql).toContain('ro."endTime" >');
+    expect(sql).toContain("'CANCELLED', 'REJECTED', 'CLOSED'");
+    expect(sql).toContain('0 AS boundary_order, -quantity');
+    expect(sql).toContain('ORDER BY moment, boundary_order');
+    expect(values).toContain("listing-1");
+    expect(values.some((v: unknown) => v instanceof Date && +v === +start)).toBe(true);
   });
 
-  // TEST 10 — 无重叠行时 Prisma 返回 _sum.quantity = null，必须归零而非 NaN/null 运算
-  it("TEST 10: normalizes a null _sum to zero reserved quantity", async () => {
-    mockReservedQuantity(null, 3);
+  it("excludes own order for extension requests and fails closed for unsafe peak", async () => {
+    await checkTimeConflict(tx, "listing-1", start, end, 1, "order-to-exclude");
+    const [parts, ...values] = peakQueryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    // The optional exclusion is a nested Prisma.Sql interpolation, not a
+    // flattened string. Inspect its rendered fragment and bound values.
+    const fragments = values.filter((v): v is Prisma.Sql => Boolean(v && typeof v === "object" && "strings" in v && "values" in v));
+    expect(fragments.some(v => v.sql.includes('ro."id" <>'))).toBe(true);
+    expect(fragments.flatMap(v => v.values)).toContain("order-to-exclude");
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1) }]);
+    expect((await checkTimeConflict(tx, "listing-1", start, end, 1)).available).toBe(false);
+  });
 
-    const result = await checkTimeConflict(tx, "listing-1", start, end, 3);
-
-    expect(result).toEqual({ available: true, reservedQuantity: 0 });
-    expect(Number.isFinite(result.reservedQuantity)).toBe(true);
+  it("defaults null/no overlap to zero occupancy", async () => {
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(0) }]);
+    expect(await checkTimeConflict(tx, "listing-1", start, end, 2))
+      .toEqual({ available: true, reservedQuantity: 0 });
   });
 });

@@ -3,11 +3,28 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+// R13：工作区可能经 core.autocrlf 检出 CRLF；合同使用 LF 文本形状
+// 作精确断言时，先规范化输入而不是放宽任何业务安全断言。
+function normalizedSourceText(text: string): string {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 function source(file: string) {
-  return readFileSync(path.join(process.cwd(), file), "utf8");
+  return normalizedSourceText(readFileSync(path.join(process.cwd(), file), "utf8"));
 }
 
 describe("Phase 10C-2 CTV authority guards", () => {
+  it("R13: LF/CRLF checkout variants preserve exact guard matching", () => {
+    const expected = "endTime,\n      quantity,";
+    const lf = "const args = [endTime,\n      quantity,];";
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(normalizedSourceText(lf)).toContain(expected);
+    expect(normalizedSourceText(crlf)).toContain(expected);
+    expect(normalizedSourceText(lf)).toBe(normalizedSourceText(crlf));
+    // 缺失 quantity 仍必须被合同断言捕获，不能通过正规化伪造
+    expect(normalizedSourceText("endTime,\r\n      unitPrice,")).not.toContain(expected);
+  });
+
   it("P10C2-ARCH-01: backfill uses canonical completed booked-value fields only", () => {
     const text = source("src/lib/analytics/transaction-value-backfill.ts");
     const query = text.slice(

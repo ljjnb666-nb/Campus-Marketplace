@@ -34,6 +34,20 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+// R12：只隔离数据库参与人查询，保留真实 lifecycle access 裁决。
+vi.mock("@/lib/listings/listing-visibility", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/listings/listing-visibility")>()),
+  isListingTransactionParticipant: vi.fn(async () => false),
+}));
+
+// R12：页面级测试应隔离 moderation 数据库 I/O，不能依赖 CI 的 PG
+// 存在与否。授权与隐藏策略仍由页面入口独立判断。
+vi.mock("@/lib/moderation/listing-moderation-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/moderation/listing-moderation-query")>()),
+  hasActiveModerationForPublicSurface: vi.fn(async () => false),
+  resolvePublicDetailModerationGate: vi.fn(async () => "OPEN"),
+}));
+
 vi.mock("@/lib/server-auth", () => ({
   getActiveViewerId,
 }));
