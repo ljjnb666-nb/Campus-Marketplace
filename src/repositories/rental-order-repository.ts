@@ -106,9 +106,10 @@ export async function getRentalOrderDetail(orderId: string, userId: string) {
 }
 
 /**
- * RB-02 租赁容量不变量：容量占用 = 重叠订单的 quantity 总和（而非订单条数）。
- * totalQuantity 是唯一容量事实源；availableQuantity 是一次性写入的历史投影，
- * 不参与任何容量判定（见 BACKLOG AUDIT_DEBT_RENTAL_AVAILABLE_QUANTITY）。
+ * R07：库存权威是 [start,end) 内的峰值并发占用，不是所有曾重叠订单之和。
+ * PostgreSQL 单语句生成 start +quantity、end -quantity 事件；同刻先
+ * 扣 end 再加 start，窗口 SUM 取峰值，不传输任意多条订单到应用。
+ * 调用方必须在 RentalListing 行锁内执行此函数以保证并发序列化。
  */
 export async function checkTimeConflict(
   tx: Prisma.TransactionClient,
@@ -122,26 +123,42 @@ export async function checkTimeConflict(
     where: { id: rentalListingId },
     select: { totalQuantity: true },
   });
-
   if (!listing) return { available: false, reservedQuantity: 0 };
-
-  const aggregation = await tx.rentalOrder.aggregate({
-    where: {
-      rentalListingId,
-      status: { notIn: ["CANCELLED", "REJECTED", "CLOSED"] },
-      ...(excludeOrderId ? { id: { not: excludeOrderId } } : {}),
-      AND: [
-        { startTime: { lt: endTime } },
-        { endTime: { gt: startTime } },
-      ],
-    },
-    _sum: {
-      quantity: true,
-    },
-  });
-
-  const reservedQuantity = aggregation._sum.quantity ?? 0;
-
+  if (!Number.isSafeInteger(quantity) || quantity < 1 || !(startTime < endTime)) {
+    return { available: false, reservedQuantity: 0 };
+  }
+  const exclude = excludeOrderId
+    ? Prisma.sql`AND ro."id" <> ${excludeOrderId}`
+    : Prisma.empty;
+  const peaks = await tx.$queryRaw<Array<{ reservedQuantity: bigint | number }>>`
+    WITH active AS (
+      SELECT GREATEST(ro."startTime", ${startTime}) AS "fromTime",
+             LEAST(ro."endTime", ${endTime}) AS "toTime",
+             ro."quantity" AS quantity
+      FROM "RentalOrder" ro
+      WHERE ro."rentalListingId" = ${rentalListingId}
+        AND ro."status" NOT IN ('CANCELLED', 'REJECTED', 'CLOSED')
+        AND ro."startTime" < ${endTime}
+        AND ro."endTime" > ${startTime}
+        ${exclude}
+    ),
+    boundaries AS (
+      SELECT "fromTime" AS moment, 1 AS boundary_order, quantity AS delta FROM active
+      UNION ALL
+      SELECT "toTime" AS moment, 0 AS boundary_order, -quantity AS delta FROM active
+    ),
+    timeline AS (
+      SELECT SUM(delta) OVER (
+        ORDER BY moment, boundary_order
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+      ) AS occupied FROM boundaries
+    )
+    SELECT COALESCE(MAX(occupied), 0) AS "reservedQuantity" FROM timeline
+  `;
+  const reservedQuantity = Number(peaks[0]?.reservedQuantity ?? 0);
+  if (!Number.isSafeInteger(reservedQuantity) || reservedQuantity < 0) {
+    return { available: false, reservedQuantity: Number.MAX_SAFE_INTEGER };
+  }
   return {
     available: reservedQuantity + quantity <= listing.totalQuantity,
     reservedQuantity,

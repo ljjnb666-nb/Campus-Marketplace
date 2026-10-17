@@ -328,4 +328,42 @@ describe.skipIf(!integrationDatabaseUrl)("rental capacity invariant (RB-02, real
     );
     expect(noOverlap).toEqual({ available: true, reservedQuantity: 0 });
   });
+  it("R07 real-PG: adjacent bookings allow shared interval only up to peak occupancy", async () => {
+    const { checkTimeConflict } = await import("@/repositories/rental-order-repository");
+    const { withTransaction } = await import("@/lib/prisma");
+    const listing = await createFixtureListing(2);
+    const t10 = new Date("2026-10-18T10:00:00Z");
+    const t11 = new Date("2026-10-18T11:00:00Z");
+    const t12 = new Date("2026-10-18T12:00:00Z");
+    const activeStatus = "PENDING_PICKUP" as const;
+    await rawClient!.rentalOrder.createMany({ data: [
+      orderRow({ listingId: listing.id, renterId: renterA.id,
+        status: activeStatus, quantity: 1, startTime: t10, endTime: t11 }),
+      orderRow({ listingId: listing.id, renterId: renterB.id,
+        status: activeStatus, quantity: 1, startTime: t11, endTime: t12 }),
+    ] });
+    // SUM(existing overlaps)=2 会错误拒绝；真正峰值=1，剩余 1 件。
+    const available = await withTransaction((tx: Prisma.TransactionClient) =>
+      checkTimeConflict(tx, listing.id, t10, t12, 1),
+    );
+    expect(available).toEqual({ available: true, reservedQuantity: 1 });
+
+    // 10:30–11:30 跨接力窗口增加一件，峰值=2；再申请 1 件必须拒绝。
+    const middle = await rawClient!.rentalOrder.create({ data: orderRow({
+      listingId: listing.id, renterId: renterA.id, status: activeStatus, quantity: 1,
+      startTime: new Date("2026-10-18T10:30:00Z"),
+      endTime: new Date("2026-10-18T11:30:00Z"),
+    }) });
+    const full = await withTransaction((tx: Prisma.TransactionClient) =>
+      checkTimeConflict(tx, listing.id, t10, t12, 1),
+    );
+    expect(full).toEqual({ available: false, reservedQuantity: 2 });
+
+    // 续租排除自身：去掉跨段的 middle 后恢复峰值=1。
+    const excluded = await withTransaction((tx: Prisma.TransactionClient) =>
+      checkTimeConflict(tx, listing.id, t10, t12, 1, middle.id),
+    );
+    expect(excluded).toEqual({ available: true, reservedQuantity: 1 });
+  });
+
 });
