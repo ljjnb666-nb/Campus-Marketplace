@@ -1240,8 +1240,9 @@ export async function respondDamageClaimTx(
     if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
   }
 
-  if (claim.order.status !== 'COMPLETED') {
-    await writeStatusLog(tx, {
+  // Guard above already proved PENDING_INSPECTION; every accepted response
+  // transitions to COMPLETED exactly once after CAS success.
+  await writeStatusLog(tx, {
       orderId: claim.orderId,
       fromStatus: claim.order.status,
       toStatus: 'COMPLETED',
@@ -1256,7 +1257,6 @@ export async function respondDamageClaimTx(
       bookedValue: computeRentalCompletedBookedValue(claim.order),
     });
     await incrementRentalCompletionCounters(tx, claim.order);
-  }
 
   await emitNotificationsTx(tx, [{
     kind: RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
