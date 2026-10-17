@@ -35,11 +35,13 @@ const {
   txRentalOrderCreate,
   txRentalOrderFindFirst,
   txRentalOrderUpdate,
+  txRentalOrderUpdateMany,
   txRentalOrderStatusLogCreate,
   txRentalHandoverUpsert,
   txRentalReturnUpsert,
   txRentalDamageClaimFindFirst,
   txRentalDamageClaimUpdate,
+  txRentalDamageClaimUpdateMany,
   txRentalReviewFindFirst,
   txRentalReviewCreate,
   txRentalReviewCount,
@@ -64,11 +66,13 @@ const {
   const txRentalOrderCreate = vi.fn();
   const txRentalOrderFindFirst = vi.fn();
   const txRentalOrderUpdate = vi.fn();
+  const txRentalOrderUpdateMany = vi.fn();
   const txRentalOrderStatusLogCreate = vi.fn();
   const txRentalHandoverUpsert = vi.fn();
   const txRentalReturnUpsert = vi.fn();
   const txRentalDamageClaimFindFirst = vi.fn();
   const txRentalDamageClaimUpdate = vi.fn();
+  const txRentalDamageClaimUpdateMany = vi.fn();
   const txRentalReviewFindFirst = vi.fn();
   const txRentalReviewCreate = vi.fn();
   const txRentalReviewCount = vi.fn();
@@ -104,6 +108,7 @@ const {
       create: txRentalOrderCreate,
       findFirst: txRentalOrderFindFirst,
       update: txRentalOrderUpdate,
+      updateMany: txRentalOrderUpdateMany,
     },
     rentalOrderStatusLog: { create: txRentalOrderStatusLogCreate },
     rentalHandoverRecord: { upsert: txRentalHandoverUpsert },
@@ -111,6 +116,7 @@ const {
     rentalDamageClaim: {
       findFirst: txRentalDamageClaimFindFirst,
       update: txRentalDamageClaimUpdate,
+      updateMany: txRentalDamageClaimUpdateMany,
       create: txDamageClaimCreate,
     },
     rentalExtensionRequest: {
@@ -151,11 +157,13 @@ const {
     txRentalOrderCreate,
     txRentalOrderFindFirst,
     txRentalOrderUpdate,
+  txRentalOrderUpdateMany,
     txRentalOrderStatusLogCreate,
     txRentalHandoverUpsert,
     txRentalReturnUpsert,
     txRentalDamageClaimFindFirst,
     txRentalDamageClaimUpdate,
+  txRentalDamageClaimUpdateMany,
     txRentalReviewFindFirst,
     txRentalReviewCreate,
     txRentalReviewCount,
@@ -343,11 +351,13 @@ describe("rental-order actions", () => {
     txRentalOrderCreate.mockReset();
     txRentalOrderFindFirst.mockReset();
     txRentalOrderUpdate.mockReset();
+    txRentalOrderUpdateMany.mockReset().mockResolvedValue({ count: 1 });
     txRentalOrderStatusLogCreate.mockReset();
     txRentalHandoverUpsert.mockReset();
     txRentalReturnUpsert.mockReset();
     txRentalDamageClaimFindFirst.mockReset();
     txRentalDamageClaimUpdate.mockReset();
+    txRentalDamageClaimUpdateMany.mockReset().mockResolvedValue({ count: 1 });
     txRentalReviewFindFirst.mockReset();
     txRentalReviewCreate.mockReset();
     txRentalReviewCount.mockReset();
@@ -578,9 +588,9 @@ describe("rental-order actions", () => {
     const result = await cancelRentalOrder(formData);
 
     expect(result.success).toBe(true);
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith(
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1" },
+        where: { id: "order-1", status: "PENDING_APPROVAL" },
         data: expect.objectContaining({ status: "CANCELLED" }),
       }),
     );
@@ -755,9 +765,9 @@ describe("rental-order actions", () => {
     // 拒绝索赔的出口：PENDING_INSPECTION -> COMPLETED（押金不扣除、进入退回流程），
     // 出租者若不认可仍可在 COMPLETED 状态发起纠纷。
     expect(result.success).toBe(true);
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith(
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1" },
+        where: { id: "order-1", status: "PENDING_INSPECTION" },
         data: expect.objectContaining({
           status: "COMPLETED",
           depositStatus: "PENDING_REFUND",
@@ -793,9 +803,9 @@ describe("rental-order actions", () => {
     const result = await respondDamageClaim(buildClaimFormData({ agreed: "true" }));
 
     expect(result.success).toBe(true);
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith(
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1" },
+        where: { id: "order-1", status: "PENDING_INSPECTION" },
         data: expect.objectContaining({
           status: "COMPLETED",
           depositStatus: "PARTIALLY_REFUNDED",
