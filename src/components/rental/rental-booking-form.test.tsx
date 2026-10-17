@@ -58,6 +58,26 @@ describe("RentalBookingForm", () => {
     expect(screen.getByRole("button", { name: "立即预订" })).toBeEnabled();
   });
 
+  it("R08: daylight-saving time on the device cannot change campus hourly rent", () => {
+    try {
+      for (const timezone of ["UTC", "America/Los_Angeles", "Asia/Shanghai"]) {
+        vi.stubEnv("TZ", timezone);
+        renderForm({ pricingUnit: "PER_HOUR", price: 20, depositAmount: 0 });
+        // Los Angeles changes to daylight-saving time on March 8, 2026.
+        // The campus wall-clock interval is exactly 24h in every environment.
+        fireEvent.change(field("startTime"), { target: { value: "2026-03-07T10:00" } });
+        fireEvent.change(field("endTime"), { target: { value: "2026-03-08T10:00" } });
+        expect(screen.getByText("24 小时"), `TZ=${timezone}`).toBeInTheDocument();
+        expect(screen.getAllByText("¥480.00"), `TZ=${timezone}`).toHaveLength(2);
+        expect(screen.getByRole("button", { name: "立即预订" })).toBeEnabled();
+        cleanup();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      cleanup();
+    }
+  });
+
   it("resets the estimate when the range is invalid", () => {
     renderForm();
 
