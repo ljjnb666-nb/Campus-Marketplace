@@ -451,6 +451,73 @@ describe("rental-order actions", () => {
     expect(transactionMock).not.toHaveBeenCalled();
   });
 
+  it("R08: campus datetime-local maps to the same instant across distinct server timezones", async () => {
+    txQueryRaw.mockResolvedValue([{
+      id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
+      pricingUnit: "PER_DAY", minimumDuration: 1, maximumDuration: 30,
+      price: "20", depositAmount: "50", requiresApproval: true,
+      pickupLocation: "南门", returnLocation: "南门", title: "相机",
+      status: "AVAILABLE", deletedAt: null,
+    }]);
+    txRentalUnavailableFindFirst.mockResolvedValue(null);
+    txRentalOrderCreate.mockResolvedValue({ id: "order-local" });
+    // Regression must actually change process TZ, not just claim timezone
+    // independence while running one test under the CI runner's UTC zone.
+    try {
+      for (const timezone of ["UTC", "America/Los_Angeles", "Asia/Shanghai"]) {
+        vi.stubEnv("TZ", timezone);
+        txRentalOrderCreate.mockClear();
+        const result = await createRentalOrder(
+          { success: false, message: "" },
+          buildCreateFormData({
+            startTime: "2026-10-18T10:00",
+            endTime: "2026-10-19T10:00",
+          }),
+        );
+        expect(result.success, `TZ=${timezone}`).toBe(true);
+        expect(txRentalOrderCreate, `TZ=${timezone}`).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              startTime: new Date("2026-10-18T02:00:00.000Z"),
+              endTime: new Date("2026-10-19T02:00:00.000Z"),
+            }),
+          }),
+        );
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("R08: invalid campus-local date cannot fall back to local Node timezone parsing", async () => {
+    const result = await createRentalOrder(
+      { success: false, message: "" },
+      buildCreateFormData({ startTime: "2026-02-30T10:00", endTime: "2026-03-01T10:00" }),
+    );
+    expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("R08: invalid explicit-offset calendar dates are rejected instead of rolling over", async () => {
+    for (const invalid of ["2026-02-30T10:00:00Z", "2026-04-31T10:00:00+08:00"]) {
+      const result = await createRentalOrder(
+        { success: false, message: "" },
+        buildCreateFormData({ startTime: invalid, endTime: "2026-05-02T10:00:00Z" }),
+      );
+      expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    }
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("R08: invalid explicit-offset extension timestamp rejects before transaction", async () => {
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-02-30T10:00:00+08:00");
+    const result = await requestExtension(formData);
+    expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
   it("rejects renting your own listing", async () => {
     txQueryRaw.mockResolvedValue([{
       id: "listing-1",

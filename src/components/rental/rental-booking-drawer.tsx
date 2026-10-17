@@ -3,6 +3,7 @@
 import React, { useState, useTransition } from "react";
 import { Repeat, MapPin, X, CheckCircle2, Loader2, Calendar, ShieldCheck, AlertCircle } from "lucide-react";
 import { PriceDisplay } from "@/components/ui/price-display";
+import { formatMarketplaceDateTimeLocalInput, parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 
 interface RentalBookingDrawerProps {
   open: boolean;
@@ -43,8 +44,8 @@ export function RentalBookingDrawer({
   const [isPending, startTransition] = useTransition();
 
   const now = new Date();
-  const defaultStart = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 16);
-  const defaultEnd = new Date(now.getTime() + 25 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  const defaultStart = formatMarketplaceDateTimeLocalInput(new Date(now.getTime() + 60 * 60 * 1000));
+  const defaultEnd = formatMarketplaceDateTimeLocalInput(new Date(now.getTime() + 25 * 60 * 60 * 1000));
 
   const [startTime, setStartTime] = useState(defaultStart);
   const [endTime, setEndTime] = useState(defaultEnd);
@@ -55,8 +56,8 @@ export function RentalBookingDrawer({
   if (!open) return null;
 
   // 实时算价
-  const startMs = new Date(startTime).getTime();
-  const endMs = new Date(endTime).getTime();
+  const startMs = parseMarketplaceDateTimeLocal(startTime)?.getTime() ?? Number.NaN;
+  const endMs = parseMarketplaceDateTimeLocal(endTime)?.getTime() ?? Number.NaN;
   const validDates = !isNaN(startMs) && !isNaN(endMs) && endMs > startMs;
 
   let calculatedUnits = 1;

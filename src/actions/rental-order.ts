@@ -4,6 +4,7 @@ import { withTransaction } from "@/lib/prisma";
 import type { AssetCategory, Prisma } from "@prisma/client";
 import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
+import { parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
 import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
@@ -53,6 +54,29 @@ import {
   rentalReviewSchema,
   rentalOrderCreateSchema,
 } from "@/validators/rental";
+
+/** R08: unzoned browser datetime-local always means the campus Asia/Shanghai wall clock.
+ * Zoned legacy callers remain compatible but must also pass strict calendar validation.
+ * Node Date.parse silently normalizes invalid days such as 2026-02-30, so reject them
+ * before accepting a zoned ISO timestamp.
+ */
+function parseRentalDateInput(value: string): Date | null {
+  const input = value.trim();
+  const campusWallTime = parseMarketplaceDateTimeLocal(input);
+  if (campusWallTime) return campusWallTime;
+
+  const zoned = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|[+-]\d{2}:\d{2})$/i.exec(input);
+  if (!zoned) return null;
+  const campusCalendar = [zoned[1], zoned[2], zoned[3]].join("-") +
+    "T" + zoned[4] + ":" + zoned[5] + ":" + (zoned[6] ?? "00");
+  if (!parseMarketplaceDateTimeLocal(campusCalendar)) return null;
+  const zone = zoned[8].toUpperCase();
+  if (zone !== "Z" && (Number(zone.slice(1, 3)) > 23 || Number(zone.slice(4, 6)) > 59)) {
+    return null;
+  }
+  const explicit = new Date(input);
+  return Number.isFinite(explicit.getTime()) ? explicit : null;
+}
 
 export type RentalOrderActionState = {
   success: boolean;
@@ -146,11 +170,11 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
     return { success: false, message: parsed.error.issues[0]?.message ?? '参数不正确' };
   }
 
-  const startTime = new Date(parsed.data.startTime);
-  const endTime = new Date(parsed.data.endTime);
+  const startTime = parseRentalDateInput(parsed.data.startTime);
+  const endTime = parseRentalDateInput(parsed.data.endTime);
   const quantity = Number(parsed.data.quantity);
 
-  if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+  if (!startTime || !endTime) {
     return { success: false, message: '时间格式不正确' };
   }
   if (startTime >= endTime) {
@@ -377,7 +401,8 @@ export async function requestExtension(formData: FormData): Promise<RentalOrderA
   if (!parsed.success) return { success: false, message: "参数错误" };
 
   const { orderId, newEndTime: endStr } = parsed.data;
-  const newEndTime = new Date(endStr);
+  const newEndTime = parseRentalDateInput(endStr);
+  if (!newEndTime) return { success: false, message: "时间格式不正确" };
 
   try {
     const result = await withTransaction((tx) =>

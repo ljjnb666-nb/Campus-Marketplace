@@ -3,6 +3,7 @@
 import React, { useTransition, useState } from "react";
 import { requestExtension } from "@/actions/rental-order";
 import { Loader2 } from "lucide-react";
+import { formatMarketplaceDateTime, formatMarketplaceDateTimeLocalInput, parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 
 type ExtensionFormProps = {
   orderId: string;
@@ -31,9 +32,9 @@ export function RentalExtensionForm({ orderId, currentEndTime, price, pricingUni
     }
 
     const current = new Date(currentEndTime).getTime();
-    const next = new Date(newEndTime).getTime();
+    const next = parseMarketplaceDateTimeLocal(newEndTime)?.getTime() ?? Number.NaN;
 
-    if (next <= current) {
+    if (!Number.isFinite(next) || next <= current) {
       return { extraFee: 0, extraDuration: 0 };
     }
 
@@ -80,7 +81,7 @@ export function RentalExtensionForm({ orderId, currentEndTime, price, pricingUni
       <div className="space-y-6">
         <div className="space-y-2 text-sm">
           <p className="text-slate-500">当前到期时间</p>
-          <p className="text-lg font-bold text-slate-900">{new Date(currentEndTime).toLocaleString("zh-CN")}</p>
+          <p className="text-lg font-bold text-slate-900">{formatMarketplaceDateTime(new Date(currentEndTime))}</p>
         </div>
 
         <div className="space-y-2">
@@ -91,7 +92,7 @@ export function RentalExtensionForm({ orderId, currentEndTime, price, pricingUni
             type="datetime-local"
             name="newEndTime"
             required
-            min={new Date(currentEndTime).toISOString().slice(0, 16)}
+            min={formatMarketplaceDateTimeLocalInput(new Date(currentEndTime))}
             value={newEndTime}
             onChange={(e) => setNewEndTime(e.target.value)}
             className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
