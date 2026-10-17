@@ -116,7 +116,7 @@ case "\$ARGS" in
     elif [[ "\$ARGS" == *"campus-marketplace-cleanup:"* ]]; then
       [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]] && exit 1 || exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-async-worker:"* ]]; then
-      [[ "\${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]] && exit 1 || exit 0
+      [[ "\${ASYNC_STUB_MODE:-post-async}" == "pre-async" || "\${ASYNC_STUB_MODE:-post-async}" == "missing-image" ]] && exit 1 || exit 0
     else
       exit 1
     fi ;;
@@ -198,6 +198,16 @@ case "\$ARGS" in
   *) echo "[docker-stub] unhandled: \$ARGS" >> "${SANDBOX}/calls.log"; exit 0 ;;
 esac
 STUB
+  # 目标 release 的 Git topology 只读 stub。默认 post-async；
+  # pre-async 时该历史 commit 不含 worker entrypoint。不能把本地
+  # image 被 prune 的情况误认成历史 release 不存在此服务。
+  cat > "${SANDBOX}/bin/git" <<'GIT_STUB'
+#!/usr/bin/env bash
+if [[ "$*" != *"cat-file -e"* ]]; then exit 1; fi
+if [[ "$*" == *"scripts/ops/async-worker.ts"* && "${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]]; then exit 1; fi
+exit 0
+GIT_STUB
+  chmod +x "${SANDBOX}/bin/git"
   chmod +x "${SANDBOX}/bin/docker"
   # 初始运行状态：默认 app + storage-cleanup 均在运行（post-worker release）；
   # DOCKER_STUB_INITIAL="app" 模拟 pre-worker release（cleanup 容器不存在）
@@ -820,6 +830,18 @@ assert_exit 0 "$rc" "pre-async rollback"
 assert_log_contains "async_stop_called"
 assert_log_not_contains "async_up_called"
 assert_contains_file "ASYNC_WORKER=stopped_pre_async_release" "${SANDBOX}/.releases.log" "pre-async rollback log"
+
+echo "== 9o. 有 worker 的历史提交缺失镜像 → 拒绝误判为 pre-async =="
+make_sandbox
+ASYNC_STUB_MODE=missing-image run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "post-async missing image must fail closed"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then
+  fail_test "已存在 async-worker 的旧版本缺失镜像不得写成功日志"
+else
+  pass_test
+fi
 
 echo "== 9n. 无法确认 async-worker 已停止 → 必须阻断 app 切换 =="
 make_sandbox
