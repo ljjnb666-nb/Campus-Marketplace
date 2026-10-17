@@ -29,22 +29,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm install --package-lock-only --ignore-scripts --audit=false --save-exact next@16.3.6 eslint-config-next@16.3.6
+          npm install --package-lock-only --ignore-scripts --audit=false --save-exact next@16.4.2 eslint-config-next@16.4.2 sharp@0.35.5
           npm update brace-expansion --package-lock-only --ignore-scripts --audit=false
           node <<'NODE'
           const fs = require('fs');
           const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
           if (lock.lockfileVersion !== 3) throw new Error('lockfileVersion must remain 3');
-          for (const [name, version] of [['next', '16.3.6'], ['eslint-config-next', '16.3.6']]) {
-            const declared = p[(name === 'next') ? 'dependencies' : 'devDependencies'][name];
+          for (const [name, version] of [['next', '16.4.2'], ['eslint-config-next', '16.4.2'], ['sharp', '0.35.5']]) {
+            const declared = p[(name === 'next' || name === 'sharp') ? 'dependencies' : 'devDependencies'][name];
             if (declared !== version || lock.packages['node_modules/' + name]?.version !== version) {
               throw new Error(name + ' declaration/lock mismatch');
             }
           }
           for (const [name, ent] of Object.entries(lock.packages)) {
             if (/^node_modules\/(?:@next\/swc-[^/]+|@next\/env|@next\/eslint-plugin-next)$/.test(name)
-                && ent.version !== '16.3.6') throw new Error(name + ' not on Next 16.3.6');
+                && ent.version !== '16.4.2') throw new Error(name + ' not on Next 16.3.6');
           }
           const versionIsPatched = (v) => {
             const [major, minor, patch] = v.split('.').map(Number);
@@ -64,7 +64,7 @@ jobs:
           for (const pkg of ['@next/swc-win32-x64-msvc','@next/swc-linux-x64-gnu','@next/swc-darwin-arm64']) {
             if (!lock.packages['node_modules/' + pkg]?.integrity) throw new Error('missing cross-platform optional package ' + pkg);
           }
-          console.log('LOCKFILE VERIFIED', Object.keys(lock.packages).length, 'entries; Next 16.3.6; brace-expansion patched');
+          console.log('LOCKFILE VERIFIED', Object.keys(lock.packages).length, 'entries; Next 16.4.2, sharp 0.35.5; brace-expansion patched');
           NODE
       - name: Verify npm ci lockfile consistency
         shell: bash
@@ -91,12 +91,32 @@ jobs:
           const lines = Object.entries(audit.vulnerabilities || {}).map(([name,v]) => ({name,severity:v.severity,isDirect:v.isDirect,via:v.via?.length,range:v.range}));
           console.log('NPM AUDIT VULNERABILITIES', JSON.stringify(lines));
           NODE
+      - name: Audit production dependencies separately
+        shell: bash
+        run: |
+          set +e
+          npm audit --omit=dev --json > issue-155-production-audit.json
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then
+            echo "production npm audit failed: exit $rc"
+            exit "$rc"
+          fi
+          node <<'NODE'
+          const fs = require('fs');
+          const audit = JSON.parse(fs.readFileSync('issue-155-production-audit.json', 'utf8'));
+          if (audit.error || !audit.metadata?.vulnerabilities) throw new Error('production audit invalid');
+          console.log('PRODUCTION AUDIT COUNTS', JSON.stringify(audit.metadata.vulnerabilities));
+          console.log('PRODUCTION AUDIT VULNERABILITIES', JSON.stringify(Object.entries(audit.vulnerabilities || {}).map(([name,v]) => ({name,severity:v.severity,isDirect:v.isDirect,range:v.range,fixAvailable:v.fixAvailable}))));
+          NODE
       - name: Upload raw audit evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: issue-155-npm-audit-raw
-          path: issue-155-audit.json
+          path: |
+            issue-155-audit.json
+            issue-155-production-audit.json
           if-no-files-found: warn
           retention-days: 14
       - name: Commit only audited package.json and package-lock.json
