@@ -446,6 +446,7 @@ assert_exit 1 "$rc" "hard rollback with restore failure"
 assert_log_contains "restore_called"
 assert_log_not_contains "app_up_called"
 assert_log_not_contains "cleanup_up_called"
+assert_log_not_contains "async_up_called"
 
 echo "== 3. hard restore 成功 → app 回滚才执行，且选择 EXACT PREVIOUS_SHA（真实 gate 全绿）=="
 FAKE_OUT="${SANDBOX}/fake-app.out"
@@ -460,6 +461,7 @@ assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2
 assert_log_contains "config --images"
 # post-worker 目标：cleanup 必须与 app 同 SHA 成对切换
 assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "async_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 
 echo "== 4. 缺少备份文件 → 失败（不调用 restore）=="
 make_sandbox   # 新沙箱，BACKUP_DIR 为空
@@ -491,16 +493,18 @@ CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 0 "$rc" "restore success"
 assert_log_contains "app_stop_called"
 assert_log_contains "cleanup_stop_called"
+assert_log_contains "async_stop_called"
 assert_log_contains "pg_restore_called"
 # 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
 stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
 stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
+stop_async_line="$(printf '%s' "$CALL_LOG" | grep -n "async_stop_called" | head -1 | cut -d: -f1)"
 first_psql_line="$(printf '%s' "$CALL_LOG" | grep -n "psql_called" | head -1 | cut -d: -f1)"
-if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$first_psql_line" \
-      && "$stop_app_line" -lt "$first_psql_line" && "$stop_cleanup_line" -lt "$first_psql_line" ]]; then
+if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$stop_async_line" && -n "$first_psql_line" \
+      && "$stop_app_line" -lt "$first_psql_line" && "$stop_cleanup_line" -lt "$first_psql_line" && "$stop_async_line" -lt "$first_psql_line" ]]; then
   pass_test
 else
-  fail_test "必须在 terminate DB connections 之前停止 app 与 storage-cleanup"
+  fail_test "必须在 terminate DB connections 之前停止 app / storage-cleanup / async-worker"
 fi
 
 echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
@@ -516,6 +520,22 @@ CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "cleanup cannot stop must fail closed"
 assert_log_contains "app_stop_called"
 assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "psql_called"
+assert_log_not_contains "pg_restore_called"
+
+echo "== 5c-async. async-worker 停止后仍运行 → 拒绝破坏性 DB 操作 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" STOP_FAILURE_STUB_MODE=async-worker \\
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \\
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \\
+    --target-db campus_marketplace >/tmp/rp-async-stopfail.$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "async-worker stop not verified"
+assert_log_contains "app_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_contains "async_stop_called"
 assert_log_not_contains "psql_called"
 assert_log_not_contains "pg_restore_called"
 
@@ -681,6 +701,8 @@ TEST_APP_URL=""
 assert_exit 0 "$rc" "post-worker rollback"
 assert_log_contains "app_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 assert_log_contains "cleanup_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_log_contains "async_up_called GIT_SHA=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+assert_contains_file "ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 日志 async image"
 assert_contains_file "CLEANUP_IMAGE=campus-marketplace-cleanup:${PREV_SHA}" "${SANDBOX}/.releases.log" "rollback 日志 cleanup image"
 assert_contains_file "CLEANUP=running" "${SANDBOX}/.releases.log" "rollback 日志 cleanup 状态"
 
@@ -760,6 +782,52 @@ if [[ -e "${SANDBOX}/.releases.log" ]]; then
 else
   pass_test
 fi
+
+echo "== 9k. async-worker 回滚切换失败 → FAIL CLOSED，无成功日志 =="
+make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+UP_FAILURE_STUB_MODE=async-worker run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "async-worker up failure"
+assert_log_contains "async_stop_called"
+assert_log_contains "async_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "async up 失败不得写成功日志"; else pass_test; fi
+
+echo "== 9l. async-worker 运行镜像不匹配 → FAIL CLOSED =="
+make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+ASYNC_RUNNING_WRONG_IMAGE=1 run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 1 "$rc" "async wrong image fail closed"
+assert_log_contains "async_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "async 镜像错误不得写成功日志"; else pass_test; fi
+
+echo "== 9m. 目标版本没有 async-worker image → 旧 worker 必须停止 =="
+make_sandbox
+FAKE_OUT="${SANDBOX}/fake-app.out"
+start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
+TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
+ASYNC_STUB_MODE=pre-async run_rollback "${PREV_SHA}"; rc=$?
+TEST_APP_URL=""
+[[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
+assert_exit 0 "$rc" "pre-async rollback"
+assert_log_contains "async_stop_called"
+assert_log_not_contains "async_up_called"
+assert_contains_file "ASYNC_WORKER=stopped_pre_async_release" "${SANDBOX}/.releases.log" "pre-async rollback log"
+
+echo "== 9n. 无法确认 async-worker 已停止 → 必须阻断 app 切换 =="
+make_sandbox
+STOP_FAILURE_STUB_MODE=async-worker run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "async stop failure"
+assert_log_contains "async_stop_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "async 停止未验证不得写日志"; else pass_test; fi
 
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
