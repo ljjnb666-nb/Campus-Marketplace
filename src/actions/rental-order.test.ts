@@ -1468,6 +1468,53 @@ describe("rental-order actions", () => {
     );
   });
 
+  it("重复交接确认不将仍留在订单的旧照片标记待删除", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      ...pendingPickupOrder,
+      handoverRecord: {
+        photos: ["asset:still-referenced"],
+        ownerConfirmed: false,
+        renterConfirmed: true,
+      },
+    });
+    prismaHandoverFindUnique.mockResolvedValue({
+      photos: ["asset:still-referenced"],
+    });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: true,
+    });
+
+    const result = await confirmPickup(buildPickupFormData());
+    expect(result).toEqual({ success: true, message: "已确认取货" });
+    expect(txRentalHandoverUpsert).toHaveBeenCalledOnce();
+    expect(markAssetsForValuesPendingDelete).not.toHaveBeenCalled();
+    expect(prismaHandoverFindUnique).not.toHaveBeenCalled();
+  });
+
+  it("归还确认未附加新照片时不会删除旧证据", async () => {
+    requireUser.mockResolvedValue({ id: "user-renter" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      id: "order-1", status: "PENDING_RETURN",
+      ownerId: "user-owner", renterId: "user-renter",
+      returnRecord: null,
+      rentalListing: { campusId: "campus-1" },
+    });
+    prismaReturnFindUnique.mockResolvedValue({
+      photos: ["asset:still-referenced"],
+    });
+    txRentalReturnUpsert.mockResolvedValue({
+      ownerConfirmed: false, renterConfirmed: true,
+    });
+    const result = await confirmReturn(
+      buildSimpleFormData(["orderId", "order-1", "role", "renter"]),
+    );
+    expect(result).toEqual({ success: true, message: "已确认归还" });
+    expect(txRentalReturnUpsert).toHaveBeenCalledOnce();
+    expect(markAssetsForValuesPendingDelete).not.toHaveBeenCalled();
+    expect(prismaReturnFindUnique).not.toHaveBeenCalled();
+  });
+
   it("rejects a friendly retry message when the transaction throws", async () => {    transactionMock.mockRejectedValue(new Error("db down"));
 
     const approveResult = await rejectRentalOrder(
