@@ -25,11 +25,10 @@ export interface PutObjectInput extends ObjectRef {
    */
   operationTimeoutMs?: number;
   /**
-   * RB04：覆盖写入失败日志中的存储定位符输出（logWriteFailure）。
-   * 提供时（应为 opaque 机器标识，如 "data-export:<artifactId>"）日志只含
-   * 该标识——绝不输出 raw bucket / objectKey / endpoint / userId-derived
-   * 路径。缺省 = 保持既有行为（raw locator 进日志，UploadedAsset 面
-   * 不变）。安全责任由本策略在代码内保证，不依赖日志平台脱敏。
+   * R11：仅在匹配受限 opaque 格式（如 "data-export:artifact_12345678"）
+   * 时记录此诊断标识。无论此字段是否提供，存储失败日志一律
+   * 不得包含原始 bucket / objectKey / endpoint / 私有路径。
+   * 不满足安全格式的 diagnosticRef 将被静默省略。
    */
   diagnosticRef?: string;
 }
