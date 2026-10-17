@@ -3,6 +3,7 @@
 import React, { useActionState, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { createRentalOrder } from "@/actions/rental-order";
+import { parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 
 type RentalBookingFormProps = {
   listingId: string;
@@ -39,10 +40,10 @@ export function RentalBookingForm({
       return { duration: 0, rentalFee: 0 };
     }
 
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
+    const start = parseMarketplaceDateTimeLocal(startTime)?.getTime() ?? Number.NaN;
+    const end = parseMarketplaceDateTimeLocal(endTime)?.getTime() ?? Number.NaN;
 
-    if (end <= start) {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
       return { duration: 0, rentalFee: 0 };
     }
 
