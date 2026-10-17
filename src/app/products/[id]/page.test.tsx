@@ -40,6 +40,12 @@ vi.mock("next/link", () => ({
   ),
 }));
 
+// R12：只隔离数据库参与人查询，保留真实 lifecycle access 裁决。
+vi.mock("@/lib/listings/listing-visibility", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/listings/listing-visibility")>()),
+  isListingTransactionParticipant: vi.fn(async () => false),
+}));
+
 vi.mock("@/lib/server-auth", () => ({
   getActiveViewerId,
 }));
