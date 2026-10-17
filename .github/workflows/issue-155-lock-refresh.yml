@@ -75,8 +75,10 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          set +e
           npm audit --json > issue-155-audit.json
           rc=$?
+          set -e
           if [ "$rc" -gt 1 ]; then
             echo "npm audit network/process failure: exit $rc"
             exit "$rc"
