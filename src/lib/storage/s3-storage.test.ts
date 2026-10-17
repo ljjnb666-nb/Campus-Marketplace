@@ -165,6 +165,54 @@ describe("S3Storage", () => {
     }
   });
 
+  it("R11: untrusted SDK error name/code cannot smuggle private object locators into logs", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const privateName = "InvalidBucket:" + ref.bucket + "/" + ref.objectKey;
+    const privateCode = "storage/" + ref.objectKey;
+    const storage = new S3Storage(buildFakeClient(() => {
+      const error = new Error("failed with private locator in error metadata");
+      error.name = privateName;
+      Object.assign(error, { code: privateCode });
+      throw error;
+    }));
+    try {
+      await expect(storage.deleteObject(ref)).rejects.toThrow();
+      const diagnostic = warn.mock.calls.at(-1)?.[2] as Record<string, unknown>;
+      expect(diagnostic).toMatchObject({
+        errorClass: "AMBIGUOUS_WRITE_FAILURE",
+        errorName: null,
+        errorCode: null,
+      });
+      const serialized = JSON.stringify(diagnostic);
+      expect(serialized).not.toContain(ref.bucket);
+      expect(serialized).not.toContain(ref.objectKey);
+      expect(serialized).not.toContain(privateName);
+      expect(serialized).not.toContain(privateCode);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("R11: approved SDK diagnostic tokens remain available for operations", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const storage = new S3Storage(buildFakeClient(() => {
+      const error = new Error("connect timeout");
+      error.name = "TimeoutError";
+      Object.assign(error, { code: "ETIMEDOUT" });
+      throw error;
+    }));
+    try {
+      await expect(storage.deleteObject(ref)).rejects.toThrow();
+      expect(warn.mock.calls.at(-1)?.[2]).toMatchObject({
+        errorName: "TimeoutError",
+        errorCode: "ETIMEDOUT",
+        ambiguous: true,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("propagates non-404 head errors", async () => {
     const storage = new S3Storage(
       buildFakeClient(() => {
