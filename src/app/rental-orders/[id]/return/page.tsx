@@ -37,6 +37,7 @@ export default async function ReturnVerificationPage({ params }: { params: Promi
       </div>
 
       <RentalActionForm
+        uploadCategory="return"
         action={isRequestingReturn ? requestReturn : confirmReturn}
         submitLabel={isRenter ? "提交归还申请" : "确认完好归还"}
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"

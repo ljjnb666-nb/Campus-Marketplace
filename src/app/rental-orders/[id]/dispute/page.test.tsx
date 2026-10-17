@@ -46,6 +46,7 @@ function buildOrder(overrides: Record<string, unknown> = {}) {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
   redirect.mockImplementation(() => {
     throw new Error("redirected");
@@ -126,5 +127,34 @@ describe("DisputePage", () => {
     const formData = initiateDispute.mock.calls[0][0] as FormData;
     expect(formData.get("orderId")).toBe("order-1");
     expect(formData.get("reason")).toBe("归还物品与出租时不符");
+  });
+
+  it("R09：纠纷证据先独立上传，Server Action 仅收到私有资产令牌", async () => {
+    requireUser.mockResolvedValue({ id: "renter-1" });
+    getRentalOrderDetail.mockResolvedValue(buildOrder({ status: "COMPLETED" }));
+    initiateDispute.mockResolvedValue({ success: true, message: "已提交" });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, json: async () => ({ success: true, assetId: "dispute-asset-1" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(await DisputePage({ params: Promise.resolve({ id: "order-1" }) }));
+    fireEvent.change(screen.getByLabelText(/纠纷原因/), {
+      target: { value: "归还物品与出租时不符" },
+    });
+    const file = new File([new Uint8Array(2 * 1024 * 1024)], "evidence.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText(/纠纷证据照片/), {
+      target: { files: [file] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交纠纷申请" }));
+    await waitFor(() => expect(initiateDispute).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, options] = fetchMock.mock.calls[0] as [string, { method: string; body: FormData }];
+    expect(url).toBe("/api/upload/images");
+    expect(options.method).toBe("POST");
+    expect(options.body.get("category")).toBe("report");
+    expect((options.body.get("file") as File).size).toBe(2 * 1024 * 1024);
+    const actionData = initiateDispute.mock.calls[0][0] as FormData;
+    expect(actionData.getAll("evidencePhotos")).toEqual(["asset:dispute-asset-1"]);
+    expect([...actionData.values()].every((value) => typeof value === "string")).toBe(true);
   });
 });
