@@ -33,6 +33,7 @@ export default async function DisputePage({ params }: { params: Promise<{ id: st
       </div>
 
       <RentalActionForm
+        uploadCategory="report"
         action={initiateDispute}
         submitLabel="提交纠纷申请"
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"
@@ -56,6 +57,20 @@ export default async function DisputePage({ params }: { params: Promise<{ id: st
             placeholder="例如：归还的物品与出租时不符，租客拒绝沟通..."
             className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
           />
+        </div>
+        <div className="space-y-2">
+          <label htmlFor="disputeEvidencePhotos" className="text-sm font-medium text-slate-700">
+            纠纷证据照片 <span className="text-slate-400">（选填，最多5张）</span>
+          </label>
+          <input
+            id="disputeEvidencePhotos"
+            name="evidencePhotos"
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            className="block w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-indigo-100 file:px-3 file:py-2 file:text-indigo-700"
+          />
+          <p className="text-xs text-slate-500">证据图片单张不超过10MB，先独立上传，再提交纠纷申请。</p>
         </div>
       </RentalActionForm>
     </div>

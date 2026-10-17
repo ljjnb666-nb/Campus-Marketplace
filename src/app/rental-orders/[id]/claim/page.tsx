@@ -34,6 +34,7 @@ export default async function DamageClaimPage({ params }: { params: Promise<{ id
       </div>
 
       <RentalActionForm
+        uploadCategory="report"
         action={submitDamageClaim}
         submitLabel="提交索赔"
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"

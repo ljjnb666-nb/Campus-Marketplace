@@ -33,6 +33,7 @@ const {
   txExecuteRaw,
   txUserFindMany,
   txRentalOrderCreate,
+  txUploadedAssetFindMany,
   txRentalOrderFindFirst,
   txRentalOrderUpdate,
   txRentalOrderUpdateMany,
@@ -64,6 +65,7 @@ const {
   const txRentalUnavailableFindFirst = vi.fn();
   const txQueryRaw = vi.fn();
   const txRentalOrderCreate = vi.fn();
+  const txUploadedAssetFindMany = vi.fn();
   const txRentalOrderFindFirst = vi.fn();
   const txRentalOrderUpdate = vi.fn();
   const txRentalOrderUpdateMany = vi.fn();
@@ -111,6 +113,7 @@ const {
       updateMany: txRentalOrderUpdateMany,
     },
     rentalOrderStatusLog: { create: txRentalOrderStatusLogCreate },
+    uploadedAsset: { findMany: txUploadedAssetFindMany },
     rentalHandoverRecord: { upsert: txRentalHandoverUpsert },
     rentalReturnRecord: { upsert: txRentalReturnUpsert },
     rentalDamageClaim: {
@@ -155,6 +158,7 @@ const {
     txExecuteRaw,
     txUserFindMany,
     txRentalOrderCreate,
+  txUploadedAssetFindMany,
     txRentalOrderFindFirst,
     txRentalOrderUpdate,
   txRentalOrderUpdateMany,
@@ -349,6 +353,7 @@ describe("rental-order actions", () => {
     txQueryRaw.mockReset();
     txRentalUnavailableFindFirst.mockReset();
     txRentalOrderCreate.mockReset();
+    txUploadedAssetFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.map((id: string) => ({ id })));
     txRentalOrderFindFirst.mockReset();
     txRentalOrderUpdate.mockReset();
     txRentalOrderUpdateMany.mockReset().mockResolvedValue({ count: 1 });
@@ -477,6 +482,26 @@ describe("rental-order actions", () => {
       { success: false, message: "" },
       buildCreateFormData({ startTime: "2026-02-30T10:00", endTime: "2026-03-01T10:00" }),
     );
+    expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("R08: invalid explicit-offset calendar dates are rejected instead of rolling over", async () => {
+    for (const invalid of ["2026-02-30T10:00:00Z", "2026-04-31T10:00:00+08:00"]) {
+      const result = await createRentalOrder(
+        { success: false, message: "" },
+        buildCreateFormData({ startTime: invalid, endTime: "2026-05-02T10:00:00Z" }),
+      );
+      expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    }
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
+  it("R08: invalid explicit-offset extension timestamp rejects before transaction", async () => {
+    const formData = new FormData();
+    formData.set("orderId", "order-1");
+    formData.set("newEndTime", "2026-02-30T10:00:00+08:00");
+    const result = await requestExtension(formData);
     expect(result).toEqual({ success: false, message: "时间格式不正确" });
     expect(transactionMock).not.toHaveBeenCalled();
   });
@@ -1488,7 +1513,7 @@ describe("rental-order actions", () => {
       category: "handover",
       file: expect.any(File),
     });
-    // 私有照片以 asset: 引用落库，事务成功后绑定订单
+    // 私有照片以 asset: 引用落库，且同一事务内完成资产绑定
     expect(txRentalHandoverUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
@@ -1501,6 +1526,115 @@ describe("rental-order actions", () => {
       expect.anything(),
       { ownerId: "user-owner", assetIds: ["asset-1"], target: { type: "rentalOrder", id: "order-1" } },
     );
+  });
+
+  it("R10: attachment short-count rejects the whole pickup transaction instead of committing referenced UPLOADED asset", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      ...pendingPickupOrder, handoverRecord: null,
+    });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    attachAssetsToEntity.mockResolvedValueOnce(0);
+    const formData = buildPickupFormData();
+    formData.append("photos", new File(["image-data"], "evidence.png", { type: "image/png" }));
+
+    const result = await confirmPickup(formData);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片状态已变化");
+    // domain 已写入测试事务替身，但同一事务回调抛错，真实 Prisma
+    // interactive transaction 才有权提交/回滚，不能在事务外继续绑定。
+    expect(txRentalHandoverUpsert).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).toHaveBeenCalledOnce();
+    expect(transactionMock).toHaveBeenCalledOnce();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("R10: binding throws inside the same claim transaction and the action never reports success", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      ...pendingPickupOrder, status: "PENDING_INSPECTION",
+      depositAmount: new Prisma.Decimal("50"),
+      rentalListing: { campusId: "campus-1" },
+    });
+    txDamageClaimCreate.mockResolvedValue({ id: "claim-1" });
+    attachAssetsToEntity.mockRejectedValueOnce(new Error("simulated DB attach failure"));
+    const formData = buildSimpleFormData([
+      "orderId", "order-1", "damageDescription", "左侧屏幕破损",
+      "requestedDeduction", "10",
+    ]);
+    formData.append("photos", new File(["image-data"], "claim.png", { type: "image/png" }));
+
+    const result = await submitDamageClaim(formData);
+    expect(result.success).toBe(false);
+    expect(transactionMock).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).toHaveBeenCalledOnce();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("R09: a pre-uploaded asset token is validated and bound without uploading File in Server Action", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    const formData = buildPickupFormData();
+    formData.append("photos", "asset:asset-1");
+
+    const result = await confirmPickup(formData);
+    expect(result).toEqual({ success: true, message: "已确认取货" });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+    expect(txUploadedAssetFindMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["asset-1"] }, ownerId: "user-owner",
+        status: "UPLOADED", category: "HANDOVER", access: "PRIVATE",
+      },
+      select: { id: true },
+    });
+    expect(attachAssetsToEntity).toHaveBeenCalledWith(
+      expect.anything(), {
+        ownerId: "user-owner", assetIds: ["asset-1"],
+        target: { type: "rentalOrder", id: "order-1" },
+      },
+    );
+  });
+
+  it("R09: forged token of another owner/category is rejected before binding", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    txUploadedAssetFindMany.mockResolvedValueOnce([]);
+    const formData = buildPickupFormData();
+    formData.append("photos", "asset:asset-1");
+
+    const result = await confirmPickup(formData);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片状态已变化");
+    expect(txUploadedAssetFindMany).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("R09: malformed or duplicate pre-uploaded tokens cannot reach asset binding", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    const malformed = buildPickupFormData();
+    malformed.append("photos", "https://private.example.invalid/secret");
+    expect((await confirmPickup(malformed)).success).toBe(false);
+    expect(txRentalHandoverUpsert).not.toHaveBeenCalled();
+    const duplicated = buildPickupFormData();
+    duplicated.append("photos", "asset:asset-1");
+    duplicated.append("photos", "asset:asset-1");
+    const result = await confirmPickup(duplicated);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片引用无效");
+    expect(attachAssetsToEntity).not.toHaveBeenCalled();
   });
 
   it("重复交接确认不将仍留在订单的旧照片标记待删除", async () => {
