@@ -248,17 +248,19 @@ describe("release lifecycle 静态 gate（FINAL REPAIR B：deploy / restore / ro
     expect(cleanupSwitch).toBeGreaterThan(migrateStep);
   });
 
-  it("restore：DROP 前必须 quiesce 全部 production writers（app + storage-cleanup）", () => {
+  it("restore：DROP 前必须 quiesce 全部 production writers（app + storage-cleanup + async-worker）", () => {
     const stopApp = restoreSh.indexOf("stop_production_writer app");
     const stopCleanup = restoreSh.indexOf("stop_production_writer storage-cleanup");
+    const stopAsync = restoreSh.indexOf("stop_production_writer async-worker");
     const terminate = restoreSh.indexOf("pg_terminate_backend");
     expect(stopApp).toBeGreaterThan(-1);
     expect(stopCleanup).toBeGreaterThan(stopApp);
-    expect(terminate).toBeGreaterThan(stopCleanup);
+    expect(stopAsync).toBeGreaterThan(stopCleanup);
+    expect(terminate).toBeGreaterThan(stopAsync);
     // pre-worker 兼容：writer 容器不存在 = 无写流量（不得 fail）
     expect(restoreSh).toMatch(/容器不存在，无该 writer 写流量/);
     // 失败语义：production writers 保持停止
-    expect(restoreSh).toMatch(/production writers（app \/ storage-cleanup）保持停止状态/);
+    expect(restoreSh).toMatch(/production writers（app \/ storage-cleanup \/ async-worker）保持停止状态/);
     // fail closed（终审修复）：writer 状态未知 ≠ 已停止 / 无容器——
     // discovery 与 stop 验证都必须两阶段（先确认命令成功，再判定状态）
     expect(restoreSh).toMatch(/无法确认 \$\{svc\} writer 状态/);
