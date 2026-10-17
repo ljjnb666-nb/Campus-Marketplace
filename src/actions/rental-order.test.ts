@@ -1453,7 +1453,7 @@ describe("rental-order actions", () => {
       category: "handover",
       file: expect.any(File),
     });
-    // 私有照片以 asset: 引用落库，事务成功后绑定订单
+    // 私有照片以 asset: 引用落库，且同一事务内完成资产绑定
     expect(txRentalHandoverUpsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({
@@ -1466,6 +1466,51 @@ describe("rental-order actions", () => {
       expect.anything(),
       { ownerId: "user-owner", assetIds: ["asset-1"], target: { type: "rentalOrder", id: "order-1" } },
     );
+  });
+
+  it("R10: attachment short-count rejects the whole pickup transaction instead of committing referenced UPLOADED asset", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      ...pendingPickupOrder, handoverRecord: null,
+    });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    attachAssetsToEntity.mockResolvedValueOnce(0);
+    const formData = buildPickupFormData();
+    formData.append("photos", new File(["image-data"], "evidence.png", { type: "image/png" }));
+
+    const result = await confirmPickup(formData);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片状态已变化");
+    // domain 已写入测试事务替身，但同一事务回调抛错，真实 Prisma
+    // interactive transaction 才有权提交/回滚，不能在事务外继续绑定。
+    expect(txRentalHandoverUpsert).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).toHaveBeenCalledOnce();
+    expect(transactionMock).toHaveBeenCalledOnce();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("R10: binding throws inside the same claim transaction and the action never reports success", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({
+      ...pendingPickupOrder, status: "PENDING_INSPECTION",
+      depositAmount: new Prisma.Decimal("50"),
+      rentalListing: { campusId: "campus-1" },
+    });
+    txDamageClaimCreate.mockResolvedValue({ id: "claim-1" });
+    attachAssetsToEntity.mockRejectedValueOnce(new Error("simulated DB attach failure"));
+    const formData = buildSimpleFormData([
+      "orderId", "order-1", "damageDescription", "左侧屏幕破损",
+      "requestedDeduction", "10",
+    ]);
+    formData.append("photos", new File(["image-data"], "claim.png", { type: "image/png" }));
+
+    const result = await submitDamageClaim(formData);
+    expect(result.success).toBe(false);
+    expect(transactionMock).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).toHaveBeenCalledOnce();
+    expect(revalidatePath).not.toHaveBeenCalled();
   });
 
   it("重复交接确认不将仍留在订单的旧照片标记待删除", async () => {
