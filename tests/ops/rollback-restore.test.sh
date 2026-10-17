@@ -168,6 +168,12 @@ case "\$ARGS" in
     exit 0 ;;
   *"compose"*"ps --status running --services"*)
     [[ "\${PS_FAILURE_STUB_MODE:-}" == "verify" ]] && exit 1
+    # 故障定点注入：async-worker 预停检查已通过、cleanup 停止后，
+    # 仅在 cleanup 的二次运行态验证时使 ps 命令失败。不能让前置
+    # async pre-stop gate 截断原本要测试的 cleanup 分支。
+    if [[ "\${PS_FAILURE_STUB_MODE:-}" == "verify-cleanup" ]] && ! state_has storage-cleanup; then
+      exit 1
+    fi
     cat "\$STATE" 2>/dev/null; exit 0 ;;
   *"compose"*"up -d"*"async-worker"*)
     echo "async_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
@@ -781,10 +787,11 @@ RESTORE_STUB_MODE=success make_sandbox
 FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
-CLEANUP_STUB_MODE=pre-worker PS_FAILURE_STUB_MODE=verify run_rollback "${PREV_SHA}"; rc=$?
+CLEANUP_STUB_MODE=pre-worker PS_FAILURE_STUB_MODE=verify-cleanup run_rollback "${PREV_SHA}"; rc=$?
 TEST_APP_URL=""
 [[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 1 "$rc" "pre-worker ps verify failure must fail rollback"
+assert_log_contains "async_stop_called"
 assert_log_contains "cleanup_stop_called"
 assert_log_not_contains "cleanup_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then
