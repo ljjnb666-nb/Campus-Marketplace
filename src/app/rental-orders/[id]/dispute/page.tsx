@@ -33,6 +33,7 @@ export default async function DisputePage({ params }: { params: Promise<{ id: st
       </div>
 
       <RentalActionForm
+        uploadCategory="report"
         action={initiateDispute}
         submitLabel="提交纠纷申请"
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"
