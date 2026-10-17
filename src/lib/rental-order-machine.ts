@@ -436,6 +436,10 @@ export async function confirmPickupTx(
   await prepareActiveAccountMutation(tx, input.userId);
 
   const { orderId, userId, role } = input;
+  // Serialize pickup confirmations with cancellation on the RentalOrder row,
+  // including the first participant's confirmation (which does not change
+  // order.status). A stale read must never recreate a handover on CANCELLED.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: 'PENDING_PICKUP' },
     include: { handoverRecord: true },
@@ -464,10 +468,13 @@ export async function confirmPickupTx(
   });
 
   if (newRecord.ownerConfirmed && newRecord.renterConfirmed) {
-    await tx.rentalOrder.update({
-      where: { id: orderId },
+    const moved = await tx.rentalOrder.updateMany({
+      where: { id: orderId, status: 'PENDING_PICKUP' },
       data: { status: 'IN_RENTAL' },
     });
+    // Throw (rather than return) so the already-written handover record
+    // rolls back with the surrounding transaction if its status changed.
+    if (moved.count !== 1) throw new Error("RENTAL_PICKUP_STATE_CONFLICT");
     await writeStatusLog(tx, {
       orderId,
       fromStatus: 'PENDING_PICKUP',
@@ -636,12 +643,15 @@ export async function cancelRentalOrderTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  // Pair with confirmPickupTx's FOR UPDATE lock. Cancellation must never
+  // overwrite a concurrently completed pickup, nor rely on a stale snapshot.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({ where: { id: input.orderId } });
   if (!order) return { error: "订单不存在" };
   if (!canCancelRentalOrder(order, input.userId)) return { error: "当前状态不允许取消" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const changed = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, status: order.status },
     data: {
       status: 'CANCELLED',
       cancelledById: input.userId,
@@ -650,6 +660,7 @@ export async function cancelRentalOrderTx(
       cancelledAt: new Date(),
     },
   });
+  if (changed.count !== 1) return { error: "订单状态已变化，请重试" };
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
@@ -1191,16 +1202,20 @@ export async function respondDamageClaimTx(
     },
   });
   if (!claim || claim.order.renterId !== input.userId) return { error: "无效请求" };
+  if (claim.order.status !== "PENDING_INSPECTION") {
+    return { error: "订单已进入其他处理状态，不能处理旧索赔" };
+  }
 
-  await tx.rentalDamageClaim.update({
-    where: { id: input.claimId },
+  const responded = await tx.rentalDamageClaim.updateMany({
+    where: { id: input.claimId, resolvedAt: null },
     data: { renterAgreed: input.agreed, renterNote: input.renterNote, resolvedAt: new Date() },
   });
+  if (responded.count !== 1) return { error: "索赔已处理" };
 
   const now = new Date();
   if (input.agreed) {
-    await tx.rentalOrder.update({
-      where: { id: claim.orderId },
+    const changed = await tx.rentalOrder.updateMany({
+      where: { id: claim.orderId, status: "PENDING_INSPECTION" },
       data: {
         depositDeduction: claim.requestedDeduction,
         depositStatus: 'PARTIALLY_REFUNDED', // Simplified
@@ -1208,17 +1223,21 @@ export async function respondDamageClaimTx(
         completedAt: now,
       },
     });
+    // A dispute may have won the RentalOrder lock after our initial read.
+    // Reject the stale claim and roll back its resolvedAt in the same tx.
+    if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
   } else {
     // 租客拒绝索赔：物品已实际归还，订单完成、押金不扣除并进入退回流程；
     // 出租者若不认可，仍可在 COMPLETED 状态发起纠纷（initiateDispute 允许该状态）。
-    await tx.rentalOrder.update({
-      where: { id: claim.orderId },
+    const changed = await tx.rentalOrder.updateMany({
+      where: { id: claim.orderId, status: "PENDING_INSPECTION" },
       data: {
         status: 'COMPLETED',
         completedAt: now,
         depositStatus: depositStatusAfterCompletion(claim.order),
       },
     });
+    if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
   }
 
   if (claim.order.status !== 'COMPLETED') {
