@@ -451,7 +451,7 @@ describe("rental-order actions", () => {
     expect(transactionMock).not.toHaveBeenCalled();
   });
 
-  it("R08: campus datetime-local books the same instant regardless of server timezone", async () => {
+  it("R08: campus datetime-local maps to the same instant across distinct server timezones", async () => {
     txQueryRaw.mockResolvedValue([{
       id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
       pricingUnit: "PER_DAY", minimumDuration: 1, maximumDuration: 30,
@@ -461,20 +461,32 @@ describe("rental-order actions", () => {
     }]);
     txRentalUnavailableFindFirst.mockResolvedValue(null);
     txRentalOrderCreate.mockResolvedValue({ id: "order-local" });
-    const result = await createRentalOrder(
-      { success: false, message: "" },
-      buildCreateFormData({
-        startTime: "2026-10-18T10:00",
-        endTime: "2026-10-19T10:00",
-      }),
-    );
-    expect(result.success).toBe(true);
-    expect(txRentalOrderCreate).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({
-        startTime: new Date("2026-10-18T02:00:00.000Z"),
-        endTime: new Date("2026-10-19T02:00:00.000Z"),
-      }),
-    }));
+    // Regression must actually change process TZ, not just claim timezone
+    // independence while running one test under the CI runner's UTC zone.
+    try {
+      for (const timezone of ["UTC", "America/Los_Angeles", "Asia/Shanghai"]) {
+        vi.stubEnv("TZ", timezone);
+        txRentalOrderCreate.mockClear();
+        const result = await createRentalOrder(
+          { success: false, message: "" },
+          buildCreateFormData({
+            startTime: "2026-10-18T10:00",
+            endTime: "2026-10-19T10:00",
+          }),
+        );
+        expect(result.success, `TZ=${timezone}`).toBe(true);
+        expect(txRentalOrderCreate, `TZ=${timezone}`).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              startTime: new Date("2026-10-18T02:00:00.000Z"),
+              endTime: new Date("2026-10-19T02:00:00.000Z"),
+            }),
+          }),
+        );
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("R08: invalid campus-local date cannot fall back to local Node timezone parsing", async () => {
