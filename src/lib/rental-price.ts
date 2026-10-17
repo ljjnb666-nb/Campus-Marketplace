@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Prisma } from "@prisma/client";
 
 const UNIT_MS: Record<string, number> = {
@@ -32,6 +33,9 @@ export function calculateRentalAmount(
 export function createRentalOrderNo(): string {
   const now = new Date();
   const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
-  const suffix = String(Date.now()).slice(-6);
+  // R06：仅靠 Date.now() 尾 6 位会每 1,000,000ms 周期碰撞，
+  // 同毫秒请求也必然相同。80 位 CSPRNG 后缀消除时间周期相关性，
+  // 数据库 unique 约束保留为最终仲裁。不使用 Math.random。
+  const suffix = randomBytes(10).toString("hex");
   return `RT${date}${suffix}`;
 }
