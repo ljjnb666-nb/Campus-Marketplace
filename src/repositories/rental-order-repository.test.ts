@@ -204,8 +204,11 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
   it("excludes own order for extension requests and fails closed for unsafe peak", async () => {
     await checkTimeConflict(tx, "listing-1", start, end, 1, "order-to-exclude");
     const [parts, ...values] = peakQueryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
-    expect(parts.join("?")).toContain('ro."id" <>');
-    expect(values).toContain("order-to-exclude");
+    // The optional exclusion is a nested Prisma.Sql interpolation, not a
+    // flattened string. Inspect its rendered fragment and bound values.
+    const fragments = values.filter((v): v is Prisma.Sql => Boolean(v && typeof v === "object" && "strings" in v && "values" in v));
+    expect(fragments.some(v => v.sql.includes('ro."id" <>'))).toBe(true);
+    expect(fragments.flatMap(v => v.values)).toContain("order-to-exclude");
     peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1) }]);
     expect((await checkTimeConflict(tx, "listing-1", start, end, 1)).available).toBe(false);
   });
