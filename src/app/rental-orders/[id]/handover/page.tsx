@@ -33,6 +33,7 @@ export default async function HandoverVerificationPage({ params }: { params: Pro
       </div>
 
       <RentalActionForm
+        uploadCategory="handover"
         action={confirmPickup}
         submitLabel="确认已交接"
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"

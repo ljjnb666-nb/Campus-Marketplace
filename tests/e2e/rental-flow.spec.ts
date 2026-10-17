@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import sharp from "sharp";
 import { test, expect } from "@playwright/test";
 import { storageStatePath, uniqueTag, FIXTURE_IMAGES } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
@@ -92,7 +94,26 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await renter.goto(`/rental-orders/${orderId}`);
   await renter.getByRole("link", { name: "确认取货" }).click();
   await renter.waitForURL(/\/handover$/, { timeout: 15_000, waitUntil: "commit" });
-  await renter.locator('input[name="photos"]').first().setInputFiles(FIXTURE_IMAGES.handover);
+  // R09：真实 Next HTTP：提交两张有效 PNG，分别大于 Server Action 默认
+  // 1 MiB 上限。浏览器必须逐张走 /api/upload/images；Action 只拿 token。
+  const pngA = await sharp(randomBytes(768 * 768 * 3), {
+    raw: { width: 768, height: 768, channels: 3 },
+  }).png().toBuffer();
+  const pngB = await sharp(randomBytes(640 * 640 * 3), {
+    raw: { width: 640, height: 640, channels: 3 },
+  }).png().toBuffer();
+  expect(pngA.byteLength).toBeGreaterThan(1024 * 1024);
+  expect(pngB.byteLength).toBeGreaterThan(1024 * 1024);
+  const uploadedRequests: string[] = [];
+  renter.on("request", (request) => {
+    if (request.url().includes("/api/upload/images") && request.method() === "POST") {
+      uploadedRequests.push(request.url());
+    }
+  });
+  await renter.locator('input[name="photos"]').first().setInputFiles([
+    { name: "handover-large-a.png", mimeType: "image/png", buffer: pngA },
+    { name: "handover-large-b.png", mimeType: "image/png", buffer: pngB },
+  ]);
   await renter.getByRole("button", { name: "确认已交接" }).click();
   await expect
     .poll(
@@ -102,9 +123,22 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
         )?.renterConfirmed,
     )
     .toBe(true);
+  expect(uploadedRequests).toHaveLength(2);
+  const renterHandover = await e2eDb().rentalHandoverRecord.findUniqueOrThrow({ where: { orderId } });
+  expect(renterHandover.photos).toHaveLength(2);
+  const renterAssetIds = renterHandover.photos.map((token) => token.replace(/^asset:/, ""));
+  const attached = await e2eDb().uploadedAsset.findMany({
+    where: { id: { in: renterAssetIds } },
+    select: { id: true, status: true, access: true, category: true, rentalOrderId: true },
+  });
+  expect(attached).toHaveLength(2);
+  expect(attached.every((asset) =>
+    asset.status === "ATTACHED" && asset.category === "HANDOVER" &&
+    asset.access === "PRIVATE" && asset.rentalOrderId === orderId
+  )).toBe(true);
   await expect
     .poll(async () => (await e2eDb().uploadedAsset.count({ where: { category: "HANDOVER" } })))
-    .toBeGreaterThanOrEqual(1);
+    .toBeGreaterThanOrEqual(2);
 
   await renter.goto(`/rental-orders/${orderId}`);
   await expect(renter.getByText(/租客：已确认/).first()).toBeVisible();
