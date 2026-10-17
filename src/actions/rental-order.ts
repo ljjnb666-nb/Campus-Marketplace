@@ -3,6 +3,7 @@
 import { withTransaction, prisma } from "@/lib/prisma";
 import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
+import { parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
 import { NewActivityDisabledError } from "@/lib/feature-flags/feature-flag-guard";
@@ -53,6 +54,19 @@ import {
   rentalReviewSchema,
   rentalOrderCreateSchema,
 } from "@/validators/rental";
+
+/**
+ * R08：浏览器 datetime-local 是校园时区墙钟，不得用 Node 的本机 TZ
+ * new Date(no-offset) 解析。明确附带 Z/±hh:mm 的旧 API/测试输入继续
+ * 作为绝对时刻接受，其他不明确/无效的文本 fail closed。
+ */
+function parseRentalDateInput(value: string): Date | null {
+  const campusWallTime = parseMarketplaceDateTimeLocal(value);
+  if (campusWallTime) return campusWallTime;
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return null;
+  const explicit = new Date(value);
+  return Number.isNaN(explicit.getTime()) ? null : explicit;
+}
 
 export type RentalOrderActionState = {
   success: boolean;
@@ -119,11 +133,11 @@ export async function createRentalOrder(_prevState: RentalOrderActionState, form
     return { success: false, message: parsed.error.issues[0]?.message ?? '参数不正确' };
   }
 
-  const startTime = new Date(parsed.data.startTime);
-  const endTime = new Date(parsed.data.endTime);
+  const startTime = parseRentalDateInput(parsed.data.startTime);
+  const endTime = parseRentalDateInput(parsed.data.endTime);
   const quantity = Number(parsed.data.quantity);
 
-  if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+  if (!startTime || !endTime) {
     return { success: false, message: '时间格式不正确' };
   }
   if (startTime >= endTime) {
@@ -359,7 +373,8 @@ export async function requestExtension(formData: FormData): Promise<RentalOrderA
   if (!parsed.success) return { success: false, message: "参数错误" };
 
   const { orderId, newEndTime: endStr } = parsed.data;
-  const newEndTime = new Date(endStr);
+  const newEndTime = parseRentalDateInput(endStr);
+  if (!newEndTime) return { success: false, message: "时间格式不正确" };
 
   try {
     const result = await withTransaction((tx) =>
