@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           npm install --package-lock-only --ignore-scripts --audit=false --save-exact next@16.4.2 eslint-config-next@16.4.2 sharp@0.35.5
-          npm update brace-expansion --package-lock-only --ignore-scripts --audit=false
+          npm update brace-expansion fast-uri source-map-js --package-lock-only --ignore-scripts --audit=false
           node <<'NODE'
           const fs = require('fs');
           const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -60,6 +60,16 @@ jobs:
               throw new Error('unpatched or unverifiable ' + name + '@' + ent.version);
             }
             console.log('PATCHED', name, ent.version);
+          }
+          for (const [pkg, minimum] of [['fast-uri','3.1.8'],['source-map-js','1.2.2']]) {
+            const current = lock.packages['node_modules/' + pkg]?.version;
+            const tuple = (v) => (v || '').split('.').map(Number);
+            const [maj,min,pat] = tuple(current);
+            const [reqMaj,reqMin,reqPat] = tuple(minimum);
+            if (!current || maj !== reqMaj || min < reqMin || (min === reqMin && pat < reqPat)) {
+              throw new Error(pkg + '@' + current + ' < ' + minimum);
+            }
+            console.log('PRODUCTION-PATCHED', pkg, current);
           }
           for (const pkg of ['@next/swc-win32-x64-msvc','@next/swc-linux-x64-gnu','@next/swc-darwin-arm64']) {
             if (!lock.packages['node_modules/' + pkg]?.integrity) throw new Error('missing cross-platform optional package ' + pkg);
