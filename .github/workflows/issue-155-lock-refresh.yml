@@ -20,10 +20,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: true
-      - name: Setup pinned Node 24.12
+      - name: Setup CI-equivalent Node 24.21
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: 24.12.0
+          node-version: 24.21.0
           cache: npm
       - name: Update lockfile using real registry metadata
         shell: bash
@@ -31,6 +31,7 @@ jobs:
           set -euo pipefail
           npm install --package-lock-only --ignore-scripts --audit=false --save-exact next@16.4.2 eslint-config-next@16.4.2 sharp@0.35.5
           npm update brace-expansion fast-uri source-map-js --package-lock-only --ignore-scripts --audit=false
+          npm install --package-lock-only --ignore-scripts --audit=false --include=optional
           node <<'NODE'
           const fs = require('fs');
           const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
@@ -60,6 +61,13 @@ jobs:
               throw new Error('unpatched or unverifiable ' + name + '@' + ent.version);
             }
             console.log('PATCHED', name, ent.version);
+          }
+          // npm 11.19.0 CI requires the complete platform-independent WASM optional subgraph.
+          for (const pkg of ['@emnapi/core','@emnapi/runtime']) {
+            const ent = lock.packages['node_modules/' + pkg];
+            if (!ent?.version || !ent.integrity?.startsWith('sha512-')) {
+              throw new Error('missing optional WASM dependency ' + pkg + ' (CI npm 11.19.0)');
+            }
           }
           for (const [pkg, minimum] of [['fast-uri','3.1.8'],['source-map-js','1.2.2']]) {
             const current = lock.packages['node_modules/' + pkg]?.version;
