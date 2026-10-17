@@ -6,15 +6,15 @@
 #   ./scripts/ops/rollback.sh <previous_git_sha>          # 安全路径（默认）
 #   ./scripts/ops/rollback.sh <previous_git_sha> --hard   # schema 不兼容时
 #
-# 安全路径（默认）：把 release artifact pair（app + storage-cleanup）切回旧
+# 安全路径（默认）：把 release artifact set（app + storage-cleanup + async-worker）切回旧
 # 镜像；数据库 schema 保持向前（向前兼容 migration 约束见 docs/ROLLBACK.md），
 # 完全不触碰数据库。
 #
 # --hard：仅当旧 release 与当前 schema 不兼容、需回退数据时使用：
 #   1. 先执行 restore-production-postgres.sh（强确认、停写【app +
-#      storage-cleanup 全部 production writers】、SHA256、完整性检查；
+#      storage-cleanup + async-worker 全部 production writers】、SHA256、完整性检查；
 #      脚本任一步失败立即非 0 退出）
-#   2. 恢复成功才允许按目标 release policy 切换 writers（app + cleanup）
+#   2. 恢复成功才允许按目标 release policy 切换 writers（app + cleanup + async-worker）
 #   3. 最后 RELEASE READINESS GATE 验证
 # 恢复失败 → 立即非 0 退出，writers 切换绝不执行（全部保持停止，人工介入）。
 # 绝不自动执行 destructive down migration。
@@ -78,6 +78,28 @@ else
 fi
 echo "[rollback] cleanup target mode = ${CLEANUP_TARGET_MODE}（${CLEANUP_TARGET_IMAGE}）"
 
+# async-worker 也是数据库写入方。旧版本没有 async-worker 镜像时必须
+# 保持它停止；旧版本有镜像时必须切换并验证其运行镜像，不能遗留 newer
+# worker。镜像缺失模式沿用 cleanup 的早期 release 兼容策略。
+ASYNC_TARGET_IMAGE="campus-marketplace-async-worker:${PREVIOUS_SHA}"
+# A missing local image is NOT proof that the target release never had the
+# service. Prove its topology against the exact immutable Git commit before
+# allowing any production side effect. A pruned post-async image must block.
+if ! git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+  echo "[rollback][FAIL] 无法验证目标 release commit；拒绝推断 async-worker 拓扑" >&2
+  exit 1
+fi
+if git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}:scripts/ops/async-worker.ts" 2>/dev/null; then
+  ASYNC_TARGET_MODE="post-async"
+  if ! docker image inspect "${ASYNC_TARGET_IMAGE}" >/dev/null 2>&1; then
+    echo "[rollback][FAIL] 目标 release 包含 async-worker，但其 immutable image 不存在，禁止降级为 pre-async" >&2
+    exit 1
+  fi
+else
+  ASYNC_TARGET_MODE="pre-async"
+fi
+echo "[rollback] async-worker target mode = ${ASYNC_TARGET_MODE}（${ASYNC_TARGET_IMAGE}）"
+
 APP_URL="${APP_URL:-$(app_url_from_env)}"
 # OPS_HEALTH_TIMEOUT 仅调整门禁等待预算（不能把失败变成功）：
 # 必须是正整数，否则回默认；正则白名单保证无注入面。
@@ -132,7 +154,7 @@ switch_app_to() {
 
 # -----------------------------------------------------------------------------
 # cleanup worker 切换的唯一路径（safe 与 --hard 共用，app 切换之后执行）：
-# release identity 必须成对——APP_RELEASE 与 CLEANUP_RELEASE 不允许 split。
+# release identity 必须一致——APP_RELEASE、CLEANUP_RELEASE 与 ASYNC_RELEASE 不允许 split。
 # post-worker 目标：config --images 精确断言 + up + running 验证 + 运行容器
 # exact image 验证（cleanup 无 HTTP release endpoint，runtime identity 只能
 # 由 authoritative runtime inspection 提供，同 deploy.sh 的验证链）；
@@ -197,6 +219,64 @@ switch_cleanup_to() {
   CLEANUP_LOG_TAG="running"
 }
 
+# 停止旧 async writer：在 app 开始切换前 quiesce，避免跨版本
+# job/outbox 处理与业务写入。失败和状态未知均 fail closed。
+stop_async_before_switch() {
+  if ! compose_run stop async-worker; then
+    echo "[rollback][FAIL] async-worker 停止失败，拒绝切换 release" >&2
+    exit 1
+  fi
+  local running_services=""
+  if ! running_services="$(compose_run ps --status running --services)"; then
+    echo "[rollback][FAIL] async-worker 运行状态无法确认，拒绝切换 release" >&2
+    exit 1
+  fi
+  if printf '%s\n' "${running_services}" | grep -qx "async-worker"; then
+    echo "[rollback][FAIL] 旧 async-worker 仍在运行，拒绝切换 release" >&2
+    exit 1
+  fi
+}
+
+ASYNC_LOG_TAG=""
+switch_async_to() {
+  local target_sha="$1" resolved_images="" running_services="" runtime_json=""
+  if [[ "${ASYNC_TARGET_MODE}" == "pre-async" ]]; then
+    # stop_async_before_switch 已确认停稳；此路径不再重启。
+    ASYNC_LOG_TAG="stopped_pre_async_release"
+    return 0
+  fi
+
+  if ! resolved_images="$(GIT_SHA="${target_sha}" compose_run config --images)"; then
+    echo "[rollback][FAIL] 无法解析 async-worker 镜像，拒绝回滚成功" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${resolved_images}" | grep -Fxq "campus-marketplace-async-worker:${target_sha}"; then
+    echo "[rollback][FAIL] 解析后的 async-worker 镜像与目标 SHA 不一致" >&2
+    exit 1
+  fi
+  if ! GIT_SHA="${target_sha}" compose_run up -d --no-deps async-worker; then
+    echo "[rollback][FAIL] async-worker 启动失败" >&2
+    exit 1
+  fi
+  if ! running_services="$(compose_run ps --status running --services)"; then
+    echo "[rollback][FAIL] 无法核验 async-worker 是否运行" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${running_services}" | grep -qx "async-worker"; then
+    echo "[rollback][FAIL] async-worker 未运行，拒绝宣告成功" >&2
+    exit 1
+  fi
+  if ! runtime_json="$(GIT_SHA="${target_sha}" compose_run ps --format json async-worker)"; then
+    echo "[rollback][FAIL] 无法查询 async-worker 运行镜像" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${runtime_json}" | grep -Fq "campus-marketplace-async-worker:${target_sha}"; then
+    echo "[rollback][FAIL] async-worker 运行镜像不是目标 release" >&2
+    exit 1
+  fi
+  ASYNC_LOG_TAG="running"
+}
+
 if [[ "${MODE}" == "--hard" ]]; then
   echo "[rollback] --hard：先恢复最近备份到生产库（仅在旧 release 与当前 schema 不兼容时）" >&2
   BACKUP_DIR="$(require_env_var BACKUP_DIR)"
@@ -214,7 +294,7 @@ if [[ "${MODE}" == "--hard" ]]; then
 
   # 关键路径：恢复失败必须阻断 writers 切换。restore-production-postgres.sh
   # 任一步失败都以非 0 退出，这里显式检查，绝不吞错。失败状态下全部
-  # production writers（app / storage-cleanup）保持停止。
+  # production writers（app / storage-cleanup / async-worker）保持停止。
   if ! bash "${RESTORE_SCRIPT}" \
       --production-restore \
       --backup-file "${latest_dump}" \
@@ -227,9 +307,12 @@ fi
 
 # release artifact pair 切回目标 release（safe 路径唯一步骤；hard 路径在恢复
 # 成功后到达这里）：先 app，后 cleanup（release identity 成对，不允许 split）
+echo "[rollback] 先停止旧 async-worker，再切换目标 release ${PREVIOUS_SHA}"
+stop_async_before_switch
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
 switch_app_to "${PREVIOUS_SHA}"
 switch_cleanup_to "${PREVIOUS_SHA}"
+switch_async_to "${PREVIOUS_SHA}"
 
 # RELEASE READINESS GATE（RB-06）：回滚成功同样必须通过严格发布门禁——
 # health(ok + PREVIOUS_SHA) 且 ready(ready + PREVIOUS_SHA + DB/Redis/双 bucket 全 ok)。
@@ -241,9 +324,18 @@ if ! run_release_gate "${PREVIOUS_SHA}"; then
   exit 1
 fi
 
+# 记录完整 runtime artifact 集合。pre-async / pre-cleanup 只能记录已停止，
+# 绝不写不存在的 IMAGE 或把未确认的 worker 标记为 running。
+RELEASE_LOG="$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA}"
 if [[ "${CLEANUP_TARGET_MODE}" == "pre-worker" ]]; then
-  echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA} CLEANUP=${CLEANUP_LOG_TAG} MODE=${MODE:-safe} READINESS=ready" >> "${PROJECT_DIR}/.releases.log"
+  RELEASE_LOG="${RELEASE_LOG} CLEANUP=${CLEANUP_LOG_TAG}"
 else
-  echo "$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP=${CLEANUP_LOG_TAG} MODE=${MODE:-safe} READINESS=ready" >> "${PROJECT_DIR}/.releases.log"
+  RELEASE_LOG="${RELEASE_LOG} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP=${CLEANUP_LOG_TAG}"
 fi
-echo "[rollback] SUCCESS → ${PREVIOUS_SHA}（cleanup=${CLEANUP_LOG_TAG}）"
+if [[ "${ASYNC_TARGET_MODE}" == "pre-async" ]]; then
+  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER=${ASYNC_LOG_TAG}"
+else
+  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER=${ASYNC_LOG_TAG}"
+fi
+printf '%s MODE=%s READINESS=ready\n' "${RELEASE_LOG}" "${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
+echo "[rollback] SUCCESS → ${PREVIOUS_SHA}（cleanup=${CLEANUP_LOG_TAG}, async-worker=${ASYNC_LOG_TAG}）"
