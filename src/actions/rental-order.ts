@@ -35,7 +35,6 @@ import {
   attachAssetsToEntity,
   buildAssetReference,
   isImageValidationError,
-  markAssetsForValuesPendingDelete,
   parseAssetReference,
   uploadImageAsset,
   UPLOAD_LIMITS,
@@ -226,11 +225,6 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "handover", user.id);
 
-    const previousRecord = await prisma.rentalHandoverRecord.findUnique({
-      where: { orderId },
-      select: { photos: true },
-    });
-
     const result = await withTransaction((tx) =>
       confirmPickupTx(tx, {
         orderId,
@@ -245,13 +239,9 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
 
     await attachOrderPhotos(user.id, orderId, photoTokens);
 
-    // 再次确认时被替换的旧照片标记待删除
-    if (previousRecord) {
-      const removed = previousRecord.photos.filter((p) => !photoTokens.includes(p));
-      if (removed.length > 0) {
-        await markAssetsForValuesPendingDelete(user.id, removed).catch(() => undefined);
-      }
-    }
+    // 私有照片属于订单证据；本次 FormData 不包含某张历史照片，
+    // 不代表数据库或纠纷/索赔已不再引用它。禁止在确认动作中抢先
+    // PENDING_DELETE；历史资产只能由引用/hold-aware 的 retention 管理。
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "confirmPickup", error });
     return {
@@ -302,11 +292,6 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "return", user.id);
 
-    const previousRecord = await prisma.rentalReturnRecord.findUnique({
-      where: { orderId },
-      select: { photos: true },
-    });
-
     const result = await withTransaction((tx) =>
       confirmReturnTx(tx, {
         orderId,
@@ -323,13 +308,9 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
 
     await attachOrderPhotos(user.id, orderId, photoTokens);
 
-    // 再次确认时被替换的旧照片标记待删除
-    if (previousRecord) {
-      const removed = previousRecord.photos.filter((p) => !photoTokens.includes(p));
-      if (removed.length > 0) {
-        await markAssetsForValuesPendingDelete(user.id, removed).catch(() => undefined);
-      }
-    }
+    // 私有照片属于订单证据；本次 FormData 不包含某张历史照片，
+    // 不代表数据库或纠纷/索赔已不再引用它。禁止在确认动作中抢先
+    // PENDING_DELETE；历史资产只能由引用/hold-aware 的 retention 管理。
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "confirmReturn", error });
     return {
