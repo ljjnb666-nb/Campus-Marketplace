@@ -74,6 +74,18 @@ export function RentalActionForm({
     e.preventDefault();
     setErrorMsg(null);
     const formData = new FormData(e.currentTarget);
+    if (uploadCategory) {
+      // FileList 是用户当前选择的真实文件权威。显式快照这些文件，
+      // 避免合成 change 事件 / 跨 realm FormData 序列化把已选文件
+      // 错当成空 File；同时保证 Server Action 最终不会收到原始二进制。
+      for (const input of e.currentTarget.querySelectorAll<HTMLInputElement>('input[type="file"][name]')) {
+        if (input.disabled || (input.name !== "photos" && input.name !== "evidencePhotos")) continue;
+        formData.delete(input.name);
+        for (const file of input.files ?? []) {
+          if (file.size > 0) formData.append(input.name, file);
+        }
+      }
+    }
     startTransition(async () => {
       try {
         if (uploadCategory) {
