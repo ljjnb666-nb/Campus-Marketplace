@@ -1,6 +1,7 @@
 "use server";
 
-import { withTransaction, prisma } from "@/lib/prisma";
+import { withTransaction } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
@@ -30,7 +31,6 @@ import {
   submitRentalReviewTx,
 } from "@/lib/rental-order-machine";
 import {
-  asAssetTx,
   AssetServiceError,
   attachAssetsToEntity,
   buildAssetReference,
@@ -63,7 +63,7 @@ export type RentalOrderActionState = {
 /**
  * 上传订单相关私有照片（handover / return / report）。
  * 服务端强制 maxCount；返回 asset: 引用（禁止永久公开 URL），
- * 订单事务成功后再 attach 到 RentalOrder，失败则由 orphan cleanup 回收。
+ * 上传先完成，业务引用与 UploadedAsset 绑定随后在同一事务提交。
  */
 async function uploadOrderPhotos(
   files: FormDataEntryValue[],
@@ -85,17 +85,22 @@ async function uploadOrderPhotos(
   );
 }
 
-/** 事务成功后将照片资源绑定到订单（幂等；失败留待 orphan cleanup 回收） */
-async function attachOrderPhotos(ownerId: string, orderId: string, tokens: string[]): Promise<void> {
+/** R10：照片引用与 ATTACHED 状态必须属于同一数据库事务。 */
+async function attachOrderPhotos(tx: Prisma.TransactionClient, ownerId: string, orderId: string, tokens: string[]): Promise<void> {
   const assetIds = tokens
     .map((token) => parseAssetReference(token))
     .filter((id): id is string => id !== null);
   if (assetIds.length === 0) return;
-  await attachAssetsToEntity(asAssetTx(prisma), {
+  const attached = await attachAssetsToEntity(tx, {
     ownerId,
     assetIds,
     target: { type: "rentalOrder", id: orderId },
   });
+  // 抛错而非返回错误：强制回滚同一 tx 内已写入的交接/索赔/纠纷引用。
+  // UPLOADED 数量不足代表过期、被删除或已被另一请求占用，不能成功提交。
+  if (attached !== new Set(assetIds).size) {
+    throw new AssetServiceError("ASSET_BIND_CONFLICT", "照片状态已变化，请重新上传");
+  }
 }
 
 function photoUploadErrorMessage(error: unknown, fallback: string): string {
@@ -225,19 +230,15 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "handover", user.id);
 
-    const result = await withTransaction((tx) =>
-      confirmPickupTx(tx, {
-        orderId,
-        userId: user.id,
-        role,
-        photos: photoTokens,
-        currentCondition,
-        knownIssues,
-      }),
-    );
-    if ('error' in result) return { success: false, message: result.error as string };
-
-    await attachOrderPhotos(user.id, orderId, photoTokens);
+    const result = await withTransaction(async (tx) => {
+      const outcome = await confirmPickupTx(tx, {
+        orderId, userId: user.id, role, photos: photoTokens, currentCondition, knownIssues,
+      });
+      if ("error" in outcome) return outcome;
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      return outcome;
+    });
+    if ("error" in result) return { success: false, message: result.error as string };
 
     // 私有照片属于订单证据；本次 FormData 不包含某张历史照片，
     // 不代表数据库或纠纷/索赔已不再引用它。禁止在确认动作中抢先
@@ -292,21 +293,16 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "return", user.id);
 
-    const result = await withTransaction((tx) =>
-      confirmReturnTx(tx, {
-        orderId,
-        userId: user.id,
-        role,
-        photos: photoTokens,
-        hasDamage,
-        needsCleaning,
-        accessoriesComplete,
-        inspectionNote,
-      }),
-    );
-    if ('error' in result) return { success: false, message: result.error as string };
-
-    await attachOrderPhotos(user.id, orderId, photoTokens);
+    const result = await withTransaction(async (tx) => {
+      const outcome = await confirmReturnTx(tx, {
+        orderId, userId: user.id, role, photos: photoTokens,
+        hasDamage, needsCleaning, accessoriesComplete, inspectionNote,
+      });
+      if ("error" in outcome) return outcome;
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      return outcome;
+    });
+    if ("error" in result) return { success: false, message: result.error as string };
 
     // 私有照片属于订单证据；本次 FormData 不包含某张历史照片，
     // 不代表数据库或纠纷/索赔已不再引用它。禁止在确认动作中抢先
@@ -437,18 +433,15 @@ export async function submitDamageClaim(formData: FormData): Promise<RentalOrder
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "report", user.id);
 
-    const result = await withTransaction((tx) =>
-      submitDamageClaimTx(tx, {
-        orderId,
-        userId: user.id,
-        damageDescription,
-        requestedDeduction,
-        photos: photoTokens,
-      }),
-    );
-    if ('error' in result) return { success: false, message: result.error as string };
-
-    await attachOrderPhotos(user.id, orderId, photoTokens);
+    const result = await withTransaction(async (tx) => {
+      const outcome = await submitDamageClaimTx(tx, {
+        orderId, userId: user.id, damageDescription, requestedDeduction, photos: photoTokens,
+      });
+      if ("error" in outcome) return outcome;
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      return outcome;
+    });
+    if ("error" in result) return { success: false, message: result.error as string };
   } catch (error) {
     logger.error("rental-order action failed", "rental-order", { action: "submitDamageClaim", error });
     return {
@@ -501,12 +494,15 @@ export async function initiateDispute(formData: FormData): Promise<RentalOrderAc
   try {
     const evidenceTokens = await uploadOrderPhotos(formData.getAll("evidencePhotos"), "report", user.id);
 
-    const result = await withTransaction((tx) =>
-      initiateDisputeTx(tx, { orderId, userId: user.id, reason, evidencePhotos: evidenceTokens }),
-    );
-    if ('error' in result) return { success: false, message: result.error as string };
-
-    await attachOrderPhotos(user.id, orderId, evidenceTokens);
+    const result = await withTransaction(async (tx) => {
+      const outcome = await initiateDisputeTx(tx, {
+        orderId, userId: user.id, reason, evidencePhotos: evidenceTokens,
+      });
+      if ("error" in outcome) return outcome;
+      await attachOrderPhotos(tx, user.id, orderId, evidenceTokens);
+      return outcome;
+    });
+    if ("error" in result) return { success: false, message: result.error as string };
   } catch (error) {
     if (error instanceof NewActivityDisabledError) {
       return { success: false, message: error.message };
