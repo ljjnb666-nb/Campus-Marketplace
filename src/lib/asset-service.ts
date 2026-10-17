@@ -78,7 +78,8 @@ export type AssetServiceErrorCode =
   | "ASSET_RECORD_FAILED"
   | "INVALID_ASSET_REFERENCE"
   | "ASSET_CATEGORY_MISMATCH"
-  | "ASSET_ALREADY_ATTACHED";
+  | "ASSET_ALREADY_ATTACHED"
+  | "ASSET_BIND_CONFLICT";
 
 export class AssetServiceError extends Error {
   readonly code: AssetServiceErrorCode;
