@@ -231,7 +231,7 @@ stop_async_before_switch() {
     echo "[rollback][FAIL] async-worker 运行状态无法确认，拒绝切换 release" >&2
     exit 1
   fi
-  if printf '%s\\n' "${running_services}" | grep -qx "async-worker"; then
+  if printf '%s\n' "${running_services}" | grep -qx "async-worker"; then
     echo "[rollback][FAIL] 旧 async-worker 仍在运行，拒绝切换 release" >&2
     exit 1
   fi
@@ -250,7 +250,7 @@ switch_async_to() {
     echo "[rollback][FAIL] 无法解析 async-worker 镜像，拒绝回滚成功" >&2
     exit 1
   fi
-  if ! printf '%s\\n' "${resolved_images}" | grep -Fxq "campus-marketplace-async-worker:${target_sha}"; then
+  if ! printf '%s\n' "${resolved_images}" | grep -Fxq "campus-marketplace-async-worker:${target_sha}"; then
     echo "[rollback][FAIL] 解析后的 async-worker 镜像与目标 SHA 不一致" >&2
     exit 1
   fi
@@ -262,7 +262,7 @@ switch_async_to() {
     echo "[rollback][FAIL] 无法核验 async-worker 是否运行" >&2
     exit 1
   fi
-  if ! printf '%s\\n' "${running_services}" | grep -qx "async-worker"; then
+  if ! printf '%s\n' "${running_services}" | grep -qx "async-worker"; then
     echo "[rollback][FAIL] async-worker 未运行，拒绝宣告成功" >&2
     exit 1
   fi
@@ -270,7 +270,7 @@ switch_async_to() {
     echo "[rollback][FAIL] 无法查询 async-worker 运行镜像" >&2
     exit 1
   fi
-  if ! printf '%s\\n' "${runtime_json}" | grep -Fq "campus-marketplace-async-worker:${target_sha}"; then
+  if ! printf '%s\n' "${runtime_json}" | grep -Fq "campus-marketplace-async-worker:${target_sha}"; then
     echo "[rollback][FAIL] async-worker 运行镜像不是目标 release" >&2
     exit 1
   fi
@@ -337,5 +337,5 @@ if [[ "${ASYNC_TARGET_MODE}" == "pre-async" ]]; then
 else
   RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER=${ASYNC_LOG_TAG}"
 fi
-printf '%s MODE=%s READINESS=ready\\n' "${RELEASE_LOG}" "${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
+printf '%s MODE=%s READINESS=ready\n' "${RELEASE_LOG}" "${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
 echo "[rollback] SUCCESS → ${PREVIOUS_SHA}（cleanup=${CLEANUP_LOG_TAG}, async-worker=${ASYNC_LOG_TAG}）"
