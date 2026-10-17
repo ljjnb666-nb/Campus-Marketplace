@@ -537,9 +537,9 @@ echo "== 5c-async. async-worker 停止后仍运行 → 拒绝破坏性 DB 操作
 make_sandbox
 printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
 echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
-OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" STOP_FAILURE_STUB_MODE=async-worker \\
-  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \\
-    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \\
+OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" STOP_FAILURE_STUB_MODE=async-worker \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
     --target-db campus_marketplace >/tmp/rp-async-stopfail.$ 2>&1; rc=$?
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "async-worker stop not verified"
