@@ -540,7 +540,7 @@ echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-
 OPS_PROJECT_DIR="${SANDBOX}" PATH="${SANDBOX}/bin:${PATH}" STOP_FAILURE_STUB_MODE=async-worker \
   bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
     --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
-    --target-db campus_marketplace >/tmp/rp-async-stopfail.$ 2>&1; rc=$?
+    --target-db campus_marketplace >/tmp/rp-async-stopfail.$$ 2>&1; rc=$?
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "async-worker stop not verified"
 assert_log_contains "app_stop_called"
