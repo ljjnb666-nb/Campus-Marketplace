@@ -179,6 +179,64 @@ describe.skipIf(!integrationDatabaseUrl)("R10: pickup evidence and asset binding
       .toBe("PENDING_DELETE");
   });
 
+  it("R10-PG-04: cleanup transaction wins a genuine asset-row lock race; handover write rolls back", async () => {
+    const orderId = await fixtureOrder();
+    const assetId = await fixtureAsset(renterId);
+
+    let signalLocked!: (pid: number) => void;
+    const assetLocked = new Promise<number>((resolve) => { signalLocked = resolve; });
+    let releaseCleanup!: () => void;
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+
+    // Cleanup T1 acquires the real UploadedAsset row lock, updates to
+    // PENDING_DELETE, then holds the uncommitted row while the Server Action
+    // reaches its CAS update. Same conditional UPDATE shape as cleanup.
+    const cleanupTx = raw.$transaction(async (tx) => {
+      const changed = await tx.uploadedAsset.updateMany({
+        where: { id: assetId, status: "UPLOADED" },
+        data: { status: "PENDING_DELETE" },
+      });
+      expect(changed.count).toBe(1);
+      const [{ pid }] = await tx.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      signalLocked(pid);
+      await cleanupGate;
+    }, { timeout: 10_000 });
+
+    const blockerPid = await assetLocked;
+    const actionPromise = submit(orderId, assetId);
+
+    // Deterministic lock barrier scoped to this cleanup transaction backend.
+    // Waits caused by other concurrently executing Vitest files cannot match.
+    let observedWait = false;
+    try {
+      const deadline = Date.now() + 6_000;
+      while (Date.now() < deadline) {
+        const rows = await raw.$queryRaw<{ waiting: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity a
+            WHERE a.wait_event_type = 'Lock'
+              AND ${blockerPid} = ANY(pg_blocking_pids(a.pid))
+          ) AS waiting
+        `;
+        if (rows[0]?.waiting) { observedWait = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      releaseCleanup();
+    }
+
+    const [result] = await Promise.all([actionPromise, cleanupTx.then(() => undefined)]);
+    expect(observedWait).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.message).toContain("照片状态已变化");
+    expect(await raw.rentalHandoverRecord.findUnique({ where: { orderId } })).toBeNull();
+    const order = await raw.rentalOrder.findUniqueOrThrow({ where: { id: orderId } });
+    expect(order.status).toBe("PENDING_PICKUP");
+    const asset = await raw.uploadedAsset.findUniqueOrThrow({ where: { id: assetId } });
+    expect(asset.status).toBe("PENDING_DELETE");
+    expect(asset.rentalOrderId).toBeNull();
+  });
+
   it("R10-PG-03: successful pickup persists handover reference and ATTACHED private asset in the same commit", async () => {
     const orderId = await fixtureOrder();
     const assetId = await fixtureAsset(renterId);
