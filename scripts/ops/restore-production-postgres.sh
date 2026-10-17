@@ -13,7 +13,7 @@
 #   1. 参数与环境校验（--production-restore 缺失即拒绝；--target-db 必须与
 #      .env.production 的 POSTGRES_DB 完全一致——这是操作员对生产目标的显式确认）
 #   2. 备份文件存在性 + SHA256 强校验（.sha256 伴随文件必须存在且一致）
-#   3. 停止全部生产 DB writers（app + storage-cleanup，FINAL REPAIR B：
+#   3. 停止全部生产 DB writers（app + storage-cleanup + async-worker，Phase 9A：
 #      cleanup worker 自本 release 起也是 DB writer）并逐一验证已停止；
 #      容器不存在 = 无该 writer（pre-worker release 兼容）；
 #      任一存在且无法停止 → FAIL CLOSED，绝不继续 DROP/RESTORE
@@ -22,11 +22,11 @@
 #   6. 完整性检查：业务核心表逐一 COUNT、_prisma_migrations 已完成迁移数 > 0、
 #      孤儿引用抽检
 #   7. 成功：production writers 保持停止状态，打印后续步骤（rollback.sh --hard
-#      会按目标 release policy 继续切换 app / storage-cleanup）
+#      会按目标 release policy 继续切换 app / storage-cleanup / async-worker）
 #      失败：非 0 退出，production writers 同样全部保持停止，绝不带坏库恢复服务
 #
 # 本脚本从不重启任何 writer、从不执行任何 migration（恢复出的库自带
-# _prisma_migrations）。任何失败状态下都不要手工重启 app / storage-cleanup
+# _prisma_migrations）。任何失败状态下都不要手工重启 app / storage-cleanup / async-worker
 # ——先人工检查，再决定恢复备份或修复。
 # =============================================================================
 set -euo pipefail
@@ -53,16 +53,16 @@ done
 # 失败消息卫生：必须区分"破坏性恢复是否已可能发生"——
 #   - quiesce 完成前的失败：绝不声称 writers 已停止（此时可能有 writer 仍在
 #     运行，或尚未进入停止阶段），只声明未执行任何破坏性恢复操作；
-#   - quiesce 成功后（app + storage-cleanup 均验证停止）的失败：两个
+#   - quiesce 成功后（app + storage-cleanup + async-worker 均验证停止）的失败：全部
 #     production writers 确实保持停止。
-# WRITERS_QUIESCED 仅在两个 writer 都验证停止后置 1。
+# WRITERS_QUIESCED 仅在全部三个 writer 都验证停止后置 1。
 # -----------------------------------------------------------------------------
 WRITERS_QUIESCED=0
 
 fail() {
   echo "[prod-restore] FAILED: $1" >&2
   if [[ "${WRITERS_QUIESCED}" == "1" ]]; then
-    echo "[prod-restore] production writers（app / storage-cleanup）保持停止状态，人工检查后再决定下一步" >&2
+    echo "[prod-restore] production writers（app / storage-cleanup / async-worker）保持停止状态，人工检查后再决定下一步" >&2
   else
     echo "[prod-restore] 未执行任何破坏性恢复操作；写流量状态未完全确认，人工检查全部 writers 后再继续" >&2
   fi
@@ -91,7 +91,7 @@ echo "[prod-restore] 校验 SHA256..."
 echo "[prod-restore] SHA256 一致"
 
 # -----------------------------------------------------------------------------
-# 停止全部生产 DB writers（FINAL REPAIR B）：app + storage-cleanup 都是
+# 停止全部生产 DB writers（Phase 9A）：app + storage-cleanup + async-worker 都是
 # 数据库写入方，覆盖生产库之前必须全部 quiesce。
 # 语义（全部 fail closed——writer 状态未知 ≠ writer 已停止）：
 #   - compose ps 命令失败 → FAIL CLOSED（绝不把命令失败当成"无容器/已停止"）
@@ -128,11 +128,12 @@ stop_production_writer() {
 
 stop_production_writer app
 stop_production_writer storage-cleanup
-# 两个 writer 均验证停止：此后失败的恢复操作不会造成新的写流量
+stop_production_writer async-worker
+# 三个 writer 均验证停止：此后失败的恢复操作不会造成新的写流量
 WRITERS_QUIESCED=1
 
 # 终止现存连接——此时全部 production writers（app / storage-cleanup）已验证停止
-echo "[prod-restore] 终止 ${TARGET_DB} 现存连接（所有 production writers 已停止）"
+echo "[prod-restore] 终止 ${TARGET_DB} 现存连接（全部 production writers 已停止）"
 compose_run exec -T postgres psql -U "${POSTGRES_USER}" -d postgres -v ON_ERROR_STOP=1 <<SQL \
   || fail "无法终止目标库现存连接"
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity
@@ -182,7 +183,7 @@ echo "[prod-restore] ============================================"
 echo "[prod-restore] PRODUCTION RESTORE OK → ${TARGET_DB}"
 echo "[prod-restore] production writers（app / storage-cleanup）当前均处于停止状态。"
 echo "[prod-restore] 后续按目标 release 的 runtime topology 恢复："
-echo "[prod-restore]   post-worker release：$(compose_cmd) start app && $(compose_cmd) start storage-cleanup"
-echo "[prod-restore]   pre-worker 目标 release：仅 $(compose_cmd) start app（storage-cleanup 保持停止）"
+echo "[prod-restore]   post-worker release：人工核对目标 image/runtime topology 后切换 app / storage-cleanup / async-worker"
+echo "[prod-restore]   pre-worker 目标 release：只启动目标版本实际存在的 writers（其余保持停止）"
 echo "[prod-restore] 或直接运行 rollback.sh --hard 的后续流程（会按目标 release policy 切换 writers）。"
 echo "[prod-restore] ============================================"
