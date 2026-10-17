@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   calculateRentalAmount,
   calculateRentalDuration,
@@ -53,7 +53,22 @@ describe("rental-price", () => {
     ).toThrow("RENTAL_QUANTITY_INVALID");
   });
 
-  it("creates rental order numbers with RT prefix", () => {
-    expect(createRentalOrderNo()).toMatch(/^RT\d{8}\d{6}$/);
+  it("creates rental order numbers with RT date prefix and opaque entropy", () => {
+    expect(createRentalOrderNo()).toMatch(/^RT\d{8}[a-f0-9]{20}$/);
+  });
+
+  it("R06: same-millisecond and 1,000,000ms-apart requests avoid periodic collisions", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-10-17T04:00:00Z"));
+      const sameMillisecond = Array.from({ length: 256 }, () => createRentalOrderNo());
+      expect(new Set(sameMillisecond).size).toBe(sameMillisecond.length);
+      vi.setSystemTime(new Date("2026-10-17T04:16:40Z"));
+      const afterPeriod = Array.from({ length: 256 }, () => createRentalOrderNo());
+      expect(new Set([...sameMillisecond, ...afterPeriod]).size).toBe(512);
+      expect(afterPeriod[0]).toMatch(/^RT\d{8}[a-f0-9]{20}$/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
