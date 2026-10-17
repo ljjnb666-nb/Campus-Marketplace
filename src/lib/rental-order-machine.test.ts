@@ -470,6 +470,22 @@ describe("rental-order-machine", () => {
     expect(txNotificationCreateMany).not.toHaveBeenCalled();
   });
 
+  it("confirmed participant cannot overwrite the same handover record on retry", async () => {
+    const tx = buildTx();
+    tx.rentalOrder.findFirst.mockResolvedValue({
+      id: "order-1", status: "PENDING_PICKUP", ownerId: "user-owner",
+      renterId: "user-renter",
+      handoverRecord: { ownerConfirmed: true, renterConfirmed: false, photos: ["asset:historical"] },
+    });
+    const result = await confirmPickupTx(asTx(tx), {
+      orderId: "order-1", userId: "user-owner", role: "owner", photos: [],
+    });
+    expect(result).toEqual({ error: "不能重复确认" });
+    expect(tx.$queryRaw).toHaveBeenCalledOnce();
+    expect(tx.rentalHandoverRecord.upsert).not.toHaveBeenCalled();
+    expect(tx.rentalOrder.updateMany).not.toHaveBeenCalled();
+  });
+
   it("pickup CAS mismatch throws so a handover upsert is rolled back with the transaction", async () => {
     const tx = buildTx();
     tx.rentalOrder.findFirst.mockResolvedValue({
