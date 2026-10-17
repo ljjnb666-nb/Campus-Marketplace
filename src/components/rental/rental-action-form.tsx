@@ -26,7 +26,10 @@ async function uploadEvidenceForAction(formData: FormData, category: "handover" 
   const pending: Array<{ key: typeof keys[number]; file: File }> = [];
   for (const key of keys) {
     for (const value of formData.getAll(key)) {
-      if (!(value instanceof File) || value.size === 0) continue;
+      // File can originate from a different JS realm (e.g. a browser form
+      // implementation or a test DOM). The serialized FormData value is
+      // authoritative; avoid realm-specific instanceof checks.
+      if (typeof value === "string" || value.size === 0) continue;
       pending.push({ key, file: value });
     }
   }
