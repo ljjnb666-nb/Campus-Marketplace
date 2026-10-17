@@ -348,7 +348,7 @@ describe("rental-order-machine", () => {
     expect(result).toEqual({ success: true });
     expect(tx.rentalDamageClaim.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "claim-1" },
+        where: { id: "claim-1", resolvedAt: null },
         data: expect.objectContaining({ renterAgreed: false }),
       }),
     );
