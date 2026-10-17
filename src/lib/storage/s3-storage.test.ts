@@ -9,6 +9,7 @@ vi.mock("@aws-sdk/s3-request-presigner", () => ({
 }));
 
 import { S3Storage } from "@/lib/storage/s3-storage";
+import { logger } from "@/lib/logger";
 
 /** S3Client 桩：记录发送的命令并按场景返回 */
 function buildFakeClient(handler: (commandName: string, input: Record<string, unknown>) => unknown) {
@@ -107,6 +108,61 @@ describe("S3Storage", () => {
       sizeBytes: 2048,
       contentType: "image/webp",
     });
+  });
+
+  it("R11: PUT and DELETE failures without diagnosticRef never log private bucket or objectKey", async () => {
+    const spy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const storage = new S3Storage(buildFakeClient(() => {
+      throw Object.assign(new Error("private key outside log boundary"), { name: "TimeoutError" });
+    }));
+    try {
+      await expect(storage.putObject({
+        ...ref, body: Buffer.alloc(1), contentType: "image/webp",
+        cacheControl: "private, no-store",
+      })).rejects.toThrow("private key outside log boundary");
+      await expect(storage.deleteObject(ref)).rejects.toThrow("private key outside log boundary");
+      expect(spy).toHaveBeenCalledTimes(2);
+      for (const call of spy.mock.calls) {
+        const extra = call[2] as Record<string, unknown>;
+        expect(extra).toMatchObject({
+          event: "storage_write_failure",
+          ambiguous: expect.any(Boolean),
+          attempts: expect.any(Number),
+          durationMs: expect.any(Number),
+        });
+        expect(extra).not.toHaveProperty("bucket");
+        expect(extra).not.toHaveProperty("objectKey");
+        expect(extra).not.toHaveProperty("locator");
+        const serialized = JSON.stringify(extra);
+        expect(serialized).not.toContain(ref.bucket);
+        expect(serialized).not.toContain(ref.objectKey);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("R11: only restricted opaque diagnostic refs may be emitted, never raw paths/URLs", async () => {
+    const spy = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const storage = new S3Storage(buildFakeClient(() => { throw new Error("storage offline"); }));
+    try {
+      await expect(storage.deleteObject(ref, {
+        diagnosticRef: "https://example.invalid/private/verification/user",
+      })).rejects.toThrow();
+      await expect(storage.deleteObject(ref, {
+        diagnosticRef: "data-export:artifact_12345678",
+      })).rejects.toThrow();
+      const bad = spy.mock.calls[0][2] as Record<string, unknown>;
+      const good = spy.mock.calls[1][2] as Record<string, unknown>;
+      expect(bad).not.toHaveProperty("locator");
+      expect(bad).not.toHaveProperty("bucket");
+      expect(bad).not.toHaveProperty("objectKey");
+      expect(good.locator).toBe("data-export:artifact_12345678");
+      expect(good).not.toHaveProperty("bucket");
+      expect(good).not.toHaveProperty("objectKey");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("propagates non-404 head errors", async () => {
