@@ -141,14 +141,13 @@ export class S3Storage implements StorageClient {
     logger.warn("对象存储写入失败", "S3Storage", {
       operation,
       event: "storage_write_failure",
-      // RB04：调用方提供 diagnosticRef（opaque 机器标识）时，失败日志绝不
-      // 携带 raw bucket / objectKey——logSafe=false 的私有定位符（如
-      // data-export artifact）不得进入结构化日志；其余机器诊断字段
-      // （errorClass/ambiguous/attempts/errorName/errorCode/durationMs）
-      // 完整保留。缺省 = 既有行为（UploadedAsset 面不变）。
-      ...(diagnosticRef
+      // R11：S3 diagnostic 必须 fail closed：无论调用方是否提供
+      // diagnosticRef，都不记录 bucket/objectKey 或原始网络异常详情。
+      // 仅允许受限 opaque 诊断标识，避免调用方误传 path/URL/userId。
+      // 无标识时依靠 requestId + 分类/尝试次数/时长排查。
+      ...(diagnosticRef && /^[a-zA-Z][a-zA-Z0-9_-]{0,31}:[a-zA-Z0-9_-]{8,128}$/.test(diagnosticRef)
         ? { locator: diagnosticRef }
-        : { bucket: ref.bucket, objectKey: ref.objectKey }),
+        : {}),
       errorClass: classification.errorClass,
       ambiguous: !classification.definitePreCommitFailure,
       attempts: classification.attempts,
