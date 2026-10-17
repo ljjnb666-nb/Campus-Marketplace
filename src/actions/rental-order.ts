@@ -1,7 +1,7 @@
 "use server";
 
 import { withTransaction } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
+import type { AssetCategory, Prisma } from "@prisma/client";
 import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
@@ -71,34 +71,56 @@ async function uploadOrderPhotos(
   ownerId: string,
 ): Promise<string[]> {
   const limits = UPLOAD_LIMITS[scope];
-  const validFiles = files.filter((file): file is File => file instanceof File && file.size > 0);
-
-  if (validFiles.length > limits.maxCount) {
+  // R09：浏览器先经独立 /api/upload/images 上传单文件，再把小型 asset:
+  // token 发给 Server Action。旧的小文件 action 调用保留兼容，但不能绕过
+  // token 的事务内 ownership/category/access 验证。
+  const submitted = files.filter((value) => !(value instanceof File && value.size === 0));
+  if (submitted.length > limits.maxCount) {
     throw new AssetServiceError("TOO_MANY_FILES", `最多上传${limits.maxCount}张图片`);
   }
-
-  return Promise.all(
-    validFiles.map(async (file) => {
-      const result = await uploadImageAsset({ userId: ownerId, category: scope, file });
-      return buildAssetReference(result.assetId);
-    }),
-  );
+  return Promise.all(submitted.map(async (value) => {
+    if (typeof value === "string") {
+      if (!parseAssetReference(value)) {
+        throw new AssetServiceError("INVALID_ASSET_REFERENCE", "照片引用无效，请重新上传");
+      }
+      return value;
+    }
+    const result = await uploadImageAsset({ userId: ownerId, category: scope, file: value });
+    return buildAssetReference(result.assetId);
+  }));
 }
 
 /** R10：照片引用与 ATTACHED 状态必须属于同一数据库事务。 */
-async function attachOrderPhotos(tx: Prisma.TransactionClient, ownerId: string, orderId: string, tokens: string[]): Promise<void> {
-  const assetIds = tokens
-    .map((token) => parseAssetReference(token))
-    .filter((id): id is string => id !== null);
+async function attachOrderPhotos(
+  tx: Prisma.TransactionClient, ownerId: string, orderId: string,
+  tokens: string[], scope: "handover" | "return" | "report",
+): Promise<void> {
+  const assetIds = tokens.map((token) => parseAssetReference(token));
+  if (assetIds.some((id) => !id) || new Set(assetIds).size !== tokens.length) {
+    throw new AssetServiceError("INVALID_ASSET_REFERENCE", "照片引用无效，请重新上传");
+  }
   if (assetIds.length === 0) return;
+  const ids = assetIds as string[];
+  // 同一业务事务内验证各资产的 owner、类目、私有访问级别与 UPLOADED
+  // 状态；客户端 token 不具备独立授权，不得跨类/跨租户资产挪用。
+  const rows = await tx.uploadedAsset.findMany({
+    where: {
+      id: { in: ids }, ownerId, status: "UPLOADED",
+      category: scope.toUpperCase() as AssetCategory, access: "PRIVATE",
+    },
+    select: { id: true },
+  });
+  if (rows.length !== ids.length) {
+    throw new AssetServiceError("ASSET_BIND_CONFLICT", "照片状态已变化，请重新上传");
+  }
   const attached = await attachAssetsToEntity(tx, {
     ownerId,
-    assetIds,
+    assetIds: ids,
     target: { type: "rentalOrder", id: orderId },
   });
   // 抛错而非返回错误：强制回滚同一 tx 内已写入的交接/索赔/纠纷引用。
   // UPLOADED 数量不足代表过期、被删除或已被另一请求占用，不能成功提交。
-  if (attached !== new Set(assetIds).size) {
+  if (attached !== ids.length) {
     throw new AssetServiceError("ASSET_BIND_CONFLICT", "照片状态已变化，请重新上传");
   }
 }
@@ -235,7 +257,7 @@ export async function confirmPickup(formData: FormData): Promise<RentalOrderActi
         orderId, userId: user.id, role, photos: photoTokens, currentCondition, knownIssues,
       });
       if ("error" in outcome) return outcome;
-      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens, "handover");
       return outcome;
     });
     if ("error" in result) return { success: false, message: result.error as string };
@@ -299,7 +321,7 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
         hasDamage, needsCleaning, accessoriesComplete, inspectionNote,
       });
       if ("error" in outcome) return outcome;
-      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens, "return");
       return outcome;
     });
     if ("error" in result) return { success: false, message: result.error as string };
@@ -438,7 +460,7 @@ export async function submitDamageClaim(formData: FormData): Promise<RentalOrder
         orderId, userId: user.id, damageDescription, requestedDeduction, photos: photoTokens,
       });
       if ("error" in outcome) return outcome;
-      await attachOrderPhotos(tx, user.id, orderId, photoTokens);
+      await attachOrderPhotos(tx, user.id, orderId, photoTokens, "report");
       return outcome;
     });
     if ("error" in result) return { success: false, message: result.error as string };
@@ -499,7 +521,7 @@ export async function initiateDispute(formData: FormData): Promise<RentalOrderAc
         orderId, userId: user.id, reason, evidencePhotos: evidenceTokens,
       });
       if ("error" in outcome) return outcome;
-      await attachOrderPhotos(tx, user.id, orderId, evidenceTokens);
+      await attachOrderPhotos(tx, user.id, orderId, evidenceTokens, "report");
       return outcome;
     });
     if ("error" in result) return { success: false, message: result.error as string };
