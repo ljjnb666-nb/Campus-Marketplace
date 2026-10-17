@@ -150,7 +150,7 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     rentalListingFindUnique.mockResolvedValue({ totalQuantity: 2 });
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: 0n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(0) }]);
   });
 
   it("does not query occupancy when listing is absent", async () => {
@@ -169,10 +169,10 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
   });
 
   it("rejects occupancy peak exceeding stock and accepts exact fit", async () => {
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: 2n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(2) }]);
     expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
       .toEqual({ available: false, reservedQuantity: 2 });
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: 1n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(1) }]);
     expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
       .toEqual({ available: true, reservedQuantity: 1 });
   });
@@ -180,7 +180,7 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
   it("R07: consecutive 10–11 and 11–12 reservations each occupy one of two units", async () => {
     // SQL 聚合总量会是 2，峰值却仅为 1：申请 10–12 的 quantity=1 必须放行。
     // 原始端点是否真算对由下面的 real-PG integration fixture 验证。
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: 1n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(1) }]);
     expect(await checkTimeConflict(tx, "listing-1", start, end, 1))
       .toEqual({ available: true, reservedQuantity: 1 });
   });
@@ -202,12 +202,12 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
     const sql = peakQueryRaw.mock.calls[0][0];
     expect(sql.sql).toContain('ro."id" <>');
     expect(sql.values).toContain("order-to-exclude");
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(Number.MAX_SAFE_INTEGER) + 1n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1) }]);
     expect((await checkTimeConflict(tx, "listing-1", start, end, 1)).available).toBe(false);
   });
 
   it("defaults null/no overlap to zero occupancy", async () => {
-    peakQueryRaw.mockResolvedValue([{ reservedQuantity: 0n }]);
+    peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(0) }]);
     expect(await checkTimeConflict(tx, "listing-1", start, end, 2))
       .toEqual({ available: true, reservedQuantity: 0 });
   });
