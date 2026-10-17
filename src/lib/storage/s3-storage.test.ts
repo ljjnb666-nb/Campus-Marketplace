@@ -127,7 +127,7 @@ describe("S3Storage", () => {
         expect(extra).toMatchObject({
           event: "storage_write_failure",
           ambiguous: expect.any(Boolean),
-          attempts: expect.any(Number),
+          attempts: null,
           durationMs: expect.any(Number),
         });
         expect(extra).not.toHaveProperty("bucket");
