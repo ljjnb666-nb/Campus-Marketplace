@@ -95,6 +95,9 @@ describe.skipIf(!integrationDatabaseUrl)("R10: pickup evidence and asset binding
     await raw.rentalOrder.deleteMany({ where: { id: { in: orderIds } } });
     await raw.rentalListing.deleteMany({ where: { id: { in: listingIds } } });
     if (categoryId) await raw.rentalCategory.deleteMany({ where: { id: categoryId } });
+    // User removal is RESTRICTed by membership rows; clean test-owned edges first.
+    await raw.notification.deleteMany({ where: { userId: { in: [ownerId, renterId] } } });
+    await raw.campusMembership.deleteMany({ where: { userId: { in: [ownerId, renterId] } } });
     for (const userId of [ownerId, renterId]) {
       if (userId) await purgeUserFixtureFromAppDatabase(userId);
     }
