@@ -115,6 +115,8 @@ case "\$ARGS" in
       exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-cleanup:"* ]]; then
       [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]] && exit 1 || exit 0
+    elif [[ "\$ARGS" == *"campus-marketplace-async-worker:"* ]]; then
+      [[ "\${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]] && exit 1 || exit 0
     else
       exit 1
     fi ;;
@@ -122,7 +124,7 @@ case "\$ARGS" in
     if [[ -n "\${CONFIG_STUB_MODE:-}" && "\${CONFIG_STUB_MODE}" == "broken" ]]; then
       echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
     elif [[ -n "\${GIT_SHA:-}" ]]; then
-      echo "caddy:2-alpine"; echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"; echo "campus-marketplace-migrator:\${GIT_SHA}"; echo "postgres:16-alpine"; echo "redis:7-alpine"
+      echo "caddy:2-alpine"; echo "campus-marketplace-app:\${GIT_SHA}"; echo "campus-marketplace-cleanup:\${GIT_SHA}"; echo "campus-marketplace-async-worker:\${GIT_SHA}"; echo "campus-marketplace-migrator:\${GIT_SHA}"; echo "postgres:16-alpine"; echo "redis:7-alpine"
     else
       echo "caddy:2-alpine"; echo "campus-marketplace-app:local"; echo "postgres:16-alpine"
     fi
@@ -133,12 +135,19 @@ case "\$ARGS" in
     echo "cleanup_stop_called" >> "${SANDBOX}/calls.log"
     [[ "\${STOP_FAILURE_STUB_MODE:-}" == "storage-cleanup" ]] || state_remove storage-cleanup
     exit 0 ;;
+  *"compose"*"stop async-worker"*)
+    echo "async_stop_called" >> "${SANDBOX}/calls.log"
+    [[ "\${STOP_FAILURE_STUB_MODE:-}" == "async-worker" ]] || state_remove async-worker
+    exit 0 ;;
   *"compose"*"ps -q app"*)
     [[ "\${PS_FAILURE_STUB_MODE:-}" == "query" ]] && exit 1
     state_has app && echo "container-id" ; exit 0 ;;
   *"compose"*"ps -q storage-cleanup"*)
     [[ "\${PS_FAILURE_STUB_MODE:-}" == "query" ]] && exit 1
     state_has storage-cleanup && echo "container-id" ; exit 0 ;;
+  *"compose"*"ps -q async-worker"*)
+    [[ "\${PS_FAILURE_STUB_MODE:-}" == "query" ]] && exit 1
+    state_has async-worker && echo "container-id" ; exit 0 ;;
   *"compose"*"ps --format json storage-cleanup"*)
     if [[ -n "\${WORKER_RUNNING_WRONG_IMAGE:-}" ]]; then
       echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
@@ -148,9 +157,22 @@ case "\$ARGS" in
       echo "{\"Service\":\"storage-cleanup\",\"Image\":\"campus-marketplace-cleanup:local\",\"State\":\"running\"}"
     fi
     exit 0 ;;
+  *"compose"*"ps --format json async-worker"*)
+    if [[ -n "\${ASYNC_RUNNING_WRONG_IMAGE:-}" ]]; then
+      echo "{\\"Service\\":\\"async-worker\\",\\"Image\\":\\"campus-marketplace-async-worker:local\\",\\"State\\":\\"running\\"}"
+    elif [[ -n "\${GIT_SHA:-}" ]]; then
+      echo "{\\"Service\\":\\"async-worker\\",\\"Image\\":\\"campus-marketplace-async-worker:\${GIT_SHA}\\",\\"State\\":\\"running\\"}"
+    else
+      echo "{\\"Service\\":\\"async-worker\\",\\"Image\\":\\"campus-marketplace-async-worker:local\\",\\"State\\":\\"running\\"}"
+    fi
+    exit 0 ;;
   *"compose"*"ps --status running --services"*)
     [[ "\${PS_FAILURE_STUB_MODE:-}" == "verify" ]] && exit 1
     cat "\$STATE" 2>/dev/null; exit 0 ;;
+  *"compose"*"up -d"*"async-worker"*)
+    echo "async_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
+    if [[ "\${UP_FAILURE_STUB_MODE:-}" == "async-worker" ]]; then exit 1; fi
+    state_add async-worker; exit 0 ;;
   *"compose"*"up -d"*"storage-cleanup"*)
     echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     if [[ "\${UP_FAILURE_STUB_MODE:-}" == "storage-cleanup" ]]; then exit 1; fi
@@ -180,7 +202,7 @@ STUB
   # 初始运行状态：默认 app + storage-cleanup 均在运行（post-worker release）；
   # DOCKER_STUB_INITIAL="app" 模拟 pre-worker release（cleanup 容器不存在）
   # shellcheck disable=SC2126
-  printf '%s\n' ${DOCKER_STUB_INITIAL:-app storage-cleanup} > "${SANDBOX}/running.state"
+  printf '%s\n' ${DOCKER_STUB_INITIAL:-app storage-cleanup async-worker} > "${SANDBOX}/running.state"
 
   # ---- curl stub（health 返回的 release 可配置）----
   cat > "${SANDBOX}/bin/curl" <<'STUB'
