@@ -187,21 +187,25 @@ describe("checkTimeConflict - R07 peak occupancy", () => {
 
   it("uses half-open bounds, terminal exclusion and end-before-start window order", async () => {
     await checkTimeConflict(tx, "listing-1", start, end, 1);
-    const sql = peakQueryRaw.mock.calls[0][0];
-    expect(sql.sql).toContain('ro."startTime" <');
-    expect(sql.sql).toContain('ro."endTime" >');
-    expect(sql.sql).toContain("'CANCELLED', 'REJECTED', 'CLOSED'");
-    expect(sql.sql).toContain('0 AS boundary_order, -quantity');
-    expect(sql.sql).toContain('ORDER BY moment, boundary_order');
-    expect(sql.values).toContain("listing-1");
-    expect(sql.values.some((v: unknown) => v instanceof Date && +v === +start)).toBe(true);
+    // Prisma.$queryRaw is called as a tagged template: the stub receives
+    // TemplateStringsArray as argument 0 and interpolated values as the rest.
+    // It does not receive an already materialized Prisma.Sql object.
+    const [parts, ...values] = peakQueryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    const sql = parts.join("?");
+    expect(sql).toContain('ro."startTime" <');
+    expect(sql).toContain('ro."endTime" >');
+    expect(sql).toContain("'CANCELLED', 'REJECTED', 'CLOSED'");
+    expect(sql).toContain('0 AS boundary_order, -quantity');
+    expect(sql).toContain('ORDER BY moment, boundary_order');
+    expect(values).toContain("listing-1");
+    expect(values.some((v: unknown) => v instanceof Date && +v === +start)).toBe(true);
   });
 
   it("excludes own order for extension requests and fails closed for unsafe peak", async () => {
     await checkTimeConflict(tx, "listing-1", start, end, 1, "order-to-exclude");
-    const sql = peakQueryRaw.mock.calls[0][0];
-    expect(sql.sql).toContain('ro."id" <>');
-    expect(sql.values).toContain("order-to-exclude");
+    const [parts, ...values] = peakQueryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    expect(parts.join("?")).toContain('ro."id" <>');
+    expect(values).toContain("order-to-exclude");
     peakQueryRaw.mockResolvedValue([{ reservedQuantity: BigInt(Number.MAX_SAFE_INTEGER) + BigInt(1) }]);
     expect((await checkTimeConflict(tx, "listing-1", start, end, 1)).available).toBe(false);
   });
