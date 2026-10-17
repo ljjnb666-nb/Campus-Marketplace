@@ -1517,6 +1517,70 @@ describe("rental-order actions", () => {
     expect(revalidatePath).not.toHaveBeenCalled();
   });
 
+  it("R09: a pre-uploaded asset token is validated and bound without uploading File in Server Action", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    const formData = buildPickupFormData();
+    formData.append("photos", "asset:asset-1");
+
+    const result = await confirmPickup(formData);
+    expect(result).toEqual({ success: true, message: "已确认取货" });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+    expect(txUploadedAssetFindMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["asset-1"] }, ownerId: "user-owner",
+        status: "UPLOADED", category: "HANDOVER", access: "PRIVATE",
+      },
+      select: { id: true },
+    });
+    expect(attachAssetsToEntity).toHaveBeenCalledWith(
+      expect.anything(), {
+        ownerId: "user-owner", assetIds: ["asset-1"],
+        target: { type: "rentalOrder", id: "order-1" },
+      },
+    );
+  });
+
+  it("R09: forged token of another owner/category is rejected before binding", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    txUploadedAssetFindMany.mockResolvedValueOnce([]);
+    const formData = buildPickupFormData();
+    formData.append("photos", "asset:asset-1");
+
+    const result = await confirmPickup(formData);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片状态已变化");
+    expect(txUploadedAssetFindMany).toHaveBeenCalledOnce();
+    expect(attachAssetsToEntity).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("R09: malformed or duplicate pre-uploaded tokens cannot reach asset binding", async () => {
+    requireUser.mockResolvedValue({ id: "user-owner" });
+    txRentalOrderFindFirst.mockResolvedValue({ ...pendingPickupOrder });
+    txRentalHandoverUpsert.mockResolvedValue({
+      ownerConfirmed: true, renterConfirmed: false,
+    });
+    const malformed = buildPickupFormData();
+    malformed.append("photos", "https://private.example.invalid/secret");
+    expect((await confirmPickup(malformed)).success).toBe(false);
+    expect(txRentalHandoverUpsert).not.toHaveBeenCalled();
+    const duplicated = buildPickupFormData();
+    duplicated.append("photos", "asset:asset-1");
+    duplicated.append("photos", "asset:asset-1");
+    const result = await confirmPickup(duplicated);
+    expect(result).toMatchObject({ success: false });
+    expect(result.message).toContain("照片引用无效");
+    expect(attachAssetsToEntity).not.toHaveBeenCalled();
+  });
+
   it("重复交接确认不将仍留在订单的旧照片标记待删除", async () => {
     requireUser.mockResolvedValue({ id: "user-owner" });
     txRentalOrderFindFirst.mockResolvedValue({
