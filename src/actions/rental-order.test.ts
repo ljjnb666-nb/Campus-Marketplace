@@ -1495,6 +1495,7 @@ describe("rental-order actions", () => {
     requireUser.mockResolvedValue({ id: "user-owner" });
     txRentalOrderFindFirst.mockResolvedValue({
       ...pendingPickupOrder, status: "PENDING_INSPECTION",
+      depositAmount: new Prisma.Decimal("50"),
       rentalListing: { campusId: "campus-1" },
     });
     txDamageClaimCreate.mockResolvedValue({ id: "claim-1" });
