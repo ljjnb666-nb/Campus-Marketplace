@@ -446,6 +446,12 @@ export async function confirmPickupTx(
   });
   if (!order) return { error: "订单状态错误" };
   if (!isRentalOrderRoleParticipant(order, role, userId)) return { error: "无权操作" };
+  // Actor-specific single confirmation: a retry must not replace a confirmed
+  // participant's evidence (including with an empty photo array).
+  if (order.handoverRecord &&
+      (role === "owner" ? order.handoverRecord.ownerConfirmed : order.handoverRecord.renterConfirmed)) {
+    return { error: "不能重复确认" };
+  }
 
   const dataToUpdate: Record<string, unknown> = {
     photos: input.photos.length ? input.photos : undefined,
