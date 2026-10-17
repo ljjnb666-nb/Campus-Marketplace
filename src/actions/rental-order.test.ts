@@ -446,6 +446,41 @@ describe("rental-order actions", () => {
     expect(transactionMock).not.toHaveBeenCalled();
   });
 
+  it("R08: campus datetime-local books the same instant regardless of server timezone", async () => {
+    txQueryRaw.mockResolvedValue([{
+      id: "listing-1", ownerId: "user-owner", totalQuantity: 2,
+      pricingUnit: "PER_DAY", minimumDuration: 1, maximumDuration: 30,
+      price: "20", depositAmount: "50", requiresApproval: true,
+      pickupLocation: "南门", returnLocation: "南门", title: "相机",
+      status: "AVAILABLE", deletedAt: null,
+    }]);
+    txRentalUnavailableFindFirst.mockResolvedValue(null);
+    txRentalOrderCreate.mockResolvedValue({ id: "order-local" });
+    const result = await createRentalOrder(
+      { success: false, message: "" },
+      buildCreateFormData({
+        startTime: "2026-10-18T10:00",
+        endTime: "2026-10-19T10:00",
+      }),
+    );
+    expect(result.success).toBe(true);
+    expect(txRentalOrderCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        startTime: new Date("2026-10-18T02:00:00.000Z"),
+        endTime: new Date("2026-10-19T02:00:00.000Z"),
+      }),
+    }));
+  });
+
+  it("R08: invalid campus-local date cannot fall back to local Node timezone parsing", async () => {
+    const result = await createRentalOrder(
+      { success: false, message: "" },
+      buildCreateFormData({ startTime: "2026-02-30T10:00", endTime: "2026-03-01T10:00" }),
+    );
+    expect(result).toEqual({ success: false, message: "时间格式不正确" });
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
+
   it("rejects renting your own listing", async () => {
     txQueryRaw.mockResolvedValue([{
       id: "listing-1",
