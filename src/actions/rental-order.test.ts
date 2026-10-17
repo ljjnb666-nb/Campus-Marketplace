@@ -33,6 +33,7 @@ const {
   txExecuteRaw,
   txUserFindMany,
   txRentalOrderCreate,
+  txUploadedAssetFindMany,
   txRentalOrderFindFirst,
   txRentalOrderUpdate,
   txRentalOrderUpdateMany,
@@ -64,6 +65,7 @@ const {
   const txRentalUnavailableFindFirst = vi.fn();
   const txQueryRaw = vi.fn();
   const txRentalOrderCreate = vi.fn();
+  const txUploadedAssetFindMany = vi.fn();
   const txRentalOrderFindFirst = vi.fn();
   const txRentalOrderUpdate = vi.fn();
   const txRentalOrderUpdateMany = vi.fn();
@@ -111,6 +113,7 @@ const {
       updateMany: txRentalOrderUpdateMany,
     },
     rentalOrderStatusLog: { create: txRentalOrderStatusLogCreate },
+    uploadedAsset: { findMany: txUploadedAssetFindMany },
     rentalHandoverRecord: { upsert: txRentalHandoverUpsert },
     rentalReturnRecord: { upsert: txRentalReturnUpsert },
     rentalDamageClaim: {
@@ -155,6 +158,7 @@ const {
     txExecuteRaw,
     txUserFindMany,
     txRentalOrderCreate,
+  txUploadedAssetFindMany,
     txRentalOrderFindFirst,
     txRentalOrderUpdate,
   txRentalOrderUpdateMany,
@@ -349,6 +353,7 @@ describe("rental-order actions", () => {
     txQueryRaw.mockReset();
     txRentalUnavailableFindFirst.mockReset();
     txRentalOrderCreate.mockReset();
+    txUploadedAssetFindMany.mockReset().mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.map((id: string) => ({ id })));
     txRentalOrderFindFirst.mockReset();
     txRentalOrderUpdate.mockReset();
     txRentalOrderUpdateMany.mockReset().mockResolvedValue({ count: 1 });
