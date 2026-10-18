@@ -87,6 +87,7 @@ for item in "${roles[@]}"; do
             "/app/scripts/ops/worker-lease-fencing-extension.sh",
             "/app/scripts/ops/worker-lock-contention-proof.ts",
             "/app/scripts/ops/worker-lock-contention-extension.sh",
+            "/app/scripts/ops/ops-runner-isolated-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }
