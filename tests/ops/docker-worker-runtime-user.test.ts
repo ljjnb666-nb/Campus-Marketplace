@@ -240,6 +240,9 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(dockerignore).toMatch(/^scripts\/ops\/worker-lease-fencing-extension[.]sh$/m);
     expect(dockerignore).toMatch(/^scripts\/ops\/worker-lease-fencing-proof[.]ts$/m);
     expect(workflow).toContain("- .dockerignore");
+    const imageProof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8");
+    expect(imageProof).toContain("test-only crash probe leaked into runtime image");
+    expect(imageProof).toContain("fs.existsSync(proofPath)");
     for (const contract of ["J-LEASE-02", "J-LEASE-03", "OUTBOX-RACE-01", "CRASH-REPLAY-01"]) {
       expect(original).toContain(contract);
     }
