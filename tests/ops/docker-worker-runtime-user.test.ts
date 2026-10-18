@@ -227,4 +227,41 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(generate).toBeGreaterThanOrEqual(0);
     expect(drop).toBeGreaterThan(generate);
   });
+  it("enforces R1F real-image old-token execution fencing and bounded forced crash", () => {
+    const cycle = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    const ext = readFileSync(path.join(process.cwd(), "scripts/ops/worker-lease-fencing-extension.sh"), "utf8");
+    const harness = readFileSync(path.join(process.cwd(), "scripts/ops/worker-lease-fencing-proof.ts"), "utf8");
+    const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8");
+    const original = readFileSync(path.join(process.cwd(), "tests/integration/phase9a-async-core.test.ts"), "utf8");
+    expect(cycle).toContain("source scripts/ops/worker-lease-fencing-extension.sh");
+    expect(workflow).toContain("scripts/ops/worker-lease-fencing-extension.sh");
+    expect(workflow).toContain("scripts/ops/worker-lease-fencing-proof.ts");
+    for (const contract of ["J-LEASE-02", "J-LEASE-03", "OUTBOX-RACE-01", "CRASH-REPLAY-01"]) {
+      expect(original).toContain(contract);
+    }
+    expect(ext).toContain("--read-only");
+    expect(ext).toContain("--cap-drop ALL --security-opt no-new-privileges");
+    expect(ext).toContain("--mount");
+    expect(ext).toContain("readonly");
+    expect(ext).toContain('r1f_probe crash-b 77');
+    expect(ext).toContain("PROOF_CRASH_AFTER_DOMAIN_COMMIT");
+    expect(ext).toContain('r1f_probe stale-a 0');
+    expect(ext).toContain('r1f_probe outbox-stale-a 0');
+    expect(ext).toContain("run_worker fence-crash-replay");
+    expect(ext).toContain("run_worker fence-terminal-replay");
+    expect(ext).toContain("attempts=3");
+    expect(ext).toContain('"leaseExpiresAt"=NOW()-INTERVAL');
+    expect(ext).not.toContain("UPDATE \"AsyncJob\" SET status=");
+    expect(ext).not.toContain("UPDATE \"OutboxEvent\" SET status=");
+    expect(harness).toContain("claimDueAsyncJobs(tx,");
+    expect(harness).toContain("executeClaimedAsyncJob({");
+    expect(harness).toContain("completeAsyncJob(prisma,");
+    expect(harness).toContain("beginOutboxMaterializeTx(tx,");
+    expect(harness).toContain("publishOutboxEventTx(tx,");
+    expect(harness).toContain("afterJobTxCommit:");
+    expect(harness).toContain("process.exit(77)");
+    expect(harness).toContain("STALE_ZERO_DOMAIN_SIDE_EFFECTS");
+    expect(harness).not.toContain("console.error(error");
+  });
+
 });
