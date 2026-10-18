@@ -116,6 +116,9 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("negative_rc");
     expect(script).toContain("-eq 124");
     expect(script).toContain("storage_cleanup_cycle_failed");
+    expect(script).toContain("NEG_EVENT name=%s observed=%s");
+    expect(script).toContain("NEG_CATEGORY token=%s observed=%s");
+    expect(script).toContain("NEG_COUNTS lines=%s bytes=%s");
     expect(script).toContain("phase9_retention_cycle_failed");
     expect(script).toContain("retention_failed");
     expect(script).toContain('"$started" -ne 1');
