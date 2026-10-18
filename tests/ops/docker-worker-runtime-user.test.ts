@@ -236,6 +236,10 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(cycle).toContain("source scripts/ops/worker-lease-fencing-extension.sh");
     expect(workflow).toContain("scripts/ops/worker-lease-fencing-extension.sh");
     expect(workflow).toContain("scripts/ops/worker-lease-fencing-proof.ts");
+    const dockerignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    expect(dockerignore).toMatch(/^scripts\/ops\/worker-lease-fencing-extension[.]sh$/m);
+    expect(dockerignore).toMatch(/^scripts\/ops\/worker-lease-fencing-proof[.]ts$/m);
+    expect(workflow).toContain("- .dockerignore");
     for (const contract of ["J-LEASE-02", "J-LEASE-03", "OUTBOX-RACE-01", "CRASH-REPLAY-01"]) {
       expect(original).toContain(contract);
     }
