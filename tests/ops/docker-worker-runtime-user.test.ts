@@ -449,6 +449,10 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).toContain('--user "$(id -u):$(id -g)"');
     expect(ext).toContain('--mount "type=bind,src=$sandbox,dst=/shadow"');
     expect(ext).toContain('--workdir /shadow -e HOME=/tmp');
+    expect(ext).toContain('--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m');
+    expect(ext).toContain('npm_config_cache=/shadow/.npm-cache');
+    expect(ext).toContain('rm -rf "$sandbox/.npm-cache"');
+    expect(ext).toContain('diskFull: /ENOSPC/i');
     expect(ext).toContain('--entrypoint npm "campus-marketplace-migrator:$sha"');
     expect(ext).not.toContain('timeout 180s npm install');
     expect(ext).not.toContain("-e GITHUB_TOKEN=");
