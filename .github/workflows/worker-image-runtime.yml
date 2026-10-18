@@ -12,6 +12,7 @@ on:
       - scripts/ops/worker-lease-fencing-proof.ts
       - scripts/ops/worker-lock-contention-extension.sh
       - scripts/ops/worker-lock-contention-proof.ts
+      - scripts/ops/ops-runner-isolated-extension.sh
       - package.json
       - package-lock.json
       - prisma/**
@@ -59,6 +60,10 @@ jobs:
               --target "${target}" \
               --tag "${image}" .
             printf 'BUILT stage=%s image=%s\n' "${target}" "${image}"
+          # R2B: separate one-shot ops diagnostic artifact, not a worker.
+          docker build --build-arg "GIT_SHA=${SOURCE_SHA}" \
+            --target ops-runner \
+            --tag "campus-marketplace-ops-check:${SOURCE_SHA}" .
           done
 
       - name: Verify image UID, immutable SHA and Node/Prisma/tsx execution
