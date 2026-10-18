@@ -294,3 +294,5 @@ for marker in \
 done
 echo '[worker-cycle] PASS R3D01 actual Order/RentalOrder rows CAS, atomically coordinated ledger/outbox and dedupe on Prisma7 shadow'
 echo '[worker-cycle] LIMIT R3D01 tests database primitives; it does NOT import canonical product/rental lifecycle, domain writer or outbox registry, nor test auth/notification dispatch'
+# R3D-02A: real production registries/writers run after database primitive proof.
+source scripts/ops/prisma7-canonical-writer-shadow-extension.sh
