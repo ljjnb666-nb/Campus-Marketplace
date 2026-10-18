@@ -483,4 +483,55 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).not.toContain(".env.production");
   });
 
+  it("R3B generates a v7 ESM client and checks real PrismaPg pool/transaction contract without release changes", () => {
+    const cli = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-cli-shadow-extension.sh"), "utf8",
+    );
+    const runtime = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-client-shadow-extension.sh"), "utf8",
+    );
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8",
+    );
+    const ignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const imageProof = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    const packageJson = JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf8"));
+    const schema = readFileSync(path.join(process.cwd(), "prisma/schema.prisma"), "utf8");
+    expect(packageJson.dependencies["@prisma/client"]).toBe("6.19.3");
+    expect(packageJson.devDependencies.prisma).toBe("6.19.3");
+    expect(packageJson.dependencies["@prisma/adapter-pg"]).toBeUndefined();
+    expect(schema).toContain('provider = "prisma-client-js"');
+    expect(schema).toContain('url      = env("DATABASE_URL")');
+    expect(cli).toContain("prisma@7.10.1 @prisma/client@7.10.1");
+    expect(cli).toContain("@prisma/adapter-pg@7.10.1 pg@8.16.3 tsx@4.20.5");
+    expect(cli).toContain("source scripts/ops/prisma7-client-shadow-extension.sh");
+    expect(cli.indexOf("source scripts/ops/prisma7-client-shadow-extension.sh"))
+      .toBeGreaterThan(cli.indexOf('baseline_hash="$(catalog_hash "$database")"'));
+    expect(workflow).toContain("scripts/ops/prisma7-client-shadow-extension.sh");
+    expect(ignore).toMatch(/^scripts\/ops\/prisma7-client-shadow-extension\.sh$/m);
+    expect(imageProof).toContain("/app/scripts/ops/prisma7-client-shadow-extension.sh");
+    expect(runtime).toContain('output = "../generated/prisma"');
+    expect(runtime).toContain('moduleFormat = "esm"');
+    expect(runtime).toContain("provider = \"prisma-client\"");
+    expect(runtime).toContain("--network none --read-only");
+    expect(runtime).toContain("--cap-drop ALL --security-opt no-new-privileges");
+    expect(runtime).toContain('connectionTimeoutMillis: 600');
+    expect(runtime).toContain('max: 2');
+    expect(runtime).toContain('idleTimeoutMillis: 10_000');
+    expect(runtime).toContain("prisma.user.findMany");
+    expect(runtime).toContain("await prisma.$transaction");
+    expect(runtime).toContain("R3B_EXPECTED_ROLLBACK");
+    expect(runtime).toContain("POOL_WAIT_NOT_BOUNDED");
+    expect(runtime).toContain('backendPids.size === 2');
+    expect(runtime).toContain('/timeout|timed out/i.test(err.message)');
+    expect(runtime).toContain('POOL_HOLDERS_NOT_DISTINCT');
+    expect(runtime).toContain('EXPECTED_SHADOW_DB=$shadow_db');
+    expect(runtime).toContain("await prisma.$disconnect()");
+    expect(runtime).toContain("excludes production Prisma extensions");
+    expect(runtime).not.toContain("npm audit fix");
+    expect(runtime).not.toContain(".env.production");
+  });
+
 });

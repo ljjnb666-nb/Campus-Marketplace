@@ -54,7 +54,8 @@ timeout 180s docker run --rm \
   --workdir /shadow -e HOME=/tmp -e npm_config_cache=/shadow/.npm-cache \
   --entrypoint npm "campus-marketplace-migrator:$sha" \
   install --prefix /shadow --no-save --package-lock=false \
-  --no-audit --no-fund prisma@7.10.1 \
+  --no-audit --no-fund prisma@7.10.1 @prisma/client@7.10.1 \
+  @prisma/adapter-pg@7.10.1 pg@8.16.3 tsx@4.20.5 \
   >"$tmp/prisma7-install.log" 2>&1 || install_rc=$?
 if [[ "$install_rc" != 0 ]]; then
   # Classify a failed bootstrap without disclosing arbitrary npm/registry logs
@@ -117,6 +118,8 @@ prisma7_cli schema-validate validate
 prisma7_cli migrate-initial migrate deploy
 prisma7_cli migrate-idempotent migrate deploy
 prisma7_cli migrate-status migrate status
+# R3B client+driver adapter proof uses the same disposable database after CLI parity.
+# It cannot bypass R3A catalog identity checks; invoked just before the DROP.
 
 # Stable catalog fingerprint, ignoring DB-specific OIDs and timestamps. The
 # existing Prisma 6 database and the Prisma 7-created second DB must match.
@@ -163,6 +166,8 @@ completed="$(docker exec "$pg" psql -X -U postgres -d "$shadow_db" -Atc \
 [[ "$completed" == "$n" && "$completed" =~ ^[1-9][0-9]*$ ]] || {
   echo '[worker-cycle][FAIL] R3A v7 migration count mismatch' >&2; exit 1;
 }
+# Run only after the immutable Prisma6/7 schema and migration fingerprints match.
+source scripts/ops/prisma7-client-shadow-extension.sh
 docker exec "$pg" dropdb -U postgres "$shadow_db" >/dev/null 2>&1 || {
   echo '[worker-cycle][FAIL] R3A disposable shadow DB drop failed' >&2; exit 1;
 }
