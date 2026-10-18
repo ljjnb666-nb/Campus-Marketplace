@@ -29,6 +29,19 @@ grep -qFx PROOF_R2B_OPS_PACKAGES_PRESENT "$tmp/ops-image.log" || {
 }
 
 ops_backups="$tmp/ops-backups"
+# On GitHub hosted Ubuntu, sudo is used ONLY for synthetic fixture ownership.
+# Cleanup restores runner access even when a negative test fails half-way.
+command -v sudo >/dev/null 2>&1 || {
+  echo '[worker-cycle][FAIL] R2B sudo needed to model root-owned backup ACL' >&2; exit 1;
+}
+ops_cleanup() {
+  if [[ -d "$ops_backups" ]]; then
+    sudo chown -R "$(id -u):$(id -g)" "$ops_backups" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "$r1g_holder_name" "$r1g_challenger_name" "$probe" >/dev/null 2>&1 || true
+  cleanup
+}
+trap ops_cleanup EXIT
 mkdir -m 700 "$ops_backups"
 # An ACTUAL PostgreSQL custom-format backup of the disposable database, never
 # invented production backup evidence. No dump bytes enter CI logs.
@@ -43,6 +56,21 @@ printf '{"status":"success","completedAt":"%s","filename":"synthetic-ci.dump","c
 chmod 600 "$ops_backups/"*
 ops_before="$(sha256sum "$ops_backups/"* | sha256sum | cut -d ' ' -f 1)"
 ops_before_meta="$(sha256sum "$ops_backups/backup-status.json" "$ops_backups/synthetic-ci.dump.sha256" | sha256sum | cut -d ' ' -f 1)"
+sudo chown -R root:root "$ops_backups"
+# A nonroot container must NOT read the same root-only backup metadata.
+set +e
+timeout 30s docker run --rm --network none --read-only --cap-drop ALL \
+  --security-opt no-new-privileges --user 1000:1000 \
+  --mount "type=bind,src=$ops_backups,dst=/backups,readonly" \
+  --entrypoint node "$ops_image" -e \
+  'require("node:fs").readFileSync("/backups/backup-status.json")' \
+  >"$tmp/ops-nonroot-denied.log" 2>&1
+ops_nonroot_rc=$?
+set -e
+[[ "$ops_nonroot_rc" != 0 && "$ops_nonroot_rc" != 124 && "$ops_nonroot_rc" != 137 ]] || {
+  echo '[worker-cycle][FAIL] R2B root-only backup readable by node user' >&2; exit 1;
+}
+
 
 ops_run() {
   local label="$1"; shift
@@ -122,10 +150,11 @@ ops_expect prod-skip 1 FAIL NONE PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED --mod
 # Corrupt the ACTUAL dump without updating its checksum. Production backup
 # probe must classify backup_health FAIL, never pass or claim readiness; other
 # intentionally unconfigured prod env checks may also fail in this synthetic env.
-printf 'CI-CORRUPTED' >>"$ops_backups/synthetic-ci.dump"
+printf 'CI-CORRUPTED' | sudo tee -a "$ops_backups/synthetic-ci.dump" >/dev/null
 ops_expect corrupt-prod 1 FAIL fail backup_health --mode production
 # Prove the root-owned fixture's status/checksum metadata was unchanged by all
 # read-only container runs; only the host's explicit corrupt test changes dump.
+sudo chown -R "$(id -u):$(id -g)" "$ops_backups"
 ops_after_status="$(sha256sum "$ops_backups/backup-status.json" "$ops_backups/synthetic-ci.dump.sha256" | sha256sum | cut -d ' ' -f 1)"
 [[ "$ops_after_status" == "$ops_before_meta" && "$ops_before" =~ ^[0-9a-f]{64}$ ]] || {
   echo '[worker-cycle][FAIL] R2B backup status hash invalid' >&2; exit 1;
