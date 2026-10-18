@@ -48,7 +48,7 @@ describe("Issue #157 Prisma production-image inventory contract", () => {
         writeFileSync(docker, String.raw`#!/usr/bin/env bash
 set -eu
 if [[ "$1" == image && "$2" == inspect ]]; then
-  if [[ "${3:-}" == --format ]]; then
+  if [[ "$3" == --format ]]; then
     if [[ "$4" == '{{.Id}}' ]]; then
       printf 'sha256:%064d\n' 0
     elif [[ "$4" == '{{.Config.User}}' ]]; then
@@ -64,7 +64,7 @@ if [[ "$1" == image && "$2" == inspect ]]; then
   exit 0
 fi
 if [[ "$1" == run ]]; then
-  if [[ "${FAIL_LAST:-0}" == 1 && "$*" == *'campus-marketplace-async-worker:'* ]]; then
+  if [[ "$FAIL_LAST" == 1 && "$*" == *'campus-marketplace-async-worker:'* ]]; then
     exit 7
   fi
   printf '{"prisma":[{"root":"/app/node_modules","version":"6.19.3"}]}'
