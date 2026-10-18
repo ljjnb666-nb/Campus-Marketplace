@@ -43,6 +43,35 @@ safe_rollback_failure_evidence() {
     "$rc" "$inspect" "$config" "$app_up" "$resolved_app" "$image_mismatch" "$config_failure" >&2
 }
 
+# Issue #97 R2: the first-failure shell artifact was not uploaded, so classify
+# the verifier's *bounded reason codes* without printing raw output, URLs, secrets,
+# request data or Docker arguments. Observations are not a root-cause verdict.
+safe_verifier_failure_evidence() {
+  local rc="$1" out_file="$2" fake_pid="$3"
+  local app_up=0 gate_started=0 verifier_pass=0 verifier_fail=0
+  local health_unreachable=0 ready_unreachable=0 release_mismatch=0
+  local dependency_failed=0 nonready=0 invalid=0 fake_app_alive=0
+  [[ "$CALL_LOG" == *"app_up_called"* ]] && app_up=1
+  if [[ -f "$out_file" ]]; then
+    grep -qF '[rollback] release readiness gate' "$out_file" && gate_started=1
+    grep -qF '"result":"PASS"' "$out_file" && verifier_pass=1
+    grep -qF '"result":"FAIL"' "$out_file" && verifier_fail=1
+    grep -Eq '"(HEALTH|READY)_UNREACHABLE"' "$out_file" && {
+      grep -qF '"HEALTH_UNREACHABLE"' "$out_file" && health_unreachable=1
+      grep -qF '"READY_UNREACHABLE"' "$out_file" && ready_unreachable=1
+    }
+    grep -Eq '"(HEALTH|READY)_RELEASE_MISMATCH"' "$out_file" && release_mismatch=1
+    grep -Eq '"DEPENDENCY_(DATABASE|REDIS|STORAGE)_NOT_OK"' "$out_file" && dependency_failed=1
+    grep -Eq '"(READY_NOT_READY|READY_DEGRADED|HEALTH_STATUS_NOT_OK)"' "$out_file" && nonready=1
+    grep -Eq '"(INVALID_ARGUMENTS|INVALID_EXPECTED_SHA)"' "$out_file" && invalid=1
+  fi
+  if [[ "$fake_pid" =~ ^[0-9]+$ ]] && kill -0 "$fake_pid" 2>/dev/null; then
+    fake_app_alive=1
+  fi
+  printf 'RB_VERIFIER_DIAG exit=%s app_up=%s gate=%s pass=%s fail=%s health_unreachable=%s ready_unreachable=%s release_mismatch=%s dependency_failed=%s nonready=%s invalid=%s fake_app_alive=%s\n' \
+    "$rc" "$app_up" "$gate_started" "$verifier_pass" "$verifier_fail" "$health_unreachable" "$ready_unreachable" "$release_mismatch" "$dependency_failed" "$nonready" "$invalid" "$fake_app_alive" >&2
+}
+
 assert_log_contains() {
   if grep -qF -- "$1" <<< "$CALL_LOG"; then
     pass_test
@@ -396,6 +425,26 @@ if [[ "$DIAG_RESULT" == *'rollback app_up 调用缺失'* &&
 else
   fail_test "RB_DIAG 缺失 app_up 实际断言链须输出固定标志，禁止回显敏感原文"
 fi
+# 故障注入：成功预期中的真实 verifier 失败须保留阶段与白名单原因，
+# 但不得泄露任意原始输出、URL 或未知 reason / Docker 参数。
+VERIFIER_DIAG_RESULT="$(
+  CALL_LOG='app_up_called ARGS=CANARY_SECRET_SHOULD_NOT_LEAK=private'
+  printf '%s\n' '[rollback] release readiness gate (https://private.example/secret)' \
+    '{"result":"FAIL","reason":"HEALTH_UNREACHABLE","reasons":["HEALTH_UNREACHABLE","READY_NOT_READY"],"untrusted":"CANARY_SECRET_SHOULD_NOT_LEAK"}' \
+    > "/tmp/rb-out.$$"
+  safe_verifier_failure_evidence 17 "/tmp/rb-out.$$" "" 2>&1
+  rm -f "/tmp/rb-out.$$"
+)"
+if [[ "$VERIFIER_DIAG_RESULT" == *'RB_VERIFIER_DIAG exit=17'* &&
+      "$VERIFIER_DIAG_RESULT" == *'app_up=1 gate=1 pass=0 fail=1'* &&
+      "$VERIFIER_DIAG_RESULT" == *'health_unreachable=1 ready_unreachable=0'* &&
+      "$VERIFIER_DIAG_RESULT" == *'nonready=1'* &&
+      "$VERIFIER_DIAG_RESULT" != *'CANARY_SECRET_SHOULD_NOT_LEAK'* &&
+      "$VERIFIER_DIAG_RESULT" != *'private.example'* ]]; then
+  pass_test
+else
+  fail_test "verifier 失败诊断必须保留有界原因标志且不泄露原始证据"
+fi
 # 故障注入：通用缺失断言不得泄露原始 Docker 参数。
 GENERIC_DIAG_RESULT="$(
   CALL_LOG='docker image inspect CANARY_SECRET_SHOULD_NOT_LEAK=private'
@@ -686,6 +735,9 @@ FAKE_OUT="${SANDBOX}/fake-app.out"
 start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
 OPS_HEALTH_TIMEOUT=15 run_rollback "${PREV_SHA}"; rc=$?
+if [[ "$rc" != 0 ]]; then
+  safe_verifier_failure_evidence "$rc" "/tmp/rb-out.$$" "${FAKE_APP_PID:-}"
+fi
 TEST_APP_URL=""
 [[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
 assert_exit 0 "$rc" "real verifier all-green rollback"
