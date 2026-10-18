@@ -116,11 +116,16 @@ try {
   console.log("[worker-cycle] PASS R3B real v7 transaction COMMIT and forced ROLLBACK");
 
   let acquired = 0;
+  const backendPids = new Set<number>();
   let signalReady!: () => void;
   const ready = new Promise<void>(resolve => { signalReady = resolve; });
   const hold = new Promise<void>(resolve => { releaseHolders = resolve; });
   const holder = () => prisma.$transaction(async tx => {
-    await tx.$queryRawUnsafe("SELECT pg_backend_pid()");
+    const [backend] = await tx.$queryRawUnsafe<{ pid: number }[]>(
+      "SELECT pg_backend_pid() AS pid"
+    );
+    assert(typeof backend?.pid === "number", "BACKEND_PID_UNREADABLE");
+    backendPids.add(backend.pid);
     acquired++;
     if (acquired === 2) signalReady();
     await hold;
@@ -131,16 +136,17 @@ try {
     new Promise<never>((_,reject) =>
       setTimeout(() => reject(new Error("R3B_HOLDER_NOT_READY")), 3000))
   ]);
-  assert(acquired === 2,"POOL_HOLDERS_NOT_TWO");
+  assert(acquired === 2 && backendPids.size === 2,"POOL_HOLDERS_NOT_DISTINCT");
   const start = Date.now();
-  let rejected = false;
+  let timeoutRejected = false;
   try {
     await prisma.$queryRawUnsafe("SELECT 1");
-  } catch {
-    rejected = true;
+  } catch (err) {
+    // An arbitrary SQL/prisma/driver error must never count as a pool proof.
+    timeoutRejected = err instanceof Error && /timeout|timed out/i.test(err.message);
   }
   const elapsed = Date.now()-start;
-  assert(rejected && elapsed >= 350 && elapsed < 2400,"POOL_WAIT_NOT_BOUNDED");
+  assert(timeoutRejected && elapsed >= 350 && elapsed < 2400,"POOL_WAIT_NOT_BOUNDED");
   console.log("[worker-cycle] PASS R3B real pg adapter max=2 bounded acquire timeout=600ms");
 } finally {
   releaseHolders?.();
