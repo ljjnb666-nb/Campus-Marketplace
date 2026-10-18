@@ -32,11 +32,22 @@ for(const name of files){
    return to;
  });
  if(/["']@\/lib\//.test(relocated))throw Error("R3D02A_UNRELOCATED_ALIAS");
+ // A source module may import the SAME dependency twice (value + type).
+ // Reverse unique mappings and prove the exact original occurrence count.
+ const unique=new Map();
+ for(const change of rewrites){
+   const prior=unique.get(change.to);
+   if(prior && prior.from!==change.from)
+     throw Error("R3D02A_CONFLICTING_MODULE_RELOCATION");
+   unique.set(change.to,change);
+ }
  let restored=relocated;
- for(const change of rewrites.slice().reverse()){
-   const pieces=restored.split(change.to);
-   if(pieces.length!==2)throw Error("R3D02A_RELOCATION_AMBIGUOUS");
-   restored=pieces.join(change.from);
+ for(const change of Array.from(unique.values()).reverse()){
+   const expected=original.split(change.from).length-1;
+   const actual=restored.split(change.to).length-1;
+   if(expected<1 || actual!==expected)
+     throw Error("R3D02A_RELOCATION_COUNT_MISMATCH");
+   restored=restored.split(change.to).join(change.from);
  }
  if(restored!==original)throw Error("R3D02A_NON_IMPORT_SOURCE_MUTATION");
  fs.writeFileSync(target,relocated);
