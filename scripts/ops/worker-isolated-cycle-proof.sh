@@ -10,8 +10,14 @@ pg_password="synthetic-pg-only"; root_user="proofroot"; root_password="synthetic
 s3_user="proofaccess"; s3_password="synthetic-s3-only"
 db_url="postgresql://postgres:${pg_password}@${pg}:5432/${database}?schema=public"
 s3_url="http://${minio}:9000"
-mc="ghcr.io/ljjnb666-nb/mc@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b878"
+mc="ghcr.io/ljjnb666-nb/mc@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780"
 minio_image="ghcr.io/ljjnb666-nb/minio@sha256:a1a8bd4ac40ad7881a245bab97323e18f971e4d4cba2c2007ec1bedd21cbaba2"
+for item in "$mc" "$minio_image"; do
+  if [[ ! "$item" =~ @sha256:[0-9a-f]{64}$ ]]; then
+    echo '[worker-cycle][FAIL] invalid pinned image digest' >&2
+    exit 2
+  fi
+done
 for tool in docker timeout; do command -v "$tool" >/dev/null 2>&1 || exit 2; done
 for image in "campus-marketplace-migrator:${sha}" "campus-marketplace-cleanup:${sha}" "campus-marketplace-async-worker:${sha}"; do
   docker image inspect "$image" >/dev/null 2>&1 || { echo '[worker-cycle][FAIL] candidate image missing' >&2; exit 1; }
