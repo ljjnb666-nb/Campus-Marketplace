@@ -56,6 +56,7 @@ for item in "${images[@]}"; do
   # Probe is hermetic and read-only. This observes only installed package.json
   # paths, not bundled code, JS reachability, or actual exploitation potential.
   package_json="$(docker run --rm --network none --read-only --user 65534:65534 \
+    --cap-drop ALL --security-opt no-new-privileges \
     --entrypoint node "$image" -e '
       const fs = require("node:fs");
       const path = require("node:path");
