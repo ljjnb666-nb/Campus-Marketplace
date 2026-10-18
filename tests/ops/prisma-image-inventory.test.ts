@@ -23,6 +23,12 @@ describe("Issue #157 Prisma production-image inventory contract", () => {
     expect(script).not.toContain("docker build");
   });
 
+  it("buffers all records and prints nothing if a later container probe fails", () => {
+    expect(script).toContain("observations=()");
+    expect(script).toContain("observations+=(");
+    expect(script).toContain("printf '%s\\n' \"${observations[@]}\"");
+  });
+
   it("records Prisma supply-chain packages and explicitly limits its evidence claim", () => {
     for (const name of ["prisma", "@prisma/config", "deepmerge-ts", "@prisma/client"]) {
       expect(script).toContain('"' + name + '"');
