@@ -409,6 +409,10 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).toContain("--cap-drop ALL --security-opt no-new-privileges");
     expect(ext).toContain('sudo chown -R root:root "$ops_backups"');
     expect(ext).toContain("--user 1000:1000");
+    expect(ext).toContain("PROOF_R2B_EACCES");
+    expect(ext).toContain("PROOF_R2B_EROFS");
+    expect(ext).toContain('ops_nonroot_rc" == 77');
+    expect(ext).toContain('ops_write_rc" == 78');
     expect(ext).toContain('ops_expect healthy-ci 0 PASS pass NONE --mode ci');
     expect(ext).toContain('ops_expect invalid-mode 1 FAIL NONE INVALID_OPS_MODE');
     expect(ext).toContain("PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED");
