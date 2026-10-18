@@ -172,6 +172,81 @@ if [[ "$(r1c_snapshot)" != 4 ]]; then
 fi
 echo '[worker-cycle] PASS real nonroot AsyncJob/Outbox expired-lease/replay 4/4'
 
+# R1D: valid PRODUCT reservation due on an isolated campus. Mirror the minimal
+# fixture shape from WORKER-INT-01 in phase9a-async-core.test.ts: real User,
+# membership, Product, Order, due canonical AsyncJob and transactionally
+# materialized Outbox/Notifications by the real nonroot worker. No real people.
+docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" >/dev/null <<'SQL'
+INSERT INTO "Campus" ("id","name","slug","schoolName","createdAt","updatedAt")
+VALUES ('proof-campus','Worker fixture campus','worker-proof-campus','Fixture campus',NOW(),NOW());
+INSERT INTO "User" ("id","name","email","passwordHash","schoolName","campusId","createdAt","updatedAt")
+VALUES
+ ('proof-seller','Proof Seller','proof-seller@fixture.invalid','not-an-auth-password','Fixture campus','proof-campus',NOW(),NOW()),
+ ('proof-buyer','Proof Buyer','proof-buyer@fixture.invalid','not-an-auth-password','Fixture campus','proof-campus',NOW(),NOW());
+INSERT INTO "CampusMembership" ("id","userId","campusId","status","createdAt","updatedAt")
+VALUES ('proof-seller-member','proof-seller','proof-campus','ACTIVE',NOW(),NOW()),
+       ('proof-buyer-member','proof-buyer','proof-campus','ACTIVE',NOW(),NOW());
+INSERT INTO "ProductCategory" ("id","name","slug","createdAt","updatedAt")
+VALUES ('proof-category','Fixture product category','proof-product-category',NOW(),NOW());
+INSERT INTO "Product"
+ ("id","title","description","price","locationText","condition","status","sellerId","campusId","categoryId","createdAt","updatedAt")
+VALUES
+ ('proof-product','Isolated proof product','Disposable fixture',10.00,'Fixture gate','NEW','RESERVED',
+  'proof-seller','proof-campus','proof-category',NOW(),NOW());
+INSERT INTO "Order"
+ ("id","orderNo","type","status","amount","buyerId","sellerId","productId",
+  "productReservationExpiresAt","createdAt","updatedAt")
+VALUES
+ ('proof-order','PROOF-EXPIRE-ORDER','PRODUCT','PENDING',10.00,'proof-buyer','proof-seller','proof-product',
+  NOW()-INTERVAL '2 minutes',NOW(),NOW());
+INSERT INTO "AsyncJob"
+ ("id","kind","schemaVersion","dedupeKey","payload","status","runAt","createdAt","updatedAt")
+VALUES
+ ('proof-expiry-job','PRODUCT_RESERVATION_EXPIRE',1,
+  'PRODUCT_RESERVATION_EXPIRE:proof-order','{"orderId":"proof-order"}'::jsonb,
+  'PENDING',NOW()-INTERVAL '2 minutes',NOW(),NOW());
+SQL
+
+valid_order_snapshot() {
+  docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT
+  (SELECT COUNT(*) FROM "Order"
+   WHERE id='proof-order' AND "status"='CANCELLED'
+     AND "productReservationResolution"='EXPIRED'
+     AND "productReservationResolvedAt" IS NOT NULL)
+  + (SELECT COUNT(*) FROM "Product"
+     WHERE id='proof-product' AND "status"='ACTIVE')
+  + (SELECT COUNT(*) FROM "AsyncJob"
+     WHERE id='proof-expiry-job' AND "status"='COMPLETED' AND "attempts"=1
+       AND "leaseToken" IS NULL AND "completedAt" IS NOT NULL)
+  + (SELECT COUNT(*) FROM "OutboxEvent"
+     WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'
+       AND "status"='PUBLISHED' AND "publishedAt" IS NOT NULL)
+  + (SELECT CASE WHEN
+      (SELECT COUNT(*) FROM "Notification" n
+       JOIN "OutboxEvent" e ON n."sourceEventId"=e.id
+       WHERE n."orderId"='proof-order'
+         AND e."dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'
+         AND n.title='商品预留已过期'
+         AND n."dedupeKey"='OUTBOX:'||e.id||':IN_APP:'||n."userId"
+         AND n."userId" IN ('proof-buyer','proof-seller'))=2
+       AND (SELECT COUNT(*) FROM "Notification" WHERE "orderId"='proof-order')=2
+       AND (SELECT COUNT(DISTINCT "userId") FROM "Notification"
+            WHERE "orderId"='proof-order')=2 THEN 1 ELSE 0 END);
+SQL
+}
+run_worker valid-expiry "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+if [[ "$(valid_order_snapshot)" != 5 ]]; then
+  echo '[worker-cycle][FAIL] valid expiry order/product/job/outbox/notification contract != 5' >&2
+  exit 1
+fi
+run_worker valid-expiry-replay "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+if [[ "$(valid_order_snapshot)" != 5 ]]; then
+  echo '[worker-cycle][FAIL] valid expiry replay changed canonical result or notifications' >&2
+  exit 1
+fi
+echo '[worker-cycle] PASS real nonroot PRODUCT expiry -> PUBLISHED outbox + exactly two notifications, replay stable 5/5'
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
