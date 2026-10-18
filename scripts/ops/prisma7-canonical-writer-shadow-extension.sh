@@ -21,7 +21,7 @@ for path in \
  cp "$path" "$target"
 done
 cp scripts/ops/prisma7-canonical-writer-relocate.cjs "$sandbox/r3d02/relocate.cjs"
-cp scripts/ops/prisma7-canonical-writer-probe.ts "$sandbox/r3d02/probe.ts"
+cp scripts/ops/prisma7-canonical-writer-probe.ts.txt "$sandbox/r3d02/probe.ts"
 cat >"$sandbox/r3d02/lib/prisma.ts" <<'SHADOW'
 import { PrismaClient } from "../../generated/prisma/client.ts";
 import { PrismaPg } from "@prisma/adapter-pg";
