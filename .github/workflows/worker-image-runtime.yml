@@ -7,6 +7,8 @@ on:
       - .github/workflows/worker-image-runtime.yml
       - scripts/ops/worker-image-runtime-proof.sh
       - scripts/ops/worker-isolated-cycle-proof.sh
+      - scripts/ops/worker-lease-fencing-extension.sh
+      - scripts/ops/worker-lease-fencing-proof.ts
       - package.json
       - package-lock.json
       - prisma/**
