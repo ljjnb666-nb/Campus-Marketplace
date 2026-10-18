@@ -32,7 +32,10 @@ if docker network inspect "$network" >/dev/null 2>&1; then
 fi
 
 tmp="$(mktemp -d)"; made_net=0; made_pg=0; made_minio=0
+parallel_one="proof-async-a-${GITHUB_RUN_ID}"; parallel_two="proof-async-b-${GITHUB_RUN_ID}"
 cleanup() {
+  # Including interrupted background real worker containers on failed assertions.
+  docker rm -f "$parallel_one" "$parallel_two" >/dev/null 2>&1 || true
   ((made_pg == 0)) || docker rm -f "$pg" >/dev/null 2>&1 || true
   ((made_minio == 0)) || docker rm -f "$minio" >/dev/null 2>&1 || true
   ((made_net == 0)) || docker network rm "$network" >/dev/null 2>&1 || true
@@ -316,6 +319,112 @@ if [[ "$(valid_order_snapshot)" != 5 ]]; then
   exit 1
 fi
 echo '[worker-cycle] PASS real nonroot PRODUCT expiry -> PUBLISHED outbox + exactly two notifications, replay stable 5/5'
+
+# R1E: launch TWO separate nonroot production-image worker processes against
+# one canonical, already-due reservation. Verify durable end-to-end side effects
+# remain single. Launch overlap is real; same-row contention is not guaranteed
+# by a scheduler, so this is NOT a substitute for deterministic fencing tests.
+docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" >/dev/null <<'SQL'
+INSERT INTO "Product"
+ ("id","title","description","price","locationText","condition","status","sellerId","campusId","categoryId","createdAt","updatedAt")
+VALUES
+ ('proof-parallel-product','Parallel worker fixture','Disposable isolated fixture',10.00,
+  'Fixture gate','NEW','RESERVED','proof-seller','proof-campus','proof-category',NOW(),NOW());
+INSERT INTO "Order"
+ ("id","orderNo","type","status","amount","buyerId","sellerId","productId",
+  "productReservationExpiresAt","createdAt","updatedAt")
+VALUES
+ ('proof-parallel-order','PROOF-PARALLEL-ORDER','PRODUCT','PENDING',10.00,
+  'proof-buyer','proof-seller','proof-parallel-product',NOW()-INTERVAL '2 minutes',NOW(),NOW());
+INSERT INTO "AsyncJob"
+ ("id","kind","schemaVersion","dedupeKey","payload","status","runAt","createdAt","updatedAt")
+VALUES
+ ('proof-parallel-job','PRODUCT_RESERVATION_EXPIRE',1,
+  'PRODUCT_RESERVATION_EXPIRE:proof-parallel-order',
+  '{"orderId":"proof-parallel-order"}'::jsonb,
+  'PENDING',NOW()-INTERVAL '2 minutes',NOW(),NOW());
+SQL
+
+# Two docker runs really start in parallel and use separate container names,
+# host processes, logs and automatic cleanup. No --user override.
+timeout --signal=TERM --kill-after=10s 180s docker run --rm --name "$parallel_one" \
+  --network "$network" --cap-drop ALL --security-opt no-new-privileges \
+  "${worker_env[@]}" "campus-marketplace-async-worker:${sha}" --run-once \
+  >"$tmp/parallel-a.log" 2>&1 &
+parallel_pid_a=$!
+timeout --signal=TERM --kill-after=10s 180s docker run --rm --name "$parallel_two" \
+  --network "$network" --cap-drop ALL --security-opt no-new-privileges \
+  "${worker_env[@]}" "campus-marketplace-async-worker:${sha}" --run-once \
+  >"$tmp/parallel-b.log" 2>&1 &
+parallel_pid_b=$!
+parallel_rc_a=0; parallel_rc_b=0
+wait "$parallel_pid_a" || parallel_rc_a=$?
+wait "$parallel_pid_b" || parallel_rc_b=$?
+if [[ "$parallel_rc_a" != 0 || "$parallel_rc_b" != 0 ]]; then
+  printf '[worker-cycle][FAIL] parallel worker process exits a=%s b=%s; safe event names:\n' \
+    "$parallel_rc_a" "$parallel_rc_b" >&2
+  for f in "$tmp/parallel-a.log" "$tmp/parallel-b.log"; do
+    grep -oE '"event":"[a-zA-Z0-9_-]+"' "$f" | sort -u >&2 || true
+  done
+  exit 1
+fi
+for f in "$tmp/parallel-a.log" "$tmp/parallel-b.log"; do
+  if ! grep -qF '"event":"async_worker_started"' "$f"; then
+    echo '[worker-cycle][FAIL] parallel worker process missing startup event' >&2; exit 1
+  fi
+  if grep -qF '"event":"async_worker_cycle_failed"' "$f"; then
+    echo '[worker-cycle][FAIL] parallel worker cycle failure event' >&2; exit 1
+  fi
+done
+parallel_snapshot() {
+  docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT
+ (SELECT COUNT(*) FROM "Order" WHERE id='proof-parallel-order'
+   AND "status"='CANCELLED' AND "productReservationResolution"='EXPIRED'
+   AND "productReservationResolvedAt" IS NOT NULL)
+ + (SELECT COUNT(*) FROM "Product"
+    WHERE id='proof-parallel-product' AND "status"='ACTIVE')
+ + (SELECT COUNT(*) FROM "AsyncJob"
+    WHERE id='proof-parallel-job' AND "status"='COMPLETED'
+      AND "attempts"=1 AND "leaseToken" IS NULL AND "completedAt" IS NOT NULL)
+ + (SELECT CASE WHEN
+    (SELECT COUNT(*) FROM "OutboxEvent" WHERE "aggregateId"='proof-parallel-order'
+      AND "eventType"='PRODUCT_RESERVATION_EXPIRED')=1
+    AND (SELECT COUNT(*) FROM "OutboxEvent"
+         WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-parallel-order'
+           AND "status"='PUBLISHED' AND "attempts"=1)=1
+    THEN 1 ELSE 0 END)
+ + (SELECT CASE WHEN
+    (SELECT COUNT(*) FROM "Notification" n
+     JOIN "OutboxEvent" e ON n."sourceEventId"=e.id
+     WHERE n."orderId"='proof-parallel-order' AND n.title='商品预留已过期'
+       AND e."dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-parallel-order'
+       AND n."dedupeKey"='OUTBOX:'||e.id||':IN_APP:'||n."userId"
+       AND n."userId" IN ('proof-buyer','proof-seller'))=2
+    AND (SELECT COUNT(*) FROM "Notification"
+         WHERE "orderId"='proof-parallel-order')=2
+    AND (SELECT COUNT(DISTINCT "userId") FROM "Notification"
+         WHERE "orderId"='proof-parallel-order')=2
+    THEN 1 ELSE 0 END)
+ + (SELECT CASE WHEN
+    (SELECT COUNT(*) FROM "NotificationDelivery" d
+     JOIN "Notification" n ON n.id=d."notificationId"
+     WHERE n."orderId"='proof-parallel-order' AND d.channel='EMAIL'
+       AND d.provider='disabled' AND d."suppressionCode"='PROVIDER_DISABLED'
+       AND d."suppressedAt" IS NOT NULL)=2
+    THEN 1 ELSE 0 END);
+SQL
+}
+if [[ "$(parallel_snapshot)" != 6 ]]; then
+  echo '[worker-cycle][FAIL] parallel real container durable canonical snapshot != 6' >&2
+  exit 1
+fi
+run_worker parallel-replay "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+if [[ "$(parallel_snapshot)" != 6 ]]; then
+  echo '[worker-cycle][FAIL] parallel replay altered idempotent durable snapshot' >&2
+  exit 1
+fi
+echo '[worker-cycle] PASS two parallel nonroot image workers -> single job/outbox and two deduped notifications 6/6'
 
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
