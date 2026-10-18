@@ -271,4 +271,49 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(harness).not.toContain("console.error(error");
   });
 
+  it("enforces R1G deterministic nonroot held-row claim contention on BOTH queue tables", () => {
+    const cycle = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    const ext = readFileSync(path.join(process.cwd(), "scripts/ops/worker-lock-contention-extension.sh"), "utf8");
+    const harness = readFileSync(path.join(process.cwd(), "scripts/ops/worker-lock-contention-proof.ts"), "utf8");
+    const workflow = readFileSync(path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8");
+    const dockerignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const imageProof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8");
+
+    expect(cycle).toContain("source scripts/ops/worker-lock-contention-extension.sh");
+    expect(cycle.indexOf("source scripts/ops/worker-lock-contention-extension.sh"))
+      .toBeGreaterThan(cycle.indexOf("source scripts/ops/worker-lease-fencing-extension.sh"));
+    expect(cycle.indexOf("source scripts/ops/worker-lock-contention-extension.sh"))
+      .toBeLessThan(cycle.indexOf("# Fail-closed negative gate"));
+    for (const name of ["worker-lock-contention-proof.ts", "worker-lock-contention-extension.sh"]) {
+      expect(workflow).toContain("scripts/ops/" + name);
+      expect(dockerignore).toContain("scripts/ops/" + name);
+      expect(imageProof).toContain("/app/scripts/ops/" + name);
+    }
+    expect(ext).toContain("for lane in job outbox");
+    expect(ext).toContain('r1g_container "$r1g_holder_name" "hold-$lane"');
+    expect(ext).toContain('r1g_container "$r1g_challenger_name" "compete-$lane"');
+    expect(ext).toContain("PROOF_R1G_LOCK_HELD");
+    expect(ext).toContain("PROOF_R1G_SKIP_LOCKED");
+    expect(ext).toContain("PROOF_R1G_LEASE_STABLE");
+    expect(ext).toContain("touch \"$tmp/proof-r1g-sync/release-$lane\"");
+    expect(ext).toContain("--read-only");
+    expect(ext).toContain("--cap-drop ALL --security-opt no-new-privileges");
+    expect(ext).toContain("--mount");
+    expect(ext).toContain("readonly");
+    expect(ext).toContain('wait "$r1g_holder_pid"');
+    expect(ext).toContain("dirty lock-state");
+    expect(ext).not.toContain('UPDATE "AsyncJob"');
+    expect(ext).not.toContain('UPDATE "OutboxEvent"');
+    expect(harness).toContain("claimDueAsyncJobs(tx,");
+    expect(harness).toContain("claimDueOutboxEvents(tx,");
+    expect(harness).toContain("withTransaction(async (tx) =>");
+    expect(harness).toContain('marker("LOCK_HELD")');
+    expect(harness).toContain('marker("SKIP_LOCKED")');
+    expect(harness).toContain('marker("LEASE_STABLE")');
+    expect(harness).toContain("UNCOMMITTED_STATE");
+    expect(harness).toContain("COMMITTED_LEASE_STABLE");
+    expect(harness).toContain("RELEASE_TIMEOUT");
+    expect(harness).not.toContain("console.error(error");
+  });
+
 });
