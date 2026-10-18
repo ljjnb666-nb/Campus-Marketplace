@@ -42,6 +42,7 @@ printf '{"status":"success","completedAt":"%s","filename":"synthetic-ci.dump","c
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$ops_backups/backup-status.json"
 chmod 600 "$ops_backups/"*
 ops_before="$(sha256sum "$ops_backups/"* | sha256sum | cut -d ' ' -f 1)"
+ops_before_meta="$(sha256sum "$ops_backups/backup-status.json" "$ops_backups/synthetic-ci.dump.sha256" | sha256sum | cut -d ' ' -f 1)"
 
 ops_run() {
   local label="$1"; shift
@@ -126,7 +127,7 @@ ops_expect corrupt-prod 1 FAIL fail backup_health --mode production
 # Prove the root-owned fixture's status/checksum metadata was unchanged by all
 # read-only container runs; only the host's explicit corrupt test changes dump.
 ops_after_status="$(sha256sum "$ops_backups/backup-status.json" "$ops_backups/synthetic-ci.dump.sha256" | sha256sum | cut -d ' ' -f 1)"
-[[ "$ops_after_status" =~ ^[0-9a-f]{64}$ && "$ops_before" =~ ^[0-9a-f]{64}$ ]] || {
+[[ "$ops_after_status" == "$ops_before_meta" && "$ops_before" =~ ^[0-9a-f]{64}$ ]] || {
   echo '[worker-cycle][FAIL] R2B backup status hash invalid' >&2; exit 1;
 }
 echo '[worker-cycle] PASS R2B ops real pg_dump+checksum, real DB/S3, readonly root backup, invalid-mode/prod-skip/corrupt failclosed'
