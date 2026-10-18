@@ -163,6 +163,28 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain('if [[ "$(r1c_snapshot)" != 4 ]]');
   });
 
+  it("exercises a valid reservation expiry and real Outbox notification exactly-once in image", () => {
+    const sql = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8",
+    );
+    const source = readFileSync(
+      path.join(process.cwd(), "tests/integration/phase9a-async-core.test.ts"), "utf8",
+    );
+    expect(source).toContain("WORKER-INT-01");
+    expect(sql).toContain("'PRODUCT_RESERVATION_EXPIRE'");
+    expect(sql).toContain("'PRODUCT_RESERVATION_EXPIRE:proof-order'");
+    expect(sql).toContain("'PRODUCT_RESERVATION_EXPIRED:proof-order'");
+    expect(sql).toContain("'proof-buyer'");
+    expect(sql).toContain("'proof-seller'");
+    expect(sql).toContain("valid_order_snapshot");
+    expect(sql).toContain("run_worker valid-expiry");
+    expect(sql).toContain("run_worker valid-expiry-replay");
+    expect(sql).toContain('if [[ "$(valid_order_snapshot)" != 5 ]]');
+    expect(sql).toContain("COUNT(DISTINCT");
+    expect(sql).toContain("'PUBLISHED'");
+    expect(sql).toContain("'COMPLETED'");
+  });
+
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
     const stage = stages.get("cleanup-runner");
     expect(stage).toBeDefined();
