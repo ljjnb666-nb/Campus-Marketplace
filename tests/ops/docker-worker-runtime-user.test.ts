@@ -379,4 +379,49 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(dockerfile).not.toContain("rm -rf node_modules/tsx");
   });
 
+  it("requires actual R2B ops-runner build, isolated root-only backup and failclosed diagnostic checks", () => {
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8",
+    );
+    const cycle = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8",
+    );
+    const ext = readFileSync(
+      path.join(process.cwd(), "scripts/ops/ops-runner-isolated-extension.sh"), "utf8",
+    );
+    const dockerignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const imageProof = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    expect(workflow).toContain("scripts/ops/ops-runner-isolated-extension.sh");
+    expect(workflow).toContain("--target ops-runner");
+    expect(workflow).toContain("campus-marketplace-ops-check:${SOURCE_SHA}");
+    expect(cycle).toContain("source scripts/ops/ops-runner-isolated-extension.sh");
+    expect(cycle.indexOf("source scripts/ops/ops-runner-isolated-extension.sh"))
+      .toBeGreaterThan(cycle.indexOf("source scripts/ops/worker-lock-contention-extension.sh"));
+    expect(dockerignore).toMatch(/^scripts\/ops\/ops-runner-isolated-extension\.sh$/m);
+    expect(imageProof).toContain("/app/scripts/ops/ops-runner-isolated-extension.sh");
+    expect(ext).toContain('ops_image="campus-marketplace-ops-check:$sha"');
+    expect(ext).toContain('process.env.RELEASE_SHA !== process.env.EXPECTED_SHA');
+    expect(ext).not.toContain('-e RELEASE_SHA=');
+    expect(ext).toContain('docker exec "$pg" pg_dump');
+    expect(ext).toContain("sha256sum");
+    expect(ext).toContain("--read-only");
+    expect(ext).toContain("readonly");
+    expect(ext).toContain("--cap-drop ALL --security-opt no-new-privileges");
+    expect(ext).toContain('sudo chown -R root:root "$ops_backups"');
+    expect(ext).toContain("--user 1000:1000");
+    expect(ext).toContain("PROOF_R2B_EACCES");
+    expect(ext).toContain("PROOF_R2B_EROFS");
+    expect(ext).toContain('ops_nonroot_rc" == 77');
+    expect(ext).toContain('ops_write_rc" == 78');
+    expect(ext).toContain('ops_expect healthy-ci 0 PASS pass NONE --mode ci');
+    expect(ext).toContain('ops_expect invalid-mode 1 FAIL NONE INVALID_OPS_MODE');
+    expect(ext).toContain("PRODUCTION_CONNECTIVITY_CANNOT_BE_SKIPPED");
+    expect(ext).toContain('ops_expect corrupt-prod 1 FAIL fail backup_health --mode production');
+    expect(ext).toContain('ops_before_meta');
+    expect(ext).toContain('ops_after_status');
+    expect(ext).not.toContain(".env.production");
+  });
+
 });

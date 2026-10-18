@@ -433,6 +433,9 @@ source scripts/ops/worker-lease-fencing-extension.sh
 # R1G: deterministic SAME-ROW PostgreSQL lock competition (job and outbox).
 source scripts/ops/worker-lock-contention-extension.sh
 
+# R2B: one-shot ops-runner real backup/readonly/diagnostic bounded probe.
+source scripts/ops/ops-runner-isolated-extension.sh
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
