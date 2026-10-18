@@ -132,6 +132,44 @@ grep -qF 'ECONNREFUSED' "$tmp/bad-db.log" && refused=1 || true
 grep -qF '[storage-cleanup-worker] fatal:' "$tmp/bad-db.log" && fatal=1 || true
 printf '[worker-cycle] refused DB classification exit=%s started=%s cycle_failed=%s retention_failed=%s p1001=%s prisma_init=%s refused=%s fatal=%s\n' \
   "$negative_rc" "$started" "$cycle_failed" "$retention_failed" "$p1001" "$prisma_init" "$refused" "$fatal"
+# Diagnostic on every negative result, including an unexpected FAIL. Output ONLY
+# fixed event vocabulary and numeric categories; never print raw stdout/stderr,
+# Prisma connection strings, synthetic passwords or stack frames.
+for evidence in \
+  storage_cleanup_worker_started \
+  storage_cleanup_cycle_failed \
+  phase9_retention_subtask_failed \
+  phase9_retention_cycle_failed \
+  storage_cleanup_cycle_completed \
+  data_export_artifact_cleanup_failed; do
+  observed=0
+  grep -qF "\"event\":\"$evidence\"" "$tmp/bad-db.log" && observed=1 || true
+  printf '[worker-cycle] NEG_EVENT name=%s observed=%s\n' "$evidence" "$observed"
+done
+for item in \
+  PrismaClientKnownRequestError \
+  PrismaClientUnknownRequestError \
+  PrismaClientValidationError \
+  PrismaClientRustPanicError \
+  P1002 \
+  P1017 \
+  ENOTFOUND \
+  EPIPE \
+  EACCES \
+  'docker: Error response from daemon' \
+  'Error: ' \
+  'UnhandledPromiseRejection' \
+  'Node.js v' ; do
+  seen=0
+  grep -qF "$item" "$tmp/bad-db.log" && seen=1 || true
+  case "$item" in
+    *[[:space:]]*) printf '[worker-cycle] NEG_CATEGORY token=unstructured_error observed=%s\n' "$seen";;
+    *) printf '[worker-cycle] NEG_CATEGORY token=%s observed=%s\n' "$item" "$seen";;
+  esac
+done
+printf '[worker-cycle] NEG_COUNTS lines=%s bytes=%s\n' \
+  "$(wc -l < "$tmp/bad-db.log" | tr -d ' ')" \
+  "$(wc -c < "$tmp/bad-db.log" | tr -d ' ')"
 if [[ "$started" -ne 1 || ( "$cycle_failed" -ne 1 && "$retention_failed" -ne 1 && "$p1001" -ne 1 && "$prisma_init" -ne 1 && "$refused" -ne 1 ) ]]; then
   echo '[worker-cycle][FAIL] refused-DB had no recognized connection error evidence' >&2
   exit 1
