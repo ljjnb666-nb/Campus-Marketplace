@@ -6,6 +6,7 @@ on:
       - Dockerfile
       - .github/workflows/worker-image-runtime.yml
       - scripts/ops/worker-image-runtime-proof.sh
+      - scripts/ops/worker-isolated-cycle-proof.sh
       - package.json
       - package-lock.json
       - prisma/**
@@ -13,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 # A later PR HEAD replaces the old candidate evidence, never the exact-master CI.
 concurrency:
@@ -57,3 +59,16 @@ jobs:
       - name: Verify image UID, immutable SHA and Node/Prisma/tsx execution
         shell: bash
         run: bash scripts/ops/worker-image-runtime-proof.sh "${SOURCE_SHA}"
+
+      - name: Login to pinned private MinIO mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Isolated network, local synthetic DB/S3 credentials only; always
+      # creates new PostgreSQL/MinIO and removes them on step exit.
+      - name: Real PostgreSQL MinIO worker run-once and refused-DB proof
+        shell: bash
+        timeout-minutes: 18
+        run: bash scripts/ops/worker-isolated-cycle-proof.sh "${SOURCE_SHA}"
