@@ -29,6 +29,14 @@ describe("Issue #157 Prisma production-image inventory contract", () => {
     expect(script).toContain("printf '%s\\n' \"${observations[@]}\"");
   });
 
+  it("records the Docker image default runtime user separately from the restricted probe user", () => {
+    expect(script).toContain("{{.Config.User}}");
+    expect(script).toContain('runtime_user="${runtime_user:-root}"');
+    expect(script).toContain("defaultRuntimeUser");
+    expect(script).toContain("invalid runtime user");
+    expect(script).toContain("--user 65534:65534");
+  });
+
   it("records Prisma supply-chain packages and explicitly limits its evidence claim", () => {
     for (const name of ["prisma", "@prisma/config", "deepmerge-ts", "@prisma/client"]) {
       expect(script).toContain('"' + name + '"');
