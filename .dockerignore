@@ -86,3 +86,5 @@ scripts/ops/worker-lock-contention-proof.ts
 scripts/ops/ops-runner-isolated-extension.sh
 # R3A CLI experiment is CI-host-only and must never ship in release images.
 scripts/ops/prisma7-cli-shadow-extension.sh
+# R3B client/adapter probe is host-only, never a release artifact.
+scripts/ops/prisma7-client-shadow-extension.sh
