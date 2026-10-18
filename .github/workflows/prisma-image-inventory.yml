@@ -1,0 +1,70 @@
+name: Prisma exact-release image inventory
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/prisma-image-inventory.yml
+      - scripts/ops/prisma-image-inventory.sh
+      - scripts/ops/prisma-image-inventory-verify.mjs
+      - tests/ops/prisma-image-inventory.test.ts
+      - package.json
+      - package-lock.json
+      - prisma/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prisma-inventory-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  four-image-inventory:
+    name: Build and inspect four exact-SHA production images (metadata only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout exact candidate commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build real release stages from local trusted checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          for pair in \
+            runner:campus-marketplace-app \
+            migrator:campus-marketplace-migrator \
+            cleanup-runner:campus-marketplace-cleanup \
+            async-runner:campus-marketplace-async-worker; do
+            target="${pair%%:*}"
+            tag="${pair#*:}:${SOURCE_SHA}"
+            docker build --build-arg "GIT_SHA=$SOURCE_SHA" \
+              --target "$target" --tag "$tag" .
+            printf '[prisma-inventory] BUILT stage=%s tag=%s\n' "$target" "$tag"
+          done
+
+      - name: Inventory installed packages without running entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Pure installed package metadata. No production credentials or network
+          # access inside each inspection container.
+          bash scripts/ops/prisma-image-inventory.sh "$SOURCE_SHA" > prisma-image-inventory.jsonl
+          node scripts/ops/prisma-image-inventory-verify.mjs "$SOURCE_SHA" prisma-image-inventory.jsonl
+          cat prisma-image-inventory.jsonl
+          {
+            echo '### #157 R0B | Prisma actual-image metadata inventory'
+            echo ''
+            echo 'Four exact-SHA images built and inspected: installed package.json only.'
+            echo 'Presence != exploitability, runtime invocation, bundle reachability or trusted SBOM.'
+            echo 'One-shot migrator and full-node_modules workers are separate from Web standalone.'
+            echo 'This does NOT clear npm audit findings or upgrade production trust.'
+          } >> "$GITHUB_STEP_SUMMARY"
