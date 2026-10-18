@@ -120,6 +120,21 @@ COPY scripts ./scripts
 # 运行时凭据一律由 compose env 注入），与 builder 阶段同模式
 RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
     && npx prisma generate
+# R2: runtime workers use generated @prisma/client + engine, not the Prisma
+# migration CLI or its config/merge supply-chain subtree. Prune AFTER generate
+# and fail closed if the audited npm topology changes; the one-shot migrator
+# retains its original complete deps. The dedicated ops stage below explicitly
+# restores these paths for its existing diagnostic/backup compatibility.
+RUN test -d node_modules/prisma \
+    && test -d node_modules/@prisma/config \
+    && test -d node_modules/deepmerge-ts \
+    && test -f node_modules/@prisma/client/package.json \
+    && test -d node_modules/.prisma/client \
+    && rm -rf node_modules/prisma node_modules/@prisma/config node_modules/deepmerge-ts \
+    && test ! -e node_modules/prisma \
+    && test ! -e node_modules/@prisma/config \
+    && test ! -e node_modules/deepmerge-ts \
+    && test -d node_modules/.prisma/client
 # ---- LR-R2（R2 评审修复 CLEANUP_RELEASE_IDENTITY_RUNTIME_OVERRIDE）----
 # release identity 必须是构建期 immutable artifact metadata：ARG/ENV bake
 # 之外，还把值写死进镜像文件 /app/.release-sha。ARG/ENV 置于 COPY 层之后，
@@ -153,6 +168,11 @@ ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\";
 # 的 release artifact set，由 canonical 命令按需 --build（immutable
 # GIT_SHA tag）。
 FROM cleanup-runner AS ops-runner
+# Ops is a separate one-shot diagnostic artifact, not a long-running worker.
+# Restore its PRE-R2 dependency shape explicitly; preserve existing behavior.
+COPY --from=deps /app/node_modules/prisma ./node_modules/prisma
+COPY --from=deps /app/node_modules/@prisma/config ./node_modules/@prisma/config
+COPY --from=deps /app/node_modules/deepmerge-ts ./node_modules/deepmerge-ts
 # One-shot backup checks may read root-restricted host backup mounts. Preserve
 # their existing identity in this scoped worker hardening; review separately.
 USER root
