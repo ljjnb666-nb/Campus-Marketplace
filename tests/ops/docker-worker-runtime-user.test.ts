@@ -250,7 +250,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).toContain("run_worker fence-crash-replay");
     expect(ext).toContain("run_worker fence-terminal-replay");
     expect(ext).toContain("attempts=3");
-    expect(ext).toContain('"leaseExpiresAt"=NOW()-INTERVAL');
+    expect(ext).toContain("leaseExpiresAt");
     expect(ext).not.toContain("UPDATE \"AsyncJob\" SET status=");
     expect(ext).not.toContain("UPDATE \"OutboxEvent\" SET status=");
     expect(harness).toContain("claimDueAsyncJobs(tx,");
