@@ -13,6 +13,7 @@ on:
       - scripts/ops/worker-lock-contention-extension.sh
       - scripts/ops/worker-lock-contention-proof.ts
       - scripts/ops/ops-runner-isolated-extension.sh
+      - scripts/ops/prisma7-cli-shadow-extension.sh
       - package.json
       - package-lock.json
       - prisma/**

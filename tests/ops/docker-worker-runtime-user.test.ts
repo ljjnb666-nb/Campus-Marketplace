@@ -424,4 +424,63 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).not.toContain(".env.production");
   });
 
+  it("R3A Prisma7 CLI experiment is isolated from release images and fails closed on drift", () => {
+    const ext = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-cli-shadow-extension.sh"), "utf8",
+    );
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8",
+    );
+    const cycle = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8",
+    );
+    const dockerignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const imageProof = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    expect(workflow).toContain("scripts/ops/prisma7-cli-shadow-extension.sh");
+    expect(cycle).toContain("source scripts/ops/prisma7-cli-shadow-extension.sh");
+    expect(cycle.indexOf("source scripts/ops/prisma7-cli-shadow-extension.sh"))
+      .toBeGreaterThan(cycle.indexOf("source scripts/ops/ops-runner-isolated-extension.sh"));
+    expect(dockerignore).toMatch(/^scripts\/ops\/prisma7-cli-shadow-extension\.sh$/m);
+    expect(imageProof).toContain("/app/scripts/ops/prisma7-cli-shadow-extension.sh");
+    expect(ext).toContain("prisma@7.10.1");
+    expect(ext).toContain("--network bridge --read-only --cap-drop ALL");
+    expect(ext).toContain('--user "$(id -u):$(id -g)"');
+    expect(ext).toContain('--mount "type=bind,src=$sandbox,dst=/shadow"');
+    expect(ext).toContain('--workdir /shadow -e HOME=/tmp');
+    expect(ext).toContain('--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m');
+    expect(ext).toContain('npm_config_cache=/shadow/.npm-cache');
+    expect(ext).toContain('rm -rf "$sandbox/.npm-cache"');
+    expect(ext).toContain('diskFull: /ENOSPC/i');
+    expect(ext).toContain('--entrypoint npm "campus-marketplace-migrator:$sha"');
+    expect(ext).not.toContain('timeout 180s npm install');
+    expect(ext).not.toContain("-e GITHUB_TOKEN=");
+
+    expect(ext).toContain('pkg.version !== "7.10.1"');
+    expect(ext).toContain('shadow_db="proof_prisma7_${GITHUB_RUN_ID}"');
+    expect(ext).toContain('cp prisma/schema.prisma "$sandbox/prisma/schema.prisma"');
+    expect(ext).toContain('cp -R prisma/migrations "$sandbox/prisma/migrations"');
+    expect(ext).toContain('raw.replace(line, "")');
+    expect(ext).toContain('datasource: { url: env("DATABASE_URL") }');
+    expect(ext).toContain('--network "$network" --read-only --cap-drop ALL');
+    expect(ext).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    for (const command of [
+      "prisma7_cli schema-validate validate",
+      "prisma7_cli migrate-initial migrate deploy",
+      "prisma7_cli migrate-idempotent migrate deploy",
+      "prisma7_cli migrate-status migrate status",
+      'baseline_hash="$(catalog_hash "$database")"',
+      'v7_hash="$(catalog_hash "$shadow_db")"',
+      'docker exec "$pg" dropdb',
+    ]) expect(ext).toContain(command);
+    for (const invariant of ["'tables'", "'columns'", "'indexes'", "'constraints'", "'enums'", "'migrations'"]) {
+      expect(ext).toContain(invariant);
+    }
+    expect(ext).toContain("excludes v7 Client/adapter/transaction/pool/app build");
+    expect(ext).not.toContain("npm audit fix --force");
+    expect(ext).not.toContain("npm install --prefix .");
+    expect(ext).not.toContain(".env.production");
+  });
+
 });
