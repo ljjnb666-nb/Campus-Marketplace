@@ -119,6 +119,10 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("NEG_EVENT name=%s observed=%s");
     expect(script).toContain("NEG_CATEGORY token=%s observed=%s");
     expect(script).toContain("NEG_COUNTS lines=%s bytes=%s");
+    expect(script).toContain("NEG_SHAPE kind=");
+    expect(script).toContain("SAFE_LOG_SHAPE");
+    expect(script).toContain('if (item.level === "error") counts.jsonError++');
+    expect(script).toContain("counts.npmError++");
     expect(script).toContain("phase9_retention_cycle_failed");
     expect(script).toContain("retention_failed");
     expect(script).toContain('"$started" -ne 1');
