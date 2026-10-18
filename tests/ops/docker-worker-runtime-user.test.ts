@@ -192,6 +192,33 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(sql).toContain("'COMPLETED'");
   });
 
+  it("requires two real simultaneously launched nonroot worker containers and single durable effects", () => {
+    const script = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8",
+    );
+    const existing = readFileSync(
+      path.join(process.cwd(), "tests/integration/phase9a-async-core.test.ts"), "utf8",
+    );
+    expect(existing).toContain("J-LEASE-02");
+    expect(existing).toContain("OUTBOX-RACE-01");
+    expect(existing).toContain("CRASH-REPLAY-01");
+    expect(script).toContain('parallel_pid_a=$!');
+    expect(script).toContain('parallel_pid_b=$!');
+    expect(script).toContain('wait "$parallel_pid_a"');
+    expect(script).toContain('wait "$parallel_pid_b"');
+    expect(script).toContain('--name "$parallel_one"');
+    expect(script).toContain('--name "$parallel_two"');
+    expect(script).toContain('docker rm -f "$parallel_one" "$parallel_two"');
+    expect(script).toContain("parallel_snapshot");
+    expect(script).toContain("'proof-parallel-order'");
+    expect(script).toContain('"attempts"=1');
+    expect(script).toContain("'PUBLISHED'");
+    expect(script).toContain("'PROVIDER_DISABLED'");
+    expect(script).toContain("COUNT(DISTINCT");
+    expect(script).toContain('if [[ "$(parallel_snapshot)" != 6 ]]');
+    expect(script).toContain("run_worker parallel-replay");
+  });
+
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
     const stage = stages.get("cleanup-runner");
     expect(stage).toBeDefined();
