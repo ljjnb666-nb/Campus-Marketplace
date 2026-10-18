@@ -253,3 +253,5 @@ for mark in \
 done
 echo '[worker-cycle] PASS R3C original soft-delete and ledger code on Prisma7 shadow: scoped tenant predicates/atomicity'
 echo '[worker-cycle] LIMIT R3C does not prove central RBAC, automatic cross-tenant enforcement, real order state machines or production cutover'
+# R3D-01: actual business tables on Prisma 7 shadow, exercising only DB primitives.
+source scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
