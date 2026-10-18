@@ -44,7 +44,8 @@ CONFIG_R3A
 # config, DB URL, or project source. It only sees the disposable writable
 # /shadow directory. Root filesystem and /tmp are isolated, capabilities dropped.
 # The install is NOT release provenance/SBOM and cannot mutate candidate images.
-if ! timeout 180s docker run --rm \
+install_rc=0
+timeout 180s docker run --rm \
   --network bridge --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
   --user "$(id -u):$(id -g)" \
@@ -53,8 +54,28 @@ if ! timeout 180s docker run --rm \
   --workdir /shadow -e HOME=/tmp \
   --entrypoint npm "campus-marketplace-migrator:$sha" \
   install --prefix /shadow --no-save --package-lock=false \
-  --no-audit --no-fund --silent prisma@7.10.1 \
-  >"$tmp/prisma7-install.log" 2>&1; then
+  --no-audit --no-fund prisma@7.10.1 \
+  >"$tmp/prisma7-install.log" 2>&1 || install_rc=$?
+if [[ "$install_rc" != 0 ]]; then
+  # Classify a failed bootstrap without disclosing arbitrary npm/registry logs
+  # (they may include URLs, authorization or synthetic values).
+  node - "$tmp/prisma7-install.log" "$install_rc" <<'CLASSIFY_R3A'
+const fs = require("node:fs");
+const raw = fs.readFileSync(process.argv[2],"utf8");
+const rc = Number(process.argv[3]);
+const categories = {
+  network: /EAI_AGAIN|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i,
+  permission: /EACCES|EPERM|EROFS/i,
+  registry: /E404|E403|E401|E429|404 Not Found/i,
+  engine: /EBADENGINE|Unsupported engine/i,
+  installScript: /postinstall|preinstall|prepare script|command failed/i,
+  storage: /ENOSPC|ENOMEM|EIO/i,
+  docker: /docker: Error|permission denied while trying to connect to Docker/i,
+};
+const seen = Object.fromEntries(Object.entries(categories).map(([key,pattern])=>[key,pattern.test(raw)]));
+console.log("[worker-cycle] R3A install failed exit=" + rc + " categories=" + JSON.stringify(seen) +
+  " logLines=" + raw.split(/\r?\n/).length);
+CLASSIFY_R3A
   echo '[worker-cycle][FAIL] R3A isolated Prisma 7 CLI install unavailable' >&2; exit 1;
 fi
 node - "$sandbox/node_modules/prisma/package.json" <<'CHECK_R3A'
