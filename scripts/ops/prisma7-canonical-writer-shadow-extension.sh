@@ -21,7 +21,7 @@ for path in \
  cp "$path" "$target"
 done
 cp scripts/ops/prisma7-canonical-writer-relocate.cjs "$sandbox/r3d02/relocate.cjs"
-cp scripts/ops/prisma7-canonical-writer-probe.ts "$sandbox/r3d02-probe.ts"
+cp scripts/ops/prisma7-canonical-writer-probe.ts "$sandbox/r3d02/probe.ts"
 node "$sandbox/r3d02/relocate.cjs" "$sandbox/r3d02/lib" >"$tmp/r3d02-relocate.log" 2>&1 || {
  echo '[worker-cycle][FAIL] R3D02A original source import relocation' >&2; exit 1;
 }
@@ -45,7 +45,7 @@ if ! timeout --signal=TERM --kill-after=10s 120s docker run --rm \
  --workdir /shadow \
  -e "DATABASE_URL=$shadow_url" -e "EXPECTED_SHADOW_DB=$shadow_db" \
  --entrypoint node "campus-marketplace-migrator:$sha" \
- /shadow/node_modules/tsx/dist/cli.mjs /shadow/r3d02-probe.ts \
+ /shadow/node_modules/tsx/dist/cli.mjs /shadow/r3d02/probe.ts \
  >"$tmp/r3d02-probe.log" 2>&1; then
  echo '[worker-cycle][FAIL] R3D02A canonical writer live shadow test' >&2; exit 1;
 fi
