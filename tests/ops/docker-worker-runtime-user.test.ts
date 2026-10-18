@@ -316,4 +316,67 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(harness).not.toContain("console.error(error");
   });
 
+  it("R2 prunes only unused Prisma CLI/config/merge AFTER codegen and before nonroot execution", () => {
+    const cleanup = stages.get("cleanup-runner");
+    const asyncRunner = stages.get("async-runner");
+    const ops = stages.get("ops-runner");
+    expect(cleanup).toBeDefined();
+    expect(asyncRunner).toBeDefined();
+    expect(ops).toBeDefined();
+    const lines = cleanup!.lines;
+    const generated = lines.findIndex((line) => line.includes("npx prisma generate"));
+    const remove = lines.findIndex((line) =>
+      line.includes("rm -rf node_modules/prisma node_modules/@prisma/config node_modules/deepmerge-ts"),
+    );
+    const user = lines.findIndex((line) => line === "USER node");
+    expect(generated).toBeGreaterThanOrEqual(0);
+    expect(remove).toBeGreaterThan(generated);
+    expect(user).toBeGreaterThan(remove);
+    expect(dockerfile).toContain("test -d node_modules/.prisma/client");
+    expect(dockerfile).toContain("test ! -e node_modules/@prisma/config");
+    expect(dockerfile).toContain("test ! -e node_modules/deepmerge-ts");
+    expect(asyncRunner?.effectiveUser).toBe("node");
+    expect(ops?.effectiveUser).toBe("root");
+    for (const dir of ["prisma", "@prisma/config", "deepmerge-ts"]) {
+      expect(ops!.lines).toContain(
+        "COPY --from=deps /app/node_modules/" + dir + " ./node_modules/" + dir,
+      );
+    }
+    const imageProof = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    expect(imageProof).toContain("unused Prisma CLI dependency in worker runtime");
+    expect(imageProof).toContain("/app/node_modules/.prisma/client");
+    for (const dir of ["prisma", "@prisma/config", "deepmerge-ts"]) {
+      expect(imageProof).toContain("/app/node_modules/" + dir);
+    }
+  });
+
+  it("R2 locked dependency graph confirms only Prisma CLI references config and only config references deepmerge", () => {
+    const lock = JSON.parse(readFileSync(path.join(process.cwd(), "package-lock.json"), "utf8")) as {
+      packages: Record<string, {
+        version?: string;
+        dependencies?: Record<string, string>;
+        optionalDependencies?: Record<string, string>;
+      }>;
+    };
+    const packages = lock.packages;
+    expect(packages["node_modules/prisma"]?.version).toBe("6.19.3");
+    expect(packages["node_modules/@prisma/config"]?.version).toBe("6.19.3");
+    expect(packages["node_modules/deepmerge-ts"]?.version).toBe("7.1.5");
+    expect(packages["node_modules/@prisma/client"]?.version).toBe("6.19.3");
+    const consumers = (dependency: string) => Object.entries(packages)
+      .filter(([name, pkg]) => name !== "" &&
+        (pkg.dependencies?.[dependency] || pkg.optionalDependencies?.[dependency]))
+      .map(([name]) => name)
+      .sort();
+    expect(consumers("@prisma/config")).toEqual(["node_modules/prisma"]);
+    expect(consumers("deepmerge-ts")).toEqual(["node_modules/@prisma/config"]);
+    // Never strip the client, its generated code, engine, or tsx runtime.
+    expect(packages["node_modules/tsx"]?.dependencies?.esbuild).toBeDefined();
+    expect(dockerfile).not.toContain("rm -rf node_modules/@prisma/client");
+    expect(dockerfile).not.toContain("rm -rf node_modules/.prisma");
+    expect(dockerfile).not.toContain("rm -rf node_modules/tsx");
+  });
+
 });
