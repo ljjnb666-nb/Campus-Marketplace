@@ -63,11 +63,11 @@ timeout 30s docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges --user 1000:1000 \
   --mount "type=bind,src=$ops_backups,dst=/backups,readonly" \
   --entrypoint node "$ops_image" -e \
-  'require("node:fs").readFileSync("/backups/backup-status.json")' \
+  'try { require("node:fs").readFileSync("/backups/backup-status.json"); process.exit(0); } catch (e) { if (e.code === "EACCES") { console.log("PROOF_R2B_EACCES"); process.exit(77); } process.exit(2); }' \
   >"$tmp/ops-nonroot-denied.log" 2>&1
 ops_nonroot_rc=$?
 set -e
-[[ "$ops_nonroot_rc" != 0 && "$ops_nonroot_rc" != 124 && "$ops_nonroot_rc" != 137 ]] || {
+[[ "$ops_nonroot_rc" == 77 ]] && grep -qFx PROOF_R2B_EACCES "$tmp/ops-nonroot-denied.log" || {
   echo '[worker-cycle][FAIL] R2B root-only backup readable by node user' >&2; exit 1;
 }
 
@@ -134,11 +134,11 @@ timeout 30s docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
   --mount "type=bind,src=$ops_backups,dst=/backups,readonly" \
   --entrypoint node "$ops_image" -e \
-  'require("node:fs").writeFileSync("/backups/forbidden-write", "1")' \
+  'try { require("node:fs").writeFileSync("/backups/forbidden-write", "1"); process.exit(0); } catch (e) { if (e.code === "EROFS") { console.log("PROOF_R2B_EROFS"); process.exit(78); } process.exit(2); }' \
   >"$tmp/ops-readonly.log" 2>&1
 ops_write_rc=$?
 set -e
-[[ "$ops_write_rc" != 0 && "$ops_write_rc" != 124 && "$ops_write_rc" != 137 ]] || {
+[[ "$ops_write_rc" == 78 ]] && grep -qFx PROOF_R2B_EROFS "$tmp/ops-readonly.log" || {
   echo '[worker-cycle][FAIL] R2B readonly mount write unexpectedly succeeded' >&2; exit 1;
 }
 [[ ! -e "$ops_backups/forbidden-write" ]] || {
