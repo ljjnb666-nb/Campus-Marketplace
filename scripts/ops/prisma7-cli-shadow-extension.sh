@@ -38,11 +38,22 @@ export default defineConfig({
   datasource: { url: env("DATABASE_URL") },
 });
 CONFIG_R3A
-# Exact CLI package in a disposable temp directory, never installed into the
-# release lockfile or the five production images. Registry provenance is outside
-# the scope of this CLI compatibility test and is not a signed release SBOM.
-if ! timeout 180s npm install --prefix "$sandbox" --no-save \
-  --package-lock=false --no-audit --no-fund --silent prisma@7.10.1 \
+# The package's install scripts are untrusted: execute them in a DIFFERENT
+# container on default bridge, not in the GitHub runner host that holds the
+# temporary GHCR login. This container receives NO GITHUB_TOKEN, registry
+# config, DB URL, or project source. It only sees the disposable writable
+# /shadow directory. Root filesystem and /tmp are isolated, capabilities dropped.
+# The install is NOT release provenance/SBOM and cannot mutate candidate images.
+if ! timeout 180s docker run --rm \
+  --network bridge --read-only --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --user "$(id -u):$(id -g)" \
+  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=128m \
+  --mount "type=bind,src=$sandbox,dst=/shadow" \
+  --workdir /shadow -e HOME=/tmp \
+  --entrypoint npm "campus-marketplace-migrator:$sha" \
+  install --prefix /shadow --no-save --package-lock=false \
+  --no-audit --no-fund --silent prisma@7.10.1 \
   >"$tmp/prisma7-install.log" 2>&1; then
   echo '[worker-cycle][FAIL] R3A isolated Prisma 7 CLI install unavailable' >&2; exit 1;
 fi
