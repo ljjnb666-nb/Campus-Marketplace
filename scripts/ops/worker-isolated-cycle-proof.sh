@@ -170,6 +170,46 @@ done
 printf '[worker-cycle] NEG_COUNTS lines=%s bytes=%s\n' \
   "$(wc -l < "$tmp/bad-db.log" | tr -d ' ')" \
   "$(wc -c < "$tmp/bad-db.log" | tr -d ' ')"
+# Local structural classification: reveal neither the log text nor its values.
+# Counts/log shapes distinguish a process-level npx/tsx exit from JSON logger
+# failures without publishing secrets, URLs, stack traces or arbitrary tokens.
+if command -v node >/dev/null 2>&1; then
+  node - "$tmp/bad-db.log" <<'SAFE_LOG_SHAPE'
+const fs = require("node:fs");
+const lines = fs.readFileSync(process.argv[2], "utf8").split(/\r?\n/);
+const counts = {
+  json: 0, jsonError: 0, jsonInfo: 0, jsonWarn: 0,
+  npmError: 0, npmNotice: 0, docker: 0,
+  nodeRuntime: 0, prisma: 0, shell: 0, empty: 0, other: 0,
+};
+for (const raw of lines) {
+  const line = raw.replace(/\x1b\[[0-9;]*m/g, "").trim();
+  if (!line) { counts.empty++; continue; }
+  if (line.startsWith("{")) {
+    try {
+      const item = JSON.parse(line);
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        counts.json++;
+        if (item.level === "error") counts.jsonError++;
+        if (item.level === "info") counts.jsonInfo++;
+        if (item.level === "warn") counts.jsonWarn++;
+        continue;
+      }
+    } catch { /* unknown unstructured line, count only */ }
+  }
+  if (/^npm (?:error|ERR!)/i.test(line)) counts.npmError++;
+  else if (/^npm notice/i.test(line)) counts.npmNotice++;
+  else if (/^docker:/i.test(line)) counts.docker++;
+  else if (/^(?:node:|Node\.js|internal\/)/i.test(line)) counts.nodeRuntime++;
+  else if (/(?:PrismaClient|query engine|P10[0-9]{2})/i.test(line)) counts.prisma++;
+  else if (/^(?:\/bin\/sh:|sh:|exec:)/i.test(line)) counts.shell++;
+  else counts.other++;
+}
+for (const [label, count] of Object.entries(counts)) {
+  console.log("[worker-cycle] NEG_SHAPE kind=" + label + " count=" + count);
+}
+SAFE_LOG_SHAPE
+fi
 if [[ "$started" -ne 1 || ( "$cycle_failed" -ne 1 && "$retention_failed" -ne 1 && "$p1001" -ne 1 && "$prisma_init" -ne 1 && "$refused" -ne 1 ) ]]; then
   echo '[worker-cycle][FAIL] refused-DB had no recognized connection error evidence' >&2
   exit 1
