@@ -30,6 +30,7 @@ for item in "${images[@]}"; do
   fi
 done
 
+observations=()
 for item in "${images[@]}"; do
   role="${item%%:*}"
   image="${item#*:}"
@@ -67,7 +68,9 @@ for item in "${images[@]}"; do
       printf '[prisma-inventory][FAIL] probe failed for %s\n' "$image" >&2
       exit 1
     }
-  # Print a JSONL audit observation. role/image/digest are regex/fixed validated.
-  printf '{"releaseSha":"%s","role":"%s","image":"%s","imageId":"%s","installedPackages":%s}\n' \
-    "$release_sha" "$role" "$image" "$image_id" "$package_json"
+  # Emit only after *all* probes succeed; a failed later container never leaves
+  # a misleading partial JSONL artifact.
+  observations+=("$(printf '{"releaseSha":"%s","role":"%s","image":"%s","imageId":"%s","installedPackages":%s}' \
+    "$release_sha" "$role" "$image" "$image_id" "$package_json")")
 done
+printf '%s\n' "${observations[@]}"
