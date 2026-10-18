@@ -657,12 +657,23 @@ test("7G-E2E06 active 支持工单阻断注销（PrivacyRequest → BLOCKED + AC
     )
     .toBe(1);
 
-  // 用户申请注销（typed confirmation：输入"注销账号"）→ 被工单阻断
+  // Issue #131：SSR/客户端过渡期可能短暂并存两份说明节点。
+  // 必须先定位唯一的语义“注销账号”区域及其确认表单，而不是用全页
+  // getByText(...).first() 忽略另一个节点或增加延时掩盖重复渲染。
+  // toHaveCount(1) 是可重试的明确就绪/唯一性断言；持续重复将真实失败。
   await userPage.goto("/my/privacy");
-  await expect(userPage.getByText(/注销后你的账号将无法登录/)).toBeVisible();
-  await userPage.locator('input[name="confirmation"]').fill("注销账号");
-  await userPage.getByRole("button", { name: "申请注销账号" }).click();
-  await expect(userPage.getByTestId("deletion-result")).toBeVisible({ timeout: 20_000 });
+  const deletionSection = userPage.locator("section").filter({
+    has: userPage.getByRole("heading", { name: "注销账号", exact: true }),
+  });
+  await expect(deletionSection).toHaveCount(1);
+  const deletionForm = deletionSection.locator('form:has(input[name="confirmation"])');
+  await expect(deletionForm).toHaveCount(1);
+  await expect(deletionForm.getByText(/注销后你的账号将无法登录/)).toBeVisible();
+
+  // 用户申请注销（typed confirmation）→ 真实数据库工单阻断
+  await deletionForm.locator('input[name="confirmation"]').fill("注销账号");
+  await deletionForm.getByRole("button", { name: "申请注销账号" }).click();
+  await expect(deletionForm.getByTestId("deletion-result")).toBeVisible({ timeout: 20_000 });
 
   // DB 不变量：PrivacyRequest BLOCKED + reasonCode ACTIVE_SUPPORT_TICKET
   await expect
