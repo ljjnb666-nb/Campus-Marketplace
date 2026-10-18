@@ -235,9 +235,26 @@ SELECT
             WHERE "orderId"='proof-order')=2 THEN 1 ELSE 0 END);
 SQL
 }
+# Bounded synthetic DB diagnostics on failure only: only enum state labels and
+# integer counts, not user identifiers, row payload, error strings, URLs/secrets.
+valid_order_shape() {
+  docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT
+ COALESCE((SELECT "status"::text || ':' || COALESCE("productReservationResolution"::text,'NULL')
+          FROM "Order" WHERE id='proof-order'),'MISSING') || '|' ||
+ COALESCE((SELECT "status"::text FROM "Product" WHERE id='proof-product'),'MISSING') || '|' ||
+ COALESCE((SELECT "status"::text || ':' || "attempts"::text
+          FROM "AsyncJob" WHERE id='proof-expiry-job'),'MISSING') || '|' ||
+ COALESCE((SELECT "status"::text FROM "OutboxEvent"
+          WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'),'MISSING') || '|' ||
+ (SELECT COUNT(*)::text FROM "Notification" WHERE "orderId"='proof-order');
+SQL
+}
 run_worker valid-expiry "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
 if [[ "$(valid_order_snapshot)" != 5 ]]; then
-  echo '[worker-cycle][FAIL] valid expiry order/product/job/outbox/notification contract != 5' >&2
+  printf '[worker-cycle][FAIL] valid expiry contract !=5, safe_enum_shape=%s\n' "$(valid_order_shape)" >&2
+  # Only known machine event names, never raw worker exception contents.
+  grep -oE '"event":"[a-zA-Z0-9_-]+"' "$tmp/valid-expiry.log" | sort -u >&2 || true
   exit 1
 fi
 run_worker valid-expiry-replay "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
