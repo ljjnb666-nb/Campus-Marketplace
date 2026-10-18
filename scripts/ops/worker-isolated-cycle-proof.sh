@@ -102,10 +102,19 @@ run_worker cleanup-dry "campus-marketplace-cleanup:${sha}" storage_cleanup_worke
 run_worker cleanup-write "campus-marketplace-cleanup:${sha}" storage_cleanup_worker_started --run-once
 run_worker async-idle "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
-if timeout --signal=TERM --kill-after=10s 50s docker run --rm \
+set +e
+timeout --signal=TERM --kill-after=10s 50s docker run --rm \
   --network "$network" --cap-drop ALL --security-opt no-new-privileges \
   "${worker_env[@]}" -e DATABASE_URL="postgresql://postgres:${pg_password}@${pg}:1/${database}?schema=public" \
-  "campus-marketplace-cleanup:${sha}" --run-once >"$tmp/bad-db.log" 2>&1; then
-  echo '[worker-cycle][FAIL] refused PostgreSQL reported success' >&2; exit 1
+  "campus-marketplace-cleanup:${sha}" --run-once >"$tmp/bad-db.log" 2>&1
+negative_rc=$?
+set -e
+if [[ "$negative_rc" -eq 0 || "$negative_rc" -eq 124 || "$negative_rc" -eq 137 ]]; then
+  printf '[worker-cycle][FAIL] refused-DB not a bounded application failure (exit=%s)\n' "$negative_rc" >&2
+  exit 1
 fi
-echo '[worker-cycle] PASS refused-DB negative gate; domain-fixture lease/retry still pending'
+if ! grep -qF '"event":"storage_cleanup_cycle_failed"' "$tmp/bad-db.log"; then
+  echo '[worker-cycle][FAIL] refused-DB did not reach the worker cycle error path' >&2
+  exit 1
+fi
+echo '[worker-cycle] PASS refused-DB negative gate (worker cycle error); domain-fixture lease/retry still pending'
