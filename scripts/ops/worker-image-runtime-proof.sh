@@ -90,6 +90,7 @@ for item in "${roles[@]}"; do
             "/app/scripts/ops/ops-runner-isolated-extension.sh",
             "/app/scripts/ops/prisma7-cli-shadow-extension.sh",
             "/app/scripts/ops/prisma7-client-shadow-extension.sh",
+            "/app/scripts/ops/prisma7-extensions-shadow-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }
