@@ -16,6 +16,7 @@ on:
       - scripts/ops/prisma7-cli-shadow-extension.sh
       - scripts/ops/prisma7-client-shadow-extension.sh
       - scripts/ops/prisma7-extensions-shadow-extension.sh
+      - scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
       - src/lib/prisma-soft-delete.ts
       - src/lib/domain-events/domain-event-ledger-extension.ts
       - package.json

@@ -586,4 +586,52 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(probe).not.toContain(".env.production");
   });
 
+  it("R3D01 real Prisma7 Order/RentalOrder CAS and durable idempotent event/outbox proof is shadow-only", () => {
+    const probe = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-order-rental-tx-shadow-extension.sh"), "utf8",
+    );
+    const upstream = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-extensions-shadow-extension.sh"), "utf8",
+    );
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8",
+    );
+    const ignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const imageGuard = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    expect(workflow).toContain("scripts/ops/prisma7-order-rental-tx-shadow-extension.sh");
+    expect(ignore).toMatch(/^scripts\/ops\/prisma7-order-rental-tx-shadow-extension\.sh$/m);
+    expect(imageGuard).toContain("/app/scripts/ops/prisma7-order-rental-tx-shadow-extension.sh");
+    expect(upstream).toContain("source scripts/ops/prisma7-order-rental-tx-shadow-extension.sh");
+    expect(probe).toContain("EXPECTED_SHADOW_DB=$shadow_db");
+    expect(probe).toContain("UNSAFE_DATABASE");
+    expect(probe).toContain("new PrismaClient(");
+    expect(probe).toContain("new PrismaPg(");
+    expect(probe).toContain("$extends(softDeleteExtension).$extends(domainEventLedgerExtension)");
+    for (const name of ["product.create","rentalListing.create","order.create",
+      "rentalOrder.create","outboxEvent.createMany","domainEvent.createMany",
+      "rentalOrderStatusLog.create"]) {
+      expect(probe).toContain(name);
+    }
+    expect(probe).toContain("productTransition(\"ACCEPTED\")");
+    expect(probe).toContain("productTransition(\"CANCELLED\")");
+    expect(probe).toContain("rentalTransition(\"PENDING_PICKUP\")");
+    expect(probe).toContain("rentalTransition(\"CANCELLED\")");
+    expect(probe).toContain("PRODUCT_DOUBLE_TRANSITION");
+    expect(probe).toContain("RENTAL_DOUBLE_TRANSITION");
+    expect(probe).toContain("PRODUCT_REPLAY_DUPLICATED");
+    expect(probe).toContain("RENTAL_DUPLICATE_STATUS_LOG");
+    expect(probe).toContain("DOMAIN_ROLLBACK_LEAK");
+    expect(probe).toContain("OUTBOX_ROLLBACK_LEAK");
+    expect(probe).toContain("UNIQUE_DEDUPE_NOT_ATOMIC");
+    expect(probe).toContain("skipDuplicates:true");
+    expect(probe).toContain("Promise.all([insertOnce(),insertOnce(),insertOnce()])");
+    expect(probe).toContain("--read-only --cap-drop ALL");
+    expect(probe).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    expect(probe).toContain("does NOT import canonical product/rental lifecycle");
+    expect(probe).not.toContain("npm audit fix");
+    expect(probe).not.toContain(".env.production");
+  });
+
 });
