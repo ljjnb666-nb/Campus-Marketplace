@@ -35,6 +35,19 @@ for item in "${images[@]}"; do
   role="${item%%:*}"
   image="${item#*:}"
   image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+  # Config.User describes the actual image default, unlike the unprivileged
+  # inspection probe below. A blank Docker default means root, not unknown.
+  if ! runtime_user="$(docker image inspect --format '{{.Config.User}}' "$image")"; then
+    printf '[prisma-inventory][FAIL] cannot inspect runtime user for %s\n' "$image" >&2
+    exit 1
+  fi
+  runtime_user="${runtime_user:-root}"
+  # This value becomes JSON, so reject unexpected image metadata rather than
+  # risking malformed output or embedding untrusted control characters.
+  if [[ ! "$runtime_user" =~ ^[a-zA-Z0-9_:.-]+$ ]]; then
+    printf '[prisma-inventory][FAIL] invalid runtime user for %s\n' "$image" >&2
+    exit 1
+  fi
   if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     printf '[prisma-inventory][FAIL] invalid local image digest for %s\n' "$image" >&2
     exit 1
@@ -70,7 +83,7 @@ for item in "${images[@]}"; do
     }
   # Emit only after *all* probes succeed; a failed later container never leaves
   # a misleading partial JSONL artifact.
-  observations+=("$(printf '{"releaseSha":"%s","role":"%s","image":"%s","imageId":"%s","installedPackages":%s}' \
-    "$release_sha" "$role" "$image" "$image_id" "$package_json")")
+  observations+=("$(printf '{"releaseSha":"%s","role":"%s","image":"%s","imageId":"%s","defaultRuntimeUser":"%s","installedPackages":%s}' \
+    "$release_sha" "$role" "$image" "$image_id" "$runtime_user" "$package_json")")
 done
 printf '%s\n' "${observations[@]}"
