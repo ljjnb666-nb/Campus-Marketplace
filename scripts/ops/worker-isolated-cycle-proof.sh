@@ -250,11 +250,64 @@ SELECT
  (SELECT COUNT(*)::text FROM "Notification" WHERE "orderId"='proof-order');
 SQL
 }
+# Phase 1: the production-mode worker deliberately starts with no EMAIL_PROVIDER.
+# The order/Job must succeed, but EMAIL notification materialization is
+# RETRYABLE (not DEAD_LETTER) and must publish zero incomplete notifications.
 run_worker valid-expiry "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+provider_missing="$(docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT CASE WHEN
+  (SELECT COUNT(*) FROM "Order" WHERE id='proof-order'
+    AND "status"='CANCELLED' AND "productReservationResolution"='EXPIRED')=1
+  AND (SELECT COUNT(*) FROM "Product"
+       WHERE id='proof-product' AND "status"='ACTIVE')=1
+  AND (SELECT COUNT(*) FROM "AsyncJob"
+       WHERE id='proof-expiry-job' AND "status"='COMPLETED' AND "attempts"=1)=1
+  AND (SELECT COUNT(*) FROM "OutboxEvent"
+       WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'
+         AND "status"='PENDING' AND "attempts"=1
+         AND "lastErrorCode"='EmailRuntimeConfigUnavailableError')=1
+  AND (SELECT COUNT(*) FROM "Notification" WHERE "orderId"='proof-order')=0
+THEN 1 ELSE 0 END;
+SQL
+)"
+if [[ "$provider_missing" != 1 ]]; then
+  printf '[worker-cycle][FAIL] email-config fail-closed contract, synthetic_shape=%s\n' "$(valid_order_shape)" >&2
+  exit 1
+fi
+echo '[worker-cycle] PASS production-mode email missing: outbox retryable and zero premature notification'
+
+# Phase 2: ONLY in this isolated no-real-email CI fixture, explicitly disable
+# provider (supported by resolveEmailChannelConfig). This simulates recovery
+# of the outbox materializer without contacting any external email provider.
+# Advance only the retry clock field, not status/lease/attempts/business facts.
+docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" >/dev/null <<'SQL'
+UPDATE "OutboxEvent"
+SET "availableAt"=NOW()-INTERVAL '1 second'
+WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'
+  AND "status"='PENDING' AND "attempts"=1;
+SQL
+worker_env+=(-e EMAIL_PROVIDER=disabled)
+run_worker valid-expiry-recovery "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
 if [[ "$(valid_order_snapshot)" != 5 ]]; then
-  printf '[worker-cycle][FAIL] valid expiry contract !=5, safe_enum_shape=%s\n' "$(valid_order_shape)" >&2
-  # Only known machine event names, never raw worker exception contents.
-  grep -oE '"event":"[a-zA-Z0-9_-]+"' "$tmp/valid-expiry.log" | sort -u >&2 || true
+  printf '[worker-cycle][FAIL] valid expiry recovery still incomplete, synthetic_shape=%s\n' "$(valid_order_shape)" >&2
+  exit 1
+fi
+safe_email_suppression="$(docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT CASE WHEN
+  (SELECT COUNT(*) FROM "NotificationDelivery" d
+   JOIN "Notification" n ON n.id=d."notificationId"
+   WHERE n."orderId"='proof-order'
+     AND d.channel='EMAIL' AND d.provider='disabled'
+     AND d."suppressionCode"='PROVIDER_DISABLED' AND d."suppressedAt" IS NOT NULL)=2
+  AND (SELECT COUNT(*) FROM "AsyncJob" WHERE kind='NOTIFICATION_DELIVERY')=0
+  AND (SELECT COUNT(*) FROM "OutboxEvent"
+       WHERE "dedupeKey"='PRODUCT_RESERVATION_EXPIRED:proof-order'
+         AND "attempts"=2 AND "status"='PUBLISHED')=1
+THEN 1 ELSE 0 END;
+SQL
+)"
+if [[ "$safe_email_suppression" != 1 ]]; then
+  echo '[worker-cycle][FAIL] disabled email must suppress both deliveries and enqueue no send jobs' >&2
   exit 1
 fi
 run_worker valid-expiry-replay "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
