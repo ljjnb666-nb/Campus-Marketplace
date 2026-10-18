@@ -118,4 +118,86 @@ exit 9
     expect(script).toContain("installedPackages");
     expect(script).toContain("imageId");
   });
+  it("requires exact-SHA real-image CI and restricted metadata probe, not simulated images", () => {
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/prisma-image-inventory.yml"), "utf8",
+    );
+    const verifier = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma-image-inventory-verify.mjs"), "utf8",
+    );
+    for (const stage of ["runner", "migrator", "cleanup-runner", "async-runner"]) {
+      expect(workflow).toContain(stage + ":campus-marketplace-");
+    }
+    expect(workflow).toContain("docker build --build-arg");
+    expect(workflow).toContain("prisma-image-inventory.sh");
+    expect(workflow).toContain("prisma-image-inventory-verify.mjs");
+    expect(workflow).toContain("head.sha || github.sha");
+    expect(workflow).toContain("cat prisma-image-inventory.jsonl");
+    expect(script).toContain("--cap-drop ALL --security-opt no-new-privileges");
+    expect(verifier).toContain("four roles required");
+    expect(verifier).toContain("web standalone unexpectedly contains Prisma CLI/config");
+    expect(verifier).toContain("installed package metadata only");
+  });
+
+  it("fails closed for malformed or cross-release metadata and distinguishes installed from reachable", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "prisma-image-inventory-ci-"));
+    try {
+      const sha = "a".repeat(40);
+      const roles = [
+        ["app", "campus-marketplace-app"],
+        ["migrator", "campus-marketplace-migrator"],
+        ["storage-cleanup", "campus-marketplace-cleanup"],
+        ["async-worker", "campus-marketplace-async-worker"],
+      ];
+      const packages = (names: string[]) => Object.fromEntries(
+        ["prisma", "@prisma/config", "deepmerge-ts", "@prisma/client"].map((name) => [
+          name, names.includes(name)
+            ? [{ root: "/app/node_modules", version: "6.19.3" }] : [],
+        ]),
+      );
+      const records = roles.map(([role, name], i) => ({
+        releaseSha: sha,
+        role,
+        image: name + ":" + sha,
+        imageId: "sha256:" + String(i + 1).repeat(64),
+        defaultRuntimeUser: role === "app" ? "node" : "root",
+        installedPackages: packages(role === "app"
+          ? ["@prisma/client"] : ["prisma", "@prisma/config", "deepmerge-ts", "@prisma/client"]),
+      }));
+      const jsonl = path.join(directory, "inventory.jsonl");
+      const verify = (rows: typeof records) => {
+        writeFileSync(jsonl, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+        return spawnSync("node", [
+          path.join(process.cwd(), "scripts/ops/prisma-image-inventory-verify.mjs"),
+          sha, jsonl,
+        ], { encoding: "utf8" });
+      };
+      const ok = verify(records);
+      expect(ok.status, ok.stderr).toBe(0);
+      expect(ok.stdout).toContain("PASS four exact-SHA images");
+      expect(ok.stdout.match(/OBSERVATION/g)).toHaveLength(4);
+      expect(ok.stdout).toContain("NOT a vulnerability reachability");
+      expect(ok.stdout).toContain("LONG_RUNNING_WORKER_WITH_FULL_NODE_MODULES");
+      expect(verify(records.slice(0, 3)).status).not.toBe(0);
+      expect(verify(records.map((row, i) =>
+        i === 2 ? { ...row, releaseSha: "b".repeat(40) } : row,
+      )).status).not.toBe(0);
+      expect(verify(records.map((row, i) =>
+        i === 1 ? { ...row, imageId: records[0].imageId } : row,
+      )).status).not.toBe(0);
+      expect(verify(records.map((row, i) =>
+        i === 0 ? {
+          ...row, installedPackages: packages(["prisma", "@prisma/client"]),
+        } : row,
+      )).status).not.toBe(0);
+      expect(verify(records.map((row, i) =>
+        i === 1 ? {
+          ...row, installedPackages: packages(["prisma", "@prisma/client"]),
+        } : row,
+      )).status).not.toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
 });
