@@ -445,6 +445,14 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(dockerignore).toMatch(/^scripts\/ops\/prisma7-cli-shadow-extension\.sh$/m);
     expect(imageProof).toContain("/app/scripts/ops/prisma7-cli-shadow-extension.sh");
     expect(ext).toContain("prisma@7.10.1");
+    expect(ext).toContain("--network bridge --read-only --cap-drop ALL");
+    expect(ext).toContain('--user "$(id -u):$(id -g)"');
+    expect(ext).toContain('--mount "type=bind,src=$sandbox,dst=/shadow"');
+    expect(ext).toContain('--workdir /shadow -e HOME=/tmp');
+    expect(ext).toContain('--entrypoint npm "campus-marketplace-migrator:$sha"');
+    expect(ext).not.toContain('timeout 180s npm install');
+    expect(ext).not.toContain("GITHUB_TOKEN");
+
     expect(ext).toContain('pkg.version !== "7.10.1"');
     expect(ext).toContain('shadow_db="proof_prisma7_${GITHUB_RUN_ID}"');
     expect(ext).toContain('cp prisma/schema.prisma "$sandbox/prisma/schema.prisma"');
