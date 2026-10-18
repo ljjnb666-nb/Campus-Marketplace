@@ -3,6 +3,7 @@ name: Worker image runtime proof
 on:
   pull_request:
     paths:
+      - .dockerignore
       - Dockerfile
       - .github/workflows/worker-image-runtime.yml
       - scripts/ops/worker-image-runtime-proof.sh
