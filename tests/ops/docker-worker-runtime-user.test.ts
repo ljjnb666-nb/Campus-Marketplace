@@ -672,6 +672,8 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("src/lib/async/outbox.ts");
     expect(script).toContain("src/lib/async/job-repository.ts");
     expect(script).toContain("R3D02A_SHADOW_REQUIRED");
+    expect(script).toContain("R3D02A sanitized machineCodes");
+    expect(script).toContain("CLASSIFY_R3D02A");
     expect(script).toContain('--read-only --cap-drop ALL');
     expect(script).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
     expect(probe).toContain("recordDomainEventTx(tx,domainIntent(completed))");
