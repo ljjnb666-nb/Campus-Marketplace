@@ -60,11 +60,11 @@ jobs:
               --target "${target}" \
               --tag "${image}" .
             printf 'BUILT stage=%s image=%s\n' "${target}" "${image}"
-          # R2B: separate one-shot ops diagnostic artifact, not a worker.
+          done
+          # R2B: separate one-shot ops diagnostic artifact, built exactly once.
           docker build --build-arg "GIT_SHA=${SOURCE_SHA}" \
             --target ops-runner \
             --tag "campus-marketplace-ops-check:${SOURCE_SHA}" .
-          done
 
       - name: Verify image UID, immutable SHA and Node/Prisma/tsx execution
         shell: bash
