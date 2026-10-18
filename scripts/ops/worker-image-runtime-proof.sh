@@ -74,6 +74,8 @@ for item in "${roles[@]}"; do
           for (const proofPath of [
             "/app/scripts/ops/worker-lease-fencing-proof.ts",
             "/app/scripts/ops/worker-lease-fencing-extension.sh",
+            "/app/scripts/ops/worker-lock-contention-proof.ts",
+            "/app/scripts/ops/worker-lock-contention-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }

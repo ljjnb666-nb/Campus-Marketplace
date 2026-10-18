@@ -77,3 +77,7 @@ public/uploads/*
 # Do not bake privileged test seams or crash harness source into a runtime image.
 scripts/ops/worker-lease-fencing-extension.sh
 scripts/ops/worker-lease-fencing-proof.ts
+
+# R1G: deterministic lock-barrier probes are host bind mounts only.
+scripts/ops/worker-lock-contention-extension.sh
+scripts/ops/worker-lock-contention-proof.ts

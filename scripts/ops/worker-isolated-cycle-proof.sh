@@ -430,6 +430,9 @@ echo '[worker-cycle] PASS two parallel nonroot image workers -> single job/outbo
 # Every nonzero probe/failed invariant aborts the mandatory image workflow.
 source scripts/ops/worker-lease-fencing-extension.sh
 
+# R1G: deterministic SAME-ROW PostgreSQL lock competition (job and outbox).
+source scripts/ops/worker-lock-contention-extension.sh
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
