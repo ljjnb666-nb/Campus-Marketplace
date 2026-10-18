@@ -622,7 +622,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(probe).toContain("RENTAL_DOUBLE_TRANSITION");
     expect(probe).toContain("PRODUCT_REPLAY_DUPLICATED");
     expect(probe).toContain("RENTAL_DUPLICATE_STATUS_LOG");
-    expect(probe).toContain("TX_LEDGER_PARTIAL_COMMIT");
+    expect(probe).toContain("DOMAIN_ROLLBACK_LEAK");
     expect(probe).toContain("OUTBOX_ROLLBACK_LEAK");
     expect(probe).toContain("UNIQUE_DEDUPE_NOT_ATOMIC");
     expect(probe).toContain("skipDuplicates:true");
