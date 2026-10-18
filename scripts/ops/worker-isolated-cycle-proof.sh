@@ -6,6 +6,7 @@ if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ || -z "${GITHUB_RUN_ID:-}" ]]; then
 fi
 sha="$1"; network="proof-net-${GITHUB_RUN_ID}"; pg="proof-pg-${GITHUB_RUN_ID}"
 minio="proof-minio-${GITHUB_RUN_ID}"; database="proof_ci"
+parallel_one="proof-async-a-${GITHUB_RUN_ID}"; parallel_two="proof-async-b-${GITHUB_RUN_ID}"
 pg_password="synthetic-pg-only"; root_user="proofroot"; root_password="synthetic-root-only"
 s3_user="proofaccess"; s3_password="synthetic-s3-only"
 db_url="postgresql://postgres:${pg_password}@${pg}:5432/${database}?schema=public"
@@ -22,7 +23,7 @@ for tool in docker timeout; do command -v "$tool" >/dev/null 2>&1 || exit 2; don
 for image in "campus-marketplace-migrator:${sha}" "campus-marketplace-cleanup:${sha}" "campus-marketplace-async-worker:${sha}"; do
   docker image inspect "$image" >/dev/null 2>&1 || { echo '[worker-cycle][FAIL] candidate image missing' >&2; exit 1; }
 done
-for name in "$pg" "$minio"; do
+for name in "$pg" "$minio" "$parallel_one" "$parallel_two"; do
   if docker container inspect "$name" >/dev/null 2>&1; then
     echo '[worker-cycle][FAIL] refusing container collision' >&2; exit 1
   fi
@@ -32,7 +33,6 @@ if docker network inspect "$network" >/dev/null 2>&1; then
 fi
 
 tmp="$(mktemp -d)"; made_net=0; made_pg=0; made_minio=0
-parallel_one="proof-async-a-${GITHUB_RUN_ID}"; parallel_two="proof-async-b-${GITHUB_RUN_ID}"
 cleanup() {
   # Including interrupted background real worker containers on failed assertions.
   docker rm -f "$parallel_one" "$parallel_two" >/dev/null 2>&1 || true
