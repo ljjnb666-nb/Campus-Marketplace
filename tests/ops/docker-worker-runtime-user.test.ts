@@ -640,7 +640,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     const relocate = readFileSync(
       path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-relocate.cjs"),"utf8");
     const probe = readFileSync(
-      path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-probe.ts"),"utf8");
+      path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-probe.ts.txt"),"utf8");
     const upstream = readFileSync(
       path.join(process.cwd(),"scripts/ops/prisma7-order-rental-tx-shadow-extension.sh"),"utf8");
     const cli = readFileSync(
@@ -651,7 +651,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     const image = readFileSync(
       path.join(process.cwd(),"scripts/ops/worker-image-runtime-proof.sh"),"utf8");
     for(const name of ["prisma7-canonical-writer-shadow-extension.sh",
-      "prisma7-canonical-writer-relocate.cjs","prisma7-canonical-writer-probe.ts"]){
+      "prisma7-canonical-writer-relocate.cjs","prisma7-canonical-writer-probe.ts.txt"]){
       expect(workflow).toContain("scripts/ops/"+name);
       expect(ignore).toContain("scripts/ops/"+name);
       expect(image).toContain("/app/scripts/ops/"+name);
