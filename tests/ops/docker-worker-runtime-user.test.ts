@@ -116,6 +116,15 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("negative_rc");
     expect(script).toContain("-eq 124");
     expect(script).toContain("storage_cleanup_cycle_failed");
+    // Refusal can fail fast at Prisma's production module-init $connect()
+    // before the cleanup worker cycle catches the error.
+    const prismaSource = readFileSync(path.join(process.cwd(), "src/lib/prisma.ts"), "utf8");
+    expect(prismaSource).toContain('console.error("[prisma] 启动连接失败:"');
+    expect(prismaSource).toContain("process.exit(1)");
+    expect(script).toContain("prisma_startup=0");
+    expect(script).toContain("prisma_startup=1");
+    expect(script).toContain("[prisma] 启动连接失败:");
+
     expect(script).toContain("NEG_EVENT name=%s observed=%s");
     expect(script).toContain("NEG_CATEGORY token=%s observed=%s");
     expect(script).toContain("NEG_COUNTS lines=%s bytes=%s");
