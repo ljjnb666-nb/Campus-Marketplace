@@ -426,6 +426,10 @@ if [[ "$(parallel_snapshot)" != 6 ]]; then
 fi
 echo '[worker-cycle] PASS two parallel nonroot image workers -> single job/outbox and two deduped notifications 6/6'
 
+# R1F lives in a test-only extension and executes in this same isolated DB.
+# Every nonzero probe/failed invariant aborts the mandatory image workflow.
+source scripts/ops/worker-lease-fencing-extension.sh
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
