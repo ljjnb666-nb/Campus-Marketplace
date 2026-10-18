@@ -137,6 +137,9 @@ RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localh
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
 RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
+# Runtime work is DB/S3-only; keep root ownership of immutable files, but
+# run the long-lived cleanup process with the standard unprivileged UID.
+USER node
 ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/storage-cleanup-worker.ts \"$@\"", "--"]
 
 # ---------- ops-runner（一次性生产运维检查，compose ops-check 服务）----------
@@ -150,6 +153,9 @@ ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\";
 # 的 release artifact set，由 canonical 命令按需 --build（immutable
 # GIT_SHA tag）。
 FROM cleanup-runner AS ops-runner
+# One-shot backup checks may read root-restricted host backup mounts. Preserve
+# their existing identity in this scoped worker hardening; review separately.
+USER root
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
 ENTRYPOINT ["npx", "tsx", "scripts/ops/ops-check.ts"]
@@ -163,7 +169,11 @@ ENTRYPOINT ["npx", "tsx", "scripts/ops/ops-check.ts"]
 # provenance 模式（构建期 GIT_SHA → /app/.release-sha → ENTRYPOINT 显式
 # export，运行时 env 无法伪造日志身份；缺失 fail closed）。
 FROM cleanup-runner AS async-runner
+# Derived stage inherits USER node; switch only for immutable build-time
+# release metadata refresh, then return to node before the runtime entrypoint.
+USER root
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
 RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
+USER node
 ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/async-worker.ts \"$@\"", "--"]
