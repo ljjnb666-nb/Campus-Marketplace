@@ -14,9 +14,11 @@ ops_user="$(docker image inspect --format '{{.Config.User}}' "$ops_image")"
 # and root UID for root-restricted backup mounts. Probe immutable image offline.
 timeout 30s docker run --rm --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
+  -e "EXPECTED_SHA=$sha" \
   --entrypoint node "$ops_image" -e '
     const fs = require("node:fs");
     if (process.getuid() !== 0) process.exit(2);
+    if (process.env.RELEASE_SHA !== process.env.EXPECTED_SHA) process.exit(4);
     for (const n of ["prisma", "@prisma/config", "deepmerge-ts", "@prisma/client", "tsx"]) {
       if (!fs.existsSync("/app/node_modules/" + n + "/package.json")) process.exit(3);
     }
@@ -81,7 +83,7 @@ ops_run() {
     --cap-drop ALL --security-opt no-new-privileges \
     --mount "type=bind,src=$ops_backups,dst=/backups,readonly" \
     "${worker_env[@]}" \
-    -e BACKUP_DIR=/backups -e REDIS_URL= -e RELEASE_SHA="$sha" \
+    -e BACKUP_DIR=/backups -e REDIS_URL= \
     "$ops_image" "$@" >"$tmp/ops-$label.log" 2>&1 || status=$?
   # Bound all outcomes. An unexpected timeout, kill, or container error is
   # NEVER accepted as an expected negative application-level failure.
