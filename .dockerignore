@@ -81,3 +81,6 @@ scripts/ops/worker-lease-fencing-proof.ts
 # R1G: deterministic lock-barrier probes are host bind mounts only.
 scripts/ops/worker-lock-contention-extension.sh
 scripts/ops/worker-lock-contention-proof.ts
+
+# #157 R2B: disposable host-only backup probe must never ship inside images.
+scripts/ops/ops-runner-isolated-extension.sh
