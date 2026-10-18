@@ -95,4 +95,4 @@ scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
 # R3D02A canonical writer experiment remains on the disposable CI host.
 scripts/ops/prisma7-canonical-writer-shadow-extension.sh
 scripts/ops/prisma7-canonical-writer-relocate.cjs
-scripts/ops/prisma7-canonical-writer-probe.ts
+scripts/ops/prisma7-canonical-writer-probe.ts.txt
