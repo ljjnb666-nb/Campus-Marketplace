@@ -138,6 +138,31 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("trap cleanup EXIT");
   });
 
+  it("requires real nonroot AsyncJob/Outbox expired-lease and failclosed replay proof", () => {
+    const script = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8",
+    );
+    const original = readFileSync(
+      path.join(process.cwd(), "tests/integration/phase9a-async-core.test.ts"), "utf8",
+    );
+    // Reuse proven semantic contract; don't invent another queue implementation.
+    expect(original).toContain("FAILCLOSED-01");
+    expect(original).toContain("OUTBOX-FAILCLOSED-01");
+    expect(original).toContain("J-LEASE-01");
+    expect(script).toContain('INSERT INTO "AsyncJob"');
+    expect(script).toContain('INSERT INTO "OutboxEvent"');
+    expect(script).toContain("'RUNNING'");
+    expect(script).toContain("'PROCESSING'");
+    expect(script).toContain("proof-stale-job-token");
+    expect(script).toContain("proof-stale-event-token");
+    expect(script).toContain("ASYNC_JOB_KIND_OR_SCHEMA_VERSION_UNKNOWN");
+    expect(script).toContain("OUTBOX_EVENT_TYPE_OR_SCHEMA_VERSION_UNKNOWN");
+    expect(script).toContain("async-fixtures");
+    expect(script).toContain("async-replay");
+    expect(script).toContain('if [[ "$first_snapshot" != 4 ]]');
+    expect(script).toContain('if [[ "$(r1c_snapshot)" != 4 ]]');
+  });
+
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
     const stage = stages.get("cleanup-runner");
     expect(stage).toBeDefined();
