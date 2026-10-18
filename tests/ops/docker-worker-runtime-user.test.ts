@@ -177,6 +177,13 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(sql).toContain("'proof-buyer'");
     expect(sql).toContain("'proof-seller'");
     expect(sql).toContain("valid_order_snapshot");
+    expect(sql).toContain("EmailRuntimeConfigUnavailableError");
+    expect(sql).toContain('worker_env+=(-e EMAIL_PROVIDER=disabled)');
+    expect(sql).toContain("valid-expiry-recovery");
+    expect(sql).toContain("PROVIDER_DISABLED");
+    expect(sql).toContain("NOTIFICATION_DELIVERY");
+    expect(sql).toContain("zero premature notification");
+    expect(sql).toContain("no send jobs");
     expect(sql).toContain("run_worker valid-expiry");
     expect(sql).toContain("run_worker valid-expiry-replay");
     expect(sql).toContain('if [[ "$(valid_order_snapshot)" != 5 ]]');
