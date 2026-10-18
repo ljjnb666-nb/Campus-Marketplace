@@ -70,6 +70,17 @@ for item in "${roles[@]}"; do
           fs.accessSync("/app/node_modules/tsx/dist/cli.mjs", fs.constants.R_OK);
           fs.accessSync("/app/node_modules/@prisma/client/package.json", fs.constants.R_OK);
           require.resolve("@prisma/client");
+          // R2: inspect actual immutable worker image, not package-lock alone.
+          // Migration CLI/config/deepmerge must be absent, generated client
+          // must remain present, and no execution path invokes prisma CLI.
+          for (const unused of [
+            "/app/node_modules/prisma",
+            "/app/node_modules/@prisma/config",
+            "/app/node_modules/deepmerge-ts",
+          ]) {
+            if (fs.existsSync(unused)) fail("unused Prisma CLI dependency in worker runtime");
+          }
+          fs.accessSync("/app/node_modules/.prisma/client", fs.constants.R_OK);
           // R1F test seams must not be present in ANY shipped worker image.
           for (const proofPath of [
             "/app/scripts/ops/worker-lease-fencing-proof.ts",
