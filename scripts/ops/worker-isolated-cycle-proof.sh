@@ -107,6 +107,71 @@ run_worker() {
 run_worker cleanup-dry "campus-marketplace-cleanup:${sha}" storage_cleanup_worker_started --run-once --dry-run
 run_worker cleanup-write "campus-marketplace-cleanup:${sha}" storage_cleanup_worker_started --run-once
 run_worker async-idle "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+
+# R1C: controlled corrupt durable rows from the existing FAILCLOSED/LEASE
+# integration contract. Isolated DB only; never production enqueue or user data.
+docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" >/dev/null <<'SQL'
+INSERT INTO "AsyncJob"
+  ("id", "kind", "schemaVersion", "dedupeKey", "payload", "status", "runAt", "createdAt", "updatedAt")
+VALUES ('proof-job-unknown', 'UNKNOWN_PROOF_KIND', 1, 'proof-r1c-job-unknown', '{}'::jsonb,
+        'PENDING', NOW() - INTERVAL '1 minute', NOW(), NOW());
+INSERT INTO "AsyncJob"
+  ("id", "kind", "schemaVersion", "dedupeKey", "payload", "status", "runAt", "attempts",
+   "leaseOwner", "leaseToken", "leaseExpiresAt", "createdAt", "updatedAt")
+VALUES ('proof-job-stale', 'UNKNOWN_PROOF_KIND', 1, 'proof-r1c-job-stale', '{}'::jsonb,
+        'RUNNING', NOW() - INTERVAL '2 minutes', 1,
+        'proof-crashed-worker', 'proof-stale-job-token', NOW() - INTERVAL '1 minute', NOW(), NOW());
+INSERT INTO "OutboxEvent"
+  ("id", "eventType", "schemaVersion", "aggregateType", "aggregateId", "dedupeKey",
+   "payload", "status", "availableAt", "createdAt", "updatedAt")
+VALUES ('proof-event-unknown', 'UNKNOWN_PROOF_EVENT', 1, 'ORDER', 'proof-nonexistent-order',
+        'proof-r1c-event-unknown', '{}'::jsonb, 'PENDING', NOW() - INTERVAL '1 minute', NOW(), NOW());
+INSERT INTO "OutboxEvent"
+  ("id", "eventType", "schemaVersion", "aggregateType", "aggregateId", "dedupeKey",
+   "payload", "status", "availableAt", "attempts",
+   "leaseOwner", "leaseToken", "leaseExpiresAt", "createdAt", "updatedAt")
+VALUES ('proof-event-stale', 'UNKNOWN_PROOF_EVENT', 1, 'ORDER', 'proof-nonexistent-order',
+        'proof-r1c-event-stale', '{}'::jsonb, 'PROCESSING', NOW() - INTERVAL '2 minutes', 1,
+        'proof-crashed-dispatcher', 'proof-stale-event-token', NOW() - INTERVAL '1 minute', NOW(), NOW());
+SQL
+
+# Evaluate actual DB outcomes after running the exact image entrypoint.
+# Expected: both PENDING rows claim once, both expired leases reclaim once,
+# unknown handlers fail closed, no stale leaseToken retained after deadletter.
+r1c_snapshot() {
+  docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -U postgres -d "$database" -At <<'SQL'
+SELECT
+ (SELECT COUNT(*) FROM "AsyncJob"
+  WHERE "id" IN ('proof-job-unknown','proof-job-stale')
+    AND "status" = 'DEAD_LETTER'
+    AND "lastErrorCode" = 'ASYNC_JOB_KIND_OR_SCHEMA_VERSION_UNKNOWN'
+    AND "leaseToken" IS NULL
+    AND (("id"='proof-job-unknown' AND "attempts"=1)
+      OR ("id"='proof-job-stale' AND "attempts"=2)))
+ +
+ (SELECT COUNT(*) FROM "OutboxEvent"
+  WHERE "id" IN ('proof-event-unknown','proof-event-stale')
+    AND "status" = 'DEAD_LETTER'
+    AND "lastErrorCode" = 'OUTBOX_EVENT_TYPE_OR_SCHEMA_VERSION_UNKNOWN'
+    AND "leaseToken" IS NULL
+    AND (("id"='proof-event-unknown' AND "attempts"=1)
+      OR ("id"='proof-event-stale' AND "attempts"=2)));
+SQL
+}
+run_worker async-fixtures "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+first_snapshot="$(r1c_snapshot)"
+if [[ "$first_snapshot" != 4 ]]; then
+  echo '[worker-cycle][FAIL] AsyncJob/Outbox failclosed-lease contract count != 4' >&2
+  exit 1
+fi
+# Replaying terminal rows must not re-run handlers or increment attempts.
+run_worker async-replay "campus-marketplace-async-worker:${sha}" async_worker_started --run-once
+if [[ "$(r1c_snapshot)" != 4 ]]; then
+  echo '[worker-cycle][FAIL] terminal replay changed status, lease or attempts' >&2
+  exit 1
+fi
+echo '[worker-cycle] PASS real nonroot AsyncJob/Outbox expired-lease/replay 4/4'
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
