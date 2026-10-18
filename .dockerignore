@@ -84,3 +84,5 @@ scripts/ops/worker-lock-contention-proof.ts
 
 # #157 R2B: disposable host-only backup probe must never ship inside images.
 scripts/ops/ops-runner-isolated-extension.sh
+# R3A CLI experiment is CI-host-only and must never ship in release images.
+scripts/ops/prisma7-cli-shadow-extension.sh
