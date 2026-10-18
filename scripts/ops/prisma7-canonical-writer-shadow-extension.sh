@@ -48,6 +48,24 @@ if ! timeout --signal=TERM --kill-after=10s 120s docker run --rm \
  --entrypoint node "campus-marketplace-migrator:$sha" \
  /shadow/node_modules/tsx/dist/cli.mjs /shadow/r3d02/probe.ts \
  >"$tmp/r3d02-probe.log" 2>&1; then
+ # Do not stream raw registry/SQL stack traces or connection strings.
+ # Only bounded machine code and boolean categories are exposed.
+ node - "$tmp/r3d02-probe.log" <<'CLASSIFY_R3D02A'
+const fs=require("node:fs");
+const raw=fs.readFileSync(process.argv[2],"utf8");
+const codes=[...raw.matchAll(/\b(?:R3D02A_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|OUTBOX_EVENT_[A-Z0-9_]+|P[0-9]{4}|ERR_[A-Z0-9_]+)\b/g)].map(m=>m[0]);
+const categories={
+ module:/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/i.test(raw),
+ syntax:/SyntaxError|Unexpected token|Transform failed/i.test(raw),
+ prisma:/PrismaClientKnownRequestError|PrismaClientValidationError|PrismaClientInitializationError/i.test(raw),
+ runtime:/TypeError|ReferenceError/i.test(raw),
+ pool:/timeout|timed out|pool timeout/i.test(raw),
+ registry:/INTENT_CONTRACT_INVALID|UNKNOWN_EVENT_TYPE|UNKNOWN_CONTRACT/i.test(raw)
+};
+console.log("[worker-cycle] R3D02A sanitized machineCodes="+
+ JSON.stringify([...new Set(codes)].slice(0,6))+
+ " categories="+JSON.stringify(categories)+" logLines="+raw.split(/\r?\n/).length);
+CLASSIFY_R3D02A
  echo '[worker-cycle][FAIL] R3D02A canonical writer live shadow test' >&2; exit 1;
 fi
 for marker in \
