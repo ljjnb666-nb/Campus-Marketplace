@@ -68,6 +68,16 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     }
   });
 
+  it("gives tsx only a bounded private /tmp while keeping the proof root filesystem readonly", () => {
+    const proof = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"),
+      "utf8",
+    );
+    expect(proof).toContain("--network none --read-only --cap-drop ALL");
+    expect(proof).toContain("--tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=32m");
+    expect(proof).toContain("--entrypoint node \"$image\" node_modules/tsx/dist/cli.mjs --version");
+  });
+
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
     const stage = stages.get("cleanup-runner");
     expect(stage).toBeDefined();
