@@ -88,3 +88,5 @@ scripts/ops/ops-runner-isolated-extension.sh
 scripts/ops/prisma7-cli-shadow-extension.sh
 # R3B client/adapter probe is host-only, never a release artifact.
 scripts/ops/prisma7-client-shadow-extension.sh
+# R3C real extension and tenant predicate shadow proof stays CI-host-only.
+scripts/ops/prisma7-extensions-shadow-extension.sh
