@@ -1,9 +1,7 @@
-import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const script = readFileSync(path.join(process.cwd(), "scripts/ops/prisma-image-inventory.sh"), "utf8");
@@ -52,12 +50,12 @@ set -eu
 if [[ "$1" == image && "$2" == inspect ]]; then
   if [[ "${3:-}" == --format ]]; then
     if [[ "$4" == '{{.Id}}' ]]; then
-      printf 'sha256:%064d\\n' 0
+      printf 'sha256:%064d\n' 0
     elif [[ "$4" == '{{.Config.User}}' ]]; then
       if [[ "$5" == *'campus-marketplace-app:'* ]]; then
-        printf 'node\\n'
+        printf 'node\n'
       else
-        printf '\\n'
+        printf '\n'
       fi
     else
       exit 4
@@ -89,7 +87,7 @@ exit 9
         );
         const success = command(false);
         expect(success.status, success.stderr).toBe(0);
-        const records = success.stdout.trim().split("\\n").map((line) => JSON.parse(line));
+        const records = success.stdout.trim().split("\n").map((line) => JSON.parse(line));
         expect(records).toHaveLength(4);
         expect(records.map((row) => row.role)).toEqual([
           "app", "migrator", "storage-cleanup", "async-worker",
