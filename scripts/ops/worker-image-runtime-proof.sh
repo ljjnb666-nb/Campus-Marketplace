@@ -70,6 +70,13 @@ for item in "${roles[@]}"; do
           fs.accessSync("/app/node_modules/tsx/dist/cli.mjs", fs.constants.R_OK);
           fs.accessSync("/app/node_modules/@prisma/client/package.json", fs.constants.R_OK);
           require.resolve("@prisma/client");
+          // R1F test seams must not be present in ANY shipped worker image.
+          for (const proofPath of [
+            "/app/scripts/ops/worker-lease-fencing-proof.ts",
+            "/app/scripts/ops/worker-lease-fencing-extension.sh",
+          ]) {
+            if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
+          }
         } catch {
           fail("release metadata, TSX or Prisma client unreadable");
         }

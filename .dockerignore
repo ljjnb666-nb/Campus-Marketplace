@@ -72,3 +72,8 @@ prisma/dev.db-journal
 public/uploads/*
 !public/uploads/placeholders/
 !public/uploads/placeholders/**
+
+# #157 R1F: test-only Docker lease/crash probes are host bind mounts in CI.
+# Do not bake privileged test seams or crash harness source into a runtime image.
+scripts/ops/worker-lease-fencing-extension.sh
+scripts/ops/worker-lease-fencing-proof.ts
