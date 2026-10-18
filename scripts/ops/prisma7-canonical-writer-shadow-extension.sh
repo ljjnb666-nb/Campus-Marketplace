@@ -22,12 +22,6 @@ for path in \
 done
 cp scripts/ops/prisma7-canonical-writer-relocate.cjs "$sandbox/r3d02/relocate.cjs"
 cp scripts/ops/prisma7-canonical-writer-probe.ts "$sandbox/r3d02/probe.ts"
-node "$sandbox/r3d02/relocate.cjs" "$sandbox/r3d02/lib" >"$tmp/r3d02-relocate.log" 2>&1 || {
- echo '[worker-cycle][FAIL] R3D02A original source import relocation' >&2; exit 1;
-}
-# Unrelated claim functions import a Prisma singleton; in this shadow-only
-# module graph it is the REAL v7 client bound to this disposable database.
-# The canonical writers under test all receive the caller's explicit tx.
 cat >"$sandbox/r3d02/lib/prisma.ts" <<'SHADOW'
 import { PrismaClient } from "../../generated/prisma/client.ts";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -38,6 +32,13 @@ export const prisma=new PrismaClient({adapter:new PrismaPg({
  connectionString:url,max:2,connectionTimeoutMillis:1200
 })});
 SHADOW
+node "$sandbox/r3d02/relocate.cjs" "$sandbox/r3d02/lib" >"$tmp/r3d02-relocate.log" 2>&1 || {
+ echo '[worker-cycle][FAIL] R3D02A original source import relocation' >&2; exit 1;
+}
+# Unrelated claim functions import a Prisma singleton; in this shadow-only
+# module graph it is the REAL v7 client bound to this disposable database.
+# The canonical writers under test all receive the caller's explicit tx.
+
 if ! timeout --signal=TERM --kill-after=10s 120s docker run --rm \
  --network "$network" --read-only --cap-drop ALL --security-opt no-new-privileges \
  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=128m \
