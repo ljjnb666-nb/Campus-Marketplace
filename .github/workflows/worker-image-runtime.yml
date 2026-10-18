@@ -24,9 +24,15 @@ jobs:
     name: Build four real images and verify runtime identities
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # On pull_request GITHUB_SHA may be a synthetic merge commit; use the
+      # candidate PR HEAD for both checkout provenance and image release tags.
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout exact candidate tree
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Build does not use production env files, credentials or a running service.
       # A missing registry image or Docker build failure is a real FAIL, not SKIP.
@@ -40,9 +46,9 @@ jobs:
             "cleanup-runner:campus-marketplace-cleanup" \
             "async-runner:campus-marketplace-async-worker"; do
             target="${item%%:*}"
-            image="${item#*:}:${GITHUB_SHA}"
+            image="${item#*:}:${SOURCE_SHA}"
             docker build \
-              --build-arg "GIT_SHA=${GITHUB_SHA}" \
+              --build-arg "GIT_SHA=${SOURCE_SHA}" \
               --target "${target}" \
               --tag "${image}" .
             printf 'BUILT stage=%s image=%s\n' "${target}" "${image}"
@@ -50,4 +56,4 @@ jobs:
 
       - name: Verify image UID, immutable SHA and Node/Prisma/tsx execution
         shell: bash
-        run: bash scripts/ops/worker-image-runtime-proof.sh "${GITHUB_SHA}"
+        run: bash scripts/ops/worker-image-runtime-proof.sh "${SOURCE_SHA}"
