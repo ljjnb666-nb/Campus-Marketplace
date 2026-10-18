@@ -86,7 +86,11 @@ for item in "${roles[@]}"; do
   if [[ "$kind" == worker ]]; then
     # Prove that the actual tsx executable starts as this image's non-root user,
     # not merely that a package.json entry exists.
+    # tsx creates a per-UID IPC directory in /tmp even for --version.
+    # Root FS remains read-only; only an isolated, bounded tmpfs is writable.
+    # This matches production's writable /tmp without granting /app writes.
     docker run --rm --network none --read-only --cap-drop ALL \
+      --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=32m \
       --security-opt no-new-privileges \
       --entrypoint node "$image" node_modules/tsx/dist/cli.mjs --version
   fi
