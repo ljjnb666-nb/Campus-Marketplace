@@ -19,7 +19,7 @@ on:
       - scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
       - scripts/ops/prisma7-canonical-writer-shadow-extension.sh
       - scripts/ops/prisma7-canonical-writer-relocate.cjs
-      - scripts/ops/prisma7-canonical-writer-probe.ts
+      - scripts/ops/prisma7-canonical-writer-probe.ts.txt
       - src/lib/domain-events/domain-event.ts
       - src/lib/domain-events/domain-event-registry.ts
       - src/lib/async/outbox.ts
