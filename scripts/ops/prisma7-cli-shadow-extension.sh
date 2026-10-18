@@ -49,9 +49,9 @@ timeout 180s docker run --rm \
   --network bridge --read-only --cap-drop ALL \
   --security-opt no-new-privileges \
   --user "$(id -u):$(id -g)" \
-  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=128m \
+  --tmpfs /tmp:rw,nosuid,nodev,mode=1777,size=512m \
   --mount "type=bind,src=$sandbox,dst=/shadow" \
-  --workdir /shadow -e HOME=/tmp \
+  --workdir /shadow -e HOME=/tmp -e npm_config_cache=/shadow/.npm-cache \
   --entrypoint npm "campus-marketplace-migrator:$sha" \
   install --prefix /shadow --no-save --package-lock=false \
   --no-audit --no-fund prisma@7.10.1 \
@@ -70,6 +70,9 @@ const categories = {
   engine: /EBADENGINE|Unsupported engine/i,
   installScript: /postinstall|preinstall|prepare script|command failed/i,
   storage: /ENOSPC|ENOMEM|EIO/i,
+  diskFull: /ENOSPC/i,
+  memory: /ENOMEM/i,
+  io: /\bEIO\b/i,
   docker: /docker: Error|permission denied while trying to connect to Docker/i,
 };
 const seen = Object.fromEntries(Object.entries(categories).map(([key,pattern])=>[key,pattern.test(raw)]));
@@ -78,6 +81,9 @@ console.log("[worker-cycle] R3A install failed exit=" + rc + " categories=" + JS
 CLASSIFY_R3A
   echo '[worker-cycle][FAIL] R3A isolated Prisma 7 CLI install unavailable' >&2; exit 1;
 fi
+# Temporary npm cache contains untrusted registry material, never mount it to
+# the subsequent read-only migration CLI container.
+rm -rf "$sandbox/.npm-cache"
 node - "$sandbox/node_modules/prisma/package.json" <<'CHECK_R3A'
 const pkg = require(process.argv[2]);
 if (pkg.version !== "7.10.1") {
