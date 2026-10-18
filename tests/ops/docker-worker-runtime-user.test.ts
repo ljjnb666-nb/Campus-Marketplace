@@ -78,6 +78,36 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(proof).toContain("--entrypoint node \"$image\" node_modules/tsx/dist/cli.mjs --version");
   });
 
+  it("executes real isolated Postgres/MinIO worker cycles and idempotent migration", () => {
+    const ci = readFileSync(path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8");
+    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    expect(ci).toContain("packages: read");
+    expect(ci).toContain("worker-isolated-cycle-proof.sh");
+    expect(ci).toContain("Real PostgreSQL MinIO worker run-once and refused-DB proof");
+    expect(proof).toContain("docker network create");
+    expect(proof).toContain("postgres:16-alpine");
+    expect(proof).toContain("minio@sha256:");
+    expect(proof).toContain("migrate deploy");
+    expect(proof).toContain("for pass in 1 2");
+    expect(proof).toContain('run_worker cleanup-dry');
+    expect(proof).toContain('run_worker cleanup-write');
+    expect(proof).toContain('run_worker async-idle');
+  });
+
+  it("refuses production dependencies, collisions and a timed-out negative gate", () => {
+    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    expect(proof).toContain("GITHUB_RUN_ID");
+    expect(proof).toContain("refusing container collision");
+    expect(proof).toContain("refusing network collision");
+    expect(proof).not.toContain(".env.production");
+    expect(proof).toContain("synthetic-pg-only");
+    expect(proof).toContain("synthetic-s3-only");
+    expect(proof).toContain('negative_rc');
+    expect(proof).toContain('"$negative_rc" -eq 124');
+    expect(proof).toContain('storage_cleanup_cycle_failed');
+    expect(proof).toContain("trap cleanup EXIT");
+  });
+
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
     const stage = stages.get("cleanup-runner");
     expect(stage).toBeDefined();
