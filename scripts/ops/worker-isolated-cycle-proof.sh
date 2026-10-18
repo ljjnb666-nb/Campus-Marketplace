@@ -436,6 +436,9 @@ source scripts/ops/worker-lock-contention-extension.sh
 # R2B: one-shot ops-runner real backup/readonly/diagnostic bounded probe.
 source scripts/ops/ops-runner-isolated-extension.sh
 
+# R3A: isolated Prisma7 CLI validation/migration against a separate disposable DB.
+source scripts/ops/prisma7-cli-shadow-extension.sh
+
 # Fail-closed negative gate: a broken database endpoint must not become SUCCESS.
 set +e
 timeout --signal=TERM --kill-after=10s 50s docker run --rm \
