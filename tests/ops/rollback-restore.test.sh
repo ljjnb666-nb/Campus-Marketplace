@@ -68,7 +68,7 @@ safe_verifier_failure_evidence() {
   if [[ "$fake_pid" =~ ^[0-9]+$ ]] && kill -0 "$fake_pid" 2>/dev/null; then
     fake_app_alive=1
   fi
-  printf 'RB_VERIFIER_DIAG exit=%s app_up=%s gate=%s pass=%s fail=%s health_unreachable=%s ready_unreachable=%s release_mismatch=%s dependency_failed=%s nonready=%s invalid=%s fake_app_alive=%s\\n' \\
+  printf 'RB_VERIFIER_DIAG exit=%s app_up=%s gate=%s pass=%s fail=%s health_unreachable=%s ready_unreachable=%s release_mismatch=%s dependency_failed=%s nonready=%s invalid=%s fake_app_alive=%s\n' \
     "$rc" "$app_up" "$gate_started" "$verifier_pass" "$verifier_fail" "$health_unreachable" "$ready_unreachable" "$release_mismatch" "$dependency_failed" "$nonready" "$invalid" "$fake_app_alive" >&2
 }
 
@@ -429,11 +429,11 @@ fi
 # 但不得泄露任意原始输出、URL 或未知 reason / Docker 参数。
 VERIFIER_DIAG_RESULT="$(
   CALL_LOG='app_up_called ARGS=CANARY_SECRET_SHOULD_NOT_LEAK=private'
-  printf '%s\\n' '[rollback] release readiness gate (https://private.example/secret)' \\
-    '{"result":"FAIL","reason":"HEALTH_UNREACHABLE","reasons":["HEALTH_UNREACHABLE","READY_NOT_READY"],"untrusted":"CANARY_SECRET_SHOULD_NOT_LEAK"}' \\
-    > "/tmp/rb-out.$"
-  safe_verifier_failure_evidence 17 "/tmp/rb-out.$" "" 2>&1
-  rm -f "/tmp/rb-out.$"
+  printf '%s\n' '[rollback] release readiness gate (https://private.example/secret)' \
+    '{"result":"FAIL","reason":"HEALTH_UNREACHABLE","reasons":["HEALTH_UNREACHABLE","READY_NOT_READY"],"untrusted":"CANARY_SECRET_SHOULD_NOT_LEAK"}' \
+    > "/tmp/rb-out.$$"
+  safe_verifier_failure_evidence 17 "/tmp/rb-out.$$" "" 2>&1
+  rm -f "/tmp/rb-out.$$"
 )"
 if [[ "$VERIFIER_DIAG_RESULT" == *'RB_VERIFIER_DIAG exit=17'* &&
       "$VERIFIER_DIAG_RESULT" == *'app_up=1 gate=1 pass=0 fail=1'* &&
@@ -736,7 +736,7 @@ start_fake_app "${PREV_SHA}" ready "${FAKE_OUT}" || fail_test "fake app 启动"
 TEST_APP_URL="http://127.0.0.1:$(fake_port "${FAKE_OUT}")"
 OPS_HEALTH_TIMEOUT=15 run_rollback "${PREV_SHA}"; rc=$?
 if [[ "$rc" != 0 ]]; then
-  safe_verifier_failure_evidence "$rc" "/tmp/rb-out.$" "${FAKE_APP_PID:-}"
+  safe_verifier_failure_evidence "$rc" "/tmp/rb-out.$$" "${FAKE_APP_PID:-}"
 fi
 TEST_APP_URL=""
 [[ -n "${FAKE_APP_PID:-}" ]] && kill "${FAKE_APP_PID}" 2>/dev/null
