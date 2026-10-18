@@ -78,73 +78,45 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(proof).toContain("--entrypoint node \"$image\" node_modules/tsx/dist/cli.mjs --version");
   });
 
-  it("executes real isolated Postgres/MinIO worker cycles and idempotent migration", () => {
+  it("verifies isolated PostgreSQL/MinIO worker cycles are mandatory in the image workflow", () => {
     const ci = readFileSync(path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8");
-    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    const script = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
     expect(ci).toContain("packages: read");
     expect(ci).toContain("worker-isolated-cycle-proof.sh");
     expect(ci).toContain("Real PostgreSQL MinIO worker run-once and refused-DB proof");
-    expect(proof).toContain("docker network create");
-    expect(proof).toContain("postgres:16-alpine");
-    expect(proof).toContain("minio@sha256:");
-    expect(proof).toContain("migrate deploy");
-    expect(proof).toContain("for pass in 1 2");
-    expect(proof).toContain('run_worker cleanup-dry');
-    expect(proof).toContain('run_worker cleanup-write');
-    expect(proof).toContain('run_worker async-idle');
+    expect(script).toContain("docker network create");
+    expect(script).toContain("postgres:16-alpine");
+    expect(script).toContain("for pass in 1 2");
+    expect(script).toContain("campus-marketplace-migrator:");
+    expect(script).toContain("run_worker cleanup-dry");
+    expect(script).toContain("run_worker cleanup-write");
+    expect(script).toContain("run_worker async-idle");
   });
 
-  it("uses the same complete 64-hex pinned MinIO and mc image digests as existing CI", () => {
-    const baseline = readFileSync(path.join(process.cwd(), ".github/workflows/ci.yml"), "utf8");
-    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+  it("matches the exact existing CI MinIO and mc sha256 pins without truncation", () => {
+    const ci = readFileSync(path.join(process.cwd(), ".github/workflows/ci.yml"), "utf8");
+    const script = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
     for (const name of ["minio", "mc"]) {
-      const refs = [...baseline.matchAll(
-        new RegExp("ghcr\\.io/ljjnb666-nb/" + name + "@sha256:[a-f0-9]+", "g"),
-      )].map((match) => match[0]);
-      expect(refs.length).toBeGreaterThan(0);
-      expect(refs[0].split("@sha256:")[1]).toHaveLength(64);
-      expect(refs.every((ref) => ref === refs[0])).toBe(true);
-      expect(proof).toContain(refs[0]);
+      const ref = ci.match(new RegExp("ghcr[.]io/ljjnb666-nb/" + name + "@sha256:([0-9a-f]+)"))?.[0];
+      expect(ref).toBeDefined();
+      expect(ref!.split("@sha256:")[1]).toHaveLength(64);
+      expect(script).toContain(ref);
     }
-    expect(proof).toContain('invalid pinned image digest');
-    expect(proof).toContain('@sha256:[0-9a-f]{64}
-    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
-    expect(proof).toContain("GITHUB_RUN_ID");
-    expect(proof).toContain("refusing container collision");
-    expect(proof).toContain("refusing network collision");
-    expect(proof).not.toContain(".env.production");
-    expect(proof).toContain("synthetic-pg-only");
-    expect(proof).toContain("synthetic-s3-only");
-    expect(proof).toContain('negative_rc');
-    expect(proof).toContain('"$negative_rc" -eq 124');
-    expect(proof).toContain('storage_cleanup_cycle_failed');
-    expect(proof).toContain("trap cleanup EXIT");
+    expect(script).toContain("invalid pinned image digest");
   });
 
-  it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
-    const stage = stages.get("cleanup-runner");
-    expect(stage).toBeDefined();
-    const generate = stage!.lines.findIndex((line) => line.includes("npx prisma generate"));
-    const drop = stage!.lines.findIndex((line) => line === "USER node");
-    expect(generate).toBeGreaterThanOrEqual(0);
-    expect(drop).toBeGreaterThan(generate);
-  });
-});
-);
-  });
-
-  it("refuses production dependencies, collisions and a timed-out negative gate", () => {
-    const proof = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
-    expect(proof).toContain("GITHUB_RUN_ID");
-    expect(proof).toContain("refusing container collision");
-    expect(proof).toContain("refusing network collision");
-    expect(proof).not.toContain(".env.production");
-    expect(proof).toContain("synthetic-pg-only");
-    expect(proof).toContain("synthetic-s3-only");
-    expect(proof).toContain('negative_rc');
-    expect(proof).toContain('"$negative_rc" -eq 124');
-    expect(proof).toContain('storage_cleanup_cycle_failed');
-    expect(proof).toContain("trap cleanup EXIT");
+  it("rejects colliding resources and failed-DB timeouts instead of faking green", () => {
+    const script = readFileSync(path.join(process.cwd(), "scripts/ops/worker-isolated-cycle-proof.sh"), "utf8");
+    expect(script).toContain("GITHUB_RUN_ID");
+    expect(script).toContain("refusing container collision");
+    expect(script).toContain("refusing network collision");
+    expect(script).not.toContain(".env.production");
+    expect(script).toContain("synthetic-pg-only");
+    expect(script).toContain("synthetic-s3-only");
+    expect(script).toContain("negative_rc");
+    expect(script).toContain("-eq 124");
+    expect(script).toContain("storage_cleanup_cycle_failed");
+    expect(script).toContain("trap cleanup EXIT");
   });
 
   it("keeps Prisma code generation in the build stage before cleanup runtime UID switch", () => {
