@@ -664,6 +664,9 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
       expect(relocate).toContain(name);
     }
     expect(relocate).toContain("if(restored!==original)");
+    expect(relocate).toContain("R3D02A_RELOCATION_COUNT_MISMATCH");
+    expect(relocate).toContain("unique.set(change.to,change)");
+    expect(relocate).toContain("original.split(change.from).length-1");
     expect(relocate).toContain("R3D02A_UNMAPPED_PRODUCTION_DEPENDENCY");
     expect(script).toContain("src/lib/domain-events/domain-event.ts");
     expect(script).toContain("src/lib/async/outbox.ts");
