@@ -534,4 +534,56 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(runtime).not.toContain(".env.production");
   });
 
+  it("R3C uses authentic extension source with only a relocated generated-v7 Prisma import", () => {
+    const probe = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-extensions-shadow-extension.sh"), "utf8",
+    );
+    const r3b = readFileSync(
+      path.join(process.cwd(), "scripts/ops/prisma7-client-shadow-extension.sh"), "utf8",
+    );
+    const workflow = readFileSync(
+      path.join(process.cwd(), ".github/workflows/worker-image-runtime.yml"), "utf8",
+    );
+    const dockerignore = readFileSync(path.join(process.cwd(), ".dockerignore"), "utf8");
+    const runtimeGuard = readFileSync(
+      path.join(process.cwd(), "scripts/ops/worker-image-runtime-proof.sh"), "utf8",
+    );
+    const soft = readFileSync(path.join(process.cwd(), "src/lib/prisma-soft-delete.ts"), "utf8");
+    const ledger = readFileSync(
+      path.join(process.cwd(), "src/lib/domain-events/domain-event-ledger-extension.ts"), "utf8",
+    );
+    expect(workflow).toContain("scripts/ops/prisma7-extensions-shadow-extension.sh");
+    expect(workflow).toContain("src/lib/prisma-soft-delete.ts");
+    expect(workflow).toContain("src/lib/domain-events/domain-event-ledger-extension.ts");
+    expect(dockerignore).toMatch(/^scripts\/ops\/prisma7-extensions-shadow-extension\.sh$/m);
+    expect(runtimeGuard).toContain("/app/scripts/ops/prisma7-extensions-shadow-extension.sh");
+    expect(r3b).toContain("source scripts/ops/prisma7-extensions-shadow-extension.sh");
+    expect(r3b.indexOf("source scripts/ops/prisma7-extensions-shadow-extension.sh"))
+      .toBeGreaterThan(r3b.indexOf("PASS R3B Prisma7 client+adapter"));
+    expect(soft).toContain('import { Prisma } from "@prisma/client";');
+    expect(ledger).toContain('import { Prisma } from "@prisma/client";');
+    expect(probe).toContain('cp src/lib/prisma-soft-delete.ts');
+    expect(probe).toContain('cp src/lib/domain-events/domain-event-ledger-extension.ts');
+    expect(probe).toContain('original.split(needle).length !== 2');
+    expect(probe).toContain('relocated.replace(');
+    expect(probe).toContain('import { Prisma } from "../generated/prisma/client.ts";');
+    expect(probe).toContain("base.$extends(softDeleteExtension).$extends(domainEventLedgerExtension)");
+    expect(probe).toContain('EXPECTED_SHADOW_DB=$shadow_db');
+    expect(probe).toContain('OUTSIDE_SHADOW_DATABASE');
+    expect(probe).toContain('SOFT_DELETE_EXPLICIT_DOMAIN_MUTATION_REQUIRED');
+    expect(probe).toContain('DOMAIN_EVENT_APPEND_ONLY');
+    expect(probe).toContain('findUniqueOrThrow');
+    expect(probe).toContain('omit: { deletedAt: true }');
+    expect(probe).toContain('EXPLICIT_DELETED_FILTER_IGNORED');
+    expect(probe).toContain('CROSS_TENANT_WHERE_OVERRIDDEN');
+    expect(probe).toContain('TX_LEDGER_PARTIAL_COMMIT');
+    expect(probe).toContain('HARD_DELETE_ESCAPED_TRANSACTION');
+    expect(probe).toContain('await base.$disconnect()');
+    expect(probe).toContain('--read-only --cap-drop ALL');
+    expect(probe).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    expect(probe).toContain("does not prove central RBAC");
+    expect(probe).not.toContain("npm audit fix");
+    expect(probe).not.toContain(".env.production");
+  });
+
 });

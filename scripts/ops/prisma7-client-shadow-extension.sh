@@ -179,3 +179,5 @@ for expected in \
 done
 echo '[worker-cycle] PASS R3B Prisma7 client+adapter basic model, commit/rollback and pool budget (shadow only)'
 echo '[worker-cycle] LIMIT R3B excludes production Prisma extensions, Next bundle, identity/tenant gates and upgrade/rollback'
+# R3C: test production extension source unchanged (except v7 Prisma import path).
+source scripts/ops/prisma7-extensions-shadow-extension.sh
