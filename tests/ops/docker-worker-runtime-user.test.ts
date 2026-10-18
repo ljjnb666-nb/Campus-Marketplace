@@ -402,6 +402,8 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(dockerignore).toMatch(/^scripts\/ops\/ops-runner-isolated-extension\.sh$/m);
     expect(imageProof).toContain("/app/scripts/ops/ops-runner-isolated-extension.sh");
     expect(ext).toContain('ops_image="campus-marketplace-ops-check:$sha"');
+    expect(ext).toContain('process.env.RELEASE_SHA !== process.env.EXPECTED_SHA');
+    expect(ext).not.toContain('-e RELEASE_SHA=');
     expect(ext).toContain('docker exec "$pg" pg_dump');
     expect(ext).toContain("sha256sum");
     expect(ext).toContain("--read-only");
