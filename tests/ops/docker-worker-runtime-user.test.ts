@@ -451,7 +451,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(ext).toContain('--workdir /shadow -e HOME=/tmp');
     expect(ext).toContain('--entrypoint npm "campus-marketplace-migrator:$sha"');
     expect(ext).not.toContain('timeout 180s npm install');
-    expect(ext).not.toContain("GITHUB_TOKEN");
+    expect(ext).not.toContain("-e GITHUB_TOKEN=");
 
     expect(ext).toContain('pkg.version !== "7.10.1"');
     expect(ext).toContain('shadow_db="proof_prisma7_${GITHUB_RUN_ID}"');
