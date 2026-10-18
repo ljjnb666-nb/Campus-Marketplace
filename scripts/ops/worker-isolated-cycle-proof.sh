@@ -119,8 +119,20 @@ if [[ "$negative_rc" -eq 0 || "$negative_rc" -eq 124 || "$negative_rc" -eq 137 ]
   printf '[worker-cycle][FAIL] refused-DB not a bounded application failure (exit=%s)\n' "$negative_rc" >&2
   exit 1
 fi
-if ! grep -qF '"event":"storage_cleanup_cycle_failed"' "$tmp/bad-db.log"; then
-  echo '[worker-cycle][FAIL] refused-DB did not reach the worker cycle error path' >&2
+# Prisma may reject during module initialization, before the main cycle handler.
+# Accept only an explicit bounded Prisma connection-failure class or the worker
+# cycle failure event. Never count an arbitrary nonzero Docker/Node exit as PASS.
+started=0; cycle_failed=0; p1001=0; prisma_init=0; refused=0; fatal=0
+grep -qF '"event":"storage_cleanup_worker_started"' "$tmp/bad-db.log" && started=1 || true
+grep -qF '"event":"storage_cleanup_cycle_failed"' "$tmp/bad-db.log" && cycle_failed=1 || true
+grep -qF 'P1001' "$tmp/bad-db.log" && p1001=1 || true
+grep -qF 'PrismaClientInitializationError' "$tmp/bad-db.log" && prisma_init=1 || true
+grep -qF 'ECONNREFUSED' "$tmp/bad-db.log" && refused=1 || true
+grep -qF '[storage-cleanup-worker] fatal:' "$tmp/bad-db.log" && fatal=1 || true
+printf '[worker-cycle] refused DB classification exit=%s started=%s cycle_failed=%s p1001=%s prisma_init=%s refused=%s fatal=%s\n' \
+  "$negative_rc" "$started" "$cycle_failed" "$p1001" "$prisma_init" "$refused" "$fatal"
+if [[ "$cycle_failed" -ne 1 && "$p1001" -ne 1 && "$prisma_init" -ne 1 && "$refused" -ne 1 ]]; then
+  echo '[worker-cycle][FAIL] refused-DB had no recognized connection error evidence' >&2
   exit 1
 fi
-echo '[worker-cycle] PASS refused-DB negative gate (worker cycle error); domain-fixture lease/retry still pending'
+echo '[worker-cycle] PASS refused-DB nonzero + classified connection failure; fixture lease/retry pending'
