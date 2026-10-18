@@ -524,6 +524,9 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(runtime).toContain("await prisma.$transaction");
     expect(runtime).toContain("R3B_EXPECTED_ROLLBACK");
     expect(runtime).toContain("POOL_WAIT_NOT_BOUNDED");
+    expect(runtime).toContain('backendPids.size === 2');
+    expect(runtime).toContain('/timeout|timed out/i.test(err.message)');
+    expect(runtime).toContain('POOL_HOLDERS_NOT_DISTINCT');
     expect(runtime).toContain('EXPECTED_SHADOW_DB=$shadow_db');
     expect(runtime).toContain("await prisma.$disconnect()");
     expect(runtime).toContain("excludes production Prisma extensions");
