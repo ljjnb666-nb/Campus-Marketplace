@@ -62,9 +62,16 @@ const categories={
  pool:/timeout|timed out|pool timeout/i.test(raw),
  registry:/INTENT_CONTRACT_INVALID|UNKNOWN_EVENT_TYPE|UNKNOWN_CONTRACT/i.test(raw)
 };
+// Parse-only diagnostics contain no DB URL, SQL payload, or arbitrary log lines.
+// Limit to a known shadow source basename and numeric line/column.
+const diagnostics=[...raw.matchAll(/(?:\/shadow\/)?(?:r3d02\/)?(?:lib\/)?([a-z0-9-]+\.tsx?):(\d+):(\d+):\s*ERROR:/gi)].slice(0,4).map(m=>({
+ file:m[1],line:Number(m[2]),column:Number(m[3])
+}));
 console.log("[worker-cycle] R3D02A sanitized machineCodes="+
  JSON.stringify([...new Set(codes)].slice(0,6))+
- " categories="+JSON.stringify(categories)+" logLines="+raw.split(/\r?\n/).length);
+ " categories="+JSON.stringify(categories)+
+ " sourceLocations="+JSON.stringify(diagnostics)+
+ " logLines="+raw.split(/\r?\n/).length);
 CLASSIFY_R3D02A
  echo '[worker-cycle][FAIL] R3D02A canonical writer live shadow test' >&2; exit 1;
 fi
