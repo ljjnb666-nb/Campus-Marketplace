@@ -55,11 +55,25 @@ if ! timeout --signal=TERM --kill-after=10s 195s docker run --rm \
  >"$tmp/r3d02c01-runtime.log" 2>&1; then
  node - "$tmp/r3d02c01-runtime.log" <<'SAFE_RUNTIME'
 const fs=require("node:fs"),raw=fs.readFileSync(process.argv[2],"utf8");
-const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C01_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-4]_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const categories={
+ prisma:/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw),
+ import:/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw),
+ timeout:/timed out|timeout/i.test(raw),
+ syntax:/SyntaxError|Transform failed|Unexpected token/.test(raw),
+ type:/TypeError/.test(raw),reference:/ReferenceError/.test(raw),
+ domain:/DomainEvent|DOMAIN_EVENT/.test(raw),
+ runtime:/Error:|error:|ERROR:/.test(raw),
+ assertion:/R3D02C04_|R3D02C01_/.test(raw)
+};
+const frames=[...raw.matchAll(/(?:\/shadow\/r3d02\/)?([a-z0-9-]+\.(?:ts|js)):(\d+):(\d+)/gi)]
+ .slice(0,5).map(x=>({file:x[1],line:Number(x[2]),column:Number(x[3])}));
+const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-4]) [^\r\n]+/g)]
+ .slice(-8).map(x=>x[1]);
 console.log("[worker-cycle] R3D02C01 sanitized runtime codes="+JSON.stringify(codes)+
- " prisma="+/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw)+
- " import="+/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw)+
- " timeout="+/timed out|timeout/i.test(raw));
+ " categories="+JSON.stringify(categories)+
+ " frames="+JSON.stringify(frames)+
+ " priorMarkers="+JSON.stringify(marker));
 SAFE_RUNTIME
  echo '[worker-cycle][FAIL] R3D02C01 original rental real PostgreSQL probe' >&2
  exit 1
