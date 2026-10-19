@@ -868,4 +868,37 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("grep -qF 'PASS R3D02C02 deterministic real PG renter CANCEL");
   });
 
+
+  it("R3D02C03 locks the original renter return request and runs real PG terminal/rollback proof", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/rental-order-machine.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const start=src.indexOf("export async function requestReturnTx(");
+    const end=src.indexOf("export async function confirmReturnTx(",start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const fn=src.slice(start,end);
+    expect(fn).toContain("await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams)");
+    expect(fn).toContain('SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE');
+    expect(fn.indexOf("FOR UPDATE")).toBeLessThan(fn.indexOf("tx.rentalOrder.findFirst("));
+    expect(fn).toContain("tx.rentalOrder.updateMany({");
+    expect(fn).toContain("renterId: input.userId");
+    expect(fn).toContain("status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] }");
+    expect(fn).toContain("if (moved.count !== 1)");
+    expect(fn).not.toContain("await tx.rentalOrder.update({");
+    expect(prepare).toContain('"requestReturnTx"');
+    expect(prepare).toContain("ActiveAccountMutationSeams");
+    expect(prepare).toContain("RENTAL_RETURN_REQUESTED_KIND");
+    expect(probe).toContain("RETURN_ROW_LOCK_WAIT_ABSENT");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(probe).toContain("RETURN_RESURRECTED_COMPLETED");
+    expect(probe).toContain("INACTIVE_RENTER_RETURN");
+    expect(probe).toContain("RETURN_REPLAY_DUPLICATE");
+    expect(probe).toContain("R3D02C03_FORCED_ABORT_AFTER_RETURN_WRITE");
+    expect(shell).toContain("PASS R3D02C03 real PostgreSQL terminal row-lock wait");
+    expect(shell).toContain("not full original confirmReturnTx");
+  });
+
 });

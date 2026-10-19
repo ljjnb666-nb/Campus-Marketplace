@@ -8,7 +8,7 @@ if(ast.parseDiagnostics.length)throw Error("R3D02C01_SOURCE_PARSE");
 const fns=[
  "writeStatusLog","isRentalOrderRoleParticipant","canCancelRentalOrder",
  "counterpartyId","approveRentalOrderTx","rejectRentalOrderTx",
- "confirmPickupTx","cancelRentalOrderTx"
+ "confirmPickupTx","cancelRentalOrderTx","requestReturnTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -18,8 +18,9 @@ const bodies=fns.map(name=>{
 const imports=[
  'import type { Prisma, RentalOrderStatus, RentalCancellationReason } from "../generated/prisma/client.ts";',
  'import { prepareActiveAccountMutation } from "./lib/governance/active-account-mutation.ts";',
+ 'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
 console.log("[worker-cycle] PASS R3D02C01 exact original rental approval/pickup/cancel AST declarations");

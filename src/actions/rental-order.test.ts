@@ -1032,8 +1032,12 @@ describe("rental-order actions", () => {
     const result = await requestReturn(formData);
 
     expect(result).toEqual({ success: true, message: "已提交归还请求" });
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith({
+      where: {
+        id: "order-1",
+        renterId: "user-renter",
+        status: { in: ["IN_RENTAL", "OVERDUE", "PICKED_UP"] },
+      },
       data: { status: "PENDING_RETURN" },
     });
     // Phase 9B：canonical RENTAL_RETURN_REQUESTED 通知发给 owner

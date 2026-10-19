@@ -526,15 +526,25 @@ export async function requestReturnTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
 
+  // R3D02C03: serialize with other rental state changes, then re-read the
+  // *committed* status. Same lock order as lifecycle cancellations:
+  // renter USER governance lock -> RentalOrder FOR UPDATE -> fresh status.
+  // A stale IN_RENTAL read must never resurrect a completed/disputed order.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] } },
   });
   if (!order) return { error: "订单状态错误" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: {
+      id: input.orderId,
+      renterId: input.userId,
+      status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] },
+    },
     data: { status: 'PENDING_RETURN' },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
