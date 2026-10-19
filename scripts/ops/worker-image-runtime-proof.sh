@@ -101,6 +101,9 @@ for item in "${roles[@]}"; do
             "/app/scripts/ops/prisma7-product-actor-prepare.cjs.txt",
             "/app/scripts/ops/prisma7-product-actor-probe.ts.txt",
             "/app/scripts/ops/prisma7-product-actor-shadow-extension.sh",
+            "/app/scripts/ops/prisma7-rental-core-prepare.cjs.txt",
+            "/app/scripts/ops/prisma7-rental-core-probe.ts.txt",
+            "/app/scripts/ops/prisma7-rental-core-shadow-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }
