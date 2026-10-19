@@ -1,0 +1,84 @@
+// R3D02B02: exact TS AST extraction of ORIGINAL accept/cancel + their shared helpers.
+// This file has a .txt suffix so sandbox-only dependencies never enter app build.
+const fs=require("node:fs"),path=require("node:path"),ts=require("typescript");
+const [sourcePath,output,root]=process.argv.slice(2);
+if(!sourcePath||!output||!root)throw Error("R3D02B02_INVALID_ARGS");
+const source=fs.readFileSync(sourcePath,"utf8");
+const ast=ts.createSourceFile(sourcePath,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
+if(ast.parseDiagnostics.length)throw Error("R3D02B02_PRODUCTION_PARSE_FAILED");
+const names=[
+ "acceptProductOrderTx","cancelProductOrderTx",
+ "expireLockedProductReservation","projectProductAfterReservationRelease"
+];
+const bodies=names.map(name=>{
+ const matches=ast.statements.filter(x=>ts.isFunctionDeclaration(x)&&x.name?.text===name);
+ if(matches.length!==1||!matches[0].body)throw Error("R3D02B02_ENTRY_DRIFT_"+name);
+ return source.slice(matches[0].getStart(ast),matches[0].end);
+});
+const constants=ast.statements.filter(x=>ts.isVariableStatement(x)&&
+ x.declarationList.declarations.some(d=>ts.isIdentifier(d.name)&&
+ d.name.text==="ACTIVE_PRODUCT_ORDER_STATUSES"));
+if(constants.length!==1)throw Error("R3D02B02_ACTIVE_STATUSES_DRIFT");
+const active=source.slice(constants[0].getStart(ast),constants[0].end);
+const imports=[
+ 'import type { Prisma } from "../generated/prisma/client.ts";',
+ 'import { assertActiveAccountMutationAllowed } from "./lib/governance/active-account-mutation.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";',
+ 'import { evaluateMarketplaceCapability } from "./lib/enforcement/capability-gate.ts";',
+ 'import { isProductReservationExpired, PRODUCT_RESERVATION_EXPIRED_CANCEL_REASON } from "./lib/product-reservation.ts";',
+ 'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
+ 'import { ORDER_STATUS_CHANGED_KIND } from "./lib/notifications/notification-registry.ts";',
+ 'import { recordOutboxEventTx } from "./lib/async/outbox.ts";',
+ 'import { PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE, PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION, PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE } from "./lib/async/outbox-event-registry.ts";'
+];
+fs.writeFileSync(output,imports.join("\n")+"\n"+active+"\n"+bodies.join("\n\n")+"\n");
+const dependencies=[
+ "governance/active-account-mutation.ts","rbac/service.ts",
+ "notifications/notification-service.ts","notifications/notification-registry.ts",
+ "notifications/notification-delivery.ts","notifications/email-config.ts",
+ "notifications/email-contract.ts","notifications/email-escape.ts",
+ "logger.ts","request-context.ts","request-id.ts"
+];
+for(const mod of dependencies){
+ const file=path.join(root,mod);
+ if(!fs.existsSync(file))throw Error("R3D02B02_MISSING_ORIGINAL_"+mod);
+ const original=fs.readFileSync(file,"utf8");
+ const changes=[];
+ let converted=original.replace(/(["'])@\/lib\/([a-zA-Z0-9/-]+)\1/g,
+  (whole,quote,sub)=>{
+   const imported=path.join(root,sub+".ts");
+   if(!fs.existsSync(imported))throw Error("R3D02B02_UNMAPPED_ALIAS_"+sub);
+   let rel=path.relative(path.dirname(file),imported).replaceAll(path.sep,"/");
+   if(!rel.startsWith("."))rel="./"+rel;
+   const dest=quote+rel+quote;
+   changes.push({from:whole,to:dest});
+   return dest;
+  });
+ const clientPath=path.resolve(root,"../../generated/prisma/client.ts");
+ if(!fs.existsSync(clientPath))throw Error("R3D02B02_CLIENT_MISSING");
+ let rel=path.relative(path.dirname(file),clientPath).replaceAll(path.sep,"/");
+ if(!rel.startsWith("."))rel="./"+rel;
+ converted=converted.replace(/(["'])@prisma\/client\1/g,(whole,q)=>{
+   const to=q+rel+q;changes.push({from:whole,to});return to;
+ });
+ if(/["']@\/lib\//.test(converted)||/["']@prisma\/client["']/.test(converted))
+   throw Error("R3D02B02_UNRELOCATED_IMPORT_"+mod);
+ // Reverse each occurrence by count rather than assuming unique imports.
+ let restored=converted;
+ // One module can legitimately import two bindings from the same alias.
+ // Reversibility checks must count each occurrence, not assume unique imports.
+ const grouped=new Map();
+ for(const {from,to} of changes){
+   const prev=grouped.get(to);
+   if(prev&&prev.from!==from)throw Error("R3D02B02_CONFLICTED_RELOCATION_"+mod);
+   grouped.set(to,{from,count:(prev?.count??0)+1});
+ }
+ for(const [dest,{from,count}] of [...grouped.entries()].reverse()){
+   if(restored.split(dest).length-1!==count)
+     throw Error("R3D02B02_RELOCATION_COUNT_DRIFT_"+mod);
+   restored=restored.split(dest).join(from);
+ }
+ if(restored!==original)throw Error("R3D02B02_SOURCE_NOT_REVERSIBLE_"+mod);
+ fs.writeFileSync(file,converted);
+}
+console.log("[worker-cycle] PASS R3D02B02 exact production actor AST functions and reversible authentic dependencies");

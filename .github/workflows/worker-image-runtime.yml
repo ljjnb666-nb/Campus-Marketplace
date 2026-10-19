@@ -23,6 +23,16 @@ on:
       - scripts/ops/prisma7-product-expiry-prepare.cjs.txt
       - scripts/ops/prisma7-product-expiry-probe.ts.txt
       - scripts/ops/prisma7-product-expiry-shadow-extension.sh
+      - scripts/ops/prisma7-product-actor-prepare.cjs.txt
+      - scripts/ops/prisma7-product-actor-probe.ts.txt
+      - scripts/ops/prisma7-product-actor-shadow-extension.sh
+      - src/lib/governance/active-account-mutation.ts
+      - src/lib/rbac/service.ts
+      - src/lib/notifications/notification-service.ts
+      - src/lib/notifications/notification-registry.ts
+      - src/lib/notifications/email-config.ts
+      - src/lib/notifications/notification-delivery.ts
+      - src/lib/logger.ts
       - src/lib/product-order-lifecycle.ts
       - src/lib/governance/governance-lock.ts
       - src/lib/enforcement/capability-gate.ts

@@ -100,3 +100,8 @@ scripts/ops/prisma7-canonical-writer-probe.ts.txt
 scripts/ops/prisma7-product-expiry-prepare.cjs.txt
 scripts/ops/prisma7-product-expiry-probe.ts.txt
 scripts/ops/prisma7-product-expiry-shadow-extension.sh
+
+# R3D02B02 product actor proof: test-only disposable shadow inputs.
+scripts/ops/prisma7-product-actor-prepare.cjs.txt
+scripts/ops/prisma7-product-actor-probe.ts.txt
+scripts/ops/prisma7-product-actor-shadow-extension.sh
