@@ -742,4 +742,56 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).not.toContain(".env.production");
   });
 
+
+  it("R3D02B02 runs genuine actor accept/cancel on shadow v7 PG with notification and role fences", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const workflow=read(".github/workflows/worker-image-runtime.yml");
+    const ignore=read(".dockerignore");
+    const image=read("scripts/ops/worker-image-runtime-proof.sh");
+    const upstream=read("scripts/ops/prisma7-product-expiry-shadow-extension.sh");
+    const script=read("scripts/ops/prisma7-product-actor-shadow-extension.sh");
+    const prepare=read("scripts/ops/prisma7-product-actor-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-product-actor-probe.ts.txt");
+    const original=read("src/lib/product-order-lifecycle.ts");
+    for (const name of ["prisma7-product-actor-prepare.cjs.txt",
+      "prisma7-product-actor-probe.ts.txt","prisma7-product-actor-shadow-extension.sh"]) {
+      expect(workflow).toContain("scripts/ops/"+name);
+      expect(ignore).toMatch(new RegExp("^scripts/ops/"+name.replaceAll(".","[.]")+"$","m"));
+      expect(image).toContain("/app/scripts/ops/"+name);
+    }
+    expect(upstream).toContain("source scripts/ops/prisma7-product-actor-shadow-extension.sh");
+    expect(prepare).toContain("ts.createSourceFile(");
+    expect(prepare).toContain("source.slice(matches[0].getStart(ast),matches[0].end)");
+    expect(prepare).toContain("if(restored!==original)");
+    for(const name of ["acceptProductOrderTx","cancelProductOrderTx",
+      "expireLockedProductReservation","projectProductAfterReservationRelease",
+      "ACTIVE_PRODUCT_ORDER_STATUSES"]){
+      expect(prepare).toContain(name);
+      expect(original).toContain(name);
+    }
+    for(const mod of ["active-account-mutation.ts","rbac/service.ts",
+      "notification-service.ts","notification-registry.ts",
+      "email-config.ts","notification-delivery.ts"]){
+      expect(script).toContain(mod);
+    }
+    expect(prepare).toContain("R3D02B02_UNMAPPED_ALIAS");
+    expect(script).toContain("--network none --read-only --cap-drop ALL");
+    expect(script).toContain('NODE_PATH=/app/node_modules');
+    expect(script).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    expect(script).toContain("EXPECTED_SHADOW_DB=$shadow_db");
+    expect(script).toContain("-e EMAIL_PROVIDER=disabled");
+    expect(probe).toContain("UNSAFE_DATABASE");
+    expect(probe).toContain("$extends(softDeleteExtension).$extends(domainEventLedgerExtension)");
+    expect(probe).toContain("AUTH_ACCOUNT_INACTIVE");
+    expect(probe).toContain("CROSS_CAMPUS_OUTSIDER_CANCELLED");
+    expect(probe).toContain("STALE_CANDIDATE_BYPASSED");
+    expect(probe).toContain("RACE_NOT_SERIALIZED");
+    expect(probe).toContain("LATE_CANONICAL_OUTBOX");
+    expect(probe).toContain("ROLLBACK_ORDER_PRODUCT_NOTIFICATION_LEAK");
+    expect(probe).toContain("R3D02B02_EXPECTED_ABORT_AFTER_CANONICAL_NOTIFICATION");
+    expect(probe).toContain("canonical Notification");
+    expect(script).not.toContain(".env.production");
+    expect(script).toContain("full module load");
+  });
+
 });
