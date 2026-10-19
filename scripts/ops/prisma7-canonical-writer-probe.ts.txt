@@ -7,7 +7,7 @@ import { recordDomainEventTx } from "./lib/domain-events/domain-event.ts";
 import { recordOutboxEventTx } from "./lib/async/outbox.ts";
 import {
  LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
- LIQUIDITY_TRANSACTION_COMPLETED_EVENT_AGGREGATE_TYPE
+ LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE
 } from "./lib/domain-events/domain-event-registry.ts";
 import { PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE } from "./lib/async/outbox-event-registry.ts";
 
@@ -29,7 +29,7 @@ const at=new Date("2026-01-02T03:04:05Z");
 const domainIntent=(orderId:string,tenant=campus)=>({
  eventType:LIQUIDITY_TRANSACTION_COMPLETED_EVENT_TYPE,
  schemaVersion:1,
- aggregateType:LIQUIDITY_TRANSACTION_COMPLETED_EVENT_AGGREGATE_TYPE,
+ aggregateType:LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE,
  aggregateId:orderId,campusId:tenant,
  payload:{transactionId:orderId,transactionType:"PRODUCT"},
  occurredAt:at
