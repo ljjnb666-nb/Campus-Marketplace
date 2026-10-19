@@ -78,3 +78,6 @@ for marker in \
 done
 echo '[worker-cycle] PASS R3D02B01 authentic PRODUCT expiry via original AST bodies + real governance/capability/outbox on v7 shadow'
 echo '[worker-cycle] LIMIT R3D02B01 extracts function declarations; full product module initialization, actor accept/cancel and rental lifecycle not yet validated'
+
+# R3D02B02 independently loads authentic actor functions after expiry passes.
+source scripts/ops/prisma7-product-actor-shadow-extension.sh
