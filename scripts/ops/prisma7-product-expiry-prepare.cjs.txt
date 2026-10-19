@@ -1,0 +1,72 @@
+// R3D02B01: extract unchanged PROD function declarations via TS AST.
+// Runtime-only .cjs.txt fixture: host lint/typecheck must not load it.
+const fs=require("node:fs"),path=require("node:path"),ts=require("typescript");
+const [sourcePath,output,root]=process.argv.slice(2);
+const source=fs.readFileSync(sourcePath,"utf8");
+const file=ts.createSourceFile(sourcePath,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
+if(file.parseDiagnostics.length)throw Error("R3D02B01_SOURCE_PARSE_ERROR");
+const functionNames=["expireProductReservationTx","expireLockedProductReservation",
+  "projectProductAfterReservationRelease"];
+const snippets=[];
+for(const name of functionNames){
+ const matches=file.statements.filter(node=>ts.isFunctionDeclaration(node)&&node.name?.text===name);
+ if(matches.length!==1)throw Error("R3D02B01_PRODUCTION_ENTRY_DRIFT_"+name);
+ const node=matches[0];
+ const body=source.slice(node.getStart(file),node.end);
+ if(!body.includes("async function ")||!body.includes("await "))
+   throw Error("R3D02B01_PRODUCTION_FUNCTION_SHAPE_DRIFT");
+ snippets.push(body);
+}
+const constants=file.statements.filter(node=>ts.isVariableStatement(node)&&
+ node.declarationList.declarations.some(d=>ts.isIdentifier(d.name)&&d.name.text==="ACTIVE_PRODUCT_ORDER_STATUSES"));
+if(constants.length!==1)throw Error("R3D02B01_ACTIVE_STATES_DRIFT");
+const active=source.slice(constants[0].getStart(file),constants[0].end);
+const prefix=[
+ 'import type { Prisma } from "../generated/prisma/client.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";',
+ 'import { evaluateMarketplaceCapability } from "./lib/enforcement/capability-gate.ts";',
+ 'import { isProductReservationExpired, PRODUCT_RESERVATION_EXPIRED_CANCEL_REASON } from "./lib/product-reservation.ts";',
+ 'import { recordOutboxEventTx } from "./lib/async/outbox.ts";',
+ 'import { PRODUCT_RESERVATION_EXPIRED_AGGREGATE_TYPE, PRODUCT_RESERVATION_EXPIRED_EVENT_SCHEMA_VERSION, PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE } from "./lib/async/outbox-event-registry.ts";'
+].join("\n");
+fs.writeFileSync(output,prefix+"\n"+active+"\n"+snippets.join("\n\n")+"\n");
+const required=[
+ "governance/governance-lock.ts","enforcement/capability-gate.ts",
+ "enforcement/errors.ts","enforcement/risk-scope.ts","metrics.ts",
+ "rbac/errors.ts","rbac/roles.ts","rbac/permissions.ts","product-reservation.ts"
+];
+for(const filename of required){
+ const target=path.resolve(root,filename);
+ if(!fs.existsSync(target))throw Error("R3D02B01_DEPENDENCY_MISSING");
+ const original=fs.readFileSync(target,"utf8");
+ const rewrites=[];
+ let rewritten=original.replace(/(["'])@\/lib\/([a-z0-9/-]+)\1/g,(whole,q,mod)=>{
+   const dest=path.resolve(root,mod+".ts");
+   if(!fs.existsSync(dest))throw Error("R3D02B01_IMPORT_DRIFT");
+   let rel=path.relative(path.dirname(target),dest).replaceAll(path.sep,"/");
+   if(!rel.startsWith("."))rel="./"+rel;
+   const replaced=q+rel+q;
+   rewrites.push([whole,replaced]);
+   return replaced;
+ });
+ const orig='import type { Prisma } from "@prisma/client";';
+ let generatedImport="";
+ if(rewritten.includes(orig)){
+   let rel=path.relative(path.dirname(target),
+     path.resolve(root,"../../generated/prisma/client.ts")).replaceAll(path.sep,"/");
+   if(!rel.startsWith("."))rel="./"+rel;
+   generatedImport='import type { Prisma } from "'+rel+'";';
+   rewritten=rewritten.replace(orig,generatedImport);
+ }
+ if(rewritten.includes('"@/lib/')||rewritten.includes("'@/lib/"))
+   throw Error("R3D02B01_UNMAPPED_ALIAS");
+ let restored=generatedImport?rewritten.replace(generatedImport,orig):rewritten;
+ for(const [from,to] of rewrites.reverse()){
+   const pieces=restored.split(to);
+   if(pieces.length!==2)throw Error("R3D02B01_AMBIGUOUS_IMPORT");
+   restored=pieces.join(from);
+ }
+ if(restored!==original)throw Error("R3D02B01_SOURCE_MODIFIED");
+ fs.writeFileSync(target,rewritten);
+}
+console.log("[worker-cycle] PASS R3D02B01 exact lifecycle AST bodies and reversible policy import relocation");
