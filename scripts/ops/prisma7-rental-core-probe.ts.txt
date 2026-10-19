@@ -850,11 +850,17 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
 
   // Abort after authentic dispute & source-linked holds, not mock rollback.
   const abort=await setup("abort");
-  let aborted=false;
+  let aborted=false,abortedDisputeId="";
   try{await db.$transaction(async tx=>{
    assert(succeeds(await initiateDisputeTx(tx,{
     orderId:abort,userId:owner,reason:"rollback original dispute",evidencePhotos:[]
    })),"ORIGINAL_DISPUTE_ABORT_SETUP");
+   abortedDisputeId=(await tx.rentalDispute.findFirstOrThrow({
+    where:{orderId:abort},select:{id:true}
+   })).id;
+   assert(await tx.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:abortedDisputeId,status:"ACTIVE"
+   }})===2,"ROLLBACK_HOLDS_NOT_WRITTEN");
    throw Error("R3D02C05B_FORCED_ROLLBACK");
   },{maxWait:5000,timeout:15000})}catch(e){
    aborted=e instanceof Error&&e.message==="R3D02C05B_FORCED_ROLLBACK";
@@ -862,6 +868,13 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   assert(aborted&&
    (await root.rentalOrder.findUniqueOrThrow({where:{id:abort}})).status==="PENDING_INSPECTION"&&
    await root.rentalDispute.count({where:{orderId:abort}})===0&&
+   await root.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:abortedDisputeId
+   }})===0&&
+   await root.notification.count({where:{
+    kind:RENTAL_DISPUTE_OPENED_KIND,
+    dedupeKey:RENTAL_DISPUTE_OPENED_KIND+":"+abortedDisputeId+":"+renter
+   }})===0&&
    await root.rentalOrderStatusLog.count({where:{orderId:abort}})===0,
    "ORIGINAL_DISPUTE_ABORT_PARTIAL");
   console.log("[worker-cycle] PASS R3D02C05B authentic dispute, DataHold, notification and order rollback");
