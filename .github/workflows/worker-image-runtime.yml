@@ -30,6 +30,7 @@ on:
       - scripts/ops/prisma7-rental-core-probe.ts.txt
       - scripts/ops/prisma7-rental-core-shadow-extension.sh
       - src/lib/rental-order-machine.ts
+      - src/lib/analytics/liquidity-domain-events.ts
       - src/lib/governance/active-account-mutation.ts
       - src/lib/rbac/service.ts
       - src/lib/notifications/notification-service.ts
