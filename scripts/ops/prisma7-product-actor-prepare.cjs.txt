@@ -65,10 +65,18 @@ for(const mod of dependencies){
    throw Error("R3D02B02_UNRELOCATED_IMPORT_"+mod);
  // Reverse each occurrence by count rather than assuming unique imports.
  let restored=converted;
- for(const change of changes.reverse()){
-   if(restored.split(change.to).length-1!==1)
-     throw Error("R3D02B02_AMBIGUOUS_RELOCATION_"+mod);
-   restored=restored.replace(change.to,change.from);
+ // One module can legitimately import two bindings from the same alias.
+ // Reversibility checks must count each occurrence, not assume unique imports.
+ const grouped=new Map();
+ for(const {from,to} of changes){
+   const prev=grouped.get(to);
+   if(prev&&prev.from!==from)throw Error("R3D02B02_CONFLICTED_RELOCATION_"+mod);
+   grouped.set(to,{from,count:(prev?.count??0)+1});
+ }
+ for(const [dest,{from,count}] of [...grouped.entries()].reverse()){
+   if(restored.split(dest).length-1!==count)
+     throw Error("R3D02B02_RELOCATION_COUNT_DRIFT_"+mod);
+   restored=restored.split(dest).join(from);
  }
  if(restored!==original)throw Error("R3D02B02_SOURCE_NOT_REVERSIBLE_"+mod);
  fs.writeFileSync(file,converted);
