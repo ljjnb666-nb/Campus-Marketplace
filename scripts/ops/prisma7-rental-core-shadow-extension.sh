@@ -75,3 +75,11 @@ for marker in \
 done
 echo '[worker-cycle] PASS R3D02C01 original rental approval/pickup/cancel via Prisma7 shadow PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C01 does not cover rental creation, return, extension, damage, dispute, reviews, full module, notification dispatcher, production v7 cutover'
+
+# R3D02C02 must observe the new independent cross-actor concurrency proof.
+grep -qF 'PASS R3D02C02 deterministic real PG renter CANCEL vs owner APPROVE/REJECT row-lock authority and CAS' \
+ "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C02 approve/reject-vs-cancel serializability not proven' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C02 rental cross-actor row-lock CAS verified against real Prisma7 PostgreSQL'
