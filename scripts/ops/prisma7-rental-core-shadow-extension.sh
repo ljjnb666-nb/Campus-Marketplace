@@ -83,3 +83,24 @@ grep -qF 'PASS R3D02C02 deterministic real PG renter CANCEL vs owner APPROVE/REJ
  exit 1
 }
 echo '[worker-cycle] PASS R3D02C02 rental cross-actor row-lock CAS verified against real Prisma7 PostgreSQL'
+
+# R3D02C03 is independent and must fail closed if any original-return
+# semantic assertion or real PG row-blocking experiment disappears.
+grep -qF 'PASS R3D02C03 original renter request return, canonical notification and replay' "$tmp/r3d02c01-runtime.log" || {
+  echo '[worker-cycle][FAIL] R3D02C03 required real-PG return safety proof missing' >&2
+  exit 1
+}
+grep -qF 'PASS R3D02C03 rental return ACTIVE guard and no side effects' "$tmp/r3d02c01-runtime.log" || {
+  echo '[worker-cycle][FAIL] R3D02C03 required real-PG return safety proof missing' >&2
+  exit 1
+}
+grep -qF 'PASS R3D02C03 real PostgreSQL terminal row-lock wait and safe fresh status CAS' "$tmp/r3d02c01-runtime.log" || {
+  echo '[worker-cycle][FAIL] R3D02C03 required real-PG return safety proof missing' >&2
+  exit 1
+}
+grep -qF 'PASS R3D02C03 original return, status log and notification atomic rollback' "$tmp/r3d02c01-runtime.log" || {
+  echo '[worker-cycle][FAIL] R3D02C03 required real-PG return safety proof missing' >&2
+  exit 1
+}
+echo '[worker-cycle] PASS R3D02C03 original renter return request, CAS, guard, replay and rollback on Prisma7 PostgreSQL'
+echo '[worker-cycle] LIMIT R3D02C03 terminal opponent is a controlled database writer, not full original confirmReturnTx/claims/dispute; no production v7 cutover proof'
