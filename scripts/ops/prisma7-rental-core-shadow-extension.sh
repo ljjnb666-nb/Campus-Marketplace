@@ -13,6 +13,15 @@ set -euo pipefail
 # R3D02C04: immutable original canonical DomainEvent liquidity writer.
 mkdir -p "$sandbox/r3d02/lib/analytics"
 cp src/lib/analytics/liquidity-domain-events.ts "$sandbox/r3d02/lib/analytics/liquidity-domain-events.ts"
+# R3D02C05B: exact original pure dispute/flag modules (not emulated).
+for p in \
+ feature-flags/feature-flag-registry.ts \
+ disputes/dispute-scope.ts disputes/dispute-sla.ts \
+ rental-dispute-eligibility.ts; do
+ target="$sandbox/r3d02/lib/$p"
+ mkdir -p "$(dirname "$target")"
+ cp "src/lib/$p" "$target"
+done
 cp scripts/ops/prisma7-rental-core-prepare.cjs.txt "$sandbox/r3d02/rental-prepare.cjs"
 cp scripts/ops/prisma7-rental-core-probe.ts.txt "$sandbox/r3d02/rental-core-probe.ts"
 # Networkless extraction of the unmodified production TS function declarations.
@@ -55,7 +64,7 @@ if ! timeout --signal=TERM --kill-after=10s 195s docker run --rm \
  >"$tmp/r3d02c01-runtime.log" 2>&1; then
  node - "$tmp/r3d02c01-runtime.log" <<'SAFE_RUNTIME'
 const fs=require("node:fs"),raw=fs.readFileSync(process.argv[2],"utf8");
-const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-4]_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-5][AB]?_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
 const categories={
  prisma:/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw),
  import:/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw),
@@ -64,11 +73,11 @@ const categories={
  type:/TypeError/.test(raw),reference:/ReferenceError/.test(raw),
  domain:/DomainEvent|DOMAIN_EVENT/.test(raw),
  runtime:/Error:|error:|ERROR:/.test(raw),
- assertion:/R3D02C04_|R3D02C01_/.test(raw)
+ assertion:/R3D02C05B_|R3D02C05A_|R3D02C04_|R3D02C01_/.test(raw)
 };
 const frames=[...raw.matchAll(/(?:\/shadow\/r3d02\/)?([a-z0-9-]+\.(?:ts|js)):(\d+):(\d+)/gi)]
  .slice(0,5).map(x=>({file:x[1],line:Number(x[2]),column:Number(x[3])}));
-const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-4]) [^\r\n]+/g)]
+const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-5][AB]?) [^\r\n]+/g)]
  .slice(-8).map(x=>x[1]);
 console.log("[worker-cycle] R3D02C01 sanitized runtime codes="+JSON.stringify(codes)+
  " categories="+JSON.stringify(categories)+
@@ -174,3 +183,27 @@ grep -qF 'PASS R3D02C05A claim and notification atomic rollback after forced err
 }
 echo '[worker-cycle] PASS R3D02C05A original claim response and dispute-competitor serialization on real Prisma7 PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C05A disputed opponent is controlled DB writer; complete initiateDisputeTx workflow and payment/refund remain UNVERIFIED'
+
+# R3D02C05B: all REAL original dispute-vs-claim proofs are mandatory.
+grep -qF 'PASS R3D02C05B authentic dispute/governance/hold/feature-flag AST declaration provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B original dispute creates two canonical holds, scoped SLA, notification and blocks stale claim' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B actual dispute races original claim response, blocks stale completion and ledger' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B claim completion then original dispute preserves exactly-once ledger and holds' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B authentic dispute, DataHold, notification and order rollback' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C05B original full dispute/claim concurrency, canonical holds, ledger and rollback via real PostgreSQL'
+echo '[worker-cycle] LIMIT R3D02C05B isolated Prisma7 authentic original functions only; production migration, payout/refund and full dispute-resolution workflow UNVERIFIED'

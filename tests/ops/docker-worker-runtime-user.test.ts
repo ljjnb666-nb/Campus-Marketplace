@@ -982,4 +982,34 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("PASS R3D02C05A real dispute row-lock blocks stale response");
   });
 
+
+  it("R3D02C05B extracts the original dispute writer and proves two commit orders on real PG", () => {
+    const read = (p: string) => readFileSync(path.join(process.cwd(), p), "utf8");
+    const prepare = read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe = read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell = read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const original = read("src/lib/rental-order-machine.ts");
+    expect(original).toContain("export async function initiateDisputeTx(");
+    expect(prepare).toContain('"initiateDisputeTx"');
+    expect(prepare).toContain('"acquireGovernanceSubjectLocks"');
+    expect(prepare).toContain('"createHoldTxLocked"');
+    expect(prepare).toContain('"requireNewActivityAllowed"');
+    expect(prepare).toContain('"isUniqueViolationOn"');
+    expect(prepare).toContain('R3D02C05B_SOURCE_DRIFT_');
+    expect(prepare).toContain('R3D02C05B authentic dispute/governance/hold/feature-flag AST declaration provenance');
+    expect(shell).toContain("disputes/dispute-scope.ts disputes/dispute-sla.ts");
+    expect(shell).toContain("feature-flags/feature-flag-registry.ts");
+    expect(shell).toContain("rental-dispute-eligibility.ts");
+    expect(probe).not.toContain("initiatedDisputeTx"); // No renamed pseudo-writer.
+    expect(probe).toContain("initiateDisputeTx(tx,");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(probe).toContain("ACTUAL_DISPUTE_LOCK_NOT_OBSERVED");
+    expect(probe).toContain("DISPUTE_WINNER_RESURRECTED_CLAIM");
+    expect(probe).toContain("REVERSE_DISPUTE_DUPLICATE_COMPLETION");
+    expect(probe).toContain("ORIGINAL_DISPUTE_ABORT_PARTIAL");
+    expect(shell).toContain("PASS R3D02C05B original full dispute/claim concurrency");
+    expect(shell).toContain("original dispute creates two canonical holds");
+    expect(shell).toContain("claim completion then original dispute preserves exactly-once ledger");
+  });
+
 });

@@ -4,12 +4,12 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
- approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx
+ approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx,initiateDisputeTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
  RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND,
- RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND
+ RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,RENTAL_DISPUTE_OPENED_KIND
 } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -711,5 +711,172 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    (await root.rentalOrder.findUniqueOrThrow({where:{id:abortOrder}})).status===
      "PENDING_INSPECTION","CLAIM_ABORT_FAILED_ATOMICITY");
   console.log("[worker-cycle] PASS R3D02C05A claim and notification atomic rollback after forced error");
+ }
+
+ // R3D02C05B: authentic initiateDisputeTx vs claim writers, no synthetic
+ // status updater or fake legal holds.
+ {
+  const submit=(id:string)=>run(tx=>submitDamageClaimTx(tx,{
+   orderId:id,userId:owner,damageDescription:"original damaged rental",
+   requestedDeduction:"12.00",photos:["damage-photo"]
+  }));
+  const dispute=(id:string)=>run(tx=>initiateDisputeTx(tx,{
+   orderId:id,userId:owner,reason:"original dispute test",
+   evidencePhotos:["dispute-photo"]
+  }));
+  const setup=async(suffix:string)=>{
+   const id=await fixture("auth-dispute-"+suffix,"PENDING_INSPECTION");
+   await root.rentalOrder.update({where:{id},data:{
+    depositAmount:"40.00",depositStatus:"PAID"
+   }});
+   return id;
+  };
+  const holdFor=(id:string)=>root.dataHold.findMany({where:{
+   sourceType:"RENTAL_DISPUTE",sourceId:id,status:"ACTIVE"
+  }});
+  const started=await setup("open");
+  assert(succeeds(await dispute(started)),"ORIGINAL_DISPUTE_CREATE");
+  const dis=await root.rentalDispute.findFirstOrThrow({where:{orderId:started}});
+  const pair=await holdFor(dis.id);
+  const canonical=await root.notification.findMany({where:{
+   kind:RENTAL_DISPUTE_OPENED_KIND,
+   dedupeKey:RENTAL_DISPUTE_OPENED_KIND+":"+dis.id+":"+renter
+  }});
+  assert((await root.rentalOrder.findUniqueOrThrow({where:{id:started}})).status==="IN_DISPUTE"&&
+   dis.status==="OPEN"&&dis.openedFromOrderStatus==="PENDING_INSPECTION"&&
+   dis.campusId===campus&&dis.scopeKey==="CAMPUS:"+campus&&
+   Math.abs(dis.dueAt.getTime()-dis.createdAt.getTime()-172800000)<1000&&
+   pair.length===2&&new Set(pair.map(p=>p.subjectId)).size===2&&
+   pair.every(p=>p.reasonCode==="ACTIVE_RENTAL_DISPUTE")&&
+   canonical.length===1&&canonical[0].userId===renter,
+   "ORIGINAL_DISPUTE_HOLD_SCOPE_SLA_NOTICE");
+  assert(!succeeds(await dispute(started))&&!succeeds(await submit(started))&&
+   await root.rentalDamageClaim.count({where:{orderId:started}})===0&&
+   await root.domainEvent.count({where:{aggregateId:started}})===0,
+   "DISPUTE_REPLAY_OR_STALE_CLAIM");
+  console.log("[worker-cycle] PASS R3D02C05B original dispute creates two canonical holds, scoped SLA, notification and blocks stale claim");
+
+  // Original dispute holds sorted participant locks + RentalOrder lock through
+  // the pre-write test seam. Actual renter response is the competitor.
+  const early=await setup("dispute-first");
+  assert(succeeds(await submit(early)),"EARLY_CLAIM_SETUP");
+  const [earlyClaim]=await root.rentalDamageClaim.findMany({where:{orderId:early}});
+  let release!:()=>void,held!:()=>void,attempting!:()=>void;
+  const gate=new Promise<void>(r=>release=r);
+  const ready=new Promise<void>(r=>held=r);
+  const queued=new Promise<void>(r=>attempting=r);
+  const winning=db.$transaction(async tx=>initiateDisputeTx(tx,{
+   orderId:early,userId:owner,reason:"winner original dispute",evidencePhotos:[],
+   racePoint:async()=>{held();await gate;}
+  }),{maxWait:5000,timeout:15000});
+  await ready;
+  let pid=0;
+  const losing=db.$transaction(async tx=>{
+   pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   attempting();
+   return respondDamageClaimTx(tx,{claimId:earlyClaim.id,userId:renter,agreed:true});
+  },{maxWait:5000,timeout:15000});
+  await queued;
+  let blocked=false;
+  try{
+   for(let i=0;i<110;i++){
+    const q=await root.$queryRaw<Array<{blocked:boolean}>>`
+     SELECT COALESCE(array_length(pg_blocking_pids(${pid}::int),1),0)>0 AS blocked
+    `;
+    if(q[0]?.blocked){blocked=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(blocked,"ACTUAL_DISPUTE_LOCK_NOT_OBSERVED");
+  }finally{release()}
+  const [winner,loser]=await Promise.all([winning,losing]);
+  const winDispute=await root.rentalDispute.findFirstOrThrow({where:{orderId:early}});
+  const finalClaim=await root.rentalDamageClaim.findUniqueOrThrow({where:{id:earlyClaim.id}});
+  assert(succeeds(winner)&&!succeeds(loser)&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:early}})).status==="IN_DISPUTE"&&
+   finalClaim.resolvedAt===null&&(await holdFor(winDispute.id)).length===2&&
+   await root.domainEvent.count({where:{aggregateId:early}})===0,
+   "DISPUTE_WINNER_RESURRECTED_CLAIM");
+  console.log("[worker-cycle] PASS R3D02C05B actual dispute races original claim response, blocks stale completion and ledger");
+
+  // Reverse commit order: COMPLETED is intentionally still disputable.
+  const reverse=await setup("claim-first");
+  assert(succeeds(await submit(reverse)),"REVERSE_CLAIM_SETUP");
+  const [rc]=await root.rentalDamageClaim.findMany({where:{orderId:reverse}});
+  const count=(await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount;
+  let resume!:()=>void,claimHeld!:()=>void,disputeTrying!:()=>void;
+  const cGate=new Promise<void>(r=>resume=r);
+  const cReady=new Promise<void>(r=>claimHeld=r);
+  const dReady=new Promise<void>(r=>disputeTrying=r);
+  const first=db.$transaction(async tx=>{
+   const x=await respondDamageClaimTx(tx,{claimId:rc.id,userId:renter,agreed:false});
+   assert(succeeds(x),"REVERSE_RESPONSE_FAILED");
+   claimHeld();
+   await cGate;
+   return x;
+  },{maxWait:5000,timeout:15000});
+  await cReady;
+  let secondPid=0;
+  const second=db.$transaction(async tx=>{
+   secondPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   disputeTrying();
+   return initiateDisputeTx(tx,{
+    orderId:reverse,userId:owner,reason:"valid post completion dispute",evidencePhotos:[]
+   });
+  },{maxWait:5000,timeout:15000});
+  await dReady;
+  let waited=false;
+  try{
+   for(let i=0;i<110;i++){
+    const q=await root.$queryRaw<Array<{blocked:boolean}>>`
+     SELECT COALESCE(array_length(pg_blocking_pids(${secondPid}::int),1),0)>0 AS blocked
+    `;
+    if(q[0]?.blocked){waited=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(waited,"REVERSE_DISPUTE_LOCK_NOT_OBSERVED");
+  }finally{resume()}
+  const [accepted,after]=await Promise.all([first,second]);
+  const final=await root.rentalOrder.findUniqueOrThrow({where:{id:reverse}});
+  const follow=await root.rentalDispute.findFirstOrThrow({where:{orderId:reverse}});
+  const log=await root.rentalOrderStatusLog.findMany({where:{orderId:reverse}});
+  assert(succeeds(accepted)&&succeeds(after)&&final.status==="IN_DISPUTE"&&
+   final.depositStatus==="PENDING_REFUND"&&follow.openedFromOrderStatus==="COMPLETED"&&
+   (await holdFor(follow.id)).length===2&&log.length===2&&
+   log.some(l=>l.toStatus==="COMPLETED")&&log.some(l=>l.toStatus==="IN_DISPUTE")&&
+   await root.domainEvent.count({where:{aggregateId:reverse}})===2&&
+   (await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount===count+1,
+   "REVERSE_DISPUTE_DUPLICATE_COMPLETION");
+  console.log("[worker-cycle] PASS R3D02C05B claim completion then original dispute preserves exactly-once ledger and holds");
+
+  // Abort after authentic dispute & source-linked holds, not mock rollback.
+  const abort=await setup("abort");
+  let aborted=false,abortedDisputeId="";
+  try{await db.$transaction(async tx=>{
+   assert(succeeds(await initiateDisputeTx(tx,{
+    orderId:abort,userId:owner,reason:"rollback original dispute",evidencePhotos:[]
+   })),"ORIGINAL_DISPUTE_ABORT_SETUP");
+   abortedDisputeId=(await tx.rentalDispute.findFirstOrThrow({
+    where:{orderId:abort},select:{id:true}
+   })).id;
+   assert(await tx.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:abortedDisputeId,status:"ACTIVE"
+   }})===2,"ROLLBACK_HOLDS_NOT_WRITTEN");
+   throw Error("R3D02C05B_FORCED_ROLLBACK");
+  },{maxWait:5000,timeout:15000})}catch(e){
+   aborted=e instanceof Error&&e.message==="R3D02C05B_FORCED_ROLLBACK";
+  }
+  assert(aborted&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:abort}})).status==="PENDING_INSPECTION"&&
+   await root.rentalDispute.count({where:{orderId:abort}})===0&&
+   await root.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:abortedDisputeId
+   }})===0&&
+   await root.notification.count({where:{
+    kind:RENTAL_DISPUTE_OPENED_KIND,
+    dedupeKey:RENTAL_DISPUTE_OPENED_KIND+":"+abortedDisputeId+":"+renter
+   }})===0&&
+   await root.rentalOrderStatusLog.count({where:{orderId:abort}})===0,
+   "ORIGINAL_DISPUTE_ABORT_PARTIAL");
+  console.log("[worker-cycle] PASS R3D02C05B authentic dispute, DataHold, notification and order rollback");
  }
 }finally{await root.$disconnect();}
