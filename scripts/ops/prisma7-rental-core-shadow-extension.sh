@@ -13,6 +13,15 @@ set -euo pipefail
 # R3D02C04: immutable original canonical DomainEvent liquidity writer.
 mkdir -p "$sandbox/r3d02/lib/analytics"
 cp src/lib/analytics/liquidity-domain-events.ts "$sandbox/r3d02/lib/analytics/liquidity-domain-events.ts"
+# R3D02C05B: exact original pure dispute/flag modules (not emulated).
+for p in \
+ feature-flags/feature-flag-registry.ts \
+ disputes/dispute-scope.ts disputes/dispute-sla.ts \
+ rental-dispute-eligibility.ts; do
+ target="$sandbox/r3d02/lib/$p"
+ mkdir -p "$(dirname "$target")"
+ cp "src/lib/$p" "$target"
+done
 cp scripts/ops/prisma7-rental-core-prepare.cjs.txt "$sandbox/r3d02/rental-prepare.cjs"
 cp scripts/ops/prisma7-rental-core-probe.ts.txt "$sandbox/r3d02/rental-core-probe.ts"
 # Networkless extraction of the unmodified production TS function declarations.
