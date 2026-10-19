@@ -1207,18 +1207,33 @@ export async function submitDamageClaimTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  // R3D02C05A: same row mutex as confirmReturnTx and initiateDisputeTx.
+  // Serializes duplicate owner claims with dispute/claim response, and
+  // validates the PENDING_INSPECTION authority only after this lock.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_INSPECTION' },
   });
   if (!order) return { error: "状态错误" };
-  if (new Prisma.Decimal(input.requestedDeduction).gt(order.depositAmount)) return { error: "索赔金额不能大于押金" };
+  const requested = new Prisma.Decimal(input.requestedDeduction);
+  if (!requested.isFinite() || requested.lte(0)) return { error: "索赔金额必须大于零" };
+  if (requested.gt(order.depositAmount)) return { error: "索赔金额不能大于押金" };
+
+  // Only one unresolved claim may govern a pending-inspection episode.
+  // RentalOrder row-lock is the serialization authority (schema has no
+  // unique partial index on an active RentalDamageClaim).
+  const pending = await tx.rentalDamageClaim.findFirst({
+    where: { orderId: order.id, resolvedAt: null },
+    select: { id: true },
+  });
+  if (pending) return { error: "该订单已有待处理的损坏索赔" };
 
   const claim = await tx.rentalDamageClaim.create({
     data: {
       orderId: input.orderId,
       submittedById: input.userId,
       damageDescription: input.damageDescription,
-      requestedDeduction: new Prisma.Decimal(input.requestedDeduction),
+      requestedDeduction: requested,
       photos: input.photos,
     },
   });
@@ -1238,8 +1253,19 @@ export async function respondDamageClaimTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  // Candidate only discovers the row-lock key; never authorizes a mutation.
+  // Lock order: renter USER governance -> RentalOrder FOR UPDATE -> fresh
+  // claim/order status. In particular no claim row may be written before
+  // the shared order mutex is acquired (dispute must win or lose cleanly).
+  const candidate = await tx.rentalDamageClaim.findFirst({
+    where: { id: input.claimId },
+    select: { orderId: true },
+  });
+  if (!candidate) return { error: "无效请求" };
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${candidate.orderId} FOR UPDATE`;
+
   const claim = await tx.rentalDamageClaim.findFirst({
-    where: { id: input.claimId, resolvedAt: null },
+    where: { id: input.claimId, orderId: candidate.orderId, resolvedAt: null },
     include: {
       order: {
         include: {
@@ -1248,7 +1274,8 @@ export async function respondDamageClaimTx(
       },
     },
   });
-  if (!claim || claim.order.renterId !== input.userId) return { error: "无效请求" };
+  if (!claim || claim.order.renterId !== input.userId ||
+      claim.orderId !== candidate.orderId) return { error: "无效请求" };
   if (claim.order.status !== "PENDING_INSPECTION") {
     return { error: "订单已进入其他处理状态，不能处理旧索赔" };
   }
