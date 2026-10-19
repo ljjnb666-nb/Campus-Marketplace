@@ -107,3 +107,28 @@ grep -qF 'PASS R3D02C03 original return, status log and notification atomic roll
 }
 echo '[worker-cycle] PASS R3D02C03 original renter return request, CAS, guard, replay and rollback on Prisma7 PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C03 terminal opponent is a controlled database writer, not full original confirmReturnTx/claims/dispute; no production v7 cutover proof'
+
+# R3D02C04: every independent original confirm-return assertion is mandatory.
+grep -qF 'PASS R3D02C04 authentic liquidity event/counter canonical writer import provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 exact liquidity writer provenance missing' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real original owner completion with canonical ledger, deposit, counters and durable photo union' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 damaged return defers ledger and preserves owner inspection against late renter' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 return roles, cross-campus and inactive actor fail closed' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real concurrent owner confirmations one winner and no duplicate liquidity facts' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 abort restores RentalOrder/ReturnRecord/StatusLog/DomainEvent/counters' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+echo '[worker-cycle] PASS R3D02C04 original confirmReturnTx, canonical liquidity events/projection, deposit, evidence and rollback via real v7 PG'
+echo '[worker-cycle] LIMIT R3D02C04 owner-authoritative completion retained; claim/dispute writer interaction and production v7 cutover not fully verified'
