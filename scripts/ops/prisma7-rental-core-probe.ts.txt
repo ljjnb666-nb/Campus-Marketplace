@@ -4,11 +4,12 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
- approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx
+ approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
- RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND
+ RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND,
+ RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND
 } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -536,5 +537,179 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   "DISPUTE_RETURN_PARTIAL_WRITE");
  console.log("[worker-cycle] PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects");
 
+ }
+
+ // R3D02C05A: original damage claim submit / response with genuine
+ // Prisma7 Client+Pg, canonical Notification, real liquidity events/async jobs.
+ {
+  const submit=(orderId:string,actor=owner,value="12.00")=>
+   run(tx=>submitDamageClaimTx(tx,{
+    orderId,userId:actor,damageDescription:"synthetic original claim",
+    requestedDeduction:value,photos:["evidence:owner"]
+   }));
+  const respond=(claimId:string,actor=renter,agreed=true)=>
+   run(tx=>respondDamageClaimTx(tx,{claimId,userId:actor,agreed}));
+  const damageOrder=async(label:string)=>{
+   const id=await fixture("claim-"+label,"PENDING_INSPECTION");
+   await root.rentalOrder.update({where:{id},data:{
+    depositAmount:"30.00",depositStatus:"PAID"
+   }});
+   return id;
+  };
+  const claimRows=(id:string)=>root.rentalDamageClaim.findMany({
+   where:{orderId:id},orderBy:{createdAt:"asc"}
+  });
+  const notifs=(id:string,kind:string)=>root.notification.findMany({
+   where:{kind,dedupeKey:{contains:id}}
+  });
+  const original=await damageOrder("original");
+  assert(succeeds(await submit(original)),"CLAIM_OWNER_FILED");
+  const [claim]=await claimRows(original);
+  assert(claim?.submittedById===owner&&claim?.requestedDeduction.toFixed(2)==="12.00",
+   "CLAIM_CANONICAL_AMOUNT");
+  const filed=await root.notification.findMany({where:{
+   kind:RENTAL_DAMAGE_CLAIM_FILED_KIND,
+   dedupeKey:RENTAL_DAMAGE_CLAIM_FILED_KIND+":"+claim.id+":"+renter
+  }});
+  assert(filed.length===1&&filed[0].userId===renter,"CLAIM_CANONICAL_NOTIFY");
+  assert(!succeeds(await submit(original)),"DUPLICATE_UNRESOLVED_CLAIM_ALLOWED");
+  assert((await claimRows(original)).length===1,"DUPLICATE_CLAIM_WRITTEN");
+  assert(!succeeds(await submit(original,renter))&&
+   !succeeds(await submit(original,outsider)),"NON_OWNER_FILED_CLAIM");
+  assert(!succeeds(await submit(original,owner,"31.00")),"OVER_DEPOSIT_CLAIM");
+  console.log("[worker-cycle] PASS R3D02C05A original claim submission, duplicate fence, tenant/role and canonical notification");
+
+  const beforeCount=await Promise.all([owner,renter].map(id=>
+   root.user.findUniqueOrThrow({where:{id}})));
+  assert(succeeds(await respond(claim.id)),"RENTER_AGREE_CLAIM");
+  const updated=await root.rentalOrder.findUniqueOrThrow({where:{id:original}});
+  const resolved=await root.rentalDamageClaim.findUniqueOrThrow({where:{id:claim.id}});
+  const ledger=await root.domainEvent.findMany({where:{aggregateId:original}});
+  const responded=await root.notification.findMany({where:{
+   kind:RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,
+   dedupeKey:RENTAL_DAMAGE_CLAIM_RESPONDED_KIND+":"+claim.id+":"+owner
+  }});
+  const afterCount=await Promise.all([owner,renter].map(id=>
+   root.user.findUniqueOrThrow({where:{id}})));
+  assert(updated.status==="COMPLETED"&&updated.depositDeduction.toFixed(2)==="12.00"&&
+   updated.depositStatus==="PARTIALLY_REFUNDED"&&resolved.resolvedAt!==null&&
+   resolved.renterAgreed===true,"AGREED_CLAIM_SETTLEMENT");
+  assert(ledger.length===2&&
+   ledger.some(e=>e.eventType==="LIQUIDITY_TRANSACTION_COMPLETED")&&
+   ledger.some(e=>e.eventType==="LIQUIDITY_TRANSACTION_VALUE_RECORDED")&&
+   responded.length===1&&responded[0].userId===owner,"CLAIM_CANONICAL_LEDGERS");
+  assert(afterCount[0].rentalOwnerCount===beforeCount[0].rentalOwnerCount+1&&
+   afterCount[1].rentalRenterCount===beforeCount[1].rentalRenterCount+1,
+   "CLAIM_COMPLETION_COUNT_ONCE");
+  assert(!succeeds(await respond(claim.id)),"CLAIM_RESPONSE_REPLAY_WON");
+  assert(await root.domainEvent.count({where:{aggregateId:original}})===2,
+   "CLAIM_REPLAY_LEDGER");
+  console.log("[worker-cycle] PASS R3D02C05A original agreed claim completed canonical ledger and counters once");
+
+  const rejectedOrder=await damageOrder("reject");
+  assert(succeeds(await submit(rejectedOrder)),"REJECTION_SETUP");
+  const [rejectClaim]=await claimRows(rejectedOrder);
+  assert(succeeds(await respond(rejectClaim.id,renter,false)),"REJECT_CLAIM_FAILED");
+  const rejected=await root.rentalOrder.findUniqueOrThrow({where:{id:rejectedOrder}});
+  assert(rejected.status==="COMPLETED"&&rejected.depositDeduction.toFixed(2)==="0.00"&&
+   rejected.depositStatus==="PENDING_REFUND"&&
+   await root.domainEvent.count({where:{aggregateId:rejectedOrder}})===2,
+   "CLAIM_REJECTION_DID_NOT_COMPLETE_SAFELY");
+  console.log("[worker-cycle] PASS R3D02C05A renter rejects claim, preserves deposit and canonical completion");
+
+  // A real PostgreSQL competitor commits IN_DISPUTE while holding
+  // RentalOrder FOR UPDATE; the original owner claim must block and then
+  // reject fresh status without inserting any claim/notification.
+  const contested=await damageOrder("dispute-first");
+  let unlock!:()=>void,held!:()=>void,started!:()=>void;
+  const gate=new Promise<void>(r=>unlock=r),ready=new Promise<void>(r=>held=r),
+   queued=new Promise<void>(r=>started=r);
+  const dispute=db.$transaction(async tx=>{
+   await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${contested} FOR UPDATE`;
+   await tx.rentalOrder.update({where:{id:contested},data:{status:"IN_DISPUTE"}});
+   held();await gate;
+  },{timeout:15000,maxWait:5000});
+  await ready;
+  let pid=0;
+  const claimAttempt=db.$transaction(async tx=>{
+   pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   started();
+   return submitDamageClaimTx(tx,{orderId:contested,userId:owner,
+    damageDescription:"must not file",requestedDeduction:"5.00",photos:[]});
+  },{timeout:15000,maxWait:5000});
+  await queued;
+  let blocked=false;
+  try{
+   for(let i=0;i<110;i++){
+    const rows=await root.$queryRaw<Array<{blocked:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${pid}::int),1),0)>0 AS blocked
+    `;
+    if(rows[0]?.blocked){blocked=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(blocked,"CLAIM_SUBMIT_ROW_WAIT_NOT_OBSERVED");
+  }finally{unlock()}
+  const [attemptResult]=await Promise.all([claimAttempt,dispute]);
+  assert(!succeeds(attemptResult)&&await root.rentalDamageClaim.count({
+   where:{orderId:contested}
+  })===0&&await root.domainEvent.count({where:{aggregateId:contested}})===0,
+   "DISPUTE_OVERRIDDEN_BY_OLD_CLAIM");
+  console.log("[worker-cycle] PASS R3D02C05A real dispute row-lock blocks stale original claim filing");
+
+  const respondOrder=await damageOrder("dispute-response");
+  assert(succeeds(await submit(respondOrder)),"RESPONSE_RACE_SETUP");
+  const [respondClaim]=await claimRows(respondOrder);
+  let releaseResp!:()=>void,respReady!:()=>void,respStarted!:()=>void;
+  const respGate=new Promise<void>(r=>releaseResp=r),
+   respHeld=new Promise<void>(r=>respReady=r),
+   respQueued=new Promise<void>(r=>respStarted=r);
+  const changing=db.$transaction(async tx=>{
+   await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${respondOrder} FOR UPDATE`;
+   await tx.rentalOrder.update({where:{id:respondOrder},data:{status:"IN_DISPUTE"}});
+   respReady();await respGate;
+  },{timeout:15000,maxWait:5000});
+  await respHeld;
+  let responsePid=0;
+  const responding=db.$transaction(async tx=>{
+   responsePid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   respStarted();
+   return respondDamageClaimTx(tx,{claimId:respondClaim.id,userId:renter,agreed:true});
+  },{timeout:15000,maxWait:5000});
+  await respQueued;
+  let waiting=false;
+  try{
+   for(let i=0;i<110;i++){
+    const rows=await root.$queryRaw<Array<{blocked:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${responsePid}::int),1),0)>0 AS blocked
+    `;
+    if(rows[0]?.blocked){waiting=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(waiting,"CLAIM_RESPONSE_ROW_WAIT_NOT_OBSERVED");
+  }finally{releaseResp()}
+  const [resResult]=await Promise.all([responding,changing]);
+  const cur=await root.rentalOrder.findUniqueOrThrow({where:{id:respondOrder}});
+  const oldClaim=await root.rentalDamageClaim.findUniqueOrThrow({where:{id:respondClaim.id}});
+  assert(!succeeds(resResult)&&cur.status==="IN_DISPUTE"&&oldClaim.resolvedAt===null&&
+   await root.domainEvent.count({where:{aggregateId:respondOrder}})===0&&
+   await root.rentalOrderStatusLog.count({where:{orderId:respondOrder}})===0,
+   "DISPUTE_RESPOND_WROTE_PARTIAL_FACTS");
+  console.log("[worker-cycle] PASS R3D02C05A real dispute row-lock blocks stale response and liquidity facts");
+
+  const abortOrder=await damageOrder("abort");
+  let abortFound=false;
+  try{await db.$transaction(async tx=>{
+   const result=await submitDamageClaimTx(tx,{
+    orderId:abortOrder,userId:owner,damageDescription:"abort on notification",
+    requestedDeduction:"3.00",photos:[]});
+   assert(succeeds(result),"ABORT_SUBMIT_NOT_REACHED");
+   throw Error("R3D02C05A_ABORT_CLAIM_WRITES");
+  },{timeout:15000,maxWait:5000});}catch(e){
+   abortFound=e instanceof Error&&e.message==="R3D02C05A_ABORT_CLAIM_WRITES";
+  }
+  assert(abortFound&&await root.rentalDamageClaim.count({where:{orderId:abortOrder}})===0&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:abortOrder}})).status===
+     "PENDING_INSPECTION","CLAIM_ABORT_FAILED_ATOMICITY");
+  console.log("[worker-cycle] PASS R3D02C05A claim and notification atomic rollback after forced error");
  }
 }finally{await root.$disconnect();}
