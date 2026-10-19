@@ -1003,7 +1003,8 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(probe).not.toContain("initiatedDisputeTx"); // No renamed pseudo-writer.
     expect(probe).toContain("initiateDisputeTx(tx,");
     expect(probe).toContain("pg_blocking_pids(");
-    expect(probe).toContain("REAL_DISPUTE_WON_CLAIM");
+    expect(probe).toContain("ACTUAL_DISPUTE_LOCK_NOT_OBSERVED");
+    expect(probe).toContain("DISPUTE_WINNER_RESURRECTED_CLAIM");
     expect(probe).toContain("REVERSE_DISPUTE_DUPLICATE_COMPLETION");
     expect(probe).toContain("ORIGINAL_DISPUTE_ABORT_PARTIAL");
     expect(shell).toContain("PASS R3D02C05B original full dispute/claim concurrency");
