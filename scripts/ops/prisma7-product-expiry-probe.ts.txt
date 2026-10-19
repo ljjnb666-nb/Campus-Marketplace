@@ -1,0 +1,125 @@
+// R3D02B01: real production expiry / projection declaration bodies via AST,
+// authentic governance advisory locks, capability policy and canonical outbox.
+import { PrismaClient } from "../generated/prisma/client.ts";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
+import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
+import { expireProductReservationTx } from "./product-expiry-extracted.ts";
+import { PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE } from "./lib/async/outbox-event-registry.ts";
+
+function assert(ok:unknown, tag:string):asserts ok{
+ if(!ok)throw Error("R3D02B01_"+tag);
+}
+const url=process.env.DATABASE_URL!;
+assert(new URL(url).pathname==="/"+process.env.EXPECTED_SHADOW_DB,
+ "UNSAFE_DATABASE");
+const base=new PrismaClient({adapter:new PrismaPg({
+ connectionString:url,max:6,connectionTimeoutMillis:2500,idleTimeoutMillis:10000
+})});
+const prisma=base.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
+const campusId="r3d01-campus-a",sellerId="r3d01-seller",
+ buyerId="r3d01-buyer";
+const now=new Date();
+const overdue=new Date(now.getTime()-60_000);
+const ahead=new Date(now.getTime()+60_000);
+const categoryId="r3d02b-product-category";
+
+async function fixture(suffix:string, deadline:Date){
+ const productId="r3d02b-product-"+suffix;
+ const orderId="r3d02b-order-"+suffix;
+ await base.product.create({data:{
+   id:productId,title:"synthetic",description:"synthetic",
+   price:"9.00",locationText:"isolated",condition:"NEW",
+   status:"RESERVED",sellerId,campusId,categoryId
+ }});
+ await base.order.create({data:{
+   id:orderId,orderNo:"R3D02B-"+suffix,type:"PRODUCT",
+   status:"PENDING",buyerId,sellerId,productId,amount:"9.00",
+   productReservationExpiresAt:deadline
+ }});
+ return {productId,orderId};
+}
+const result=(orderId:string)=>prisma.$transaction(
+ tx=>expireProductReservationTx(tx,orderId,undefined,{now}),
+ {timeout:12_000,maxWait:5_000}
+);
+const read=(ids:{productId:string,orderId:string})=>
+ Promise.all([
+   base.order.findUniqueOrThrow({where:{id:ids.orderId}}),
+   base.product.findUniqueOrThrow({where:{id:ids.productId}}),
+   base.outboxEvent.findMany({where:{
+     eventType:PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE,
+     dedupeKey:PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE+":"+ids.orderId
+   }})
+ ]);
+try{
+ await base.$connect();
+ await base.productCategory.create({data:{
+   id:categoryId,name:"R3D02B synthetic",slug:"r3d02b-product"
+ }});
+ const denied=await fixture("denied",overdue);
+ assert(await base.campusMembership.count({where:{userId:sellerId,campusId}})===0,
+   "CAPABILITY_DENIAL_NOT_FIXTURED");
+ const deniedResult=await result(denied.orderId);
+ assert(deniedResult?.kind==="EXPIRED","DENIED_SELLER_BLOCKED_SYSTEM_EXPIRY");
+ const [deniedOrder,deniedProduct,deniedEvents]=await read(denied);
+ assert(deniedOrder.status==="CANCELLED" &&
+   deniedOrder.productReservationResolution==="EXPIRED" &&
+   deniedProduct.status==="OFFLINE" && deniedEvents.length===1,
+   "CAPABILITY_DENIED_RELEASE_NOT_OFFLINE");
+ assert((await result(denied.orderId))?.kind==="NOT_PENDING",
+   "EXPIRED_REPLAY_NOT_IDEMPOTENT");
+ assert((await read(denied))[2].length===1,"EXPIRED_REPLAY_EXTRA_OUTBOX");
+ console.log("[worker-cycle] PASS R3D02B01 authentic expiry commits with restricted seller OFFLINE and exactly one canonical outbox");
+
+ await base.campusMembership.create({data:{
+   userId:sellerId,campusId,status:"ACTIVE"
+ }});
+ const active=await fixture("active",overdue);
+ const activeResult=await result(active.orderId);
+ assert(activeResult?.kind==="EXPIRED","ELIGIBLE_EXPIRE_NOT_WON");
+ const [activeOrder,activeProduct,activeEvents]=await read(active);
+ assert(activeOrder.status==="CANCELLED" &&
+   activeOrder.productReservationResolution==="EXPIRED" &&
+   activeProduct.status==="ACTIVE" && activeEvents.length===1,
+   "ELIGIBLE_PRODUCT_NOT_EXPOSED_AFTER_RELEASE");
+ console.log("[worker-cycle] PASS R3D02B01 real capability recheck releases eligible seller listing ACTIVE");
+
+ const waiting=await fixture("not-due",ahead);
+ assert((await result(waiting.orderId))?.kind==="NOT_DUE","PREMATURE_EXPIRY");
+ const [waitOrder,waitProduct,waitEvents]=await read(waiting);
+ assert(waitOrder.status==="PENDING"&&waitProduct.status==="RESERVED"&&
+   waitEvents.length===0,"NOT_DUE_CREATED_SIDE_EFFECT");
+ console.log("[worker-cycle] PASS R3D02B01 pre-deadline no mutation or outbox");
+
+ const concurrent=await fixture("concurrent",overdue);
+ const winners=await Promise.all([result(concurrent.orderId),result(concurrent.orderId)]);
+ assert(winners.filter(x=>x?.kind==="EXPIRED").length===1 &&
+   winners.filter(x=>x?.kind==="NOT_PENDING").length===1,
+   "CONCURRENT_EXPIRY_NOT_SERIALIZED");
+ const [conOrder,conProduct,conEvents]=await read(concurrent);
+ assert(conOrder.status==="CANCELLED"&&
+   conOrder.productReservationResolution==="EXPIRED"&&
+   conProduct.status==="ACTIVE"&&conEvents.length===1,
+   "CONCURRENT_OUTBOX_DUPLICATE_OR_LOST");
+ console.log("[worker-cycle] PASS R3D02B01 authentic governance-lock order-row CAS race produces one expiry");
+
+ const aborted=await fixture("rollback",overdue);
+ let abortSeen=false;
+ try{
+   await prisma.$transaction(async tx=>{
+     const out=await expireProductReservationTx(tx,aborted.orderId,undefined,{now});
+     assert(out?.kind==="EXPIRED","ABORT_WINNER_NOT_REACHED");
+     throw Error("R3D02B01_EXPECTED_ABORT_AFTER_OUTBOX");
+   },{timeout:12_000,maxWait:5_000});
+ }catch(e){
+   abortSeen=e instanceof Error&&e.message==="R3D02B01_EXPECTED_ABORT_AFTER_OUTBOX";
+ }
+ assert(abortSeen,"ABORT_EXCEPTION_NOT_REACHED");
+ const [abortOrder,abortProduct,abortEvents]=await read(aborted);
+ assert(abortOrder.status==="PENDING"&&
+   abortOrder.productReservationResolution===null&&
+   abortProduct.status==="RESERVED"&&abortEvents.length===0,
+   "TX_ROLLBACK_ORDER_PRODUCT_OUTBOX_LEAK");
+ console.log("[worker-cycle] PASS R3D02B01 original expiry Order/Product/Outbox all roll back after forced abort");
+}finally{await base.$disconnect();}

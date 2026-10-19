@@ -695,4 +695,51 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).not.toContain(".env.production");
   });
 
+  it("R3D02B01 proves exact AST production expiry and real governance/capability/outbox dependencies in v7 shadow", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const workflow=read(".github/workflows/worker-image-runtime.yml");
+    const ignore=read(".dockerignore");
+    const imageProof=read("scripts/ops/worker-image-runtime-proof.sh");
+    const upstream=read("scripts/ops/prisma7-canonical-writer-shadow-extension.sh");
+    const shell=read("scripts/ops/prisma7-product-expiry-shadow-extension.sh");
+    const prepare=read("scripts/ops/prisma7-product-expiry-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-product-expiry-probe.ts.txt");
+    const original=read("src/lib/product-order-lifecycle.ts");
+    const deps=[
+      "prisma7-product-expiry-prepare.cjs.txt",
+      "prisma7-product-expiry-probe.ts.txt",
+      "prisma7-product-expiry-shadow-extension.sh"
+    ];
+    for(const name of deps){
+      expect(workflow).toContain("scripts/ops/"+name);
+      expect(ignore).toContain("scripts/ops/"+name);
+      expect(imageProof).toContain("/app/scripts/ops/"+name);
+    }
+    expect(workflow).toContain("src/lib/product-order-lifecycle.ts");
+    expect(upstream).toContain("source scripts/ops/prisma7-product-expiry-shadow-extension.sh");
+    expect(prepare).toContain('ts.createSourceFile(');
+    expect(prepare).toContain('source.slice(node.getStart(file),node.end)');
+    expect(prepare).toContain('if(restored!==original)');
+    for(const name of ["expireProductReservationTx","expireLockedProductReservation",
+      "projectProductAfterReservationRelease","ACTIVE_PRODUCT_ORDER_STATUSES"]){
+      expect(prepare).toContain(name);
+      expect(original).toContain(name);
+    }
+    expect(shell).toContain('--network none --read-only --cap-drop ALL');
+    expect(shell).toContain('NODE_PATH=/app/node_modules');
+    expect(shell).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    expect(shell).toContain('EXPECTED_SHADOW_DB=$shadow_db');
+    expect(probe).toContain('UNSAFE_DATABASE');
+    expect(prepare).toContain('acquireGovernanceSubjectLocks');
+    expect(prepare).toContain('evaluateMarketplaceCapability');
+    expect(probe).toContain("CAPABILITY_DENIED_RELEASE_NOT_OFFLINE");
+    expect(probe).toContain("ELIGIBLE_PRODUCT_NOT_EXPOSED_AFTER_RELEASE");
+    expect(probe).toContain("NOT_DUE_CREATED_SIDE_EFFECT");
+    expect(probe).toContain("CONCURRENT_EXPIRY_NOT_SERIALIZED");
+    expect(probe).toContain("TX_ROLLBACK_ORDER_PRODUCT_OUTBOX_LEAK");
+    expect(probe).toContain("R3D02B01_EXPECTED_ABORT_AFTER_OUTBOX");
+    expect(shell).toContain("full product module initialization, actor accept/cancel and rental lifecycle not yet validated");
+    expect(shell).not.toContain(".env.production");
+  });
+
 });

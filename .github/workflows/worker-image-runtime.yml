@@ -20,6 +20,12 @@ on:
       - scripts/ops/prisma7-canonical-writer-shadow-extension.sh
       - scripts/ops/prisma7-canonical-writer-relocate.cjs.txt
       - scripts/ops/prisma7-canonical-writer-probe.ts.txt
+      - scripts/ops/prisma7-product-expiry-prepare.cjs.txt
+      - scripts/ops/prisma7-product-expiry-probe.ts.txt
+      - scripts/ops/prisma7-product-expiry-shadow-extension.sh
+      - src/lib/product-order-lifecycle.ts
+      - src/lib/governance/governance-lock.ts
+      - src/lib/enforcement/capability-gate.ts
       - src/lib/domain-events/domain-event.ts
       - src/lib/domain-events/domain-event-registry.ts
       - src/lib/async/outbox.ts

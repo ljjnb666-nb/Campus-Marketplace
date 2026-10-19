@@ -96,3 +96,7 @@ scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
 scripts/ops/prisma7-canonical-writer-shadow-extension.sh
 scripts/ops/prisma7-canonical-writer-relocate.cjs.txt
 scripts/ops/prisma7-canonical-writer-probe.ts.txt
+# R3D02B01 original product expiry shadow-only AST/PG probes.
+scripts/ops/prisma7-product-expiry-prepare.cjs.txt
+scripts/ops/prisma7-product-expiry-probe.ts.txt
+scripts/ops/prisma7-product-expiry-shadow-extension.sh
