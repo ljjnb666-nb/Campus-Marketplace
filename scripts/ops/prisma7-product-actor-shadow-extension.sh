@@ -36,6 +36,19 @@ if ! timeout --signal=TERM --kill-after=10s 55s docker run --rm \
   /source/src/lib/product-order-lifecycle.ts \
   /shadow/r3d02/product-actor-extracted.ts /shadow/r3d02/lib \
   >"$tmp/r3d02b02-prepare.log" 2>&1; then
+  # Keep raw diagnostics on the ephemeral runner only. Emit machine codes,
+  # not module paths, database credentials, raw source, or stack traces.
+  node - "$tmp/r3d02b02-prepare.log" <<'SAFE_ACTOR_PREP'
+const fs=require("node:fs");
+const raw=fs.readFileSync(process.argv[2],"utf8");
+const machineCodes=[...new Set([...raw.matchAll(/\bR3D02B02_[A-Z0-9_]+\b/g)]
+ .map(match=>match[0]))].slice(0,6);
+console.log("[worker-cycle] R3D02B02 prep sanitized codes="+
+ JSON.stringify(machineCodes)+
+ " import="+/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw)+
+ " parser="+/SyntaxError|parseDiagnostics|Unexpected token/.test(raw)+
+ " permission="+/EACCES|EPERM|permission denied/i.test(raw));
+SAFE_ACTOR_PREP
   echo '[worker-cycle][FAIL] R3D02B02 original actor AST/dependency provenance' >&2
   exit 1
 fi
