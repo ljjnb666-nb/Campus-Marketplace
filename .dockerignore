@@ -105,3 +105,8 @@ scripts/ops/prisma7-product-expiry-shadow-extension.sh
 scripts/ops/prisma7-product-actor-prepare.cjs.txt
 scripts/ops/prisma7-product-actor-probe.ts.txt
 scripts/ops/prisma7-product-actor-shadow-extension.sh
+
+# Issue #157 R3D02C01 shadow-only rental test harness, never in production images.
+scripts/ops/prisma7-rental-core-prepare.cjs.txt
+scripts/ops/prisma7-rental-core-probe.ts.txt
+scripts/ops/prisma7-rental-core-shadow-extension.sh

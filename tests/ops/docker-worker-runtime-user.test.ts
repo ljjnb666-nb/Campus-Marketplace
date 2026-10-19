@@ -794,4 +794,50 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("full module load");
   });
 
+
+  it("R3D02C01 only runs exact production rental core functions with real governance/notification on isolated PG", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const ci=read(".github/workflows/worker-image-runtime.yml");
+    const ignore=read(".dockerignore");
+    const image=read("scripts/ops/worker-image-runtime-proof.sh");
+    const upstream=read("scripts/ops/prisma7-product-actor-shadow-extension.sh");
+    const script=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const prod=read("src/lib/rental-order-machine.ts");
+    const scripts=["prisma7-rental-core-prepare.cjs.txt",
+      "prisma7-rental-core-probe.ts.txt","prisma7-rental-core-shadow-extension.sh"];
+    for(const name of scripts) {
+      expect(ci).toContain("scripts/ops/"+name);
+      expect(ignore).toContain("scripts/ops/"+name);
+      expect(image).toContain("/app/scripts/ops/"+name);
+    }
+    expect(ci).toContain("src/lib/rental-order-machine.ts");
+    expect(upstream).toContain("source scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(prepare).toContain("ts.createSourceFile");
+    expect(prepare).toContain("source.slice(matches[0].getStart(ast),matches[0].end)");
+    for(const name of ["approveRentalOrderTx","rejectRentalOrderTx","confirmPickupTx",
+      "cancelRentalOrderTx","writeStatusLog","isRentalOrderRoleParticipant",
+      "canCancelRentalOrder","counterpartyId"]) {
+      expect(prepare).toContain(name);
+      expect(prod).toContain(name);
+    }
+    expect(prepare).toContain("governance/active-account-mutation");
+    expect(prepare).toContain("notifications/notification-service");
+    expect(script).toContain("--network none --read-only --cap-drop ALL");
+    expect(script).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    expect(script).toContain('EXPECTED_SHADOW_DB=$shadow_db');
+    expect(script).toContain("EMAIL_PROVIDER=disabled");
+    expect(script).not.toContain(".env.production");
+    expect(probe).toContain("UNSAFE_DB");
+    expect(probe).toContain("$extends(softDeleteExtension).$extends(domainEventLedgerExtension)");
+    expect(probe).toContain("SUSPENDED_RENTER_ACCEPTED");
+    expect(probe).toContain("APPROVE_REJECT_DOUBLE_WIN");
+    expect(probe).toContain("PICKUP_CANCEL_DOUBLE_WIN");
+    expect(probe).toContain("REPLAY_DELETED_EVIDENCE");
+    expect(probe).toContain("REJECT_COPIED_FREE_TEXT");
+    expect(probe).toContain("R3D02C01_EXPECTED_ABORT_AFTER_NOTIFICATION");
+    expect(script).toContain("does not cover rental creation, return, extension");
+  });
+
 });

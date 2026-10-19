@@ -99,3 +99,6 @@ for marker in \
 done
 echo '[worker-cycle] PASS R3D02B02 original PRODUCT actor accept/cancel and real v7 PostgreSQL dependencies'
 echo '[worker-cycle] LIMIT R3D02B02 tests AST-selected original entry functions; full module load, materializer dispatch, rental R3D02C, production v7 cutover NOT VERIFIED'
+
+# R3D02C01: independent original rental core proof, after all product actor checks.
+source scripts/ops/prisma7-rental-core-shadow-extension.sh
