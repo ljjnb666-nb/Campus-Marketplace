@@ -183,3 +183,27 @@ grep -qF 'PASS R3D02C05A claim and notification atomic rollback after forced err
 }
 echo '[worker-cycle] PASS R3D02C05A original claim response and dispute-competitor serialization on real Prisma7 PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C05A disputed opponent is controlled DB writer; complete initiateDisputeTx workflow and payment/refund remain UNVERIFIED'
+
+# R3D02C05B: all REAL original dispute-vs-claim proofs are mandatory.
+grep -qF 'PASS R3D02C05B authentic dispute/governance/hold/feature-flag AST declaration provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B original dispute creates two canonical holds, scoped SLA, notification and blocks stale claim' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B actual dispute races original claim response, blocks stale completion and ledger' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B claim completion then original dispute preserves exactly-once ledger and holds' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05B authentic dispute, DataHold, notification and order rollback' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05B original dispute/claim proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C05B original full dispute/claim concurrency, canonical holds, ledger and rollback via real PostgreSQL'
+echo '[worker-cycle] LIMIT R3D02C05B isolated Prisma7 authentic original functions only; production migration, payout/refund and full dispute-resolution workflow UNVERIFIED'
