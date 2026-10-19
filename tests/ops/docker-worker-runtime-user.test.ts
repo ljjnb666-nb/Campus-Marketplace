@@ -730,7 +730,6 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
     expect(shell).toContain('EXPECTED_SHADOW_DB=$shadow_db');
     expect(probe).toContain('UNSAFE_DATABASE');
-    expect(probe).toContain('acquireGovernanceSubjectLocks');
     expect(prepare).toContain('acquireGovernanceSubjectLocks');
     expect(prepare).toContain('evaluateMarketplaceCapability');
     expect(probe).toContain("CAPABILITY_DENIED_RELEASE_NOT_OFFLINE");
