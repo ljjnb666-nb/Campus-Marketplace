@@ -10,6 +10,9 @@ set -euo pipefail
  echo '[worker-cycle][FAIL] R3D02C01 requires authentic R3D02B02 shadow prerequisites' >&2
  exit 1
 }
+# R3D02C04: immutable original canonical DomainEvent liquidity writer.
+mkdir -p "$sandbox/r3d02/lib/analytics"
+cp src/lib/analytics/liquidity-domain-events.ts "$sandbox/r3d02/lib/analytics/liquidity-domain-events.ts"
 cp scripts/ops/prisma7-rental-core-prepare.cjs.txt "$sandbox/r3d02/rental-prepare.cjs"
 cp scripts/ops/prisma7-rental-core-probe.ts.txt "$sandbox/r3d02/rental-core-probe.ts"
 # Networkless extraction of the unmodified production TS function declarations.
