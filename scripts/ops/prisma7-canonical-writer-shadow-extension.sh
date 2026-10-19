@@ -67,10 +67,24 @@ const categories={
 const diagnostics=[...raw.matchAll(/(?:\/shadow\/)?(?:r3d02\/)?(?:lib\/)?([a-z0-9-]+\.tsx?):(\d+):(\d+):\s*ERROR:/gi)].slice(0,4).map(m=>({
  file:m[1],line:Number(m[2]),column:Number(m[3])
 }));
+const syntaxKinds={
+ expected:/(?:ERROR:\s*)?Expected (?:identifier|";"|"{"|"}"|"("|")"|expression)/i.test(raw),
+ unexpected:/(?:Unexpected token|Unexpected character|Unexpected identifier)/i.test(raw),
+ topLevelAwait:/Top-level await is currently not supported/i.test(raw),
+ invalidExport:/does not provide an export named/i.test(raw),
+ invalidImport:/Cannot use import statement outside a module/i.test(raw),
+ esmMismatch:/ERR_REQUIRE_ESM|require\(\) of ES module/i.test(raw),
+ transformFailure:/Transform failed/i.test(raw),
+ unsupportedSyntax:/Unsupported syntax|not supported/i.test(raw)
+};
+const sourceBasenames=[...raw.matchAll(/(?:^|\/)([A-Za-z0-9._-]+\.(?:ts|tsx|mts|js|mjs|cjs))(?::[0-9]+(?::[0-9]+)?)?/gm)]
+ .map(m=>m[1]).filter(s=>s!=="index.js").slice(0,6);
 console.log("[worker-cycle] R3D02A sanitized machineCodes="+
  JSON.stringify([...new Set(codes)].slice(0,6))+
  " categories="+JSON.stringify(categories)+
  " sourceLocations="+JSON.stringify(diagnostics)+
+ " syntaxKinds="+JSON.stringify(syntaxKinds)+
+ " sourceBasenames="+JSON.stringify(sourceBasenames)+
  " logLines="+raw.split(/\r?\n/).length);
 CLASSIFY_R3D02A
  echo '[worker-cycle][FAIL] R3D02A canonical writer live shadow test' >&2; exit 1;
