@@ -146,3 +146,31 @@ grep -qF 'PASS R3D02C04 real PG dispute row-lock stops stale owner completion an
 }
 echo '[worker-cycle] PASS R3D02C04 original confirmReturnTx, canonical liquidity events/projection, deposit, evidence and rollback via real v7 PG'
 echo '[worker-cycle] LIMIT R3D02C04 owner-authoritative completion retained; claim/dispute writer interaction and production v7 cutover not fully verified'
+
+# R3D02C05A: mandatory authentic damage-claim/dispute cross-actor PG proof.
+grep -qF 'PASS R3D02C05A original claim submission, duplicate fence, tenant/role and canonical notification' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05A original agreed claim completed canonical ledger and counters once' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05A renter rejects claim, preserves deposit and canonical completion' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05A real dispute row-lock blocks stale original claim filing' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05A real dispute row-lock blocks stale response and liquidity facts' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C05A claim and notification atomic rollback after forced error' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C05A canonical claim/dispute proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C05A original claim response and dispute-competitor serialization on real Prisma7 PostgreSQL'
+echo '[worker-cycle] LIMIT R3D02C05A disputed opponent is controlled DB writer; complete initiateDisputeTx workflow and payment/refund remain UNVERIFIED'

@@ -9,7 +9,8 @@ const fns=[
  "writeStatusLog","isRentalOrderRoleParticipant","canCancelRentalOrder",
  "counterpartyId","approveRentalOrderTx","rejectRentalOrderTx",
  "confirmPickupTx","cancelRentalOrderTx","requestReturnTx",
- "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx"
+ "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx",
+ "submitDamageClaimTx","respondDamageClaimTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -17,12 +18,12 @@ const bodies=fns.map(name=>{
  return source.slice(matches[0].getStart(ast),matches[0].end);
 });
 const imports=[
- 'import type { Prisma, RentalOrderStatus, RentalCancellationReason } from "../generated/prisma/client.ts";',
+ 'import { Prisma, type RentalOrderStatus, type RentalCancellationReason } from "../generated/prisma/client.ts";',
  'import { prepareActiveAccountMutation } from "./lib/governance/active-account-mutation.ts";',
  'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
  'import { computeRentalCompletedBookedValue, recordLiquidityTransactionCompletionFactsTx } from "./lib/analytics/liquidity-domain-events.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
 // Reversibly relocate the ORIGINAL canonical liquidity writer, not a stub:
