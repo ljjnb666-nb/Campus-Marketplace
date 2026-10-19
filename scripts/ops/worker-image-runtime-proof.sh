@@ -98,6 +98,9 @@ for item in "${roles[@]}"; do
             "/app/scripts/ops/prisma7-product-expiry-prepare.cjs.txt",
             "/app/scripts/ops/prisma7-product-expiry-probe.ts.txt",
             "/app/scripts/ops/prisma7-product-expiry-shadow-extension.sh",
+            "/app/scripts/ops/prisma7-product-actor-prepare.cjs.txt",
+            "/app/scripts/ops/prisma7-product-actor-probe.ts.txt",
+            "/app/scripts/ops/prisma7-product-actor-shadow-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }
