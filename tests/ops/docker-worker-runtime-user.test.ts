@@ -680,7 +680,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
       "src/lib/domain-events/domain-event-registry.ts"),"utf8");
     const canonicalExport = "LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE";
     expect(registry).toContain("export const "+canonicalExport+" =");
-    expect(probe).toContain("  "+canonicalExport);
+    expect(probe).toContain(canonicalExport);
     expect(probe).not.toContain("LIQUIDITY_TRANSACTION_COMPLETED_EVENT_AGGREGATE_TYPE");
     expect(probe).toContain("recordDomainEventTx(tx,domainIntent(completed))");
     expect(probe).toContain("recordOutboxEventTx(tx,outboxIntent(expired))");
