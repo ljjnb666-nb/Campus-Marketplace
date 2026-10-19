@@ -1,0 +1,166 @@
+// R3D02B02: authentic actor accept/cancel, canonical IN_APP Notification and expiry Outbox.
+// All PROD function declarations originate from exact TypeScript AST slices.
+import { PrismaClient } from "../generated/prisma/client.ts";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
+import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
+import { acceptProductOrderTx, cancelProductOrderTx } from "./product-actor-extracted.ts";
+import { ORDER_STATUS_CHANGED_KIND } from "./lib/notifications/notification-registry.ts";
+import { PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE } from "./lib/async/outbox-event-registry.ts";
+
+function assert(ok:unknown,tag:string):asserts ok{if(!ok)throw Error("R3D02B02_"+tag);}
+const url=process.env.DATABASE_URL!;
+assert(new URL(url).pathname==="/"+process.env.EXPECTED_SHADOW_DB,"UNSAFE_DATABASE");
+assert(process.env.EMAIL_PROVIDER==="disabled","EMAIL_MUST_BE_DISABLED");
+const base=new PrismaClient({adapter:new PrismaPg({
+ connectionString:url,max:7,connectionTimeoutMillis:2500,idleTimeoutMillis:10000
+})});
+const prisma=base.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
+const campus="r3d01-campus-a",seller="r3d01-seller",buyer="r3d01-buyer",
+ outsider="r3d01-outsider",category="r3d02b-product-category";
+const future=new Date(Date.now()+600000),past=new Date(Date.now()-60000);
+type Fixture={orderId:string;productId:string;buyerId:string;sellerId:string};
+async function make(suffix:string,deadline=future):Promise<Fixture>{
+ const orderId="r3d02b02-order-"+suffix,productId="r3d02b02-product-"+suffix;
+ await base.product.create({data:{
+  id:productId,title:"Synthetic",description:"Synthetic",price:"9.00",
+  locationText:"isolated",condition:"NEW",status:"RESERVED",
+  campusId:campus,sellerId:seller,categoryId:category
+ }});
+ await base.order.create({data:{
+  id:orderId,orderNo:"R3D02B02-"+suffix,type:"PRODUCT",status:"PENDING",
+  amount:"9.00",buyerId:buyer,sellerId:seller,productId,
+  productReservationExpiresAt:deadline
+ }});
+ return {orderId,productId,buyerId:buyer,sellerId:seller};
+}
+const candidate=(f:Fixture)=>({buyerId:f.buyerId,sellerId:f.sellerId,productId:f.productId});
+const accept=(f:Fixture,actor=seller)=>prisma.$transaction(
+ tx=>acceptProductOrderTx(tx,actor,f.orderId,candidate(f),undefined,{now:new Date()}),
+ {timeout:15000,maxWait:5000}
+);
+const cancel=(f:Fixture,actor=buyer)=>prisma.$transaction(
+ tx=>cancelProductOrderTx(tx,actor,f.orderId,candidate(f)),
+ {timeout:15000,maxWait:5000}
+);
+async function state(f:Fixture){
+ const [o,p,n,e,d]=await Promise.all([
+  base.order.findUniqueOrThrow({where:{id:f.orderId}}),
+  base.product.findUniqueOrThrow({where:{id:f.productId}}),
+  base.notification.findMany({where:{orderId:f.orderId,kind:ORDER_STATUS_CHANGED_KIND}}),
+  base.outboxEvent.findMany({where:{aggregateId:f.orderId,eventType:PRODUCT_RESERVATION_EXPIRED_EVENT_TYPE}}),
+  base.domainEvent.findMany({where:{aggregateId:f.orderId}})
+ ]);
+ return {o,p,n,e,d};
+}
+function assertManualNotifications(f:Fixture,s:Awaited<ReturnType<typeof state>>,status:string,role:string){
+ assert(s.n.length===2,"NOTIFICATION_COUNT_"+status);
+ for(const uid of [buyer,seller]){
+  assert(s.n.some(n=>n.userId===uid&&
+    n.dedupeKey===ORDER_STATUS_CHANGED_KIND+":"+f.orderId+":"+status+":"+uid&&
+    (n.payload as {actorRole?:string;status?:string}).actorRole===role&&
+    (n.payload as {status?:string}).status===status),
+   "CANONICAL_NOTIFICATION_"+status);
+ }
+ assert(s.e.length===0&&s.d.length===0,"MANUAL_FAKE_DOMAIN_OR_OUTBOX_"+status);
+}
+async function unchanged(f:Fixture,tag:string){
+ const s=await state(f);
+ assert(s.o.status==="PENDING"&&s.o.productReservationResolution===null&&
+  s.p.status==="RESERVED"&&s.n.length===0&&s.e.length===0&&s.d.length===0,tag);
+}
+async function expectInactive(fn:()=>Promise<unknown>,tag:string){
+ let denied=false;
+ try{await fn();}catch(e){denied=Boolean(e instanceof Error&&
+  ((e as Error & {code?:string}).code==="AUTH_ACCOUNT_INACTIVE"||
+   e.message.includes("AUTH_ACCOUNT_INACTIVE")));}
+ assert(denied,tag);
+}
+try{
+ await base.$connect();
+ assert(await base.campusMembership.count({where:{
+  userId:seller,campusId:campus,status:"ACTIVE"
+ }})===1,"SELLER_MEMBERSHIP_PREREQUISITE");
+ assert((await base.user.findUniqueOrThrow({where:{id:seller}})).status==="ACTIVE",
+  "SELLER_NOT_ACTIVE");
+ const ok=await make("accept");
+ assert((await accept(ok))?.reservationResolution==="ACCEPTED","ACCEPT_WON");
+ const a=await state(ok);
+ assert(a.o.status==="ACCEPTED"&&a.o.productReservationResolution==="ACCEPTED"&&
+  a.o.productReservationResolvedAt!==null&&a.p.status==="RESERVED",
+  "ACCEPT_STATE_OR_LISTING_CHANGED");
+ assertManualNotifications(ok,a,"ACCEPTED","SELLER");
+ assert(await accept(ok)===null,"ACCEPT_REPLAY");
+ assert((await state(ok)).n.length===2,"ACCEPT_REPLAY_NOTIFICATIONS");
+ console.log("[worker-cycle] PASS R3D02B02 original seller accept and canonical dual notifications are idempotent");
+
+ const cancelled=await make("cancel");
+ assert((await cancel(cancelled))?.isBuyer===true,"BUYER_CANCEL_WON");
+ const c=await state(cancelled);
+ assert(c.o.status==="CANCELLED"&&c.o.productReservationResolution==="CANCELLED"&&
+  c.p.status==="ACTIVE","CANCEL_STATE_OR_CAPABILITY_RELEASE");
+ assertManualNotifications(cancelled,c,"CANCELLED","BUYER");
+ assert(await cancel(cancelled)===null,"CANCEL_REPLAY");
+ assert((await state(cancelled)).n.length===2,"CANCEL_REPLAY_NOTIFICATION_DUP");
+ const bySeller=await make("seller-cancel");
+ assert((await cancel(bySeller,seller))?.isBuyer===false,"SELLER_CANCEL_WON");
+ assertManualNotifications(bySeller,await state(bySeller),"CANCELLED","SELLER");
+ console.log("[worker-cycle] PASS R3D02B02 buyer/seller cancel, capability projection and canonical replay safety");
+
+ const invalid=await make("unauthorized");
+ assert(await accept(invalid,buyer)===null,"BUYER_ACCEPTED_OWN_ORDER");
+ assert(await cancel(invalid,outsider)===null,"CROSS_CAMPUS_OUTSIDER_CANCELLED");
+ assert(await prisma.$transaction(tx=>cancelProductOrderTx(tx,buyer,invalid.orderId,
+  {...candidate(invalid),sellerId:outsider}))===null,"STALE_CANDIDATE_BYPASSED");
+ await unchanged(invalid,"UNAUTHORIZED_SIDE_EFFECT");
+ const inactive=await make("inactive");
+ await base.user.update({where:{id:buyer},data:{status:"SUSPENDED"}});
+ try{
+  await expectInactive(()=>cancel(inactive,buyer),"SUSPENDED_BUYER_NOT_REJECTED");
+  await unchanged(inactive,"SUSPENDED_BUYER_CHANGED_ORDER");
+ }finally{await base.user.update({where:{id:buyer},data:{status:"ACTIVE"}});}
+ console.log("[worker-cycle] PASS R3D02B02 original active-account lock-time denial, role and candidate/tenant fences");
+
+ for(const actor of ["accept","cancel"] as const){
+  const f=await make("late-"+actor,past);
+  const outcome=actor==="accept"?await accept(f):await cancel(f);
+  assert(actor==="accept"?
+    (outcome as {reservationResolution?:string}|null)?.reservationResolution==="EXPIRED":
+    (outcome as {isBuyer?:boolean}|null)?.isBuyer===true,
+    "LATE_ACTOR_DID_NOT_EXPIRE_"+actor);
+  const s=await state(f);
+  assert(s.o.status==="CANCELLED"&&s.o.productReservationResolution==="EXPIRED"&&
+    s.p.status==="ACTIVE"&&s.e.length===1&&s.n.length===0&&s.d.length===0,
+    "LATE_CANONICAL_OUTBOX_"+actor);
+  assert((await (actor==="accept"?accept(f):cancel(f)))===null,
+    "LATE_REPLAY_NOT_IDEMPOTENT_"+actor);
+  assert((await state(f)).e.length===1,"LATE_OUTBOX_DUP_"+actor);
+ }
+ console.log("[worker-cycle] PASS R3D02B02 late accept/cancel share original EXPIRED canonical Outbox without direct notifications");
+
+ const race=await make("race");
+ const [ra,rc]=await Promise.all([accept(race),cancel(race)]);
+ assert(Number(ra!==null)+Number(rc!==null)===1,"RACE_NOT_SERIALIZED");
+ const rs=await state(race);
+ assert((rs.o.status==="ACCEPTED"&&rs.o.productReservationResolution==="ACCEPTED")||
+  (rs.o.status==="CANCELLED"&&rs.o.productReservationResolution==="CANCELLED"),
+  "RACE_INCONSISTENT_STATE");
+ assert(rs.n.length===2&&rs.e.length===0&&rs.d.length===0,
+  "RACE_MULTIPLE_NOTIFICATIONS");
+ console.log("[worker-cycle] PASS R3D02B02 concurrent authentic accept/cancel serialize to one winner and two notification intents");
+
+ const rollback=await make("rollback");
+ let aborted=false;
+ try{await prisma.$transaction(async tx=>{
+  const outcome=await cancelProductOrderTx(tx,buyer,rollback.orderId,candidate(rollback));
+  assert(outcome?.isBuyer===true,"ROLLBACK_WRITER_NOT_REACHED");
+  assert(await tx.notification.count({where:{orderId:rollback.orderId}})===2,
+   "ROLLBACK_NOTIFICATION_NOT_WRITTEN");
+  throw Error("R3D02B02_EXPECTED_ABORT_AFTER_CANONICAL_NOTIFICATION");
+ },{timeout:15000,maxWait:5000});}
+ catch(e){aborted=e instanceof Error&&
+  e.message==="R3D02B02_EXPECTED_ABORT_AFTER_CANONICAL_NOTIFICATION";}
+ assert(aborted,"ROLLBACK_ABORT_NOT_SEEN");
+ await unchanged(rollback,"ROLLBACK_ORDER_PRODUCT_NOTIFICATION_LEAK");
+ console.log("[worker-cycle] PASS R3D02B02 actor mutation, Product and canonical Notification fully roll back on forced abort");
+}finally{await base.$disconnect();}
