@@ -840,4 +840,32 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("does not cover rental creation, return, extension");
   });
 
+
+  it("R3D02C02 rental owner decision uses order row lock and status CAS against renter cancellation", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/rental-order-machine.ts");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    for(const fn of ["approveRentalOrderTx","rejectRentalOrderTx"]){
+      const start=src.indexOf("export async function "+fn+"(");
+      const end=src.indexOf("export async function ",start+1);
+      const body=src.slice(start,end>start?end:src.length);
+      expect(body).toContain("await prepareActiveAccountMutation(tx, input.userId)");
+      expect(body).toContain('SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE');
+      expect(body.indexOf("FOR UPDATE")).toBeLessThan(body.indexOf("tx.rentalOrder.findFirst("));
+      expect(body).toContain("tx.rentalOrder.updateMany({");
+      expect(body).toContain("ownerId: input.userId, status: 'PENDING_APPROVAL'");
+      expect(body).toContain("if (moved.count !== 1) return");
+      expect(body).not.toContain("await tx.rentalOrder.update({");
+    }
+    expect(probe).toContain('for(const decision of ["approve","reject"] as const)');
+    expect(probe).toContain("CROSS_CANCEL_NOT_WRITTEN_");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(probe).toContain("OWNER_ROW_LOCK_WAIT_NOT_OBSERVED_");
+    expect(probe).toContain("OWNER_OVERWROTE_RENTER_CANCEL_");
+    expect(probe).toContain("CROSS_CANCEL_STATE_LOG_NOTIFICATION_DRIFT_");
+    expect(probe).toContain("R3D02C02 deterministic real PG renter CANCEL");
+    expect(shell).toContain("grep -qF 'PASS R3D02C02 deterministic real PG renter CANCEL");
+  });
+
 });

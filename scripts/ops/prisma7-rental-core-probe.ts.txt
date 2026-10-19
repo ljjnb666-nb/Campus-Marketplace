@@ -201,4 +201,54 @@ try{
  assert(aborted,"FORCED_ABORT_MISSING");
  await assertPending(rollback);
  console.log("[worker-cycle] PASS R3D02C01 real rollback of original RentalOrder/StatusLog/canonical Notification");
+
+// R3D02C02: hold the real renter cancellation after it writes CANCELLED but
+// before COMMIT. The owner action must wait on the same RentalOrder row lock.
+// No mocked data, no timed guess at winner, no application-layer fake locks.
+for(const decision of ["approve","reject"] as const){
+ const id=await fixture("cross-cancel-"+decision);
+ let releaseCancel!:()=>void,signalReady!:()=>void,signalOwner!:()=>void;
+ const gate=new Promise<void>(resolve=>{releaseCancel=resolve;});
+ const ready=new Promise<void>(resolve=>{signalReady=resolve;});
+ const ownerReady=new Promise<void>(resolve=>{signalOwner=resolve;});
+ const cancelling=db.$transaction(async tx=>{
+  const changed=await cancelRentalOrderTx(tx,{
+   orderId:id,userId:renter,cancellationReason:"RENTER_CHANGED_PLAN"
+  });
+  assert(succeeds(changed),"CROSS_CANCEL_NOT_WRITTEN_"+decision);
+  signalReady();
+  await gate;
+ },{timeout:15000,maxWait:5000});
+ await ready;
+ let ownerPid=0;
+ const deciding=db.$transaction(async tx=>{
+  const rows=await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`;
+  ownerPid=rows[0]?.pid??0;
+  signalOwner();
+  return decision==="approve"?
+   approveRentalOrderTx(tx,{orderId:id,userId:owner}):
+   rejectRentalOrderTx(tx,{orderId:id,userId:owner,rejectReason:"sensitive"});
+ },{timeout:15000,maxWait:5000});
+ await ownerReady;
+ let wasBlocked=false;
+ try{
+  for(let attempt=0;attempt<110;attempt++){
+   const waiting=await root.$queryRaw<Array<{blocked:boolean}>>`
+    SELECT COALESCE(array_length(pg_blocking_pids(${ownerPid}::int),1),0)>0 AS blocked
+   `;
+   if(waiting[0]?.blocked){wasBlocked=true;break;}
+   await new Promise(resolve=>setTimeout(resolve,30));
+  }
+  assert(wasBlocked,"OWNER_ROW_LOCK_WAIT_NOT_OBSERVED_"+decision);
+ }finally{releaseCancel();}
+ const [ownerResult]=await Promise.all([deciding,cancelling]);
+ assert(!succeeds(ownerResult),"OWNER_OVERWROTE_RENTER_CANCEL_"+decision);
+ const row=await snapshot(id);
+ assert(row.order.status==="CANCELLED"&&row.logs.length===1&&
+  row.logs[0]?.toStatus==="CANCELLED"&&row.notes.length===1,
+  "CROSS_CANCEL_STATE_LOG_NOTIFICATION_DRIFT_"+decision);
+ singleNote(row,RENTAL_ORDER_CANCELLED_KIND,id,owner);
+ noSyntheticEvents(row);
+}
+console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs owner APPROVE/REJECT row-lock authority and CAS");
 }finally{await root.$disconnect();}

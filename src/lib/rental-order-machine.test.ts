@@ -229,8 +229,8 @@ describe("rental-order-machine", () => {
     const result = await approveRentalOrderTx(asTx(tx), { orderId: "order-1", userId: "user-owner" });
 
     expect(result).toEqual({ success: true });
-    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: { status: "PENDING_PICKUP" },
     });
     expect(tx.rentalOrderStatusLog.create).toHaveBeenCalledWith({
@@ -275,9 +275,9 @@ describe("rental-order-machine", () => {
 
     expect(result).toEqual({ success: true });
 
-    // 权威列保存原始原因（lifecycle/erasure 策略处理）
-    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    // 权威列保存原始原因（lifecycle/erasure 策略处理），但必须命中 CAS。
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: expect.objectContaining({
         status: "REJECTED",
         cancellationNote: RAW_REASON,

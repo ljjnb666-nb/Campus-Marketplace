@@ -697,7 +697,7 @@ describe("rental-order actions", () => {
       ownerId: "user-owner",
       renterId: "user-renter",
     });
-    txRentalOrderUpdate.mockRejectedValueOnce(new Error("db down"));
+    txRentalOrderUpdateMany.mockRejectedValueOnce(new Error("db down"));
 
     const formData = new FormData();
     formData.set("orderId", "order-1");
@@ -726,9 +726,9 @@ describe("rental-order actions", () => {
     const result = await approveRentalOrder(formData);
 
     expect(result.success).toBe(true);
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith(
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1" },
+        where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
         data: expect.objectContaining({ status: "PENDING_PICKUP" }),
       }),
     );
@@ -983,8 +983,8 @@ describe("rental-order actions", () => {
     const result = await rejectRentalOrder(formData);
 
     expect(result).toEqual({ success: true, message: "已拒绝租赁申请" });
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: expect.objectContaining({
         status: "REJECTED",
         cancellationNote: "物品已损坏",

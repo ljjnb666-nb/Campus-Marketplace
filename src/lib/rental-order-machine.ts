@@ -352,15 +352,23 @@ export async function approveRentalOrderTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  // R3D02C02: same Order row-lock authority as renter cancellation.
+  // Lock order = actor USER governance lock -> RentalOrder FOR UPDATE ->
+  // fresh status/role read -> conditional transition -> status log/notification.
+  // Without this, an owner may read stale PENDING_APPROVAL while the renter
+  // commits CANCELLED and then an unconditional update(id) resurrects it.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
   if (!order) return { error: "订单不存在或状态不允许" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
     data: { status: 'PENDING_PICKUP' },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
@@ -385,13 +393,17 @@ export async function rejectRentalOrderTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  // R3D02C02: reject shares the same order row mutex with renter cancellation
+  // and approve; fresh PENDING_APPROVAL is checked only AFTER FOR UPDATE.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
   if (!order) return { error: "订单不存在或状态不允许" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
     data: {
       status: 'REJECTED',
       cancellationNote: input.rejectReason,
@@ -400,6 +412,7 @@ export async function rejectRentalOrderTx(
       cancelledAt: new Date(),
     },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   // Repair 4 / RB-04 secondary-copy rule：rejectReason 是 user free text，
   // 唯一权威保存在 RentalOrder.cancellationNote（由 lifecycle/erasure 策略
