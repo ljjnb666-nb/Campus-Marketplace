@@ -8,7 +8,8 @@ if(ast.parseDiagnostics.length)throw Error("R3D02C01_SOURCE_PARSE");
 const fns=[
  "writeStatusLog","isRentalOrderRoleParticipant","canCancelRentalOrder",
  "counterpartyId","approveRentalOrderTx","rejectRentalOrderTx",
- "confirmPickupTx","cancelRentalOrderTx","requestReturnTx"
+ "confirmPickupTx","cancelRentalOrderTx","requestReturnTx",
+ "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -20,7 +21,48 @@ const imports=[
  'import { prepareActiveAccountMutation } from "./lib/governance/active-account-mutation.ts";',
  'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { computeRentalCompletedBookedValue, recordLiquidityTransactionCompletionFactsTx } from "./lib/analytics/liquidity-domain-events.ts";',
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
+// Reversibly relocate the ORIGINAL canonical liquidity writer, not a stub:
+// completion emits two DomainEvents plus projection AsyncJob intents.
+const analyticsName="analytics/liquidity-domain-events.ts";
+const canonical=path.join(path.dirname(sourcePath),analyticsName);
+const target=path.join(root,analyticsName);
+const original=fs.readFileSync(canonical,"utf8");
+if(fs.readFileSync(target,"utf8")!==original)
+ throw Error("R3D02C04_ANALYTICS_SOURCE_PROVENANCE_DRIFT");
+const rewrites=[];
+const mapped=original.replace(/(["'])@\/lib\/([a-z0-9/-]+)\1/g,
+ (whole,q,mod)=>{
+   const dest=path.resolve(root,mod+".ts");
+   if(!fs.existsSync(dest))throw Error("R3D02C04_UNMAPPED_CANONICAL_"+mod.replaceAll("/","_"));
+   let rel=path.relative(path.dirname(target),dest).replaceAll(path.sep,"/");
+   if(!rel.startsWith("."))rel="./"+rel;
+   const to=q+rel+q;rewrites.push({from:whole,to});return to;
+ }).replace(/(["'])@prisma\/client\1/g,(whole,q)=>{
+   const dest=path.resolve(root,"../../generated/prisma/client.ts");
+   if(!fs.existsSync(dest))throw Error("R3D02C04_CLIENT_UNAVAILABLE");
+   let rel=path.relative(path.dirname(target),dest).replaceAll(path.sep,"/");
+   if(!rel.startsWith("."))rel="./"+rel;
+   const to=q+rel+q;rewrites.push({from:whole,to});return to;
+ });
+if(/["']@\/lib\//.test(mapped)||/["']@prisma\/client["']/.test(mapped))
+ throw Error("R3D02C04_UNRELOCATED_IMPORT");
+const grouped=new Map();
+for(const {from,to} of rewrites){
+ const previous=grouped.get(to);
+ if(previous&&previous.from!==from)throw Error("R3D02C04_AMBIGUOUS_IMPORT");
+ grouped.set(to,{from,count:(previous?.count??0)+1});
+}
+let recovered=mapped;
+for(const [to,{from,count}] of [...grouped.entries()].reverse()){
+ if(recovered.split(to).length-1!==count)throw Error("R3D02C04_IMPORT_COUNT_DRIFT");
+ recovered=recovered.split(to).join(from);
+}
+if(recovered!==original)throw Error("R3D02C04_CANONICAL_SOURCE_CHANGED");
+fs.writeFileSync(target,mapped);
+console.log("[worker-cycle] PASS R3D02C04 authentic liquidity event/counter canonical writer import provenance");
+
 console.log("[worker-cycle] PASS R3D02C01 exact original rental approval/pickup/cancel AST declarations");
