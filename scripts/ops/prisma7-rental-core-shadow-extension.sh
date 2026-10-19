@@ -10,6 +10,9 @@ set -euo pipefail
  echo '[worker-cycle][FAIL] R3D02C01 requires authentic R3D02B02 shadow prerequisites' >&2
  exit 1
 }
+# R3D02C04: immutable original canonical DomainEvent liquidity writer.
+mkdir -p "$sandbox/r3d02/lib/analytics"
+cp src/lib/analytics/liquidity-domain-events.ts "$sandbox/r3d02/lib/analytics/liquidity-domain-events.ts"
 cp scripts/ops/prisma7-rental-core-prepare.cjs.txt "$sandbox/r3d02/rental-prepare.cjs"
 cp scripts/ops/prisma7-rental-core-probe.ts.txt "$sandbox/r3d02/rental-core-probe.ts"
 # Networkless extraction of the unmodified production TS function declarations.
@@ -52,11 +55,25 @@ if ! timeout --signal=TERM --kill-after=10s 195s docker run --rm \
  >"$tmp/r3d02c01-runtime.log" 2>&1; then
  node - "$tmp/r3d02c01-runtime.log" <<'SAFE_RUNTIME'
 const fs=require("node:fs"),raw=fs.readFileSync(process.argv[2],"utf8");
-const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C01_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-4]_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const categories={
+ prisma:/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw),
+ import:/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw),
+ timeout:/timed out|timeout/i.test(raw),
+ syntax:/SyntaxError|Transform failed|Unexpected token/.test(raw),
+ type:/TypeError/.test(raw),reference:/ReferenceError/.test(raw),
+ domain:/DomainEvent|DOMAIN_EVENT/.test(raw),
+ runtime:/Error:|error:|ERROR:/.test(raw),
+ assertion:/R3D02C04_|R3D02C01_/.test(raw)
+};
+const frames=[...raw.matchAll(/(?:\/shadow\/r3d02\/)?([a-z0-9-]+\.(?:ts|js)):(\d+):(\d+)/gi)]
+ .slice(0,5).map(x=>({file:x[1],line:Number(x[2]),column:Number(x[3])}));
+const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-4]) [^\r\n]+/g)]
+ .slice(-8).map(x=>x[1]);
 console.log("[worker-cycle] R3D02C01 sanitized runtime codes="+JSON.stringify(codes)+
- " prisma="+/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw)+
- " import="+/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw)+
- " timeout="+/timed out|timeout/i.test(raw));
+ " categories="+JSON.stringify(categories)+
+ " frames="+JSON.stringify(frames)+
+ " priorMarkers="+JSON.stringify(marker));
 SAFE_RUNTIME
  echo '[worker-cycle][FAIL] R3D02C01 original rental real PostgreSQL probe' >&2
  exit 1
@@ -104,3 +121,28 @@ grep -qF 'PASS R3D02C03 original return, status log and notification atomic roll
 }
 echo '[worker-cycle] PASS R3D02C03 original renter return request, CAS, guard, replay and rollback on Prisma7 PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C03 terminal opponent is a controlled database writer, not full original confirmReturnTx/claims/dispute; no production v7 cutover proof'
+
+# R3D02C04: every independent original confirm-return assertion is mandatory.
+grep -qF 'PASS R3D02C04 authentic liquidity event/counter canonical writer import provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 exact liquidity writer provenance missing' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real original owner completion with canonical ledger, deposit, counters and durable photo union' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 damaged return defers ledger and preserves owner inspection against late renter' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 return roles, cross-campus and inactive actor fail closed' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real concurrent owner confirmations one winner and no duplicate liquidity facts' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 abort restores RentalOrder/ReturnRecord/StatusLog/DomainEvent/counters' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+grep -qF 'PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C04 required original return evidence absent' >&2; exit 1;
+}
+echo '[worker-cycle] PASS R3D02C04 original confirmReturnTx, canonical liquidity events/projection, deposit, evidence and rollback via real v7 PG'
+echo '[worker-cycle] LIMIT R3D02C04 owner-authoritative completion retained; claim/dispute writer interaction and production v7 cutover not fully verified'

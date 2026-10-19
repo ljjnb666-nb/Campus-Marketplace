@@ -901,4 +901,47 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("not full original confirmReturnTx");
   });
 
+
+  it("R3D02C04 locks original return confirmation, never overwrites evidence and uses canonical liquidity writer", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/rental-order-machine.ts");
+    const prep=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const proof=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const canonical=read("src/lib/analytics/liquidity-domain-events.ts");
+    const start=src.indexOf("export async function confirmReturnTx(");
+    const end=src.indexOf("export async function cancelRentalOrderTx(",start);
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const fn=src.slice(start,end);
+    expect(fn).toContain("await prepareActiveAccountMutation(tx, input.userId)");
+    expect(fn).toContain('SELECT "id" FROM "RentalOrder" WHERE "id" = ${orderId} FOR UPDATE');
+    expect(fn.indexOf("FOR UPDATE")).toBeLessThan(fn.indexOf("tx.rentalOrder.findFirst("));
+    expect(fn).toContain("[...new Set([...(order.returnRecord?.photos ?? []), ...photos])]");
+    expect(fn).toContain("!order.returnRecord?.ownerConfirmed");
+    expect(fn).toContain("role === 'owner' && order.status !== 'PENDING_RETURN'");
+    expect(fn).toContain("tx.rentalOrder.updateMany({");
+    expect(fn).toContain("where: { id: orderId, ownerId: userId, status: 'PENDING_RETURN' }");
+    expect(fn).toContain('throw new Error("RENTAL_RETURN_ORDER_STATE_CONFLICT")');
+    expect(fn).not.toContain("await tx.rentalOrder.update({");
+    expect(prep).toContain('"confirmReturnTx"');
+    expect(prep).toContain('"depositStatusAfterCompletion"');
+    expect(prep).toContain('"incrementRentalCompletionCounters"');
+    expect(prep).toContain("R3D02C04_CANONICAL_SOURCE_CHANGED");
+    expect(prep).toContain("recordLiquidityTransactionCompletionFactsTx");
+    expect(canonical).toContain("recordDomainEventTx(tx");
+    expect(shell).toContain("src/lib/analytics/liquidity-domain-events.ts");
+    expect(shell).toContain("PASS R3D02C04 authentic liquidity event/counter canonical writer import provenance");
+    for(const marker of ["CANONICAL_COMPLETE_EVENTS",
+      "CANONICAL_PROJECTION_JOB","ONCE_ONLY_PARTICIPATION_COUNTS",
+      "MERGED_EVIDENCE_AND_OWNER_AUTHORITY","LATE_RENTER_CLOBBERED_OWNER",
+      "CONCURRENT_OWNER_LEDGER_COUNTER_DUP","ROLLBACK_CROSS_DOMAIN_WRITES",
+      "OWNER_CONFIRM_ROW_LOCK_NOT_OBSERVED","DISPUTE_OVERWRITTEN_BY_RETURN"]){
+      expect(proof).toContain(marker);
+    }
+    expect(proof).toContain("pg_blocking_pids(");
+    expect(proof).toContain("R3D02C04_FORCED_ABORT_AFTER_LEDGER");
+    expect(shell).toContain("not fully verified");
+  });
+
 });

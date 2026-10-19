@@ -579,6 +579,9 @@ export async function confirmReturnTx(
   await prepareActiveAccountMutation(tx, input.userId);
 
   const { orderId, userId, role, photos, hasDamage, needsCleaning, accessoriesComplete } = input;
+  // R3D02C04: same order-row mutex as requestReturn/dispute writers.
+  // The ACTIVE actor lock always precedes this row lock.
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: { in: ['PENDING_RETURN', 'PENDING_INSPECTION'] } },
     include: {
@@ -588,15 +591,27 @@ export async function confirmReturnTx(
   });
   if (!order) return { error: "订单状态错误" };
   if (!isRentalOrderRoleParticipant(order, role, userId)) return { error: "无权操作" };
+  // The owner is the final inspection authority, and can only finalize a
+  // pending return. A renter may still acknowledge a pending damage review.
+  if (role === 'owner' && order.status !== 'PENDING_RETURN') {
+    return { error: "订单状态错误" };
+  }
 
+  // Merge evidence monotonically: one participant cannot replace, clear or
+  // reorder an earlier participant's referenced photos.
+  const mergedPhotos = [...new Set([...(order.returnRecord?.photos ?? []), ...photos])];
   const dataToUpdate: Record<string, unknown> = {
-    photos: photos.length ? photos : undefined,
-    hasDamage,
-    needsCleaning,
-    accessoriesComplete,
-    inspectionNote: input.inspectionNote || undefined,
+    photos: mergedPhotos,
+    [role === 'owner' ? 'ownerConfirmed' : 'renterConfirmed']: true,
   };
-  dataToUpdate[role === 'owner' ? 'ownerConfirmed' : 'renterConfirmed'] = true;
+  // Once the owner has confirmed, a later renter acknowledgement must never
+  // overwrite the owner's inspection findings or private inspection note.
+  if (role === 'owner' || !order.returnRecord?.ownerConfirmed) {
+    Object.assign(dataToUpdate, {
+      hasDamage, needsCleaning, accessoriesComplete,
+      inspectionNote: input.inspectionNote || undefined,
+    });
+  }
 
   if (order.returnRecord && ((role === 'owner' && order.returnRecord.ownerConfirmed) || (role === 'renter' && order.returnRecord.renterConfirmed))) {
     return { error: "不能重复确认" };
@@ -606,7 +621,7 @@ export async function confirmReturnTx(
     where: { orderId },
     create: {
       orderId,
-      photos,
+      photos: mergedPhotos,
       hasDamage,
       needsCleaning,
       accessoriesComplete,
@@ -622,8 +637,8 @@ export async function confirmReturnTx(
     const nextStatus = hasDamage ? 'PENDING_INSPECTION' : 'COMPLETED';
     const depStatus = nextStatus === 'COMPLETED' ? depositStatusAfterCompletion(order) : order.depositStatus;
 
-    await tx.rentalOrder.update({
-      where: { id: orderId },
+    const moved = await tx.rentalOrder.updateMany({
+      where: { id: orderId, ownerId: userId, status: 'PENDING_RETURN' },
       data: {
         actualReturnTime: now,
         status: nextStatus,
@@ -631,6 +646,9 @@ export async function confirmReturnTx(
         depositStatus: depStatus,
       },
     });
+    // The return record has already been written in this transaction; a lost
+    // CAS must abort the WHOLE transaction, not commit a partial record.
+    if (moved.count !== 1) throw new Error("RENTAL_RETURN_ORDER_STATE_CONFLICT");
 
     await writeStatusLog(tx, {
       orderId,

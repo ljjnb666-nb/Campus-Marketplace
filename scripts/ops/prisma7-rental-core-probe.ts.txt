@@ -4,11 +4,11 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
- approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx
+ approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
- RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND
+ RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND
 } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -21,9 +21,10 @@ const root=new PrismaClient({adapter:new PrismaPg({
 const db=root.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
 const owner="r3d01-seller",renter="r3d01-buyer",outsider="r3d01-outsider";
 const listingId="r3d01-rental-listing";
+const campus="r3d01-campus-a";
 const kinds=[RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
  RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND];
-async function fixture(id:string,status:"PENDING_APPROVAL"|"PENDING_PICKUP"|"IN_RENTAL"|"PICKED_UP"|"OVERDUE"="PENDING_APPROVAL"){
+async function fixture(id:string,status:"PENDING_APPROVAL"|"PENDING_PICKUP"|"IN_RENTAL"|"PICKED_UP"|"OVERDUE"|"PENDING_RETURN"|"PENDING_INSPECTION"="PENDING_APPROVAL"){
  const orderId="r3d02c01-"+id;
  await root.rentalOrder.create({data:{
   id:orderId,orderNumber:"R3D02C01-"+id,rentalListingId:listingId,
@@ -48,6 +49,11 @@ const cancel=(id:string,userId=renter)=>run(tx=>cancelRentalOrderTx(tx,{
 const requestReturn=(id:string,userId=renter)=>run(tx=>requestReturnTx(tx,{orderId:id,userId}));
 const pickup=(id:string,userId:string,role:"owner"|"renter",photos:string[])=>
  run(tx=>confirmPickupTx(tx,{orderId:id,userId,role,photos}));
+const confirmReturn=(id:string,actor:string,role:"owner"|"renter",photos:string[],
+ hasDamage=false,inspectionNote?:string)=>run(tx=>confirmReturnTx(tx,{
+ orderId:id,userId:actor,role,photos,hasDamage,needsCleaning:false,
+ accessoriesComplete:true,inspectionNote
+}));
 const succeeds=(x:{success?:boolean;error?:string})=>x.success===true;
 async function snapshot(id:string){
  const [order,logs,notes,handover,domain,outbox]=await Promise.all([
@@ -339,4 +345,196 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
  assert(rev.order.status==="PICKED_UP"&&rev.logs.length===0&&
   rev.notes.length===0,"RETURN_ABORT_LEAK");
  console.log("[worker-cycle] PASS R3D02C03 original return, status log and notification atomic rollback");
+
+ {
+ // R3D02C04: renter evidence must survive an owner completion. Authentic
+ // canonical analytics DomainEvents + projection intents, not fake writers.
+ const done=await fixture("return-complete","PENDING_RETURN");
+ await root.rentalOrder.update({where:{id:done},data:{
+  depositAmount:"50.00",depositStatus:"PAID",rentalAmount:"7.50"
+ }});
+ const countBefore=await Promise.all([
+  root.user.findUniqueOrThrow({where:{id:owner}}),
+  root.user.findUniqueOrThrow({where:{id:renter}})
+ ]);
+ assert(succeeds(await confirmReturn(done,renter,"renter",["renter-photo"],true,
+  "renter preliminary")),"RENTER_RETURN_CONFIRM");
+ assert((await root.rentalOrder.findUniqueOrThrow({where:{id:done}})).status===
+  "PENDING_RETURN","RENTER_PREMATURE_COMPLETION");
+ assert(succeeds(await confirmReturn(done,owner,"owner",["owner-photo"],false,
+  "owner inspected")),"OWNER_RETURN_CONFIRM");
+ const completed=await root.rentalOrder.findUniqueOrThrow({where:{id:done}});
+ const record=await root.rentalReturnRecord.findUniqueOrThrow({where:{orderId:done}});
+ const statusLogs=await root.rentalOrderStatusLog.findMany({where:{orderId:done}});
+ const notes=await root.notification.findMany({where:{
+  kind:RENTAL_RETURN_CONFIRMED_KIND,dedupeKey:{contains:done}
+ }});
+ assert(completed.status==="COMPLETED"&&completed.depositStatus==="PENDING_REFUND"&&
+  completed.actualReturnTime!==null&&completed.completedAt!==null,
+  "COMPLETE_AND_DEPOSIT_STATUS");
+ assert(record.ownerConfirmed&&record.renterConfirmed&&record.hasDamage===false&&
+  record.inspectionNote==="owner inspected"&&record.photos.join(",")===
+  "renter-photo,owner-photo","MERGED_EVIDENCE_AND_OWNER_AUTHORITY");
+ assert(statusLogs.length===1&&statusLogs[0].fromStatus==="PENDING_RETURN"&&
+  statusLogs[0].toStatus==="COMPLETED"&&statusLogs[0].operatorId===owner,
+  "COMPLETE_STATUS_LOG");
+ assert(notes.length===1&&notes[0].userId===renter&&
+  notes[0].dedupeKey===RENTAL_RETURN_CONFIRMED_KIND+":"+done+":"+renter&&
+  (notes[0].payload as {hasDamage?:boolean}).hasDamage===false,
+  "CANONICAL_COMPLETE_NOTIFICATION");
+ const events=await root.domainEvent.findMany({where:{aggregateId:done}});
+ assert(events.length===2&&new Set(events.map(e=>e.eventType)).size===2&&
+  events.some(e=>e.eventType==="LIQUIDITY_TRANSACTION_COMPLETED")&&
+  events.some(e=>e.eventType==="LIQUIDITY_TRANSACTION_VALUE_RECORDED")&&
+  events.every(e=>e.campusId===campus),"CANONICAL_COMPLETE_EVENTS");
+ const amount=events.find(e=>e.eventType==="LIQUIDITY_TRANSACTION_VALUE_RECORDED");
+ assert((amount?.payload as {bookedValue?:string})?.bookedValue==="7.50",
+  "COMPLETED_BOOKED_VALUE_EXCLUDES_DEPOSIT");
+ const projection=await root.asyncJob.findMany({where:{
+  kind:"ANALYTICS_PROJECT_DOMAIN_EVENT",dedupeKey:{contains:done}
+ }});
+ // Projection dedupe key may contain eventId rather than aggregateId.
+ const jobsByEvent=await root.asyncJob.findMany({where:{
+  kind:"ANALYTICS_PROJECT_DOMAIN_EVENT",
+  OR:events.map(e=>({dedupeKey:{contains:e.id}}))
+ }});
+ assert(jobsByEvent.length===2&&events.every(e=>jobsByEvent.some(j=>
+  (j.payload as {eventId?:string}).eventId===e.id)),
+  "CANONICAL_PROJECTION_JOB");
+ const countAfter=await Promise.all([
+  root.user.findUniqueOrThrow({where:{id:owner}}),
+  root.user.findUniqueOrThrow({where:{id:renter}})
+ ]);
+ assert(countAfter[0].rentalOwnerCount===countBefore[0].rentalOwnerCount+1&&
+  countAfter[1].rentalRenterCount===countBefore[1].rentalRenterCount+1,
+  "ONCE_ONLY_PARTICIPATION_COUNTS");
+ assert(!succeeds(await confirmReturn(done,owner,"owner",[])),
+  "OWNER_COMPLETION_REPLAY");
+ assert(!succeeds(await confirmReturn(done,renter,"renter",[])),
+  "RENTER_COMPLETION_REPLAY");
+ assert(await root.domainEvent.count({where:{aggregateId:done}})===2&&
+  await root.rentalOrderStatusLog.count({where:{orderId:done}})===1,
+  "REPLAY_DUP_EVENTS");
+ console.log("[worker-cycle] PASS R3D02C04 real original owner completion with canonical ledger, deposit, counters and durable photo union");
+
+ const damage=await fixture("return-damaged","PENDING_RETURN");
+ await root.rentalOrder.update({where:{id:damage},data:{
+  depositAmount:"30.00",depositStatus:"PAID"
+ }});
+ assert(succeeds(await confirmReturn(damage,owner,"owner",["owner-damage"],true,
+  "owner inspection")),"OWNER_DAMAGE_CONFIRM");
+ const d=await root.rentalOrder.findUniqueOrThrow({where:{id:damage}});
+ assert(d.status==="PENDING_INSPECTION"&&d.depositStatus==="PAID"&&
+  d.completedAt===null&&await root.domainEvent.count({where:{aggregateId:damage}})===0,
+  "DAMAGE_NOT_SETTLED");
+ assert(succeeds(await confirmReturn(damage,renter,"renter",
+  ["renter-late"],false,"renter note must not erase owner")),"RENTER_LATE_ACK");
+ const dr=await root.rentalReturnRecord.findUniqueOrThrow({where:{orderId:damage}});
+ assert(dr.hasDamage&&dr.inspectionNote==="owner inspection"&&
+  dr.photos.join(",")==="owner-damage,renter-late"&&dr.ownerConfirmed&&
+  dr.renterConfirmed,"LATE_RENTER_CLOBBERED_OWNER");
+ assert(!succeeds(await confirmReturn(damage,owner,"owner",[],false)),
+  "OWNER_DAMAGE_REPLAY");
+ console.log("[worker-cycle] PASS R3D02C04 damaged return defers ledger and preserves owner inspection against late renter");
+
+ const forbidden=await fixture("return-forbidden","PENDING_RETURN");
+ for(const [actor,role] of [[renter,"owner"],[owner,"renter"],
+  [outsider,"owner"]] as const){
+  assert(!succeeds(await confirmReturn(forbidden,actor,role,["spoofed"])),
+   "ROLE_SPOOF_RETURN");
+ }
+ await root.user.update({where:{id:owner},data:{status:"SUSPENDED"}});
+ let blocked=false;
+ try{await confirmReturn(forbidden,owner,"owner",["blocked"]);}
+ catch(e){blocked=e instanceof Error&&(
+  (e as Error&{code?:string}).code==="AUTH_ACCOUNT_INACTIVE"||
+  e.message.includes("AUTH_ACCOUNT_INACTIVE"));}
+ finally{await root.user.update({where:{id:owner},data:{status:"ACTIVE"}});}
+ assert(blocked&&await root.rentalReturnRecord.count({where:{orderId:forbidden}})===0&&
+  await root.rentalOrderStatusLog.count({where:{orderId:forbidden}})===0,
+  "INACTIVE_OWNER_LEAK");
+ console.log("[worker-cycle] PASS R3D02C04 return roles, cross-campus and inactive actor fail closed");
+
+ const concurrent=await fixture("return-concurrent","PENDING_RETURN");
+ const ownersBefore=(await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount;
+ const [first,second]=await Promise.all([
+  confirmReturn(concurrent,owner,"owner",["photo-a"]),
+  confirmReturn(concurrent,owner,"owner",["photo-b"])
+ ]);
+ assert(Number(succeeds(first))+Number(succeeds(second))===1,
+  "CONCURRENT_OWNER_DOUBLE_WIN");
+ assert((await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount===
+  ownersBefore+1&&await root.domainEvent.count({where:{aggregateId:concurrent}})===2&&
+  await root.rentalReturnRecord.count({where:{orderId:concurrent}})===1,
+  "CONCURRENT_OWNER_LEDGER_COUNTER_DUP");
+ console.log("[worker-cycle] PASS R3D02C04 real concurrent owner confirmations one winner and no duplicate liquidity facts");
+
+ const rollbackId=await fixture("return-rollback-owner","PENDING_RETURN");
+ const rollbackCount=(await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount;
+ let abortedOwner=false;
+ try{await db.$transaction(async tx=>{
+  assert(succeeds(await confirmReturnTx(tx,{
+   orderId:rollbackId,userId:owner,role:"owner",
+   photos:["must-rollback"],hasDamage:false,needsCleaning:false,
+   accessoriesComplete:true
+  })),"ABORT_WRITER_NOT_REACHED");
+  assert(await tx.domainEvent.count({where:{aggregateId:rollbackId}})===2,
+   "ABORT_EVENTS_NOT_WRITTEN");
+  throw Error("R3D02C04_FORCED_ABORT_AFTER_LEDGER");
+ },{maxWait:5000,timeout:15000});}
+ catch(e){abortedOwner=e instanceof Error&&
+  e.message==="R3D02C04_FORCED_ABORT_AFTER_LEDGER";}
+ assert(abortedOwner,"ABORT_NOT_SEEN");
+ assert((await root.rentalOrder.findUniqueOrThrow({where:{id:rollbackId}})).status===
+  "PENDING_RETURN"&&await root.rentalReturnRecord.count({where:{orderId:rollbackId}})===0&&
+  await root.rentalOrderStatusLog.count({where:{orderId:rollbackId}})===0&&
+  await root.domainEvent.count({where:{aggregateId:rollbackId}})===0&&
+  (await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount===rollbackCount,
+  "ROLLBACK_CROSS_DOMAIN_WRITES");
+ console.log("[worker-cycle] PASS R3D02C04 abort restores RentalOrder/ReturnRecord/StatusLog/DomainEvent/counters");
+
+ // Deterministic rival transition: actual PG row lock, not timing guess.
+ const disputeRace=await fixture("return-dispute-race","PENDING_RETURN");
+ let releaseDispute!:()=>void,disputeReady!:()=>void,ownerReady!:()=>void;
+ const disputeGate=new Promise<void>(res=>releaseDispute=res);
+ const disputeHeld=new Promise<void>(res=>disputeReady=res);
+ const ownerStarted=new Promise<void>(res=>ownerReady=res);
+ const disputed=db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${disputeRace} FOR UPDATE`;
+  await tx.rentalOrder.update({where:{id:disputeRace},data:{status:"IN_DISPUTE"}});
+  disputeReady();
+  await disputeGate;
+ },{maxWait:5000,timeout:15000});
+ await disputeHeld;
+ let ownerPid=0;
+ const ownerAttempt=db.$transaction(async tx=>{
+  ownerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+  ownerReady();
+  return confirmReturnTx(tx,{
+   orderId:disputeRace,userId:owner,role:"owner",photos:["cannot-leak"],
+   hasDamage:false,needsCleaning:false,accessoriesComplete:true
+  });
+ },{maxWait:5000,timeout:15000});
+ await ownerStarted;
+ let wasBlocked=false;
+ try{
+  for(let i=0;i<110;i++){
+   const blockers=await root.$queryRaw<Array<{blocked:boolean}>>`
+    SELECT COALESCE(array_length(pg_blocking_pids(${ownerPid}::int),1),0)>0 AS blocked
+   `;
+   if(blockers[0]?.blocked){wasBlocked=true;break;}
+   await new Promise(res=>setTimeout(res,30));
+  }
+  assert(wasBlocked,"OWNER_CONFIRM_ROW_LOCK_NOT_OBSERVED");
+ }finally{releaseDispute();}
+ const [ownerOutcome]=await Promise.all([ownerAttempt,disputed]);
+ assert(!succeeds(ownerOutcome),"DISPUTE_OVERWRITTEN_BY_RETURN");
+ const disputeEnd=await root.rentalOrder.findUniqueOrThrow({where:{id:disputeRace}});
+ assert(disputeEnd.status==="IN_DISPUTE"&&
+  await root.rentalReturnRecord.count({where:{orderId:disputeRace}})===0&&
+  await root.domainEvent.count({where:{aggregateId:disputeRace}})===0,
+  "DISPUTE_RETURN_PARTIAL_WRITE");
+ console.log("[worker-cycle] PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects");
+
+ }
 }finally{await root.$disconnect();}
