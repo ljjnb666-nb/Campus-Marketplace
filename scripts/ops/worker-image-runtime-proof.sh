@@ -95,6 +95,9 @@ for item in "${roles[@]}"; do
             "/app/scripts/ops/prisma7-canonical-writer-shadow-extension.sh",
             "/app/scripts/ops/prisma7-canonical-writer-relocate.cjs.txt",
             "/app/scripts/ops/prisma7-canonical-writer-probe.ts.txt",
+            "/app/scripts/ops/prisma7-product-expiry-prepare.cjs.txt",
+            "/app/scripts/ops/prisma7-product-expiry-probe.ts.txt",
+            "/app/scripts/ops/prisma7-product-expiry-shadow-extension.sh",
           ]) {
             if (fs.existsSync(proofPath)) fail("test-only crash probe leaked into runtime image");
           }
