@@ -4,11 +4,11 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
- approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx
+ approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
- RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND
+ RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND
 } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -22,8 +22,8 @@ const db=root.$extends(softDeleteExtension).$extends(domainEventLedgerExtension)
 const owner="r3d01-seller",renter="r3d01-buyer",outsider="r3d01-outsider";
 const listingId="r3d01-rental-listing";
 const kinds=[RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
- RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND];
-async function fixture(id:string,status:"PENDING_APPROVAL"|"PENDING_PICKUP"="PENDING_APPROVAL"){
+ RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND];
+async function fixture(id:string,status:"PENDING_APPROVAL"|"PENDING_PICKUP"|"IN_RENTAL"|"PICKED_UP"|"OVERDUE"="PENDING_APPROVAL"){
  const orderId="r3d02c01-"+id;
  await root.rentalOrder.create({data:{
   id:orderId,orderNumber:"R3D02C01-"+id,rentalListingId:listingId,
@@ -45,6 +45,7 @@ const cancel=(id:string,userId=renter)=>run(tx=>cancelRentalOrderTx(tx,{
  orderId:id,userId,cancellationReason:"RENTER_CHANGED_PLAN",
  cancellationNote:"private cancellation note"
 }));
+const requestReturn=(id:string,userId=renter)=>run(tx=>requestReturnTx(tx,{orderId:id,userId}));
 const pickup=(id:string,userId:string,role:"owner"|"renter",photos:string[])=>
  run(tx=>confirmPickupTx(tx,{orderId:id,userId,role,photos}));
 const succeeds=(x:{success?:boolean;error?:string})=>x.success===true;
@@ -251,4 +252,91 @@ for(const decision of ["approve","reject"] as const){
  noSyntheticEvents(row);
 }
 console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs owner APPROVE/REJECT row-lock authority and CAS");
+
+ // R3D02C03: real original request-return authority, status and dedupe.
+ const returned=await fixture("return-request","IN_RENTAL");
+ assert(succeeds(await requestReturn(returned)),"RETURN_DENIED");
+ const ret=await snapshot(returned);
+ assert(ret.order.status==="PENDING_RETURN"&&ret.logs.length===1&&
+  ret.logs[0]?.fromStatus==="IN_RENTAL"&&ret.logs[0]?.toStatus==="PENDING_RETURN"&&
+  ret.logs[0]?.operatorId===renter,"RETURN_TRANSITION");
+ singleNote(ret,RENTAL_RETURN_REQUESTED_KIND,returned,owner);
+ noSyntheticEvents(ret);
+ assert(!succeeds(await requestReturn(returned)),"RETURN_REPLAY_WON");
+ assert((await snapshot(returned)).notes.length===1,"RETURN_REPLAY_DUPLICATE");
+ const wrong=await fixture("return-wrong-role","IN_RENTAL");
+ assert(!succeeds(await requestReturn(wrong,owner)),"OWNER_RETURN_BYPASS");
+ assert(!succeeds(await requestReturn(wrong,outsider)),"OUTSIDER_RETURN_BYPASS");
+ assert((await snapshot(wrong)).order.status==="IN_RENTAL","ROLE_CHANGED_ORDER");
+ console.log("[worker-cycle] PASS R3D02C03 original renter request return, canonical notification and replay");
+
+ const inactiveReturn=await fixture("return-inactive","IN_RENTAL");
+ await root.user.update({where:{id:renter},data:{status:"SUSPENDED"}});
+ let deniedReturn=false;
+ try{await requestReturn(inactiveReturn);}catch(e){
+  deniedReturn=e instanceof Error&&(
+   (e as Error&{code?:string}).code==="AUTH_ACCOUNT_INACTIVE"||
+   e.message.includes("AUTH_ACCOUNT_INACTIVE"));
+ }finally{await root.user.update({where:{id:renter},data:{status:"ACTIVE"}});}
+ assert(deniedReturn,"INACTIVE_RENTER_RETURN");
+ const ir=await snapshot(inactiveReturn);
+ assert(ir.order.status==="IN_RENTAL"&&ir.logs.length===0&&ir.notes.length===0,
+  "INACTIVE_WRITES");
+ console.log("[worker-cycle] PASS R3D02C03 rental return ACTIVE guard and no side effects");
+
+ // Controlled terminal DB writer holds an actual RentalOrder FOR UPDATE
+ // mutex until an original return attempt is confirmed blocked in pg.
+ // Does not claim to exercise full original confirmReturnTx.
+ const terminal=await fixture("return-terminal","IN_RENTAL");
+ let release!:()=>void,ready!:()=>void,attempting!:()=>void;
+ const gate=new Promise<void>(r=>{release=r});
+ const held=new Promise<void>(r=>{ready=r});
+ const started=new Promise<void>(r=>{attempting=r});
+ const first=db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${terminal} FOR UPDATE`;
+  await tx.rentalOrder.update({where:{id:terminal},data:{status:"COMPLETED"}});
+  ready();await gate;
+ },{maxWait:5000,timeout:15000});
+ await held;
+ let pid=0;
+ const second=db.$transaction(async tx=>{
+  pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+  attempting();
+  return requestReturnTx(tx,{orderId:terminal,userId:renter});
+ },{maxWait:5000,timeout:15000});
+ await started;
+ let blocked=false;
+ try{
+  for(let i=0;i<110;i++){
+   const x=await root.$queryRaw<Array<{blocked:boolean}>>`
+    SELECT COALESCE(array_length(pg_blocking_pids(${pid}::int),1),0)>0 AS blocked
+   `;
+   if(x[0]?.blocked){blocked=true;break;}
+   await new Promise(r=>setTimeout(r,30));
+  }
+  assert(blocked,"RETURN_ROW_LOCK_WAIT_ABSENT");
+ }finally{release();}
+ const [res]=await Promise.all([second,first]);
+ assert(!succeeds(res),"RETURN_RESURRECTED_COMPLETED");
+ const fin=await snapshot(terminal);
+ assert(fin.order.status==="COMPLETED"&&fin.logs.length===0&&
+  fin.notes.length===0,"RETURN_OVERWROTE_TERMINAL");
+ noSyntheticEvents(fin);
+ console.log("[worker-cycle] PASS R3D02C03 real PostgreSQL terminal row-lock wait and safe fresh status CAS");
+
+ const rollbackReturn=await fixture("return-rollback","PICKED_UP");
+ let abortedReturn=false;
+ try{await run(async tx=>{
+  assert(succeeds(await requestReturnTx(tx,{orderId:rollbackReturn,userId:renter})),
+   "RETURN_ABORT_NOT_REACHED");
+  assert(await tx.rentalOrderStatusLog.count({where:{orderId:rollbackReturn}})===1,
+   "RETURN_ABORT_NO_LOG");
+  throw Error("R3D02C03_FORCED_ABORT_AFTER_RETURN_WRITE");
+ });}catch(e){abortedReturn=e instanceof Error&&
+  e.message==="R3D02C03_FORCED_ABORT_AFTER_RETURN_WRITE";}
+ assert(abortedReturn,"RETURN_ABORT_MISSING");
+ const rev=await snapshot(rollbackReturn);
+ assert(rev.order.status==="PICKED_UP"&&rev.logs.length===0&&
+  rev.notes.length===0,"RETURN_ABORT_LEAK");
+ console.log("[worker-cycle] PASS R3D02C03 original return, status log and notification atomic rollback");
 }finally{await root.$disconnect();}
