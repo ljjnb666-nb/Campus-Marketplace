@@ -17,6 +17,15 @@ on:
       - scripts/ops/prisma7-client-shadow-extension.sh
       - scripts/ops/prisma7-extensions-shadow-extension.sh
       - scripts/ops/prisma7-order-rental-tx-shadow-extension.sh
+      - scripts/ops/prisma7-canonical-writer-shadow-extension.sh
+      - scripts/ops/prisma7-canonical-writer-relocate.cjs.txt
+      - scripts/ops/prisma7-canonical-writer-probe.ts.txt
+      - src/lib/domain-events/domain-event.ts
+      - src/lib/domain-events/domain-event-registry.ts
+      - src/lib/async/outbox.ts
+      - src/lib/async/job-repository.ts
+      - src/lib/async/job-types.ts
+      - src/lib/async/outbox-event-registry.ts
       - src/lib/prisma-soft-delete.ts
       - src/lib/domain-events/domain-event-ledger-extension.ts
       - package.json

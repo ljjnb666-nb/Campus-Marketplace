@@ -55,7 +55,7 @@ timeout 180s docker run --rm \
   --entrypoint npm "campus-marketplace-migrator:$sha" \
   install --prefix /shadow --no-save --package-lock=false \
   --no-audit --no-fund prisma@7.10.1 @prisma/client@7.10.1 \
-  @prisma/adapter-pg@7.10.1 pg@8.16.3 tsx@4.20.5 \
+  @prisma/adapter-pg@7.10.1 pg@8.16.3 tsx@4.20.5 zod@4.1.5 \
   >"$tmp/prisma7-install.log" 2>&1 || install_rc=$?
 if [[ "$install_rc" != 0 ]]; then
   # Classify a failed bootstrap without disclosing arbitrary npm/registry logs

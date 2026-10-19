@@ -634,4 +634,65 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(probe).not.toContain(".env.production");
   });
 
+  it("R3D02A runs real canonical writers/registries with reversible source imports and shadow-only transactions", () => {
+    const script = readFileSync(
+      path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-shadow-extension.sh"),"utf8");
+    const relocate = readFileSync(
+      path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-relocate.cjs.txt"),"utf8");
+    const probe = readFileSync(
+      path.join(process.cwd(),"scripts/ops/prisma7-canonical-writer-probe.ts.txt"),"utf8");
+    const upstream = readFileSync(
+      path.join(process.cwd(),"scripts/ops/prisma7-order-rental-tx-shadow-extension.sh"),"utf8");
+    const cli = readFileSync(
+      path.join(process.cwd(),"scripts/ops/prisma7-cli-shadow-extension.sh"),"utf8");
+    const workflow = readFileSync(
+      path.join(process.cwd(),".github/workflows/worker-image-runtime.yml"),"utf8");
+    const ignore = readFileSync(path.join(process.cwd(),".dockerignore"),"utf8");
+    const image = readFileSync(
+      path.join(process.cwd(),"scripts/ops/worker-image-runtime-proof.sh"),"utf8");
+    for(const name of ["prisma7-canonical-writer-shadow-extension.sh",
+      "prisma7-canonical-writer-relocate.cjs.txt","prisma7-canonical-writer-probe.ts.txt"]){
+      expect(workflow).toContain("scripts/ops/"+name);
+      expect(ignore).toContain("scripts/ops/"+name);
+      expect(image).toContain("/app/scripts/ops/"+name);
+    }
+    expect(upstream).toContain("source scripts/ops/prisma7-canonical-writer-shadow-extension.sh");
+    expect(cli).toContain("tsx@4.20.5 zod@4.1.5");
+    for(const name of ["domain-events/domain-event.ts","domain-events/domain-event-registry.ts",
+      "domain-events/domain-event-ledger-extension.ts","async/outbox.ts",
+      "async/outbox-event-registry.ts","async/job-repository.ts","async/job-types.ts"]){
+      expect(relocate).toContain(name);
+    }
+    expect(relocate).toContain("if(restored!==original)");
+    expect(relocate).toContain("R3D02A_RELOCATION_COUNT_MISMATCH");
+    expect(relocate).toContain("unique.set(change.to,change)");
+    expect(relocate).toContain("original.split(change.from).length-1");
+    expect(relocate).toContain("R3D02A_UNMAPPED_PRODUCTION_DEPENDENCY");
+    expect(script).toContain("src/lib/domain-events/domain-event.ts");
+    expect(script).toContain("src/lib/async/outbox.ts");
+    expect(script).toContain("src/lib/async/job-repository.ts");
+    expect(script).toContain("R3D02A_SHADOW_REQUIRED");
+    expect(script).toContain("R3D02A sanitized machineCodes");
+    expect(script).toContain("CLASSIFY_R3D02A");
+    expect(script).toContain('--read-only --cap-drop ALL');
+    expect(script).toContain('--mount "type=bind,src=$sandbox,dst=/shadow,readonly"');
+    const registry = readFileSync(path.join(process.cwd(),
+      "src/lib/domain-events/domain-event-registry.ts"),"utf8");
+    const canonicalExport = "LIQUIDITY_TRANSACTION_COMPLETED_AGGREGATE_TYPE";
+    expect(registry).toContain("export const "+canonicalExport+" =");
+    expect(probe).toContain(canonicalExport);
+    expect(probe).not.toContain("LIQUIDITY_TRANSACTION_COMPLETED_EVENT_AGGREGATE_TYPE");
+    expect(probe).toContain("recordDomainEventTx(tx,domainIntent(completed))");
+    expect(probe).toContain("recordOutboxEventTx(tx,outboxIntent(expired))");
+    expect(probe).toContain("DOMAIN_EVENT_OCCURRENCE_CONFLICT");
+    expect(probe).toContain("DOMAIN_EVENT_INTENT_CONTRACT_INVALID");
+    expect(probe).toContain("OUTBOX_EVENT_INTENT_CONTRACT_INVALID");
+    expect(probe).toContain("PROJECTION_INTENT_NOT_CANONICAL");
+    expect(probe).toContain("ROLLBACK_ASYNCJOB_MUTATED");
+    expect(probe).toContain("NON_SHADOW_DB");
+    expect(probe).toContain("R3D02A_ABORT_AFTER_ALL_WRITES");
+    expect(script).toContain("does not yet import the production order/rental lifecycle");
+    expect(script).not.toContain(".env.production");
+  });
+
 });
