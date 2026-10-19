@@ -491,4 +491,48 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   (await root.user.findUniqueOrThrow({where:{id:owner}})).rentalOwnerCount===rollbackCount,
   "ROLLBACK_CROSS_DOMAIN_WRITES");
  console.log("[worker-cycle] PASS R3D02C04 abort restores RentalOrder/ReturnRecord/StatusLog/DomainEvent/counters");
+
+ // Deterministic rival transition: actual PG row lock, not timing guess.
+ const disputeRace=await fixture("return-dispute-race","PENDING_RETURN");
+ let releaseDispute!:()=>void,disputeReady!:()=>void,ownerReady!:()=>void;
+ const disputeGate=new Promise<void>(res=>releaseDispute=res);
+ const disputeHeld=new Promise<void>(res=>disputeReady=res);
+ const ownerStarted=new Promise<void>(res=>ownerReady=res);
+ const disputed=db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${disputeRace} FOR UPDATE`;
+  await tx.rentalOrder.update({where:{id:disputeRace},data:{status:"IN_DISPUTE"}});
+  disputeReady();
+  await disputeGate;
+ },{maxWait:5000,timeout:15000});
+ await disputeHeld;
+ let ownerPid=0;
+ const ownerAttempt=db.$transaction(async tx=>{
+  ownerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+  ownerReady();
+  return confirmReturnTx(tx,{
+   orderId:disputeRace,userId:owner,role:"owner",photos:["cannot-leak"],
+   hasDamage:false,needsCleaning:false,accessoriesComplete:true
+  });
+ },{maxWait:5000,timeout:15000});
+ await ownerStarted;
+ let wasBlocked=false;
+ try{
+  for(let i=0;i<110;i++){
+   const blockers=await root.$queryRaw<Array<{blocked:boolean}>>`
+    SELECT COALESCE(array_length(pg_blocking_pids(${ownerPid}::int),1),0)>0 AS blocked
+   `;
+   if(blockers[0]?.blocked){wasBlocked=true;break;}
+   await new Promise(res=>setTimeout(res,30));
+  }
+  assert(wasBlocked,"OWNER_CONFIRM_ROW_LOCK_NOT_OBSERVED");
+ }finally{releaseDispute();}
+ const [ownerOutcome]=await Promise.all([ownerAttempt,disputed]);
+ assert(!succeeds(ownerOutcome),"DISPUTE_OVERWRITTEN_BY_RETURN");
+ const disputeEnd=await root.rentalOrder.findUniqueOrThrow({where:{id:disputeRace}});
+ assert(disputeEnd.status==="IN_DISPUTE"&&
+  await root.rentalReturnRecord.count({where:{orderId:disputeRace}})===0&&
+  await root.domainEvent.count({where:{aggregateId:disputeRace}})===0,
+  "DISPUTE_RETURN_PARTIAL_WRITE");
+ console.log("[worker-cycle] PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects");
+
 }finally{await root.$disconnect();}
