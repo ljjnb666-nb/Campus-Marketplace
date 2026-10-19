@@ -100,3 +100,5 @@ for marker in \
 done
 echo '[worker-cycle] PASS R3D02A authentic domain/outbox/job writers against Prisma7 shadow with registry and atomicity'
 echo '[worker-cycle] LIMIT R3D02A does not yet import the production order/rental lifecycle or notification dispatcher'
+# R3D02B01: exact PROD expiry AST + authentic governance/capability/Outbox.
+source scripts/ops/prisma7-product-expiry-shadow-extension.sh
