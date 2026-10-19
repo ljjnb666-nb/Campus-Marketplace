@@ -10,7 +10,7 @@ const fns=[
  "counterpartyId","approveRentalOrderTx","rejectRentalOrderTx",
  "confirmPickupTx","cancelRentalOrderTx","requestReturnTx",
  "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx",
- "submitDamageClaimTx","respondDamageClaimTx"
+ "submitDamageClaimTx","respondDamageClaimTx","initiateDisputeTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -23,7 +23,7 @@ const imports=[
  'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
  'import { computeRentalCompletedBookedValue, recordLiquidityTransactionCompletionFactsTx } from "./lib/analytics/liquidity-domain-events.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND, RENTAL_DISPUTE_OPENED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
 // Reversibly relocate the ORIGINAL canonical liquidity writer, not a stub:
@@ -67,3 +67,44 @@ fs.writeFileSync(target,mapped);
 console.log("[worker-cycle] PASS R3D02C04 authentic liquidity event/counter canonical writer import provenance");
 
 console.log("[worker-cycle] PASS R3D02C01 exact original rental approval/pickup/cancel AST declarations");
+
+// R3D02C05B: ORIGINAL discipline: only exact source AST declarations.
+const companionFiles=[
+ ["governance/governance-lock.ts",
+  ["GOVERNANCE_SUBJECT_LOCK_NAMESPACE","ascendingStrings","acquireGovernanceSubjectLocks"],
+  'import type { Prisma } from "../../../generated/prisma/client.ts";'],
+ ["privacy/data-hold-service.ts",
+  ["DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE","DISPUTE_HOLD_REASON_CODE","isUniqueViolationOn","createHoldTxLocked"],
+  'import { Prisma, type DataHold, type DataHoldType } from "../../../generated/prisma/client.ts";\nimport { logger } from "../logger.ts";'],
+ ["feature-flags/feature-flag-guard.ts",
+  ["FEATURE_FLAG_LOCK_NAMESPACE","lockIds","NewActivityDisabledError","lockFeatureFlagSharedById","requireNewActivityAllowed"],
+  'import type { Prisma } from "../../../generated/prisma/client.ts";\nimport { NEW_ACTIVITY_FLAG_KEYS, isFlagDisabledForScope, type FeatureFlagKey, type NewActivityKind } from "./feature-flag-registry.ts";']
+];
+for(const [file,names,header] of companionFiles){
+ const origin=path.join(path.dirname(sourcePath),file);
+ const dest=path.join(root,file);
+ const raw=fs.readFileSync(origin,"utf8");
+ const parsed=ts.createSourceFile(origin,raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
+ if(parsed.parseDiagnostics.length)throw Error("R3D02C05B_SOURCE_PARSE_"+file);
+ const sections=names.map(name=>{
+  const matches=parsed.statements.filter(n=>
+   ((ts.isFunctionDeclaration(n)||ts.isClassDeclaration(n))&&n.name?.text===name)||
+   (ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(parsed)===name))
+  );
+  if(matches.length!==1)throw Error("R3D02C05B_SOURCE_DRIFT_"+name);
+  return raw.slice(matches[0].getStart(parsed),matches[0].end);
+ });
+ fs.mkdirSync(path.dirname(dest),{recursive:true});
+ fs.writeFileSync(dest,header.replaceAll("\\n","\n")+"\n"+sections.join("\n\n")+"\n");
+}
+console.log("[worker-cycle] PASS R3D02C05B authentic dispute/governance/hold/feature-flag AST declaration provenance");
+const extraImports=[
+ 'import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";',
+ 'import { assertActiveAccountMutationAllowed } from "./lib/governance/active-account-mutation.ts";',
+ 'import { requireNewActivityAllowed } from "./lib/feature-flags/feature-flag-guard.ts";',
+ 'import { createHoldTxLocked, DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE, DISPUTE_HOLD_REASON_CODE } from "./lib/privacy/data-hold-service.ts";',
+ 'import { isDisputableStatus } from "./lib/rental-dispute-eligibility.ts";',
+ 'import { DISPUTE_ACTIVE_STATUSES, disputeCampusScopeKey } from "./lib/disputes/dispute-scope.ts";',
+ 'import { computeDisputeDueAt } from "./lib/disputes/dispute-sla.ts";'
+];
+fs.writeFileSync(output,extraImports.join("\n")+"\n"+fs.readFileSync(output,"utf8"));
