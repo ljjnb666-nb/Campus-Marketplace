@@ -346,6 +346,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   rev.notes.length===0,"RETURN_ABORT_LEAK");
  console.log("[worker-cycle] PASS R3D02C03 original return, status log and notification atomic rollback");
 
+ {
  // R3D02C04: renter evidence must survive an owner completion. Authentic
  // canonical analytics DomainEvents + projection intents, not fake writers.
  const done=await fixture("return-complete","PENDING_RETURN");
@@ -535,4 +536,5 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   "DISPUTE_RETURN_PARTIAL_WRITE");
  console.log("[worker-cycle] PASS R3D02C04 real PG dispute row-lock stops stale owner completion and side effects");
 
+ }
 }finally{await root.$disconnect();}
