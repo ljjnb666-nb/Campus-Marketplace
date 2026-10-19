@@ -944,4 +944,42 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("not fully verified");
   });
 
+
+  it("R3D02C05A keeps original damage submission/response behind the rental order mutex", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/rental-order-machine.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const names=["submitDamageClaimTx","respondDamageClaimTx"];
+    for(const name of names){
+      const start=src.indexOf("export async function "+name+"(");
+      const end=src.indexOf("export async function ",start+1);
+      expect(start).toBeGreaterThan(0);
+      const fn=src.slice(start,end>start?end:src.length);
+      expect(fn).toContain("prepareActiveAccountMutation(tx, input.userId)");
+      expect(fn).toContain('SELECT "id" FROM "RentalOrder" WHERE "id" =');
+      expect(fn.indexOf("FOR UPDATE")).toBeLessThan(fn.indexOf("tx.rentalDamageClaim.create(")>0
+        ?fn.indexOf("tx.rentalDamageClaim.create("):
+         fn.indexOf("tx.rentalDamageClaim.updateMany("));
+      expect(prepare).toContain('"'+name+'"');
+    }
+    const submitStart=src.indexOf("export async function submitDamageClaimTx(");
+    const submitEnd=src.indexOf("export async function respondDamageClaimTx(");
+    const submit=src.slice(submitStart,submitEnd);
+    expect(submit).toContain("where: { orderId: order.id, resolvedAt: null }");
+    expect(submit).toContain("索赔金额必须大于零");
+    const response=src.slice(submitEnd,src.indexOf("export async function initiateDisputeTx(",submitEnd));
+    expect(response).toContain("select: { orderId: true }");
+    expect(response).toContain("claim.orderId !== candidate.orderId");
+    expect(response).toContain("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
+    expect(prepare).toContain("RENTAL_DAMAGE_CLAIM_RESPONDED_KIND");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(probe).toContain("CLAIM_SUBMIT_ROW_WAIT_NOT_OBSERVED");
+    expect(probe).toContain("CLAIM_RESPONSE_ROW_WAIT_NOT_OBSERVED");
+    expect(probe).toContain("DUPLICATE_UNRESOLVED_CLAIM_ALLOWED");
+    expect(probe).toContain("CLAIM_COMPLETION_COUNT_ONCE");
+    expect(shell).toContain("PASS R3D02C05A real dispute row-lock blocks stale response");
+  });
+
 });
