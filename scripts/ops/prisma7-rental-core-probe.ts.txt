@@ -1046,6 +1046,30 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
  // R3D02C06B: FULL original createRentalOrderTx vs FULL original approveExtensionTx.
  // Never replace original capability-gate, moderation, liquidity/notifications.
  {
+  // R3D01's fixture creates Users without CampusMembership rows. Existing
+  // obligation paths need only ACTIVE actor; NEW rental creation correctly
+  // requires ACTIVE campus membership for both parties. Supply canonical
+  // membership records in this isolated test, never bypass the real gate.
+  for(const userId of [owner,renter]){
+   const membership=await root.campusMembership.findUnique({
+    where:{userId_campusId:{userId,campusId:campus}}
+   });
+   if(!membership){
+    await root.campusMembership.create({data:{
+     userId,campusId:campus,status:"ACTIVE"
+    }});
+   }else{
+    assert(membership.status==="ACTIVE","CREATE_PARTICIPANT_MEMBERSHIP_INACTIVE");
+   }
+  }
+  const activeMembers=await root.campusMembership.findMany({
+   where:{userId:{in:[owner,renter]},campusId:campus,status:"ACTIVE"}
+  });
+  assert(activeMembers.length===2,"CREATE_BOTH_CAMPUS_MEMBERSHIPS_REQUIRED");
+  assert(await root.riskState.count({where:{
+   userId:{in:[owner,renter]},state:"RESTRICTED"
+  }})===0,"CREATE_PARTICIPANT_RISK_FIXTURE");
+  console.log("[worker-cycle] PASS R3D02C06B canonical ACTIVE memberships for original new-obligation eligibility gate");
   const make=async(name:string,slot:number)=>{
    const id=await fixture("create-vs-extension-"+name,"IN_RENTAL");
    const startTime=new Date(Date.now()+(1300+slot*10)*86400000);
