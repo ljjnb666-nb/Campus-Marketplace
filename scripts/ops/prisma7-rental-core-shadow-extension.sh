@@ -344,3 +344,31 @@ grep -qF 'PASS R3D02C07B02 original terminal after all writes forced PG rollback
 }
 echo '[worker-cycle] PASS R3D02C07B02 original locked RBAC/auth admin terminal, exact DataHold release, audit, canonical notices, concurrency and rollback'
 echo '[worker-cycle] LIMIT R3D02C07B02 original TxLocked kernel exercised with shadow real PG transaction, not full production withTransaction or Prisma7 application server'
+
+# R3D02C07B03: authentic original claim/release + terminal reconciliation.
+grep -qF 'PASS R3D02C07B03 original claim/release/authority AST provenance and real-PG-only transaction binder' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B03 exact original claim/release with campus RBAC, assignment, dueAt, hold and audit replay integrity' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B03 authentic two-reviewer claim uses RentalDispute row mutex and one audit only' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B03 original admin terminal blocks subsequent claim/release and emits canonical facts once' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B03 original claim and append-only audit fully rollback on forced outer PG transaction error' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B03 original release and audit forced PG rollback preserves assignment, SLA and holds; retry commits once' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 release rollback + retry proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07B03 original claim/release true PG locking, campus RBAC, idempotency, terminal denial and rollback'
+echo '[worker-cycle] LIMIT R3D02C07B03 only outer withTransaction bound to shadow PG; full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED'
