@@ -1121,4 +1121,46 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("original admin authorization, audit, notifications, DataHold release writer NOT VERIFIED");
   });
 
+
+  it("R3D02C07B02 requires original authorized TxLocked dispute terminal, canonical audit and PG contention", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const orig=read("src/lib/disputes/dispute-service.ts");
+    const prep=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const rbac=read("src/lib/rbac/service.ts");
+    const hold=read("src/lib/privacy/data-hold-service.ts");
+    const admin=read("src/lib/governance/admin-audit.ts");
+    expect(orig).toContain("async function resolveDisputeTxLocked(");
+    expect(orig).toContain("await requireDisputeReviewAuthorization(tx, input.actorId");
+    expect(orig).toContain("await releaseHoldsBySourceTxLocked(tx");
+    expect(orig).toContain("await recordAdminAudit(");
+    expect(orig).toContain("await emitNotificationsTx(");
+    expect(hold).toContain("export async function releaseHoldsBySourceTxLocked(");
+    expect(admin).toContain("export async function recordAdminAudit(");
+    expect(rbac).toContain("export async function loadAuthorizationContext(");
+    expect(rbac).toContain("export async function requirePermissionInContext(");
+    expect(prep).toContain('astDeclaration(terminalRaw,terminalSrc,n)');
+    expect(prep).toContain('"resolveDisputeTxLocked"');
+    expect(prep).toContain('"requireDisputeReviewAuthorization"');
+    expect(prep).toContain('"releaseHoldsBySourceTxLocked"');
+    expect(prep).toContain('"loadAuthorizationContext"');
+    expect(prep).toContain('"recordAdminAudit"');
+    expect(prep).toContain("R3D02C07B02_TERMINAL_DOMAIN_DRIFT");
+    expect(probe).toContain("executeOriginalDisputeTerminalTx(");
+    expect(probe).toContain("AUTH_CAMPUS_SCOPE_MISMATCH");
+    expect(probe).toContain("TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
+    expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_PERMISSION_BYPASS");
+    expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_FIXTURE");
+    expect(probe).toContain("abortStatusLogCount");
+    expect(shell).toContain("R3D02C07B02 suspended reviewer or membership fail-closed proof missing");
+    expect(probe).toContain("TERMINAL_RELEASE_TOUCHED_UNRELATED_HOLD");
+    expect(probe).toContain("TERMINAL_CANONICAL_NOTICE_OR_MONEY_CHANGED");
+    expect(probe).toContain("TERMINAL_TWO_REVIEWERS_LOCK_WAIT_NOT_OBSERVED");
+    expect(probe).toContain("TERMINAL_ABORT_LEFT_PARTIAL_AUTH_AUDIT_HOLD_NOTICE");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(shell).toContain("PASS R3D02C07B02 original locked RBAC/auth admin terminal");
+    expect(shell).toContain("original TxLocked kernel exercised with shadow real PG transaction");
+  });
+
 });

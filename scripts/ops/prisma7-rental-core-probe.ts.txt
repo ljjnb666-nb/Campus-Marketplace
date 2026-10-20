@@ -15,6 +15,8 @@ import {
  RENTAL_REVIEW_PUBLISHED_KIND
 } from "./lib/notifications/notification-registry.ts";
 import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
+import { executeOriginalDisputeTerminalTx } from "./lib/disputes/dispute-terminal-original.ts";
+import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
 const url=process.env.DATABASE_URL!;
@@ -1453,5 +1455,288 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    "TERMINAL_TIME_POLICY_AFTER_RESTORE");
   await unchanged(blind.id,blind.reviews);
   console.log("[worker-cycle] PASS R3D02C07B01 original blindUntil policy remains query-time and dispute-aware after terminal restoration");
+ }
+
+ // R3D02C07B02: ACTUAL unmodified resolveDisputeTxLocked, lock-time
+ // central RBAC, source-linked hold-release, append-only audit, canonical
+ // notification, visibility + real serializability on PG. Only the outer
+ // transaction is passed by the isolated probe instead of production
+ // withTransaction; original core body and all domain dependencies are exact.
+ {
+  const permission=await root.permission.upsert({
+   where:{key:"dispute.review"},
+   create:{key:"dispute.review",description:"r3d02 reviewer capability"},
+   update:{}
+  });
+  const reviewerRole=await root.role.create({data:{
+   key:"R3D02C07B02_CAMPUS_REVIEWER",name:"isolated rental reviewer",
+   scope:"CAMPUS",rolePermissions:{create:{permissionId:permission.id}}
+  }});
+  const createReviewer=async(id:string,email:string,targetCampus=campus)=>{
+   await root.user.create({data:{
+    id,name:"Shadow Review Operator",email,passwordHash:"isolated",
+    schoolName:"Shadow Campus",campusId:targetCampus,status:"ACTIVE"
+   }});
+   await root.campusMembership.create({data:{userId:id,campusId:targetCampus,status:"ACTIVE"}});
+   await root.userRoleAssignment.create({data:{
+    userId:id,roleId:reviewerRole.id,campusId:targetCampus,
+    scopeKey:"CAMPUS:"+targetCampus
+   }});
+   return id;
+  };
+  const reviewer=await createReviewer("r3d02c07b02-admin",
+   "r3d02c07b02-admin@isolated.invalid");
+  const secondReviewer=await createReviewer("r3d02c07b02-admin2",
+   "r3d02c07b02-admin2@isolated.invalid");
+  const outsiderUser=await root.user.findUniqueOrThrow({where:{id:outsider}});
+  const wrongCampus=await createReviewer("r3d02c07b02-wrongcampus",
+   "r3d02c07b02-wrongcampus@isolated.invalid",outsiderUser.campusId);
+  // Keep genuine permission grants while disabling the account or campus
+  // membership independently: both authorization axes must fail closed.
+  const inactiveReviewer=await createReviewer("r3d02c07b02-inactive-account",
+   "r3d02c07b02-inactive-account@isolated.invalid");
+  await root.user.update({where:{id:inactiveReviewer},data:{status:"SUSPENDED"}});
+  const inactiveMembershipReviewer=await createReviewer("r3d02c07b02-inactive-campus",
+   "r3d02c07b02-inactive-campus@isolated.invalid");
+  const membershipChange=await root.campusMembership.updateMany({
+   where:{userId:inactiveMembershipReviewer,campusId:campus},
+   data:{status:"SUSPENDED"}
+  });
+  assert(membershipChange.count===1,"TERMINAL_INACTIVE_MEMBERSHIP_FIXTURE");
+  const credentials=await root.userRoleAssignment.findMany({where:{
+   userId:{in:[reviewer,secondReviewer,wrongCampus,inactiveReviewer,inactiveMembershipReviewer]},
+   roleId:reviewerRole.id
+  }});
+  assert(credentials.length===5,"TERMINAL_AUTH_REAL_ROLE_ASSIGNMENTS");
+  const terminal=(disputeId:string,actorId=reviewer,
+   action:"RESTORE_PREVIOUS"|"CLOSE_ORDER"="RESTORE_PREVIOUS",
+   resolutionCode:"MUTUAL_AGREEMENT"|null|undefined=undefined,
+   racePoint?:any)=>run(tx=>executeOriginalDisputeTerminalTx(tx,{
+    actorId,disputeId,resolutionAction:action,
+    resolutionCode:resolutionCode===undefined
+     ?(action==="CLOSE_ORDER"?null:"MUTUAL_AGREEMENT"):resolutionCode,
+    adminNote:"private admin text NEVER for notice/audit",
+    racePoint
+   },async inner=>{
+    const r=await inner.rentalDispute.findUnique({where:{id:disputeId},
+     select:{order:{select:{ownerId:true,renterId:true}}}});
+    if(!r)throw Error("R3D02C07B02_NO_DISPUTE_DISCOVERY");
+    return r.order;
+   }));
+  const denied=async(fn:()=>Promise<unknown>,expectedCode:string)=>{
+   try{await fn();return false}catch(e){return !!e&&typeof e==="object"&&
+    "code" in e&&(e as {code:string}).code===expectedCode}
+  };
+  const createDispute=async(label:string,published=true)=>{
+   const id=await fixture("original-terminal-"+label,"IN_RENTAL");
+   const completedAt=new Date();
+   await root.rentalOrder.update({where:{id},data:{status:"COMPLETED",completedAt}});
+   if(published){
+    for(const actor of [renter,owner]){
+     const reviewResult=await run(tx=>submitRentalReviewTx(tx,{
+      orderId:id,userId:actor,overallRating:actor===renter?5:4
+     }));
+     assert(succeeds(reviewResult),"TERMINAL_SETUP_REVIEW");
+    }
+   }
+   const openResult=await run(tx=>initiateDisputeTx(tx,{
+    orderId:id,userId:owner,reason:"private dispute evidence",
+    evidencePhotos:[]
+   }));
+   assert(succeeds(openResult),"TERMINAL_SETUP_ORIGINAL_DISPUTE");
+   const dis=await root.rentalDispute.findFirstOrThrow({where:{orderId:id}});
+   assert(dis.status==="OPEN"&&dis.openedFromOrderStatus==="COMPLETED",
+    "TERMINAL_ORIGINAL_DISPUTE_SOURCE_STATUS");
+   return {orderId:id,disputeId:dis.id,completedAt};
+  };
+  const visible=(id:string)=>root.rentalReview.count({
+   where:visibleRentalReviewCondition({now:new Date(),orderWhere:{id}})
+  });
+  const notes=(id:string)=>root.notification.findMany({where:{
+   kind:RENTAL_DISPUTE_RESOLVED_KIND,dedupeKey:{contains:id}
+  }});
+  const audit=(id:string)=>root.adminLog.findMany({where:{
+   targetType:"RENTAL_DISPUTE",targetId:id
+  }});
+  const activeHolds=(id:string)=>root.dataHold.findMany({where:{
+   sourceType:"RENTAL_DISPUTE",sourceId:id,status:"ACTIVE"
+  }});
+
+  // Wrong campus has real dispute.review grant and active membership
+  // at another campus. No-grant renter must also fail. No hold, audit,
+  // review or canonical notification may change.
+  const auth=await createDispute("authorization");
+  assert(await denied(()=>terminal(auth.disputeId,wrongCampus),"AUTH_CAMPUS_SCOPE_MISMATCH"),
+   "TERMINAL_CAMPUS_PERMISSION_BYPASS");
+  assert(await denied(()=>terminal(auth.disputeId,renter),"AUTH_PERMISSION_DENIED"),
+   "TERMINAL_NON_ADMIN_PERMISSION_BYPASS");
+  assert(await denied(()=>terminal(auth.disputeId,inactiveReviewer),"AUTH_ACCOUNT_INACTIVE"),
+   "TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
+  assert(await denied(()=>terminal(auth.disputeId,inactiveMembershipReviewer),"AUTH_CAMPUS_SCOPE_MISMATCH"),
+   "TERMINAL_INACTIVE_MEMBERSHIP_PERMISSION_BYPASS");
+  assert((await root.rentalDispute.findUniqueOrThrow({where:{id:auth.disputeId}})).status==="OPEN"&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:auth.orderId}})).status==="IN_DISPUTE"&&
+   (await activeHolds(auth.disputeId)).length===2&&
+   (await audit(auth.disputeId)).length===0&&
+   (await notes(auth.disputeId)).length===0&&
+   await visible(auth.orderId)===0,
+   "TERMINAL_DENIAL_WROTE_EFFECTS");
+  console.log("[worker-cycle] PASS R3D02C07B02 original campus-scoped RBAC and lock-time authorization rejects foreign reviewer and unprivileged renter");
+  console.log("[worker-cycle] PASS R3D02C07B02 original RBAC rejects suspended account and suspended campus membership despite assigned review permission");
+
+  // Genuine original RESTORE_PREVIOUS from COMPLETED restores review
+  // visibility atomically, releases ONLY source-linked dispute holds.
+  const restoration=await createDispute("restore");
+  await root.dataHold.create({data:{
+   type:"LEGAL",subjectId:owner,subjectType:"USER",
+   reasonCode:"UNRELATED_LEGAL",sourceType:"LEGAL",
+   sourceId:"r3d02c07b02-unrelated-legal"
+  }});
+  const valueBefore=await root.rentalOrder.findUniqueOrThrow({where:{id:restoration.orderId}});
+  const ledgerCount=await root.domainEvent.count({where:{aggregateId:restoration.orderId}});
+  const result=await terminal(restoration.disputeId);
+  const resolved=await root.rentalDispute.findUniqueOrThrow({where:{id:restoration.disputeId}});
+  const order=await root.rentalOrder.findUniqueOrThrow({where:{id:restoration.orderId}});
+  const released=await root.dataHold.findMany({where:{
+   sourceType:"RENTAL_DISPUTE",sourceId:restoration.disputeId
+  }});
+  const adminEvents=await audit(restoration.disputeId);
+  const noticeRows=await notes(restoration.disputeId);
+  const statusLogs=await root.rentalOrderStatusLog.findMany({where:{
+   orderId:restoration.orderId
+  }});
+  assert(result.status==="RESOLVED"&&result.orderStatus==="COMPLETED"&&
+   result.releasedHolds===2&&resolved.status==="RESOLVED"&&
+   resolved.resolutionCode==="MUTUAL_AGREEMENT"&&
+   resolved.resolutionAction==="RESTORE_PREVIOUS"&&
+   resolved.resolvedById===reviewer&&order.status==="COMPLETED"&&
+   await visible(restoration.orderId)===2,
+   "TERMINAL_ORIGINAL_RESTORE_DID_NOT_REEXPOSE");
+  assert(released.length===2&&released.every(h=>h.status==="RELEASED"&&
+   h.releasedAt!==null&&h.releasedById===reviewer)&&
+   await root.dataHold.count({where:{
+    sourceType:"LEGAL",sourceId:"r3d02c07b02-unrelated-legal",status:"ACTIVE"
+   }})===1,
+   "TERMINAL_RELEASE_TOUCHED_UNRELATED_HOLD");
+  assert(adminEvents.length===1&&adminEvents[0].action==="DISPUTE_RESOLVED"&&
+   adminEvents[0].adminId===reviewer&&
+   adminEvents[0].detail===null&&
+   !JSON.stringify(adminEvents[0].metadata).includes("private admin text")&&
+   statusLogs.filter(x=>x.fromStatus==="IN_DISPUTE"&&x.toStatus==="COMPLETED").length===1,
+   "TERMINAL_ORIGINAL_ADMIN_AUDIT_OR_LOG");
+  assert(noticeRows.length===2&&
+   new Set(noticeRows.map(n=>n.userId)).has(owner)&&
+   new Set(noticeRows.map(n=>n.userId)).has(renter)&&
+   noticeRows.every(n=>!n.content.includes("private"))&&
+   order.depositStatus===valueBefore.depositStatus&&
+   order.depositAmount.toFixed(2)===valueBefore.depositAmount.toFixed(2)&&
+   await root.domainEvent.count({where:{aggregateId:restoration.orderId}})===ledgerCount,
+   "TERMINAL_CANONICAL_NOTICE_OR_MONEY_CHANGED");
+  assert(await denied(()=>terminal(restoration.disputeId),"DISPUTE_TERMINAL")&&
+   (await notes(restoration.disputeId)).length===2&&
+   (await audit(restoration.disputeId)).length===1,
+   "TERMINAL_REPLAY_WROTE_DUPLICATE_FACTS");
+  console.log("[worker-cycle] PASS R3D02C07B02 original RESTORE_PREVIOUS releases exact two holds, audits, sends two canonical notices, preserves money and restores review visibility");
+
+  const closed=await createDispute("closed");
+  const closeResult=await terminal(closed.disputeId,reviewer,"CLOSE_ORDER",undefined);
+  const closedStatus=await root.rentalOrder.findUniqueOrThrow({where:{id:closed.orderId}});
+  assert(closeResult.status==="CLOSED"&&closeResult.orderStatus==="CLOSED"&&
+   closeResult.releasedHolds===2&&closedStatus.status==="CLOSED"&&
+   await visible(closed.orderId)===0&&(await notes(closed.disputeId)).length===2&&
+   (await audit(closed.disputeId)).length===1&&
+   (await activeHolds(closed.disputeId)).length===0,
+   "TERMINAL_CLOSE_ORDER_LEAK");
+  console.log("[worker-cycle] PASS R3D02C07B02 original CLOSE_ORDER leaves immutable published review hidden and releases exact holds");
+
+  const legacy=await createDispute("legacy-missing-previous");
+  await root.rentalDispute.update({where:{id:legacy.disputeId},data:{
+   openedFromOrderStatus:null
+  }});
+  assert(await denied(()=>terminal(legacy.disputeId),"DISPUTE_RESTORE_UNAVAILABLE")&&
+   (await activeHolds(legacy.disputeId)).length===2&&
+   (await notes(legacy.disputeId)).length===0&&
+   (await audit(legacy.disputeId)).length===0,
+   "TERMINAL_LEGACY_MISSING_PREVIOUS_FAIL_OPEN");
+  console.log("[worker-cycle] PASS R3D02C07B02 original legacy missing previous order state fails closed without releasing holds");
+
+  // Two genuinely authorized campus reviewers compete on the same dispute.
+  // The second transaction MUST wait behind first reviewer ordered USER
+  // and dispute/order row locks. Exactly one terminal audit and two notices.
+  const racing=await createDispute("race");
+  let go!:()=>void,locked!:()=>void,queued!:()=>void;
+  const gate=new Promise<void>(r=>go=r),ready=new Promise<void>(r=>locked=r),
+   started=new Promise<void>(r=>queued=r);
+  const first=db.$transaction(async tx=>executeOriginalDisputeTerminalTx(tx,{
+   actorId:reviewer,disputeId:racing.disputeId,
+   resolutionAction:"RESTORE_PREVIOUS",resolutionCode:"MUTUAL_AGREEMENT",
+   racePoint:async()=>{locked();await gate;}
+  },async inner=>{
+   const x=await inner.rentalDispute.findUniqueOrThrow({where:{id:racing.disputeId},
+    select:{order:{select:{ownerId:true,renterId:true}}}});
+   return x.order;
+  }),{maxWait:5000,timeout:15000});
+  await ready;
+  let pid=0;
+  const other=db.$transaction(async tx=>{
+   pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   queued();
+   return executeOriginalDisputeTerminalTx(tx,{
+    actorId:secondReviewer,disputeId:racing.disputeId,
+    resolutionAction:"CLOSE_ORDER"
+   },async inner=>{
+    const x=await inner.rentalDispute.findUniqueOrThrow({where:{id:racing.disputeId},
+     select:{order:{select:{ownerId:true,renterId:true}}}});
+    return x.order;
+   });
+  },{maxWait:5000,timeout:15000});
+  await started;
+  let observed=false;
+  try{
+   for(let i=0;i<110;i++){
+    const rows=await root.$queryRaw<Array<{blocked:boolean}>>`
+     SELECT COALESCE(array_length(pg_blocking_pids(${pid}::int),1),0)>0 AS blocked
+    `;
+    if(rows[0]?.blocked){observed=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(observed,"TERMINAL_TWO_REVIEWERS_LOCK_WAIT_NOT_OBSERVED");
+  }finally{go()}
+  const [win,lost]=await Promise.allSettled([first,other]);
+  assert(win.status==="fulfilled"&&lost.status==="rejected"&&
+   !!lost.reason&&lost.reason.code==="DISPUTE_TERMINAL"&&
+   (await notes(racing.disputeId)).length===2&&
+   (await audit(racing.disputeId)).length===1&&
+   (await activeHolds(racing.disputeId)).length===0,
+   "TERMINAL_TWO_REVIEWERS_BOTH_WON");
+  console.log("[worker-cycle] PASS R3D02C07B02 two authentic campus reviewers serialize under original ordered locks; only winner audits and notifies");
+
+  const abort=await createDispute("forced-abort");
+  const abortStatusLogCount=await root.rentalOrderStatusLog.count({where:{orderId:abort.orderId}});
+  let rolledBack=false;
+  try{await db.$transaction(async tx=>{
+   const r=await executeOriginalDisputeTerminalTx(tx,{
+    actorId:reviewer,disputeId:abort.disputeId,
+    resolutionAction:"RESTORE_PREVIOUS",resolutionCode:"MUTUAL_AGREEMENT"
+   },async inner=>{
+    const x=await inner.rentalDispute.findUniqueOrThrow({where:{id:abort.disputeId},
+     select:{order:{select:{ownerId:true,renterId:true}}}});
+    return x.order;
+   });
+   assert(r.releasedHolds===2,"TERMINAL_ABORT_WRITER_NOT_REACHED");
+   throw Error("R3D02C07B02_FORCED_ABORT");
+  },{maxWait:5000,timeout:15000})}catch(e){
+   rolledBack=e instanceof Error&&e.message==="R3D02C07B02_FORCED_ABORT";
+  }
+  assert(rolledBack&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:abort.orderId}})).status==="IN_DISPUTE"&&
+   (await root.rentalDispute.findUniqueOrThrow({where:{id:abort.disputeId}})).status==="OPEN"&&
+   (await activeHolds(abort.disputeId)).length===2&&
+   (await root.rentalOrderStatusLog.count({where:{orderId:abort.orderId}}))===abortStatusLogCount&&
+   (await audit(abort.disputeId)).length===0&&
+   (await notes(abort.disputeId)).length===0&&
+   await visible(abort.orderId)===0,
+   "TERMINAL_ABORT_LEFT_PARTIAL_AUTH_AUDIT_HOLD_NOTICE");
+  console.log("[worker-cycle] PASS R3D02C07B02 original terminal after all writes forced PG rollback restores dispute, holds, reviews, audit and canonical notices");
  }
 }finally{await root.$disconnect();}

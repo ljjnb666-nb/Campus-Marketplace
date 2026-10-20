@@ -308,3 +308,39 @@ grep -qF 'PASS R3D02C07B01 original blindUntil policy remains query-time and dis
 }
 echo '[worker-cycle] PASS R3D02C07B01 real original review visibility policy at controlled RESTORE_PREVIOUS and CLOSE_ORDER terminal snapshots'
 echo '[worker-cycle] LIMIT R3D02C07B01 terminal state is test-controlled; original admin authorization, audit, notifications, DataHold release writer NOT VERIFIED'
+
+# R3D02C07B02: mandatory exact-original authorized admin terminal PG proof.
+grep -qF 'PASS R3D02C07B02 exact original dispute terminal, RBAC, source hold release and admin audit AST declarations' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original campus-scoped RBAC and lock-time authorization rejects foreign reviewer and unprivileged renter' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original RBAC rejects suspended account and suspended campus membership despite assigned review permission' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 suspended reviewer or membership fail-closed proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original RESTORE_PREVIOUS releases exact two holds, audits, sends two canonical notices, preserves money and restores review visibility' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original CLOSE_ORDER leaves immutable published review hidden and releases exact holds' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original legacy missing previous order state fails closed without releasing holds' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 two authentic campus reviewers serialize under original ordered locks; only winner audits and notifies' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B02 original terminal after all writes forced PG rollback restores dispute, holds, reviews, audit and canonical notices' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07B02 original locked RBAC/auth admin terminal, exact DataHold release, audit, canonical notices, concurrency and rollback'
+echo '[worker-cycle] LIMIT R3D02C07B02 original TxLocked kernel exercised with shadow real PG transaction, not full production withTransaction or Prisma7 application server'
