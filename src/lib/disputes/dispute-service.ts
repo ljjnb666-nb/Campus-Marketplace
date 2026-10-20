@@ -6,6 +6,7 @@ import type {
 } from "@prisma/client";
 
 import { disputeError } from "@/lib/disputes/errors";
+import { isDisputableStatus } from "@/lib/rental-dispute-eligibility";
 import { DISPUTE_REVIEW_PERMISSION } from "@/lib/disputes/dispute-access";
 import { resolveDisputeScope } from "@/lib/disputes/dispute-scope";
 import { acquireGovernanceSubjectLocks } from "@/lib/governance/governance-lock";
@@ -357,8 +358,13 @@ async function resolveDisputeTxLocked(
   // ---- order 收敛动作（金额字段零修改；refund/押金/payout 为冻结禁区）----
   let nextOrderStatus: RentalOrderStatus;
   if (input.resolutionAction === "RESTORE_PREVIOUS") {
-    // openedFromOrderStatus 缺失 = 历史残缺：DENY，绝不猜历史状态
-    if (dispute.openedFromOrderStatus === null) {
+    // 历史来源必须属于原版 dispute 发起资格白名单：不仅 null，
+    // IN_DISPUTE/CLOSED/CANCELLED 等结构上非法的历史快照也要拒绝。
+    // 否则终局可能已 RESOLVED，却将订单留在 IN_DISPUTE。
+    if (
+      dispute.openedFromOrderStatus === null ||
+      !isDisputableStatus(dispute.openedFromOrderStatus as RentalOrderStatus)
+    ) {
       throw disputeError("DISPUTE_RESTORE_UNAVAILABLE");
     }
     nextOrderStatus = dispute.openedFromOrderStatus as RentalOrderStatus;

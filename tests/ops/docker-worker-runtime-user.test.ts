@@ -1149,6 +1149,10 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(prep).toContain("R3D02C07B02_TERMINAL_DOMAIN_DRIFT");
     expect(probe).toContain("executeOriginalDisputeTerminalTx(");
     expect(probe).toContain("AUTH_CAMPUS_SCOPE_MISMATCH");
+    expect(probe).toContain("TERMINAL_INVALID_ORIGIN_FAIL_OPEN_");
+    expect(orig).toContain('isDisputableStatus(dispute.openedFromOrderStatus as RentalOrderStatus)');
+    expect(prep).toContain('"DISPUTABLE_STATUSES","isDisputableStatus"');
+    expect(shell).toContain("R3D02C07B02C illegal restore origin fail-closed proof missing");
     expect(probe).toContain("TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
     expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_PERMISSION_BYPASS");
     expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_FIXTURE");

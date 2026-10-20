@@ -288,6 +288,7 @@ const terminalHeader=[
  'import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts";',
  'import { recordAdminAudit } from "../governance/admin-audit.ts";',
  'import { writeStatusLog } from "../../rental-core-extracted.ts";',
+ 'import { isDisputableStatus } from "../rental-dispute-eligibility.ts";',
  'import { DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE, releaseHoldsBySourceTxLocked } from "../privacy/data-hold-service.ts";',
  'import { rbacError } from "../rbac/errors.ts";',
  'import { loadAuthorizationContext, requirePermissionInContext } from "../rbac/service.ts";',
@@ -298,6 +299,14 @@ const terminalHeader=[
 ].join("\n");
 const terminalNames=["requireDisputeReviewAuthorization","resolveDisputeTxLocked"];
 const terminalBody=terminalNames.map(n=>astDeclaration(terminalRaw,terminalSrc,n)).join("\n\n");
+// Exact eligibility authority is shared by original dispute creation and
+// terminal restore. Copy AST declarations, never shadow-reimplement the list.
+const eligibilityPath=path.resolve(path.dirname(sourcePath),"rental-dispute-eligibility.ts");
+const eligibilityRaw=fs.readFileSync(eligibilityPath,"utf8");
+fs.writeFileSync(path.join(root,"rental-dispute-eligibility.ts"),
+ 'import type { RentalOrderStatus } from "../../generated/prisma/client.ts";\n'+
+ ["DISPUTABLE_STATUSES","isDisputableStatus"]
+  .map(n=>astDeclaration(eligibilityRaw,eligibilityPath,n)).join("\n\n")+"\n");
 fs.writeFileSync(terminalOutput,terminalHeader+"\n"+terminalBody+
  '\nexport { resolveDisputeTxLocked as executeOriginalDisputeTerminalTx };\n');
 if(!terminalBody.includes('await requireDisputeReviewAuthorization(tx, input.actorId')||

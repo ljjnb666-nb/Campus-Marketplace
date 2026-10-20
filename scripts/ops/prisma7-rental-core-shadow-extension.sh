@@ -334,6 +334,10 @@ grep -qF 'PASS R3D02C07B02 original legacy missing previous order state fails cl
  echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
  exit 1
 }
+grep -qF 'PASS R3D02C07B02C original RESTORE_PREVIOUS rejects illegal historical enum origins using canonical dispute eligibility' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02C illegal restore origin fail-closed proof missing' >&2
+ exit 1
+}
 grep -qF 'PASS R3D02C07B02 two authentic campus reviewers serialize under original ordered locks; only winner audits and notifies' "$tmp/r3d02c01-runtime.log" || {
  echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
  exit 1
