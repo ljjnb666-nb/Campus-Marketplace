@@ -1071,4 +1071,32 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("original extension wins before create");
   });
 
+
+  it("R3D02C07A pins authentic review, original dispute locks and canonical double-blind visibility", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const original=read("src/lib/rental-order-machine.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const query=read("src/lib/reviews/review-query.ts");
+    for(const name of ["submitRentalReviewTx","recomputeRentalPositiveRate"]){
+      expect(original).toContain("export async function "+name+"(");
+      expect(prepare).toContain('"'+name+'"');
+    }
+    expect(prepare).toContain('"REVIEW_WINDOW_MS"');
+    expect(prepare).toContain('"computeReviewDeadline"');
+    expect(prepare).toContain('"isReviewWindowOpen"');
+    expect(prepare).toContain('"visibleRentalReviewCondition"');
+    expect(prepare).toContain("R3D02C07A original review, window and visible-query AST exact source provenance");
+    expect(query).toContain('status: "COMPLETED"');
+    expect(query).toContain("disputes: { none:");
+    expect(probe).toContain("REVIEW_DISPUTE_FIRST_LOCK_NOT_OBSERVED");
+    expect(probe).toContain("REVIEW_FIRST_DISPUTE_LOCK_NOT_OBSERVED");
+    expect(probe).toContain("REVIEW_BILATERAL_VISIBILITY_AND_PRIVACY");
+    expect(probe).toContain("REVIEW_FORCED_ABORT_WRITES");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(shell).toContain("PASS R3D02C07A original review double-blind");
+    expect(shell).toContain("original review wins then dispute preserves hidden immutable review");
+  });
+
 });

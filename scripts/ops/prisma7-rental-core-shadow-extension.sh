@@ -264,3 +264,31 @@ grep -qF 'PASS R3D02C06B original extension wins before create, real PG waiter, 
 }
 echo '[worker-cycle] PASS R3D02C06B authentic createRentalOrderTx races original extension with canonical events via real PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C06B scoped to same-owner/same-renter capacity races, not full user lifecycle or production Prisma7 cutover'
+
+# R3D02C07A: mandatory original double-blind/review vs dispute concurrency.
+grep -qF 'PASS R3D02C07A original review, window and visible-query AST exact source provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07A original review one-sided blind, bilateral publication, exactly two privacy-safe notifications' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07A original review deadline, duplicate and outsider fail closed' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07A real original dispute wins against review without creating stale review' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07A original review wins then dispute preserves hidden immutable review' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07A original review transaction rollback after forced failure' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07A original review-dispute PG evidence missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07A original review double-blind, canonical visibility, dispute races and rollback on real PG'
+echo '[worker-cycle] LIMIT R3D02C07A excludes full admin dispute resolution and production Prisma7 cutover'
