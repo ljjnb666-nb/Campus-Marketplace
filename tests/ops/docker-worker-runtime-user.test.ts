@@ -1012,4 +1012,32 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("claim completion then original dispute preserves exactly-once ledger");
   });
 
+
+  it("R3D02C06A extracts original extension and peak-capacity SQL, enforcing real PG proof", () => {
+    const read = (p: string) => readFileSync(path.join(process.cwd(), p), "utf8");
+    const original = read("src/lib/rental-order-machine.ts");
+    const prepare = read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe = read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const script = read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const repo = read("src/repositories/rental-order-repository.ts");
+    for (const name of ["requestExtensionTx", "approveExtensionTx", "rejectExtensionTx", "asExtensionOrder"]) {
+      expect(original).toContain("function " + name + "(");
+      expect(prepare).toContain('"' + name + '"');
+    }
+    expect(prepare).toContain('"EXTENSION_ALLOWED_ORDER_STATUSES"');
+    expect(prepare).toContain('"calculateRentalDuration"');
+    expect(prepare).toContain('"calculateRentalAmount"');
+    expect(prepare).toContain('"checkTimeConflict"');
+    expect(prepare).toContain("R3D02C06A original extension, price and peak-capacity SQL exact source AST");
+    expect(repo).toContain('SELECT COALESCE(MAX(occupied), 0) AS "reservedQuantity"');
+    expect(repo).toContain("boundary_order");
+    expect(probe).toContain("EXTENSION_APPROVE_REJECT_DOUBLE_WIN");
+    expect(probe).toContain("EXT_CAPACITY_APPROVAL_UNSAFE");
+    expect(probe).toContain("EXT_MAX_STALE_APPROVAL");
+    expect(probe).toContain("EXT_ABORT_PARTIAL");
+    expect(script).toContain("PASS R3D02C06A real original extension request/approve/reject");
+    expect(script).toContain("original peak-capacity SQL rejects approval");
+    expect(script).toContain("current locked max-duration policy");
+  });
+
 });
