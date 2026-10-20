@@ -28,11 +28,16 @@ const root=new PrismaClient({adapter:new PrismaPg({
 })});
 const db=root.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
 let abortAfterClaimWrites=false;
+let abortAfterReleaseWrites=false;
 bindShadowDisputeTransaction(cb=>db.$transaction(async tx=>{
  const result=await cb(tx);
  if(abortAfterClaimWrites){
   abortAfterClaimWrites=false;
   throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_CLAIM_AUDIT");
+ }
+ if(abortAfterReleaseWrites){
+  abortAfterReleaseWrites=false;
+  throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT");
  }
  return result;
 },{maxWait:5000,timeout:15000}));
@@ -1873,5 +1878,37 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    await holds(aborted.disputeId)===2,
    "CLAIM_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
   console.log("[worker-cycle] PASS R3D02C07B03 original claim and append-only audit fully rollback on forced outer PG transaction error");
+
+  // Release is a distinct transaction path. Verify its status update and
+  // append-only DISPUTE_RELEASED audit cannot partially commit either.
+  const releaseAbort=await setup("release-rollback");
+  assert((await claimDispute({actorId:actorA,disputeId:releaseAbort.disputeId})).outcome==="CLAIMED",
+   "RELEASE_ABORT_CLAIM_PRECONDITION");
+  const beforeRelease=await root.rentalDispute.findUniqueOrThrow({where:{id:releaseAbort.disputeId}});
+  const priorAudit=await audit(releaseAbort.disputeId);
+  assert(beforeRelease.status==="IN_REVIEW"&&beforeRelease.assignedToId===actorA&&
+   priorAudit.length===1&&priorAudit[0].action==="DISPUTE_CLAIMED",
+   "RELEASE_ABORT_WRONG_START_STATE");
+  abortAfterReleaseWrites=true;
+  let releaseThrown=false;
+  try{await releaseDispute({actorId:actorA,disputeId:releaseAbort.disputeId})}
+  catch(e){
+   releaseThrown=e instanceof Error&&
+    e.message==="R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT";
+  }
+  const afterAbort=await root.rentalDispute.findUniqueOrThrow({where:{id:releaseAbort.disputeId}});
+  const afterAudit=await audit(releaseAbort.disputeId);
+  assert(releaseThrown&&!abortAfterReleaseWrites&&
+   afterAbort.status==="IN_REVIEW"&&afterAbort.assignedToId===actorA&&
+   afterAbort.dueAt.getTime()===beforeRelease.dueAt.getTime()&&
+   afterAudit.length===1&&afterAudit[0].action==="DISPUTE_CLAIMED"&&
+   await holds(releaseAbort.disputeId)===2&&await notices(releaseAbort.disputeId)===0,
+   "RELEASE_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+  const recoveredRelease=await releaseDispute({actorId:actorA,disputeId:releaseAbort.disputeId});
+  const finalReleaseAudit=await audit(releaseAbort.disputeId);
+  assert(recoveredRelease.outcome==="RELEASED"&&finalReleaseAudit.length===2&&
+   finalReleaseAudit.filter(x=>x.action==="DISPUTE_RELEASED").length===1,
+   "RELEASE_ABORT_RETRY_NOT_ONCE");
+  console.log("[worker-cycle] PASS R3D02C07B03 original release and audit forced PG rollback preserves assignment, SLA and holds; retry commits once");
  }
 }finally{await root.$disconnect();}
