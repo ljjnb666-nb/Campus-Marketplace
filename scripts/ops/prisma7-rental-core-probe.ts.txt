@@ -1354,4 +1354,104 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    "REVIEW_FORCED_ABORT_WRITES");
   console.log("[worker-cycle] PASS R3D02C07A original review transaction rollback after forced failure");
  }
+
+ // R3D02C07B01: real PostgreSQL terminal snapshots + ORIGINAL canonical
+ // visibleRentalReviewCondition. Controlled terminal writes are only test
+ // state setup; NOT original authorized admin resolveDispute/closeDispute.
+ {
+  const setup=async(name:string,dual:boolean)=>{
+   const id=await fixture("terminal-visibility-"+name,"IN_RENTAL");
+   const completedAt=new Date();
+   await root.rentalOrder.update({where:{id},data:{status:"COMPLETED",completedAt}});
+   const first=await run(tx=>submitRentalReviewTx(tx,{
+    orderId:id,userId:renter,overallRating:5
+   }));
+   assert(succeeds(first),"TERMINAL_REVIEW_FIRST");
+   if(dual)assert(succeeds(await run(tx=>submitRentalReviewTx(tx,{
+    orderId:id,userId:owner,overallRating:4
+   }))),"TERMINAL_REVIEW_SECOND");
+   const reviews=await root.rentalReview.findMany({where:{orderId:id}});
+   const disputed=await run(tx=>initiateDisputeTx(tx,{
+    orderId:id,userId:owner,reason:"synthetic terminal policy",evidencePhotos:[]
+   }));
+   assert(succeeds(disputed),"TERMINAL_DISPUTE_OPEN");
+   const dispute=await root.rentalDispute.findFirstOrThrow({where:{orderId:id}});
+   assert(dispute.openedFromOrderStatus==="COMPLETED"&&dispute.status==="OPEN",
+    "TERMINAL_PREVIOUS_STATUS_AUTHORITY");
+   assert(await root.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:dispute.id,status:"ACTIVE"
+   }})===2,"TERMINAL_TWO_REAL_ORIGINAL_HOLDS");
+   return {id,disputeId:dispute.id,reviews};
+  };
+  const visible=(id:string,now=new Date())=>root.rentalReview.count({
+   where:visibleRentalReviewCondition({now,orderWhere:{id}})
+  });
+  const finalSnapshot=async(id:string,disputeId:string,action:"RESTORE_PREVIOUS"|"CLOSE_ORDER")=>
+   db.$transaction(async tx=>{
+    // Test-controlled coherent terminal pair, not production admin writer.
+    await tx.rentalOrder.update({where:{id},data:{
+     status:action==="RESTORE_PREVIOUS"?"COMPLETED":"CLOSED"
+    }});
+    if(action==="RESTORE_PREVIOUS"){
+     const premature=await tx.rentalReview.count({where:
+      visibleRentalReviewCondition({now:new Date(),orderWhere:{id}})});
+     assert(premature===0,"TERMINAL_PARTIAL_RESTORE_MUST_REMAIN_HIDDEN");
+    }
+    await tx.rentalDispute.update({where:{id:disputeId},data:{
+     status:action==="RESTORE_PREVIOUS"?"RESOLVED":"CLOSED",
+     resolutionAction:action,resolvedAt:new Date()
+    }});
+    const changed=await tx.dataHold.updateMany({where:{
+     sourceType:"RENTAL_DISPUTE",sourceId:disputeId,status:"ACTIVE"
+    },data:{status:"RELEASED",releasedAt:new Date()}});
+    assert(changed.count===2,"TERMINAL_SOURCE_LINKED_HOLD_SNAPSHOT");
+   },{maxWait:5000,timeout:15000});
+  const unchanged=async(id:string,before:Awaited<ReturnType<typeof root.rentalReview.findMany>>)=>{
+   const after=await root.rentalReview.findMany({where:{orderId:id}});
+   assert(before.length===after.length,"TERMINAL_REVIEW_COUNT_CHANGED");
+   for(const a of before){
+    const b=after.find(x=>x.id===a.id);
+    assert(!!b&&b.overallRating===a.overallRating&&
+     b.publishedAt?.getTime()===a.publishedAt?.getTime()&&
+     b.blindUntil.getTime()===a.blindUntil.getTime(),
+     "TERMINAL_IMMUTABLE_REVIEW_CHANGED");
+   }
+  };
+  const restore=await setup("restore",true);
+  const ledgerBefore=await root.domainEvent.count({where:{aggregateId:restore.id}});
+  assert(restore.reviews.length===2&&
+   restore.reviews.every(r=>r.publishedAt!==null)&&
+   await visible(restore.id)===0,"TERMINAL_RESOLVED_PRECONDITION");
+  await finalSnapshot(restore.id,restore.disputeId,"RESTORE_PREVIOUS");
+  assert((await root.rentalOrder.findUniqueOrThrow({where:{id:restore.id}})).status==="COMPLETED"&&
+   (await root.rentalDispute.findUniqueOrThrow({where:{id:restore.disputeId}})).status==="RESOLVED"&&
+   await visible(restore.id)===2&&
+   await root.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:restore.disputeId,status:"ACTIVE"
+   }})===0&&
+   await root.domainEvent.count({where:{aggregateId:restore.id}})===ledgerBefore,
+   "TERMINAL_RESTORE_VISIBILITY_AND_LEDGER");
+  await unchanged(restore.id,restore.reviews);
+  console.log("[worker-cycle] PASS R3D02C07B01 real PG RESTORE_PREVIOUS terminal snapshot reexposes existing published reviews with no ledger drift");
+
+  const closed=await setup("close",true);
+  assert(await visible(closed.id)===0,"TERMINAL_CLOSED_PRECONDITION");
+  await finalSnapshot(closed.id,closed.disputeId,"CLOSE_ORDER");
+  assert((await root.rentalOrder.findUniqueOrThrow({where:{id:closed.id}})).status==="CLOSED"&&
+   (await root.rentalDispute.findUniqueOrThrow({where:{id:closed.disputeId}})).status==="CLOSED"&&
+   await visible(closed.id)===0,"TERMINAL_CLOSED_SHOULD_HIDE");
+  await unchanged(closed.id,closed.reviews);
+  console.log("[worker-cycle] PASS R3D02C07B01 real PG CLOSE_ORDER terminal snapshot keeps immutable published reviews hidden");
+
+  const blind=await setup("blind",false);
+  const future=new Date(Date.now()+8*86400000);
+  assert(blind.reviews.length===1&&blind.reviews[0].publishedAt===null&&
+   await visible(blind.id,future)===0,
+   "TERMINAL_ACTIVE_DISPUTE_OVERRIDES_BLIND_DEADLINE");
+  await finalSnapshot(blind.id,blind.disputeId,"RESTORE_PREVIOUS");
+  assert(await visible(blind.id)===0&&await visible(blind.id,future)===1,
+   "TERMINAL_TIME_POLICY_AFTER_RESTORE");
+  await unchanged(blind.id,blind.reviews);
+  console.log("[worker-cycle] PASS R3D02C07B01 original blindUntil policy remains query-time and dispute-aware after terminal restoration");
+ }
 }finally{await root.$disconnect();}

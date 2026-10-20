@@ -292,3 +292,19 @@ grep -qF 'PASS R3D02C07A original review transaction rollback after forced failu
 }
 echo '[worker-cycle] PASS R3D02C07A original review double-blind, canonical visibility, dispute races and rollback on real PG'
 echo '[worker-cycle] LIMIT R3D02C07A excludes full admin dispute resolution and production Prisma7 cutover'
+
+# R3D02C07B01 controlled terminal snapshot visibility; not admin service.
+grep -qF 'PASS R3D02C07B01 real PG RESTORE_PREVIOUS terminal snapshot reexposes existing published reviews with no ledger drift' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B01 review terminal visibility proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B01 real PG CLOSE_ORDER terminal snapshot keeps immutable published reviews hidden' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B01 review terminal visibility proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07B01 original blindUntil policy remains query-time and dispute-aware after terminal restoration' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B01 review terminal visibility proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07B01 real original review visibility policy at controlled RESTORE_PREVIOUS and CLOSE_ORDER terminal snapshots'
+echo '[worker-cycle] LIMIT R3D02C07B01 terminal state is test-controlled; original admin authorization, audit, notifications, DataHold release writer NOT VERIFIED'
