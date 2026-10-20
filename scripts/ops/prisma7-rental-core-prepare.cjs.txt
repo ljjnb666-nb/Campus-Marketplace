@@ -11,7 +11,8 @@ const fns=[
  "confirmPickupTx","cancelRentalOrderTx","requestReturnTx",
  "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx",
  "submitDamageClaimTx","respondDamageClaimTx","initiateDisputeTx",
- "asExtensionOrder","requestExtensionTx","approveExtensionTx","rejectExtensionTx"
+ "asExtensionOrder","requestExtensionTx","approveExtensionTx","rejectExtensionTx",
+ "recomputeRentalPositiveRate","submitRentalReviewTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -24,7 +25,7 @@ const imports=[
  'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
  'import { computeRentalCompletedBookedValue, recordLiquidityTransactionCompletionFactsTx } from "./lib/analytics/liquidity-domain-events.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND, RENTAL_DISPUTE_OPENED_KIND, RENTAL_EXTENSION_REQUESTED_KIND, RENTAL_EXTENSION_APPROVED_KIND, RENTAL_EXTENSION_REJECTED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND, RENTAL_DISPUTE_OPENED_KIND, RENTAL_EXTENSION_REQUESTED_KIND, RENTAL_EXTENSION_APPROVED_KIND, RENTAL_EXTENSION_REJECTED_KIND, RENTAL_REVIEW_PUBLISHED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
 // Reversibly relocate the ORIGINAL canonical liquidity writer, not a stub:
@@ -247,3 +248,28 @@ fs.appendFileSync(output,[
  'import { RENTAL_ORDER_REQUESTED_KIND } from "./lib/notifications/notification-registry.ts";'
 ].join("\n")+"\n");
 console.log("[worker-cycle] PASS R3D02C06B exact original createRentalOrderTx and original obligation/capability/moderation/attribution/demand writers provenance");
+
+
+// R3D02C07A review integrity and canonical visible review filter from EXACT
+// original source AST, rather than duplicate/faux query policy.
+const integrityFile=path.resolve(path.dirname(sourcePath),"reviews/review-integrity.ts");
+const integrityRaw=fs.readFileSync(integrityFile,"utf8");
+const integrityNames=["REVIEW_WINDOW_MS","computeReviewDeadline","isReviewWindowOpen"];
+const integrityDest=path.join(root,"reviews/review-integrity.ts");
+fs.mkdirSync(path.dirname(integrityDest),{recursive:true});
+fs.writeFileSync(integrityDest,
+ integrityNames.map(n=>astDeclaration(integrityRaw,integrityFile,n)).join("\n\n")+"\n");
+const reviewQueryFile=path.resolve(path.dirname(sourcePath),"reviews/review-query.ts");
+const reviewQueryRaw=fs.readFileSync(reviewQueryFile,"utf8");
+const reviewQueryDest=path.join(root,"reviews/review-query.ts");
+fs.writeFileSync(reviewQueryDest,
+ 'import type { Prisma } from "../../generated/prisma/client.ts";\n'+
+ 'import { DISPUTE_ACTIVE_STATUSES } from "../disputes/dispute-scope.ts";\n'+
+ ["publishedReviewCondition","visibleRentalReviewCondition"]
+ .map(n=>astDeclaration(reviewQueryRaw,reviewQueryFile,n)).join("\n\n")+"\n");
+fs.appendFileSync(output,[
+ 'import { computeReviewDeadline, isReviewWindowOpen } from "./lib/reviews/review-integrity.ts";',
+ 'import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";',
+ 'import { RENTAL_REVIEW_PUBLISHED_KIND } from "./lib/notifications/notification-registry.ts";'
+].join("\n")+"\n");
+console.log("[worker-cycle] PASS R3D02C07A original review, window and visible-query AST exact source provenance");
