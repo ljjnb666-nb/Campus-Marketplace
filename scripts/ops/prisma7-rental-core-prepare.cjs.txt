@@ -144,3 +144,106 @@ fs.appendFileSync(output,[
  'import { checkTimeConflict } from "./lib/rental-order-repository.ts";'
 ].join("\n")+"\n");
 console.log("[worker-cycle] PASS R3D02C06A original extension, price and peak-capacity SQL exact source AST");
+
+
+// R3D02C06B: exact production rental CREATE and its governance/eligibility
+// dependencies. Refuse missing/duplicate AST declarations. No hand-written
+// capability fallback, mock validator, substituted order writer or SQL.
+const createOriginal=astDeclaration(source,sourcePath,"createRentalOrderTx");
+fs.appendFileSync(output,"\n"+createOriginal+"\n");
+const readRel=p=>fs.readFileSync(path.resolve(path.dirname(sourcePath),p),"utf8");
+function originalModule(file,names,imports){
+ const origin=path.resolve(path.dirname(sourcePath),file);
+ const raw=fs.readFileSync(origin,"utf8");
+ const target=path.join(root,file.replace(/^\.\.\//,""));
+ // all paths supplied below relative to src/lib, never absolute
+ const outputFile=path.join(root,file);
+ fs.mkdirSync(path.dirname(outputFile),{recursive:true});
+ fs.writeFileSync(outputFile,imports+"\n"+
+  names.map(n=>astDeclaration(raw,origin,n)).join("\n\n")+"\n");
+}
+const capabilityImports=[
+ 'import type { Prisma } from "../../../generated/prisma/client.ts";',
+ 'import { enforcementError } from "../enforcement/errors.ts";',
+ 'import { rbacError } from "../rbac/errors.ts";',
+ 'import { GLOBAL_SCOPE_KEY, riskScopeKey } from "../enforcement/risk-scope.ts";',
+ 'import { incrementCounter } from "../metrics.ts";'
+].join("\n");
+originalModule("enforcement/capability-gate.ts",[
+ "DEFAULT_CAPABILITY","CAPABILITY_DENIED_METRIC","incrementCapabilityDenied",
+ "findMarketplaceRestrictionScope","evaluateMarketplaceCapability",
+ "requireMarketplaceCapability","requireParticipantsMarketplaceEligible",
+ "marketplaceObligationValidator"
+],capabilityImports);
+originalModule("governance/obligation-guard.ts",["withObligationGuard"],[
+ 'import type { Prisma } from "../../../generated/prisma/client.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "./governance-lock.ts";'
+].join("\n"));
+originalModule("moderation/listing-moderation-query.ts",[
+ "TARGET_FK_FIELD","getActiveListingModeration","hasActiveListingModeration"
+], 'import type { Prisma, ListingModerationTargetType } from "../../../generated/prisma/client.ts";');
+const scopeSrc=readRel("enforcement/risk-scope.ts");
+const rolesPath=path.resolve(path.dirname(sourcePath),"rbac/roles.ts");
+const scopeKey=astDeclaration(scopeSrc,"enforcement/risk-scope.ts","riskScopeKey");
+const rolesSrc=fs.readFileSync(rolesPath,"utf8");
+const globalKey=astDeclaration(rolesSrc,rolesPath,"GLOBAL_SCOPE_KEY");
+fs.writeFileSync(path.join(root,"enforcement/risk-scope.ts"),
+ globalKey+"\n"+scopeKey+"\n");
+const exactCopies=[
+ "metrics.ts","enforcement/errors.ts","rbac/errors.ts"
+];
+for(const file of exactCopies){
+ const target=path.join(root,file);
+ fs.mkdirSync(path.dirname(target),{recursive:true});
+ const origin=readRel(file);
+ fs.writeFileSync(target,origin);
+ if(fs.readFileSync(target,"utf8")!==origin)
+  throw Error("R3D02C06B_EXACT_COPY_DRIFT_"+file);
+}
+const pricingSource=readRel("rental-price.ts");
+fs.appendFileSync(path.join(root,"rental-price.ts"),
+ "\n"+astDeclaration(pricingSource,"rental-price.ts","createRentalOrderNo")+"\n");
+const priceFile=path.join(root,"rental-price.ts");
+fs.writeFileSync(priceFile,'import { randomBytes } from "node:crypto";\n'+
+ fs.readFileSync(priceFile,"utf8"));
+const attrPath=path.resolve(path.dirname(sourcePath),
+ "analytics/order-conversation-attribution.ts");
+const attrRaw=fs.readFileSync(attrPath,"utf8");
+const attrTarget=path.join(root,"analytics/order-conversation-attribution.ts");
+const rewritesAttribution=[];
+let attrRelocated=attrRaw
+ .replace(/(["'])@\/lib\/([a-z0-9/-]+)\1/g,(whole,q,mod)=>{
+  const dest=path.resolve(root,mod+".ts");
+  if(!fs.existsSync(dest))throw Error("R3D02C06B_ATTRIBUTION_DEP_"+mod.replaceAll("/","_"));
+  let rel=path.relative(path.dirname(attrTarget),dest).replaceAll(path.sep,"/");
+  if(!rel.startsWith("."))rel="./"+rel;
+  const next=q+rel+q;
+  rewritesAttribution.push({from:whole,to:next});
+  return next;
+ })
+ .replace(/(["'])@prisma\/client\1/g,(whole,q)=>{
+  const dest=path.resolve(root,"../../generated/prisma/client.ts");
+  if(!fs.existsSync(dest))throw Error("R3D02C06B_CLIENT_MISSING");
+  let rel=path.relative(path.dirname(attrTarget),dest).replaceAll(path.sep,"/");
+  if(!rel.startsWith("."))rel="./"+rel;
+  const next=q+rel+q;
+  rewritesAttribution.push({from:whole,to:next});
+  return next;
+ });
+let restoreAttr=attrRelocated;
+for(const {from,to} of rewritesAttribution.slice().reverse()){
+ if(!restoreAttr.includes(to))throw Error("R3D02C06B_ATTR_REVERSE_DRIFT");
+ restoreAttr=restoreAttr.replace(to,from);
+}
+if(restoreAttr!==attrRaw)throw Error("R3D02C06B_ATTR_SOURCE_PROVENANCE");
+fs.writeFileSync(attrTarget,attrRelocated);
+fs.appendFileSync(output,[
+ 'import { withObligationGuard } from "./lib/governance/obligation-guard.ts";',
+ 'import { marketplaceObligationValidator } from "./lib/enforcement/capability-gate.ts";',
+ 'import { hasActiveListingModeration } from "./lib/moderation/listing-moderation-query.ts";',
+ 'import { recordLiquidityDemandCreatedTx } from "./lib/analytics/liquidity-domain-events.ts";',
+ 'import { recordAttributedOrderIfEligibleTx } from "./lib/analytics/order-conversation-attribution.ts";',
+ 'import { createRentalOrderNo } from "./lib/rental-price.ts";',
+ 'import { RENTAL_ORDER_REQUESTED_KIND } from "./lib/notifications/notification-registry.ts";'
+].join("\n")+"\n");
+console.log("[worker-cycle] PASS R3D02C06B exact original createRentalOrderTx and original obligation/capability/moderation/attribution/demand writers provenance");
