@@ -1491,11 +1491,23 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   const outsiderUser=await root.user.findUniqueOrThrow({where:{id:outsider}});
   const wrongCampus=await createReviewer("r3d02c07b02-wrongcampus",
    "r3d02c07b02-wrongcampus@isolated.invalid",outsiderUser.campusId);
+  // Keep genuine permission grants while disabling the account or campus
+  // membership independently: both authorization axes must fail closed.
+  const inactiveReviewer=await createReviewer("r3d02c07b02-inactive-account",
+   "r3d02c07b02-inactive-account@isolated.invalid");
+  await root.user.update({where:{id:inactiveReviewer},data:{status:"SUSPENDED"}});
+  const inactiveMembershipReviewer=await createReviewer("r3d02c07b02-inactive-campus",
+   "r3d02c07b02-inactive-campus@isolated.invalid");
+  const membershipChange=await root.campusMembership.updateMany({
+   where:{userId:inactiveMembershipReviewer,campusId:campus},
+   data:{status:"SUSPENDED"}
+  });
+  assert(membershipChange.count===1,"TERMINAL_INACTIVE_MEMBERSHIP_FIXTURE");
   const credentials=await root.userRoleAssignment.findMany({where:{
-   userId:{in:[reviewer,secondReviewer,wrongCampus]},
+   userId:{in:[reviewer,secondReviewer,wrongCampus,inactiveReviewer,inactiveMembershipReviewer]},
    roleId:reviewerRole.id
   }});
-  assert(credentials.length===3,"TERMINAL_AUTH_REAL_ROLE_ASSIGNMENTS");
+  assert(credentials.length===5,"TERMINAL_AUTH_REAL_ROLE_ASSIGNMENTS");
   const terminal=(disputeId:string,actorId=reviewer,
    action:"RESTORE_PREVIOUS"|"CLOSE_ORDER"="RESTORE_PREVIOUS",
    resolutionCode:"MUTUAL_AGREEMENT"|null|undefined=undefined,
@@ -1558,12 +1570,19 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    "TERMINAL_CAMPUS_PERMISSION_BYPASS");
   assert(await denied(()=>terminal(auth.disputeId,renter),"AUTH_PERMISSION_DENIED"),
    "TERMINAL_NON_ADMIN_PERMISSION_BYPASS");
-  assert((await activeHolds(auth.disputeId)).length===2&&
+  assert(await denied(()=>terminal(auth.disputeId,inactiveReviewer),"AUTH_ACCOUNT_INACTIVE"),
+   "TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
+  assert(await denied(()=>terminal(auth.disputeId,inactiveMembershipReviewer),"AUTH_CAMPUS_SCOPE_MISMATCH"),
+   "TERMINAL_INACTIVE_MEMBERSHIP_PERMISSION_BYPASS");
+  assert((await root.rentalDispute.findUniqueOrThrow({where:{id:auth.disputeId}})).status==="OPEN"&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:auth.orderId}})).status==="IN_DISPUTE"&&
+   (await activeHolds(auth.disputeId)).length===2&&
    (await audit(auth.disputeId)).length===0&&
    (await notes(auth.disputeId)).length===0&&
    await visible(auth.orderId)===0,
    "TERMINAL_DENIAL_WROTE_EFFECTS");
   console.log("[worker-cycle] PASS R3D02C07B02 original campus-scoped RBAC and lock-time authorization rejects foreign reviewer and unprivileged renter");
+  console.log("[worker-cycle] PASS R3D02C07B02 original RBAC rejects suspended account and suspended campus membership despite assigned review permission");
 
   // Genuine original RESTORE_PREVIOUS from COMPLETED restores review
   // visibility atomically, releases ONLY source-linked dispute holds.
@@ -1693,6 +1712,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   console.log("[worker-cycle] PASS R3D02C07B02 two authentic campus reviewers serialize under original ordered locks; only winner audits and notifies");
 
   const abort=await createDispute("forced-abort");
+  const abortStatusLogCount=await root.rentalOrderStatusLog.count({where:{orderId:abort.orderId}});
   let rolledBack=false;
   try{await db.$transaction(async tx=>{
    const r=await executeOriginalDisputeTerminalTx(tx,{
@@ -1712,6 +1732,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    (await root.rentalOrder.findUniqueOrThrow({where:{id:abort.orderId}})).status==="IN_DISPUTE"&&
    (await root.rentalDispute.findUniqueOrThrow({where:{id:abort.disputeId}})).status==="OPEN"&&
    (await activeHolds(abort.disputeId)).length===2&&
+   (await root.rentalOrderStatusLog.count({where:{orderId:abort.orderId}}))===abortStatusLogCount&&
    (await audit(abort.disputeId)).length===0&&
    (await notes(abort.disputeId)).length===0&&
    await visible(abort.orderId)===0,
