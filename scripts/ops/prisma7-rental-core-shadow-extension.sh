@@ -362,5 +362,9 @@ grep -qF 'PASS R3D02C07B03 original claim and append-only audit fully rollback o
  echo '[worker-cycle][FAIL] R3D02C07B03 original claim/release real PG proof missing' >&2
  exit 1
 }
+grep -qF 'PASS R3D02C07B03 original release and audit forced PG rollback preserves assignment, SLA and holds; retry commits once' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B03 release rollback + retry proof missing' >&2
+ exit 1
+}
 echo '[worker-cycle] PASS R3D02C07B03 original claim/release true PG locking, campus RBAC, idempotency, terminal denial and rollback'
 echo '[worker-cycle] LIMIT R3D02C07B03 only outer withTransaction bound to shadow PG; full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED'
