@@ -1040,4 +1040,35 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(script).toContain("current locked max-duration policy");
   });
 
+
+  it("R3D02C06B preserves the authentic original rental create and same-inventory extension race proofs", () => {
+    const read = (p: string) => readFileSync(path.join(process.cwd(), p), "utf8");
+    const original = read("src/lib/rental-order-machine.ts");
+    const prepare = read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe = read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell = read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(original).toContain("export async function createRentalOrderTx(");
+    expect(original).toContain("withObligationGuard(");
+    expect(original).toContain("marketplaceObligationValidator(");
+    expect(original).toContain("hasActiveListingModeration(");
+    expect(original).toContain("recordLiquidityDemandCreatedTx(");
+    expect(original).toContain("checkTimeConflict(tx, listing.id");
+    expect(prepare).toContain('astDeclaration(source,sourcePath,"createRentalOrderTx")');
+    expect(prepare).toContain('"marketplaceObligationValidator"');
+    expect(prepare).toContain('"withObligationGuard"');
+    expect(prepare).toContain('"hasActiveListingModeration"');
+    expect(prepare).toContain('import { recordAttributedOrderIfEligibleTx } from "./lib/analytics/order-conversation-attribution.ts"');
+    expect(prepare).toContain("R3D02C06B_ATTR_SOURCE_PROVENANCE");
+    expect(prepare).toContain("R3D02C06B exact original createRentalOrderTx");
+    expect(probe).toContain("ORIGINAL_CREATE_FIRST_APPROVE_DID_NOT_WAIT");
+    expect(probe).toContain("EXTENSION_FIRST_CREATE_DID_NOT_WAIT");
+    expect(probe).toContain("ORIGINAL_CREATE_FIRST_DOUBLE_RESERVE");
+    expect(probe).toContain("EXTENSION_FIRST_OVERBOOKED");
+    expect(probe).toContain("pg_blocking_pids(");
+    expect(probe).toContain("availableUnits");
+    expect(shell).toContain("PASS R3D02C06B authentic createRentalOrderTx races original extension");
+    expect(shell).toContain("original create wins before extension approval");
+    expect(shell).toContain("original extension wins before create");
+  });
+
 });
