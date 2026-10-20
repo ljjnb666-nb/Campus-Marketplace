@@ -1093,6 +1093,8 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   // Case A: original creation grabs sorted participant locks and RentalListing
   // FOR UPDATE before extending order. Original approval must be blocked,
   // then detect capacity consumed by the newly committed rental.
+  const availableUnits=(await root.rentalListing.findUniqueOrThrow({where:{id:listingId}})).totalQuantity;
+  assert(Number.isSafeInteger(availableUnits)&&availableUnits>=1,"CREATE_LISTING_UNITS");
   const createWins=await make("new-order-first",0);
   let resume!:()=>void,createHeld!:()=>void,approveStarted!:()=>void;
   const gate=new Promise<void>(r=>resume=r);
@@ -1100,7 +1102,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   const queued=new Promise<void>(r=>approveStarted=r);
   const first=db.$transaction(tx=>createRentalOrderTx(tx,{
    rentalListingId:listingId,userId:renter,
-   startTime:createWins.endTime,endTime:createWins.next,quantity:1
+   startTime:createWins.endTime,endTime:createWins.next,quantity:availableUnits
   },undefined,async()=>{createHeld();await gate}),{
    maxWait:5000,timeout:15000
   });
@@ -1156,7 +1158,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    createStarted();
    return createRentalOrderTx(tx,{
     rentalListingId:listingId,userId:renter,
-    startTime:extensionWins.endTime,endTime:extensionWins.next,quantity:1
+    startTime:extensionWins.endTime,endTime:extensionWins.next,quantity:availableUnits
    });
   },{maxWait:5000,timeout:15000});
   await newOrderQueued;
