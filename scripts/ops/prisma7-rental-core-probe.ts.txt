@@ -5,14 +5,16 @@ import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
  approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx,initiateDisputeTx,
- requestExtensionTx,approveExtensionTx,rejectExtensionTx,createRentalOrderTx
+ requestExtensionTx,approveExtensionTx,rejectExtensionTx,createRentalOrderTx,submitRentalReviewTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_REQUESTED_KIND,RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
  RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND,
  RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,RENTAL_DISPUTE_OPENED_KIND,
- RENTAL_EXTENSION_REQUESTED_KIND,RENTAL_EXTENSION_APPROVED_KIND,RENTAL_EXTENSION_REJECTED_KIND
+ RENTAL_EXTENSION_REQUESTED_KIND,RENTAL_EXTENSION_APPROVED_KIND,RENTAL_EXTENSION_REJECTED_KIND,
+ RENTAL_REVIEW_PUBLISHED_KIND
 } from "./lib/notifications/notification-registry.ts";
+import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
 const url=process.env.DATABASE_URL!;
@@ -1208,5 +1210,148 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    await root.rentalOrderStatusLog.count({where:{orderId:extensionWins.id}})===1,
    "EXTENSION_FIRST_ACCOUNTING_FAILED");
   console.log("[worker-cycle] PASS R3D02C06B original extension wins before create, real PG waiter, no new rental and single accounting update");
+ }
+
+ // R3D02C07A: ORIGINAL review writer and query-time visible policy vs
+ // ORIGINAL full dispute state-machine on isolated real PostgreSQL.
+ {
+  const make=async(name:string)=>{
+   const id=await fixture("r3d02c07a-"+name,"IN_RENTAL");
+   const completedAt=new Date();
+   await root.rentalOrder.update({where:{id},data:{status:"COMPLETED",completedAt}});
+   return {id,completedAt};
+  };
+  const review=(id:string,actor=renter,rating=5)=>
+   run(tx=>submitRentalReviewTx(tx,{
+    orderId:id,userId:actor,overallRating:rating,
+    content:"synthetic confidential rating body"
+   }));
+  const dispute=(id:string)=>run(tx=>initiateDisputeTx(tx,{
+   orderId:id,userId:owner,reason:"synthetic confidential dispute reason",
+   evidencePhotos:[]
+  }));
+  const rows=(id:string)=>root.rentalReview.findMany({where:{orderId:id}});
+  const shown=(id:string)=>root.rentalReview.count({
+   where:visibleRentalReviewCondition({now:new Date(),orderWhere:{id}})
+  });
+  const notice=(id:string)=>root.notification.findMany({
+   where:{kind:RENTAL_REVIEW_PUBLISHED_KIND,dedupeKey:{contains:id}}
+  });
+  const blind=await make("blind");
+  assert(succeeds(await review(blind.id,renter,5)),"REVIEW_FIRST");
+  const [one]=await rows(blind.id);
+  assert(one?.publishedAt===null&&
+   one.blindUntil.getTime()===blind.completedAt.getTime()+7*86400000&&
+   await shown(blind.id)===0&&(await notice(blind.id)).length===0,
+   "REVIEW_BLIND_NO_SIDE_EFFECT");
+  assert(!succeeds(await review(blind.id,renter,4)),"REVIEW_AUTHOR_REPLAY");
+  assert(succeeds(await review(blind.id,owner,3)),"REVIEW_SECOND");
+  const all=await rows(blind.id);
+  const notes=await notice(blind.id);
+  assert(all.length===2&&all.every(v=>v.publishedAt!==null)&&
+   await shown(blind.id)===2&&notes.length===2&&
+   new Set(notes.map(v=>v.userId)).has(owner)&&
+   new Set(notes.map(v=>v.userId)).has(renter)&&
+   notes.every(v=>!v.content.includes("synthetic confidential rating body")),
+   "REVIEW_BILATERAL_VISIBILITY_AND_PRIVACY");
+  console.log("[worker-cycle] PASS R3D02C07A original review one-sided blind, bilateral publication, exactly two privacy-safe notifications");
+
+  const expired=await make("expired");
+  await root.rentalOrder.update({where:{id:expired.id},data:{
+   completedAt:new Date(Date.now()-9*86400000)
+  }});
+  assert(!succeeds(await review(expired.id))&&
+   (await rows(expired.id)).length===0,"REVIEW_7D_DEADLINE");
+  assert(!succeeds(await review(blind.id,outsider)),"REVIEW_OUTSIDER_DENIED");
+  console.log("[worker-cycle] PASS R3D02C07A original review deadline, duplicate and outsider fail closed");
+
+  // Dispute wins: original review must wait behind governance and order mutex.
+  const dFirst=await make("dispute-first");
+  let releaseD!:()=>void,lockedD!:()=>void,queuedR!:()=>void;
+  const gateD=new Promise<void>(r=>releaseD=r),readyD=new Promise<void>(r=>lockedD=r),
+   readyR=new Promise<void>(r=>queuedR=r);
+  const disputeFirst=db.$transaction(tx=>initiateDisputeTx(tx,{
+   orderId:dFirst.id,userId:owner,reason:"real dispute first",evidencePhotos:[],
+   racePoint:async()=>{lockedD();await gateD;}
+  }),{maxWait:5000,timeout:15000});
+  await readyD;
+  let reviewerPid=0;
+  const reviewLater=db.$transaction(async tx=>{
+   reviewerPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   queuedR();
+   return submitRentalReviewTx(tx,{orderId:dFirst.id,userId:renter,overallRating:5});
+  },{maxWait:5000,timeout:15000});
+  await readyR;
+  let waiting=false;
+  try{
+   for(let i=0;i<110;i++){
+    const locks=await root.$queryRaw<Array<{blocked:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${reviewerPid}::int),1),0)>0 AS blocked
+    `;
+    if(locks[0]?.blocked){waiting=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(waiting,"REVIEW_DISPUTE_FIRST_LOCK_NOT_OBSERVED");
+  }finally{releaseD()}
+  const [dw,rl]=await Promise.all([disputeFirst,reviewLater]);
+  assert(succeeds(dw)&&!succeeds(rl)&&
+   (await rows(dFirst.id)).length===0&&await shown(dFirst.id)===0&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:dFirst.id}})).status==="IN_DISPUTE",
+   "REVIEW_DISPUTE_FIRST_STALE_REVIEW");
+  console.log("[worker-cycle] PASS R3D02C07A real original dispute wins against review without creating stale review");
+
+  // Review wins: immutable review exists before dispute, then hidden by
+  // original canonical query when dispute opens from COMPLETED.
+  const rFirst=await make("review-first");
+  let releaseR!:()=>void,lockedR!:()=>void,queuedD!:()=>void;
+  const gateR=new Promise<void>(r=>releaseR=r),readyReview=new Promise<void>(r=>lockedR=r),
+   readyDispute=new Promise<void>(r=>queuedD=r);
+  const reviewFirst=db.$transaction(tx=>submitRentalReviewTx(tx,{
+   orderId:rFirst.id,userId:renter,overallRating:5,
+   afterOrderRowLock:async()=>{lockedR();await gateR;}
+  }),{maxWait:5000,timeout:15000});
+  await readyReview;
+  let disputePid=0;
+  const disputeLater=db.$transaction(async tx=>{
+   disputePid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   queuedD();
+   return initiateDisputeTx(tx,{
+    orderId:rFirst.id,userId:owner,reason:"real review first dispute",evidencePhotos:[]
+   });
+  },{maxWait:5000,timeout:15000});
+  await readyDispute;
+  let blocked=false;
+  try{
+   for(let i=0;i<110;i++){
+    const locks=await root.$queryRaw<Array<{blocked:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${disputePid}::int),1),0)>0 AS blocked
+    `;
+    if(locks[0]?.blocked){blocked=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(blocked,"REVIEW_FIRST_DISPUTE_LOCK_NOT_OBSERVED");
+  }finally{releaseR()}
+  const [rw,dl]=await Promise.all([reviewFirst,disputeLater]);
+  assert(succeeds(rw)&&succeeds(dl)&&
+   (await rows(rFirst.id)).length===1&&await shown(rFirst.id)===0&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:rFirst.id}})).status==="IN_DISPUTE",
+   "REVIEW_FIRST_DISPUTE_VISIBILITY_LEAK");
+  console.log("[worker-cycle] PASS R3D02C07A original review wins then dispute preserves hidden immutable review");
+
+  const abort=await make("abort");
+  let rolled=false;
+  try{await db.$transaction(async tx=>{
+   assert(succeeds(await submitRentalReviewTx(tx,{
+    orderId:abort.id,userId:renter,overallRating:4
+   })),"REVIEW_ABORT_WRITER");
+   throw Error("R3D02C07A_FORCE_ABORT");
+  },{maxWait:5000,timeout:15000})}catch(e){
+   rolled=e instanceof Error&&e.message==="R3D02C07A_FORCE_ABORT";
+  }
+  assert(rolled&&(await rows(abort.id)).length===0&&
+   (await notice(abort.id)).length===0&&
+   (await root.rentalOrder.findUniqueOrThrow({where:{id:abort.id}})).status==="COMPLETED",
+   "REVIEW_FORCED_ABORT_WRITES");
+  console.log("[worker-cycle] PASS R3D02C07A original review transaction rollback after forced failure");
  }
 }finally{await root.$disconnect();}
