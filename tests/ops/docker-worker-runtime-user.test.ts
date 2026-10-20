@@ -1177,6 +1177,9 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(probe).toContain("CLAIM_RELEASE_AUDIT_HOLDS_SLA_OR_REPLAY");
     expect(probe).toContain("CLAIM_REOPENED_AFTER_TERMINAL");
     expect(probe).toContain("CLAIM_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+    expect(probe).toContain("RELEASE_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+    expect(probe).toContain("RELEASE_ABORT_RETRY_NOT_ONCE");
+    expect(shell).toContain("R3D02C07B03 release rollback + retry proof missing");
     expect(shell).toContain("PASS R3D02C07B03 original claim/release true PG locking");
     expect(shell).toContain("full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED");
   });
