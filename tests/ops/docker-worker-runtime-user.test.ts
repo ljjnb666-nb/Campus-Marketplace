@@ -1149,6 +1149,11 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(prep).toContain("R3D02C07B02_TERMINAL_DOMAIN_DRIFT");
     expect(probe).toContain("executeOriginalDisputeTerminalTx(");
     expect(probe).toContain("AUTH_CAMPUS_SCOPE_MISMATCH");
+    expect(probe).toContain("TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
+    expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_PERMISSION_BYPASS");
+    expect(probe).toContain("TERMINAL_INACTIVE_MEMBERSHIP_FIXTURE");
+    expect(probe).toContain("abortStatusLogCount");
+    expect(shell).toContain("R3D02C07B02 suspended reviewer or membership fail-closed proof missing");
     expect(probe).toContain("TERMINAL_RELEASE_TOUCHED_UNRELATED_HOLD");
     expect(probe).toContain("TERMINAL_CANONICAL_NOTICE_OR_MONEY_CHANGED");
     expect(probe).toContain("TERMINAL_TWO_REVIEWERS_LOCK_WAIT_NOT_OBSERVED");
