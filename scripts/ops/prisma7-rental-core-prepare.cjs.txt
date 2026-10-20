@@ -10,7 +10,8 @@ const fns=[
  "counterpartyId","approveRentalOrderTx","rejectRentalOrderTx",
  "confirmPickupTx","cancelRentalOrderTx","requestReturnTx",
  "depositStatusAfterCompletion","incrementRentalCompletionCounters","confirmReturnTx",
- "submitDamageClaimTx","respondDamageClaimTx","initiateDisputeTx"
+ "submitDamageClaimTx","respondDamageClaimTx","initiateDisputeTx",
+ "asExtensionOrder","requestExtensionTx","approveExtensionTx","rejectExtensionTx"
 ];
 const bodies=fns.map(name=>{
  const matches=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);
@@ -18,12 +19,12 @@ const bodies=fns.map(name=>{
  return source.slice(matches[0].getStart(ast),matches[0].end);
 });
 const imports=[
- 'import { Prisma, type RentalOrderStatus, type RentalCancellationReason } from "../generated/prisma/client.ts";',
+ 'import { Prisma, type RentalOrderStatus, type RentalCancellationReason, type RentalPricingUnit } from "../generated/prisma/client.ts";',
  'import { prepareActiveAccountMutation } from "./lib/governance/active-account-mutation.ts";',
  'import type { ActiveAccountMutationSeams } from "./lib/governance/active-account-mutation.ts";',
  'import { emitNotificationsTx } from "./lib/notifications/notification-service.ts";',
  'import { computeRentalCompletedBookedValue, recordLiquidityTransactionCompletionFactsTx } from "./lib/analytics/liquidity-domain-events.ts";',
- 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND, RENTAL_DISPUTE_OPENED_KIND } from "./lib/notifications/notification-registry.ts";'
+ 'import { RENTAL_ORDER_APPROVED_KIND, RENTAL_ORDER_REJECTED_KIND, RENTAL_ORDER_CANCELLED_KIND, RENTAL_PICKUP_CONFIRMED_KIND, RENTAL_RETURN_REQUESTED_KIND, RENTAL_RETURN_CONFIRMED_KIND, RENTAL_DAMAGE_CLAIM_FILED_KIND, RENTAL_DAMAGE_CLAIM_RESPONDED_KIND, RENTAL_DISPUTE_OPENED_KIND, RENTAL_EXTENSION_REQUESTED_KIND, RENTAL_EXTENSION_APPROVED_KIND, RENTAL_EXTENSION_REJECTED_KIND } from "./lib/notifications/notification-registry.ts";'
 ];
 fs.writeFileSync(output,imports.join("\n")+"\n"+bodies.join("\n\n")+"\n");
 // Reversibly relocate the ORIGINAL canonical liquidity writer, not a stub:
@@ -108,3 +109,38 @@ const extraImports=[
  'import { computeDisputeDueAt } from "./lib/disputes/dispute-sla.ts";'
 ];
 fs.writeFileSync(output,extraImports.join("\n")+"\n"+fs.readFileSync(output,"utf8"));
+
+
+// R3D02C06A: copy only exact original extension domain & pricing/capacity
+// functions. Zero emulated availability or fee calculation.
+function astDeclaration(raw,filename,name){
+ const tree=ts.createSourceFile(filename,raw,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
+ if(tree.parseDiagnostics.length)throw Error("R3D02C06A_PARSE_"+name);
+ const candidates=tree.statements.filter(n=>
+  (ts.isFunctionDeclaration(n)&&n.name?.text===name)||
+  (ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(tree)===name))
+ );
+ if(candidates.length!==1)throw Error("R3D02C06A_DRIFT_"+name);
+ return raw.slice(candidates[0].getStart(tree),candidates[0].end);
+}
+const extensionConstants=astDeclaration(source,sourcePath,"EXTENSION_ALLOWED_ORDER_STATUSES");
+fs.appendFileSync(output,"\n"+extensionConstants+"\n");
+const pricePath=path.resolve(path.dirname(sourcePath),"rental-price.ts");
+const priceSrc=fs.readFileSync(pricePath,"utf8");
+const priceFunctions=["UNIT_MS","calculateRentalDuration","calculateRentalAmount"]
+ .map(n=>astDeclaration(priceSrc,pricePath,n));
+const priceTarget=path.join(root,"rental-price.ts");
+fs.writeFileSync(priceTarget,
+ 'import { Prisma } from "../../generated/prisma/client.ts";\n'+
+ priceFunctions.join("\n\n")+"\n");
+const repoPath=path.resolve(path.dirname(sourcePath),"../repositories/rental-order-repository.ts");
+const repoSource=fs.readFileSync(repoPath,"utf8");
+const fn=astDeclaration(repoSource,repoPath,"checkTimeConflict");
+const repoTarget=path.join(root,"rental-order-repository.ts");
+fs.writeFileSync(repoTarget,
+ 'import { Prisma } from "../../generated/prisma/client.ts";\n'+fn+"\n");
+fs.appendFileSync(output,[
+ 'import { calculateRentalDuration, calculateRentalAmount } from "./lib/rental-price.ts";',
+ 'import { checkTimeConflict } from "./lib/rental-order-repository.ts";'
+].join("\n")+"\n");
+console.log("[worker-cycle] PASS R3D02C06A original extension, price and peak-capacity SQL exact source AST");
