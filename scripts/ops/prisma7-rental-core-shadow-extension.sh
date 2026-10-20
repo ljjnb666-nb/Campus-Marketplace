@@ -318,6 +318,10 @@ grep -qF 'PASS R3D02C07B02 original campus-scoped RBAC and lock-time authorizati
  echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
  exit 1
 }
+grep -qF 'PASS R3D02C07B02 original RBAC rejects suspended account and suspended campus membership despite assigned review permission' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07B02 suspended reviewer or membership fail-closed proof missing' >&2
+ exit 1
+}
 grep -qF 'PASS R3D02C07B02 original RESTORE_PREVIOUS releases exact two holds, audits, sends two canonical notices, preserves money and restores review visibility' "$tmp/r3d02c01-runtime.log" || {
  echo '[worker-cycle][FAIL] R3D02C07B02 original authorized terminal proof missing' >&2
  exit 1
