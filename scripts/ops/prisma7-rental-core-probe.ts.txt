@@ -891,8 +891,14 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    run(tx=>approveExtensionTx(tx,{extensionRequestId:id,userId:actor}));
   const rejectExt=(id:string,actor=owner)=>
    run(tx=>rejectExtensionTx(tx,{extensionRequestId:id,userId:actor}));
+  let extensionFixtureCounter=0;
   const make=async(name:string)=>{
    const id=await fixture("extension-"+name,"IN_RENTAL");
+   // Every isolated scenario gets a distant, disjoint booking window;
+   // prior canonical fixtures must never accidentally consume capacity.
+   const startTime=new Date(Date.now()+(500+(extensionFixtureCounter++)*10)*86400000);
+   const endTime=new Date(startTime.getTime()+86400000);
+   await root.rentalOrder.update({where:{id},data:{startTime,endTime}});
    const order=await root.rentalOrder.findUniqueOrThrow({where:{id}});
    return {id,order,next:new Date(order.endTime.getTime()+86400000)};
   };
@@ -973,6 +979,42 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
       raceLog.length===0),"EXTENSION_RACE_MONEY_OR_CANONICAL_DUP");
   console.log("[worker-cycle] PASS R3D02C06A concurrent original owner approve/reject single winner and no repeated accounting");
 
+  const max=await make("max-duration");
+  assert(succeeds(await req(max.id,max.next)),"EXT_MAX_SETUP");
+  const [maxExt]=await exts(max.id);
+  const baselineMaximum=(await root.rentalListing.findUniqueOrThrow({where:{id:listingId}})).maximumDuration;
+  await root.rentalListing.update({where:{id:listingId},data:{maximumDuration:1}});
+  try{
+   assert(!succeeds(await approve(maxExt.id)),"EXT_MAX_STALE_APPROVAL");
+   assert((await exts(max.id))[0].status==="PENDING"&&
+    (await root.rentalOrder.findUniqueOrThrow({where:{id:max.id}})).endTime.getTime()===
+      max.order.endTime.getTime(),"EXT_MAX_POLICY_CHANGED_ORDER");
+  }finally{
+   await root.rentalListing.update({where:{id:listingId},data:{
+    maximumDuration:baselineMaximum
+   }});
+  }
+  console.log("[worker-cycle] PASS R3D02C06A original extension approval uses current locked max-duration policy, not request snapshot");
+
+  // Forced transaction abort proves request and notification are atomic.
+  const abort=await make("abort");
+  let rolled=false;
+  try{
+   await db.$transaction(async tx=>{
+    assert(succeeds(await requestExtensionTx(tx,{
+     orderId:abort.id,userId:renter,newEndTime:abort.next
+    })),"EXT_ABORT_WRITER");
+    assert(await tx.rentalExtensionRequest.count({where:{
+     orderId:abort.id,status:"PENDING"
+    }})===1,"EXT_ABORT_NOT_WRITTEN");
+    throw Error("R3D02C06A_FORCE_ABORT");
+   },{timeout:15000,maxWait:5000});
+  }catch(e){rolled=e instanceof Error&&e.message==="R3D02C06A_FORCE_ABORT";}
+  assert(rolled&&await root.rentalExtensionRequest.count({where:{orderId:abort.id}})===0&&
+   await root.notification.count({where:{
+    kind:RENTAL_EXTENSION_REQUESTED_KIND,dedupeKey:{contains:abort.id}
+   }})===0,"EXT_ABORT_PARTIAL");
+  console.log("[worker-cycle] PASS R3D02C06A original extension request + canonical event atomic rollback");
   // Capacity authority: request admitted before competitor fills the new
   // time window; original owner approve rechecks the original peak SQL.
   const capacity=await make("capacity");
@@ -998,40 +1040,6 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   assert(succeeds(await rejectExt(capExt.id)),"EXT_CAPACITY_PENDING_REJECT");
   console.log("[worker-cycle] PASS R3D02C06A original peak-capacity SQL rejects approval after conflicting order reserves stock, pending remains until rejection");
 
-  const max=await make("max-duration");
-  assert(succeeds(await req(max.id,max.next)),"EXT_MAX_SETUP");
-  const [maxExt]=await exts(max.id);
-  await root.rentalListing.update({where:{id:listingId},data:{maximumDuration:1}});
-  try{
-   assert(!succeeds(await approve(maxExt.id)),"EXT_MAX_STALE_APPROVAL");
-   assert((await exts(max.id))[0].status==="PENDING"&&
-    (await root.rentalOrder.findUniqueOrThrow({where:{id:max.id}})).endTime.getTime()===
-      max.order.endTime.getTime(),"EXT_MAX_POLICY_CHANGED_ORDER");
-  }finally{
-   await root.rentalListing.update({where:{id:listingId},data:{
-    maximumDuration:listing.maximumDuration
-   }});
-  }
-  console.log("[worker-cycle] PASS R3D02C06A original extension approval uses current locked max-duration policy, not request snapshot");
 
-  // Forced transaction abort proves request and notification are atomic.
-  const abort=await make("abort");
-  let rolled=false;
-  try{
-   await db.$transaction(async tx=>{
-    assert(succeeds(await requestExtensionTx(tx,{
-     orderId:abort.id,userId:renter,newEndTime:abort.next
-    })),"EXT_ABORT_WRITER");
-    assert(await tx.rentalExtensionRequest.count({where:{
-     orderId:abort.id,status:"PENDING"
-    }})===1,"EXT_ABORT_NOT_WRITTEN");
-    throw Error("R3D02C06A_FORCE_ABORT");
-   },{timeout:15000,maxWait:5000});
-  }catch(e){rolled=e instanceof Error&&e.message==="R3D02C06A_FORCE_ABORT";}
-  assert(rolled&&await root.rentalExtensionRequest.count({where:{orderId:abort.id}})===0&&
-   await root.notification.count({where:{
-    kind:RENTAL_EXTENSION_REQUESTED_KIND,dedupeKey:{contains:abort.id}
-   }})===0,"EXT_ABORT_PARTIAL");
-  console.log("[worker-cycle] PASS R3D02C06A original extension request + canonical event atomic rollback");
  }
 }finally{await root.$disconnect();}
