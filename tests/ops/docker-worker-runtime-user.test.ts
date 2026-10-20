@@ -1158,4 +1158,27 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("original TxLocked kernel exercised with shadow real PG transaction");
   });
 
+
+  it("R3D02C07B03 preserves exact claim/release AST with real PG driver and refuses duplicate audit", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const original=read("src/lib/disputes/dispute-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    for(const name of ["withDisputeAuthority","claimDispute","releaseDispute"]){
+      expect(original).toContain("function "+name+"(");
+      expect(prepare).toContain('"'+name+'"');
+    }
+    expect(prepare).toContain("R3D02C07B03_NO_REAL_PG_TRANSACTION");
+    expect(prepare).toContain("R3D02C07B03_ORIGINAL_CLAIM_RELEASE_DRIFT");
+    expect(probe).toContain("bindShadowDisputeTransaction(");
+    expect(probe).toContain("CLAIM_REAL_PG_BLOCKING_PID_NOT_OBSERVED");
+    expect(probe).toContain("CLAIM_CONCURRENT_DOUBLE_WIN");
+    expect(probe).toContain("CLAIM_RELEASE_AUDIT_HOLDS_SLA_OR_REPLAY");
+    expect(probe).toContain("CLAIM_REOPENED_AFTER_TERMINAL");
+    expect(probe).toContain("CLAIM_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+    expect(shell).toContain("PASS R3D02C07B03 original claim/release true PG locking");
+    expect(shell).toContain("full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED");
+  });
+
 });
