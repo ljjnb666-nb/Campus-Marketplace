@@ -1660,6 +1660,25 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    "TERMINAL_LEGACY_MISSING_PREVIOUS_FAIL_OPEN");
   console.log("[worker-cycle] PASS R3D02C07B02 original legacy missing previous order state fails closed without releasing holds");
 
+  // Corrupted/legacy enum values remain representable in PostgreSQL, but
+  // never came from the original isDisputableStatus() initiation gate.
+  // Terminal must deny instead of silently restoring IN_DISPUTE or CLOSED.
+  for(const invalidOrigin of ["IN_DISPUTE","CLOSED","CANCELLED"] as const){
+   const corrupt=await createDispute("illegal-origin-"+invalidOrigin);
+   await root.rentalDispute.update({where:{id:corrupt.disputeId},data:{
+    openedFromOrderStatus:invalidOrigin
+   }});
+   assert(await denied(()=>terminal(corrupt.disputeId),"DISPUTE_RESTORE_UNAVAILABLE")&&
+    (await root.rentalOrder.findUniqueOrThrow({where:{id:corrupt.orderId}})).status==="IN_DISPUTE"&&
+    (await root.rentalDispute.findUniqueOrThrow({where:{id:corrupt.disputeId}})).status==="OPEN"&&
+    (await activeHolds(corrupt.disputeId)).length===2&&
+    (await notes(corrupt.disputeId)).length===0&&
+    (await audit(corrupt.disputeId)).length===0&&
+    await visible(corrupt.orderId)===0,
+    "TERMINAL_INVALID_ORIGIN_FAIL_OPEN_"+invalidOrigin);
+  }
+  console.log("[worker-cycle] PASS R3D02C07B02C original RESTORE_PREVIOUS rejects illegal historical enum origins using canonical dispute eligibility");
+
   // Two genuinely authorized campus reviewers compete on the same dispute.
   // The second transaction MUST wait behind first reviewer ordered USER
   // and dispute/order row locks. Exactly one terminal audit and two notices.
