@@ -1099,4 +1099,26 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("original review wins then dispute preserves hidden immutable review");
   });
 
+
+  it("R3D02C07B01 keeps terminal review visibility fail-closed and labels controlled snapshots honestly", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    const canonical=read("src/lib/reviews/review-query.ts");
+    const admin=read("src/lib/disputes/dispute-service.ts");
+    expect(canonical).toContain("visibleRentalReviewCondition");
+    expect(canonical).toContain('status: "COMPLETED"');
+    expect(canonical).toContain("disputes: { none:");
+    expect(admin).toContain("resolveDisputeTxLocked");
+    expect(admin).toContain('input.resolutionAction === "RESTORE_PREVIOUS"');
+    expect(probe).toContain("TERMINAL_PARTIAL_RESTORE_MUST_REMAIN_HIDDEN");
+    expect(probe).toContain("TERMINAL_RESTORE_VISIBILITY_AND_LEDGER");
+    expect(probe).toContain("TERMINAL_CLOSED_SHOULD_HIDE");
+    expect(probe).toContain("TERMINAL_ACTIVE_DISPUTE_OVERRIDES_BLIND_DEADLINE");
+    expect(probe).toContain("TERMINAL_IMMUTABLE_REVIEW_CHANGED");
+    expect(shell).toContain("PASS R3D02C07B01 real original review visibility policy");
+    expect(shell).toContain("terminal state is test-controlled");
+    expect(shell).toContain("original admin authorization, audit, notifications, DataHold release writer NOT VERIFIED");
+  });
+
 });
