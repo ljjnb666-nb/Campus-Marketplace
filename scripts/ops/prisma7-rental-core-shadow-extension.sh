@@ -241,6 +241,11 @@ echo '[worker-cycle] PASS R3D02C06A real original extension request/approve/reje
 echo '[worker-cycle] LIMIT R3D02C06A no original rental creation competitor, gateway payment or production v7 cutover proof'
 
 # R3D02C06B authentic original creation cross-owner extension races.
+grep -qF 'PASS R3D02C06B canonical ACTIVE memberships for original new-obligation eligibility gate' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06B original create participant eligibility fixture not proven' >&2
+ exit 1
+}
+
 grep -qF 'PASS R3D02C06B exact original createRentalOrderTx and original obligation/capability/moderation/attribution/demand writers provenance' "$tmp/r3d02c01-prepare.log" || {
  echo '[worker-cycle][FAIL] R3D02C06B original create-vs-extension safety proof missing' >&2
  exit 1
