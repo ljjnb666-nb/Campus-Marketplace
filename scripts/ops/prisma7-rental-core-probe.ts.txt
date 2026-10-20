@@ -1498,10 +1498,12 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   assert(credentials.length===3,"TERMINAL_AUTH_REAL_ROLE_ASSIGNMENTS");
   const terminal=(disputeId:string,actorId=reviewer,
    action:"RESTORE_PREVIOUS"|"CLOSE_ORDER"="RESTORE_PREVIOUS",
-   resolutionCode:"MUTUAL_AGREEMENT"|undefined="MUTUAL_AGREEMENT",
+   resolutionCode:"MUTUAL_AGREEMENT"|null|undefined=undefined,
    racePoint?:any)=>run(tx=>executeOriginalDisputeTerminalTx(tx,{
     actorId,disputeId,resolutionAction:action,
-    resolutionCode,adminNote:"private admin text NEVER for notice/audit",
+    resolutionCode:resolutionCode===undefined
+     ?(action==="CLOSE_ORDER"?null:"MUTUAL_AGREEMENT"):resolutionCode,
+    adminNote:"private admin text NEVER for notice/audit",
     racePoint
    },async inner=>{
     const r=await inner.rentalDispute.findUnique({where:{id:disputeId},
