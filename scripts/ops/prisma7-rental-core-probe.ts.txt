@@ -5,7 +5,7 @@ import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
  approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx,initiateDisputeTx,
- requestExtensionTx,approveExtensionTx,rejectExtensionTx
+ requestExtensionTx,approveExtensionTx,rejectExtensionTx,createRentalOrderTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
@@ -1041,5 +1041,146 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
   console.log("[worker-cycle] PASS R3D02C06A original peak-capacity SQL rejects approval after conflicting order reserves stock, pending remains until rejection");
 
 
+ }
+
+ // R3D02C06B: FULL original createRentalOrderTx vs FULL original approveExtensionTx.
+ // Never replace original capability-gate, moderation, liquidity/notifications.
+ {
+  const make=async(name:string,slot:number)=>{
+   const id=await fixture("create-vs-extension-"+name,"IN_RENTAL");
+   const startTime=new Date(Date.now()+(1300+slot*10)*86400000);
+   const endTime=new Date(startTime.getTime()+86400000);
+   await root.rentalOrder.update({where:{id},data:{startTime,endTime}});
+   const next=new Date(endTime.getTime()+86400000);
+   const requested=await run(tx=>requestExtensionTx(tx,{
+    orderId:id,userId:renter,newEndTime:next
+   }));
+   assert(succeeds(requested),"R3D06B_EXTENSION_REQUEST_SETUP");
+   const ext=await root.rentalExtensionRequest.findFirstOrThrow({
+    where:{orderId:id,status:"PENDING"}
+   });
+   return {id,ext,startTime,endTime,next};
+  };
+  const create=(startTime:Date,endTime:Date,domainRacePoint?:any)=>
+   run(tx=>createRentalOrderTx(tx,{
+    rentalListingId:listingId,userId:renter,startTime,endTime,quantity:1,
+    renterNote:"Synthetic competitive rental"
+   },undefined,domainRacePoint));
+  const owned=(id:string)=>root.rentalOrder.findUniqueOrThrow({where:{id}});
+  const goodCreate=(r:unknown):r is {orderId:string}=>!!r&&typeof r==="object"&&
+   "orderId" in r&&typeof (r as {orderId?:unknown}).orderId==="string";
+  // First establish original production creation path is truly complete,
+  // including consent/risk guards, canonical demand DomainEvent + notification.
+  const plainTime=new Date(Date.now()+1600*86400000);
+  const plain=await create(plainTime,new Date(plainTime.getTime()+86400000));
+  assert(goodCreate(plain),"ORIGINAL_CREATE_NO_CANONICAL_ORDER");
+  const written=await owned(plain.orderId);
+  const demandEvents=await root.domainEvent.findMany({where:{aggregateId:plain.orderId}});
+  const notifyCreate=await root.notification.findMany({where:{
+   kind:RENTAL_ORDER_REQUESTED_KIND,
+   dedupeKey:RENTAL_ORDER_REQUESTED_KIND+":"+plain.orderId+":"+owner
+  }});
+  assert(written.status==="PENDING_APPROVAL"||written.status==="PENDING_PICKUP",
+   "ORIGINAL_CREATE_STATUS");
+  assert(written.renterId===renter&&written.ownerId===owner&&
+   written.rentalAmount.toFixed(2)==="4.00"&&
+   demandEvents.length===1&&
+   notifyCreate.length===1&&notifyCreate[0].userId===owner&&
+   await root.rentalOrderStatusLog.count({where:{orderId:plain.orderId}})===1,
+   "ORIGINAL_CREATE_DEMAND_AND_CANONICAL");
+  console.log("[worker-cycle] PASS R3D02C06B authentic rental create yields demand DomainEvent, price snapshot and notification");
+
+  // Case A: original creation grabs sorted participant locks and RentalListing
+  // FOR UPDATE before extending order. Original approval must be blocked,
+  // then detect capacity consumed by the newly committed rental.
+  const createWins=await make("new-order-first",0);
+  let resume!:()=>void,createHeld!:()=>void,approveStarted!:()=>void;
+  const gate=new Promise<void>(r=>resume=r);
+  const ready=new Promise<void>(r=>createHeld=r);
+  const queued=new Promise<void>(r=>approveStarted=r);
+  const first=db.$transaction(tx=>createRentalOrderTx(tx,{
+   rentalListingId:listingId,userId:renter,
+   startTime:createWins.endTime,endTime:createWins.next,quantity:1
+  },undefined,async()=>{createHeld();await gate}),{
+   maxWait:5000,timeout:15000
+  });
+  await ready;
+  let pid=0;
+  const second=db.$transaction(async tx=>{
+   pid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   approveStarted();
+   return approveExtensionTx(tx,{extensionRequestId:createWins.ext.id,userId:owner});
+  },{maxWait:5000,timeout:15000});
+  await queued;
+  let blocked=false;
+  try{
+   for(let i=0;i<105;i++){
+    const q=await root.$queryRaw<Array<{wait:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${pid}::int),1),0)>0 AS wait
+    `;
+    if(q[0]?.wait){blocked=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(blocked,"ORIGINAL_CREATE_FIRST_APPROVE_DID_NOT_WAIT");
+  }finally{resume()}
+  const [fresh,wanted]=await Promise.all([first,second]);
+  assert(goodCreate(fresh)&&!succeeds(wanted),
+   "ORIGINAL_CREATE_FIRST_DOUBLE_RESERVE");
+  const headA=await owned(createWins.id);
+  const requestedA=await root.rentalExtensionRequest.findUniqueOrThrow({
+   where:{id:createWins.ext.id}
+  });
+  assert(headA.endTime.getTime()===createWins.endTime.getTime()&&
+   requestedA.status==="PENDING"&&
+   await root.domainEvent.count({where:{aggregateId:fresh.orderId}})===1&&
+   await root.rentalOrderStatusLog.count({where:{orderId:createWins.id}})===0,
+   "ORIGINAL_CREATE_FIRST_AMOUNT_OR_LEDGER_DRIFT");
+  console.log("[worker-cycle] PASS R3D02C06B original create wins before extension approval, real PG waiter and no overbooking");
+
+  // Case B: original extension wins first. The original NEW ORDER creation
+  // waits behind participant locks, then sees the extended reservation.
+  const extensionWins=await make("extension-first",1);
+  let allow!:()=>void,approvalHeld!:()=>void,createStarted!:()=>void;
+  const approvalGate=new Promise<void>(r=>allow=r);
+  const approvalReady=new Promise<void>(r=>approvalHeld=r);
+  const newOrderQueued=new Promise<void>(r=>createStarted=r);
+  const winning=db.$transaction(tx=>approveExtensionTx(tx,{
+   extensionRequestId:extensionWins.ext.id,userId:owner
+  },async()=>{approvalHeld();await approvalGate}),{
+   maxWait:5000,timeout:15000
+  });
+  await approvalReady;
+  let waiterPid=0;
+  const losing=db.$transaction(async tx=>{
+   waiterPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+   createStarted();
+   return createRentalOrderTx(tx,{
+    rentalListingId:listingId,userId:renter,
+    startTime:extensionWins.endTime,endTime:extensionWins.next,quantity:1
+   });
+  },{maxWait:5000,timeout:15000});
+  await newOrderQueued;
+  let sawWait=false;
+  try{
+   for(let i=0;i<105;i++){
+    const q=await root.$queryRaw<Array<{wait:boolean}>>`
+      SELECT COALESCE(array_length(pg_blocking_pids(${waiterPid}::int),1),0)>0 AS wait
+    `;
+    if(q[0]?.wait){sawWait=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(sawWait,"EXTENSION_FIRST_CREATE_DID_NOT_WAIT");
+  }finally{allow()}
+  const [win,lose]=await Promise.all([winning,losing]);
+  assert(succeeds(win)&&!goodCreate(lose),"EXTENSION_FIRST_OVERBOOKED");
+  const headB=await owned(extensionWins.id);
+  const extB=await root.rentalExtensionRequest.findUniqueOrThrow({
+   where:{id:extensionWins.ext.id}
+  });
+  assert(extB.status==="APPROVED"&&headB.endTime.getTime()===extensionWins.next.getTime()&&
+   headB.rentalAmount.toFixed(2)==="8.00"&&
+   await root.rentalOrderStatusLog.count({where:{orderId:extensionWins.id}})===1,
+   "EXTENSION_FIRST_ACCOUNTING_FAILED");
+  console.log("[worker-cycle] PASS R3D02C06B original extension wins before create, real PG waiter, no new rental and single accounting update");
  }
 }finally{await root.$disconnect();}
