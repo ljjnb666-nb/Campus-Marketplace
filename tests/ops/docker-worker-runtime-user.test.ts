@@ -1057,7 +1057,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(prepare).toContain('"marketplaceObligationValidator"');
     expect(prepare).toContain('"withObligationGuard"');
     expect(prepare).toContain('"hasActiveListingModeration"');
-    expect(prepare).toContain('"recordAttributedOrderIfEligibleTx"');
+    expect(prepare).toContain('import { recordAttributedOrderIfEligibleTx } from "./lib/analytics/order-conversation-attribution.ts"');
     expect(prepare).toContain("R3D02C06B_ATTR_SOURCE_PROVENANCE");
     expect(prepare).toContain("R3D02C06B exact original createRentalOrderTx");
     expect(probe).toContain("ORIGINAL_CREATE_FIRST_APPROVE_DID_NOT_WAIT");
