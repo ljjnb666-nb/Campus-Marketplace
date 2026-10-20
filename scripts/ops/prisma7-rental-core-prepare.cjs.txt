@@ -273,3 +273,91 @@ fs.appendFileSync(output,[
  'import { RENTAL_REVIEW_PUBLISHED_KIND } from "./lib/notifications/notification-registry.ts";'
 ].join("\n")+"\n");
 console.log("[worker-cycle] PASS R3D02C07A original review, window and visible-query AST exact source provenance");
+
+
+// R3D02C07B02: Extract original, unmodified dispute terminal transaction
+// kernel and all ORIGINAL RBAC/hold/audit declarations. No authorization stub.
+const terminalSrc=path.resolve(path.dirname(sourcePath),"disputes/dispute-service.ts");
+const terminalRaw=fs.readFileSync(terminalSrc,"utf8");
+const terminalOutput=path.join(root,"disputes/dispute-terminal-original.ts");
+const terminalHeader=[
+ 'import type { Prisma, RentalOrderStatus, DisputeResolutionAction, DisputeResolutionCode } from "../../../generated/prisma/client.ts";',
+ 'import { disputeError } from "./errors.ts";',
+ 'import { DISPUTE_REVIEW_PERMISSION } from "./dispute-access.ts";',
+ 'import { resolveDisputeScope } from "./dispute-scope.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts";',
+ 'import { recordAdminAudit } from "../governance/admin-audit.ts";',
+ 'import { writeStatusLog } from "../../rental-core-extracted.ts";',
+ 'import { DATA_HOLD_SOURCE_TYPE_RENTAL_DISPUTE, releaseHoldsBySourceTxLocked } from "../privacy/data-hold-service.ts";',
+ 'import { rbacError } from "../rbac/errors.ts";',
+ 'import { loadAuthorizationContext, requirePermissionInContext } from "../rbac/service.ts";',
+ 'import { emitNotificationsTx } from "../notifications/notification-service.ts";',
+ 'import { RENTAL_DISPUTE_RESOLVED_KIND } from "../notifications/notification-registry.ts";',
+ 'type DisputeRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;',
+ 'type ResolveDisputeResult = { disputeId: string; status: "RESOLVED" | "CLOSED"; orderStatus: string; releasedHolds: number };'
+].join("\n");
+const terminalNames=["requireDisputeReviewAuthorization","resolveDisputeTxLocked"];
+const terminalBody=terminalNames.map(n=>astDeclaration(terminalRaw,terminalSrc,n)).join("\n\n");
+fs.writeFileSync(terminalOutput,terminalHeader+"\n"+terminalBody+
+ '\nexport { resolveDisputeTxLocked as executeOriginalDisputeTerminalTx };\n');
+if(!terminalBody.includes('await requireDisputeReviewAuthorization(tx, input.actorId')||
+ !terminalBody.includes('await releaseHoldsBySourceTxLocked(tx')||
+ !terminalBody.includes('await recordAdminAudit(')||
+ !terminalBody.includes('await emitNotificationsTx('))
+ throw Error("R3D02C07B02_TERMINAL_DOMAIN_DRIFT");
+
+// Pure original domain exceptions / permission definition. Enforced by
+// exact copy and AST round-trip; permission must not default-allow unknowns.
+for(const file of ["rbac/errors.ts","disputes/errors.ts"]){
+ const original=readRel(file);
+ const dest=path.join(root,file);
+ fs.mkdirSync(path.dirname(dest),{recursive:true});
+ fs.writeFileSync(dest,original);
+ if(fs.readFileSync(dest,"utf8")!==original)
+  throw Error("R3D02C07B02_ERROR_COPY_DRIFT_"+file);
+}
+const permSrc=path.resolve(path.dirname(sourcePath),"rbac/permissions.ts");
+const permRaw=fs.readFileSync(permSrc,"utf8");
+fs.writeFileSync(path.join(root,"rbac/permissions.ts"),
+ ["PERMISSIONS","asPermissionKey"].map(n=>astDeclaration(permRaw,permSrc,n)).join("\n\n")+
+ '\nexport type PermissionKey = keyof typeof PERMISSIONS;\n');
+const reviewAccess=path.resolve(path.dirname(sourcePath),"disputes/dispute-access.ts");
+fs.writeFileSync(path.join(root,"disputes/dispute-access.ts"),
+ astDeclaration(fs.readFileSync(reviewAccess,"utf8"),reviewAccess,"DISPUTE_REVIEW_PERMISSION")+"\n");
+const rbacSrc=path.resolve(path.dirname(sourcePath),"rbac/service.ts");
+const rbacRaw=fs.readFileSync(rbacSrc,"utf8");
+const rbacVars=["authorizationSelect"];
+const rbacFunctions=["isActiveAccount","loadAuthorizationContext","hasPermission","requirePermissionInContext"];
+const rbacOutput=path.join(root,"rbac/service.ts");
+fs.writeFileSync(rbacOutput,[
+ 'import type { Prisma } from "../../../generated/prisma/client.ts";',
+ 'import { asPermissionKey, type PermissionKey } from "./permissions.ts";',
+ 'import { rbacError } from "./errors.ts";',
+ 'type AuthorizationGrant = { roleKey: string; scope: "GLOBAL" | "CAMPUS"; campusId: string | null; permissionKeys: string[] };',
+ 'type AuthorizationContext = { userId: string; accountActive: boolean; activeCampusIds: string[]; grants: AuthorizationGrant[] };',
+ ...[...rbacVars,...rbacFunctions].map(n=>astDeclaration(rbacRaw,rbacSrc,n))
+].join("\n\n")+"\n");
+// loadAuthorizationContext is strictly invoked with a real tx, so its
+// production non-transaction fallback is not exercised by this isolation.
+if(!fs.readFileSync(rbacOutput,"utf8").includes("tx.user.findUnique"))
+ throw Error("R3D02C07B02_REAL_RBAC_TRANSACTION_MISSING");
+
+// Original append-only canonical admin audit writer, machine-only metadata.
+const auditSrc=path.resolve(path.dirname(sourcePath),"governance/admin-audit.ts");
+const auditRaw=fs.readFileSync(auditSrc,"utf8");
+fs.writeFileSync(path.join(root,"governance/admin-audit.ts"),[
+ 'import type { Prisma } from "../../../generated/prisma/client.ts";',
+ 'type RecordAdminAuditInput = { actorId: string; action: string; targetType: string; targetId: string; campusId?: string | null; result?: string; detail?: string | null; metadata?: Record<string, unknown> | null };',
+ ...["ALLOWED_METADATA_KEYS","sanitizeMetadata","recordAdminAudit"].map(n=>
+  astDeclaration(auditRaw,auditSrc,n))
+].join("\n\n")+"\n");
+// DataHold source-linked writer is already extracted in R3D02C05B.
+// Append the original terminal release declaration; do not reimplement.
+const holdSrc=path.resolve(path.dirname(sourcePath),"privacy/data-hold-service.ts");
+const holdRaw=fs.readFileSync(holdSrc,"utf8");
+const holdOutput=path.join(root,"privacy/data-hold-service.ts");
+const holdRelease=astDeclaration(holdRaw,holdSrc,"releaseHoldsBySourceTxLocked");
+if(fs.readFileSync(holdOutput,"utf8").includes("function releaseHoldsBySourceTxLocked"))
+ throw Error("R3D02C07B02_DUPLICATE_HOLD_RELEASE");
+fs.appendFileSync(holdOutput,"\n"+holdRelease+"\n");
+console.log("[worker-cycle] PASS R3D02C07B02 exact original dispute terminal, RBAC, source hold release and admin audit AST declarations");
