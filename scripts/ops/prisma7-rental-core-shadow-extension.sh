@@ -64,7 +64,7 @@ if ! timeout --signal=TERM --kill-after=10s 195s docker run --rm \
  >"$tmp/r3d02c01-runtime.log" 2>&1; then
  node - "$tmp/r3d02c01-runtime.log" <<'SAFE_RUNTIME'
 const fs=require("node:fs"),raw=fs.readFileSync(process.argv[2],"utf8");
-const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-5][AB]?_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
+const codes=[...new Set([...raw.matchAll(/\b(?:R3D02C0[1-6][AB]?_[A-Z0-9_]+|DOMAIN_EVENT_[A-Z0-9_]+|LIQUIDITY_[A-Z0-9_]+|P[0-9]{4})\b/g)].map(m=>m[0]))].slice(0,8);
 const categories={
  prisma:/PrismaClient(?:KnownRequest|Validation|Initialization)Error/.test(raw),
  import:/ERR_MODULE_NOT_FOUND|Cannot find module|Cannot find package/.test(raw),
@@ -77,7 +77,7 @@ const categories={
 };
 const frames=[...raw.matchAll(/(?:\/shadow\/r3d02\/)?([a-z0-9-]+\.(?:ts|js)):(\d+):(\d+)/gi)]
  .slice(0,5).map(x=>({file:x[1],line:Number(x[2]),column:Number(x[3])}));
-const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-5][AB]?) [^\r\n]+/g)]
+const marker=[...raw.matchAll(/\[worker-cycle\] PASS (R3D02C0[1-6][AB]?) [^\r\n]+/g)]
  .slice(-8).map(x=>x[1]);
 console.log("[worker-cycle] R3D02C01 sanitized runtime codes="+JSON.stringify(codes)+
  " categories="+JSON.stringify(categories)+
@@ -207,3 +207,35 @@ grep -qF 'PASS R3D02C05B authentic dispute, DataHold, notification and order rol
 }
 echo '[worker-cycle] PASS R3D02C05B original full dispute/claim concurrency, canonical holds, ledger and rollback via real PostgreSQL'
 echo '[worker-cycle] LIMIT R3D02C05B isolated Prisma7 authentic original functions only; production migration, payout/refund and full dispute-resolution workflow UNVERIFIED'
+
+# R3D02C06A mandatory real original extension + peak SQL proof markers.
+grep -qF 'PASS R3D02C06A original extension, price and peak-capacity SQL exact source AST' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A original rental extension request/approve fee, canonical notes, role, replay and immutable price snapshot' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A original reject extension retains order price, time and unique notification' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A concurrent original owner approve/reject single winner and no repeated accounting' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A original peak-capacity SQL rejects approval after conflicting order reserves stock, pending remains until rejection' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A original extension approval uses current locked max-duration policy, not request snapshot' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C06A original extension request + canonical event atomic rollback' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C06A extension/price/capacity proof missing' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C06A real original extension request/approve/reject and peak-capacity SQL on Prisma7 PostgreSQL'
+echo '[worker-cycle] LIMIT R3D02C06A no original rental creation competitor, gateway payment or production v7 cutover proof'

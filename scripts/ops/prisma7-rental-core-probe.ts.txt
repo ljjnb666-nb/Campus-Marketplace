@@ -4,12 +4,14 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { softDeleteExtension } from "../r3c/prisma-soft-delete.ts";
 import { domainEventLedgerExtension } from "../r3c/domain-event-ledger-extension.ts";
 import {
- approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx,initiateDisputeTx
+ approveRentalOrderTx,rejectRentalOrderTx,confirmPickupTx,cancelRentalOrderTx,requestReturnTx,confirmReturnTx,submitDamageClaimTx,respondDamageClaimTx,initiateDisputeTx,
+ requestExtensionTx,approveExtensionTx,rejectExtensionTx
 } from "./rental-core-extracted.ts";
 import {
  RENTAL_ORDER_APPROVED_KIND,RENTAL_ORDER_REJECTED_KIND,
  RENTAL_ORDER_CANCELLED_KIND,RENTAL_PICKUP_CONFIRMED_KIND,RENTAL_RETURN_REQUESTED_KIND,RENTAL_RETURN_CONFIRMED_KIND,
- RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,RENTAL_DISPUTE_OPENED_KIND
+ RENTAL_DAMAGE_CLAIM_FILED_KIND,RENTAL_DAMAGE_CLAIM_RESPONDED_KIND,RENTAL_DISPUTE_OPENED_KIND,
+ RENTAL_EXTENSION_REQUESTED_KIND,RENTAL_EXTENSION_APPROVED_KIND,RENTAL_EXTENSION_REJECTED_KIND
 } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -878,5 +880,166 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    await root.rentalOrderStatusLog.count({where:{orderId:abort}})===0,
    "ORIGINAL_DISPUTE_ABORT_PARTIAL");
   console.log("[worker-cycle] PASS R3D02C05B authentic dispute, DataHold, notification and order rollback");
+ }
+
+ // R3D02C06A: original EXTENSION functions and original source peak-capacity
+ // SELECT timeline on actual Prisma7 PG, without any injected DAO mocks.
+ {
+  const req=(id:string,newEnd:Date,actor=renter)=>
+   run(tx=>requestExtensionTx(tx,{orderId:id,userId:actor,newEndTime:newEnd}));
+  const approve=(id:string,actor=owner)=>
+   run(tx=>approveExtensionTx(tx,{extensionRequestId:id,userId:actor}));
+  const rejectExt=(id:string,actor=owner)=>
+   run(tx=>rejectExtensionTx(tx,{extensionRequestId:id,userId:actor}));
+  let extensionFixtureCounter=0;
+  const make=async(name:string)=>{
+   const id=await fixture("extension-"+name,"IN_RENTAL");
+   // Every isolated scenario gets a distant, disjoint booking window;
+   // prior canonical fixtures must never accidentally consume capacity.
+   const startTime=new Date(Date.now()+(500+(extensionFixtureCounter++)*10)*86400000);
+   const endTime=new Date(startTime.getTime()+86400000);
+   await root.rentalOrder.update({where:{id},data:{startTime,endTime}});
+   const order=await root.rentalOrder.findUniqueOrThrow({where:{id}});
+   return {id,order,next:new Date(order.endTime.getTime()+86400000)};
+  };
+  const exts=(id:string)=>root.rentalExtensionRequest.findMany({
+   where:{orderId:id},orderBy:{createdAt:"asc"}
+  });
+  const basics=await make("request-approve");
+  const before=basics.order;
+  assert(succeeds(await req(basics.id,basics.next)),"EXTENSION_REQUEST_REJECTED");
+  const [proposal]=await exts(basics.id);
+  assert(proposal?.status==="PENDING"&&proposal.requesterId===renter&&
+   proposal.newEndTime.getTime()===basics.next.getTime()&&
+   proposal.additionalFee.toFixed(2)==="4.00","EXTENSION_PRICE_SNAPSHOT");
+  const requested=await root.notification.findMany({where:{
+   kind:RENTAL_EXTENSION_REQUESTED_KIND,
+   dedupeKey:RENTAL_EXTENSION_REQUESTED_KIND+":"+proposal.id+":"+owner
+  }});
+  assert(requested.length===1&&requested[0].userId===owner,"EXTENSION_REQUESTED_EVENT");
+  assert(!succeeds(await req(basics.id,basics.next))&&
+   (await exts(basics.id)).length===1,"EXTENSION_DUP_PENDING");
+  assert(!succeeds(await req(basics.id,basics.next,owner))&&
+   !succeeds(await req(basics.id,basics.next,outsider)),"EXTENSION_REQUEST_ROLE");
+  assert(succeeds(await approve(proposal.id)),"EXTENSION_APPROVAL");
+  const after=await root.rentalOrder.findUniqueOrThrow({where:{id:basics.id}});
+  assert(after.endTime.getTime()===basics.next.getTime()&&
+   after.rentalDuration===before.rentalDuration+1&&
+   after.rentalAmount.toFixed(2)==="8.00"&&
+   after.finalAmount.toFixed(2)==="8.00"&&
+   (await exts(basics.id))[0].status==="APPROVED",
+   "EXTENSION_PRICING_AND_DURATION");
+  const status=await root.rentalOrderStatusLog.findMany({where:{orderId:basics.id}});
+  const approvedNotice=await root.notification.findMany({where:{
+   kind:RENTAL_EXTENSION_APPROVED_KIND,
+   dedupeKey:RENTAL_EXTENSION_APPROVED_KIND+":"+proposal.id+":"+renter
+  }});
+  assert(status.length===1&&status[0].toStatus==="IN_RENTAL"&&
+   status[0].fromStatus==="IN_RENTAL"&&approvedNotice.length===1&&
+   approvedNotice[0].userId===renter,"EXTENSION_APPROVED_CANONICAL");
+  assert(!succeeds(await approve(proposal.id))&&
+   !succeeds(await rejectExt(proposal.id))&&
+   await root.rentalOrderStatusLog.count({where:{orderId:basics.id}})===1&&
+   await root.domainEvent.count({where:{aggregateId:basics.id}})===0,
+   "EXTENSION_WINNER_REPLAY");
+  console.log("[worker-cycle] PASS R3D02C06A original rental extension request/approve fee, canonical notes, role, replay and immutable price snapshot");
+
+  const rejected=await make("reject");
+  assert(succeeds(await req(rejected.id,rejected.next)),"EXTENSION_REJECT_SETUP");
+  const [rej]=await exts(rejected.id);
+  assert(succeeds(await rejectExt(rej.id)),"EXTENSION_REJECTED");
+  const rejOrder=await root.rentalOrder.findUniqueOrThrow({where:{id:rejected.id}});
+  assert((await exts(rejected.id))[0].status==="REJECTED"&&
+   rejOrder.endTime.getTime()===rejected.order.endTime.getTime()&&
+   rejOrder.rentalAmount.toFixed(2)===rejected.order.rentalAmount.toFixed(2),
+   "EXTENSION_REJECT_CHANGED_MONEY");
+  const rejNotice=await root.notification.findMany({where:{
+   kind:RENTAL_EXTENSION_REJECTED_KIND,
+   dedupeKey:RENTAL_EXTENSION_REJECTED_KIND+":"+rej.id+":"+renter
+  }});
+  assert(rejNotice.length===1&&rejNotice[0].userId===renter&&
+   !succeeds(await rejectExt(rej.id)),"EXTENSION_REJECT_NOTICE_REPLAY");
+  console.log("[worker-cycle] PASS R3D02C06A original reject extension retains order price, time and unique notification");
+
+  const double=await make("racer");
+  assert(succeeds(await req(double.id,double.next)),"EXTENSION_RACE_SETUP");
+  const [raceExt]=await exts(double.id);
+  const [yes,no]=await Promise.all([approve(raceExt.id),rejectExt(raceExt.id)]);
+  assert(Number(succeeds(yes))+Number(succeeds(no))===1,
+   "EXTENSION_APPROVE_REJECT_DOUBLE_WIN");
+  const raceOrder=await root.rentalOrder.findUniqueOrThrow({where:{id:double.id}});
+  const raceLog=await root.rentalOrderStatusLog.findMany({where:{orderId:double.id}});
+  const raceNotice=await root.notification.findMany({where:{
+   kind:{in:[RENTAL_EXTENSION_APPROVED_KIND,RENTAL_EXTENSION_REJECTED_KIND]},
+   dedupeKey:{contains:raceExt.id}
+  }});
+  assert(raceNotice.length===1&&
+   (succeeds(yes)?raceOrder.endTime.getTime()===double.next.getTime()&&
+      raceLog.length===1:raceOrder.endTime.getTime()===double.order.endTime.getTime()&&
+      raceLog.length===0),"EXTENSION_RACE_MONEY_OR_CANONICAL_DUP");
+  console.log("[worker-cycle] PASS R3D02C06A concurrent original owner approve/reject single winner and no repeated accounting");
+
+  const max=await make("max-duration");
+  assert(succeeds(await req(max.id,max.next)),"EXT_MAX_SETUP");
+  const [maxExt]=await exts(max.id);
+  const baselineMaximum=(await root.rentalListing.findUniqueOrThrow({where:{id:listingId}})).maximumDuration;
+  await root.rentalListing.update({where:{id:listingId},data:{maximumDuration:1}});
+  try{
+   assert(!succeeds(await approve(maxExt.id)),"EXT_MAX_STALE_APPROVAL");
+   assert((await exts(max.id))[0].status==="PENDING"&&
+    (await root.rentalOrder.findUniqueOrThrow({where:{id:max.id}})).endTime.getTime()===
+      max.order.endTime.getTime(),"EXT_MAX_POLICY_CHANGED_ORDER");
+  }finally{
+   await root.rentalListing.update({where:{id:listingId},data:{
+    maximumDuration:baselineMaximum
+   }});
+  }
+  console.log("[worker-cycle] PASS R3D02C06A original extension approval uses current locked max-duration policy, not request snapshot");
+
+  // Forced transaction abort proves request and notification are atomic.
+  const abort=await make("abort");
+  let rolled=false;
+  try{
+   await db.$transaction(async tx=>{
+    assert(succeeds(await requestExtensionTx(tx,{
+     orderId:abort.id,userId:renter,newEndTime:abort.next
+    })),"EXT_ABORT_WRITER");
+    assert(await tx.rentalExtensionRequest.count({where:{
+     orderId:abort.id,status:"PENDING"
+    }})===1,"EXT_ABORT_NOT_WRITTEN");
+    throw Error("R3D02C06A_FORCE_ABORT");
+   },{timeout:15000,maxWait:5000});
+  }catch(e){rolled=e instanceof Error&&e.message==="R3D02C06A_FORCE_ABORT";}
+  assert(rolled&&await root.rentalExtensionRequest.count({where:{orderId:abort.id}})===0&&
+   await root.notification.count({where:{
+    kind:RENTAL_EXTENSION_REQUESTED_KIND,dedupeKey:{contains:abort.id}
+   }})===0,"EXT_ABORT_PARTIAL");
+  console.log("[worker-cycle] PASS R3D02C06A original extension request + canonical event atomic rollback");
+  // Capacity authority: request admitted before competitor fills the new
+  // time window; original owner approve rechecks the original peak SQL.
+  const capacity=await make("capacity");
+  assert(succeeds(await req(capacity.id,capacity.next)),"EXT_CAPACITY_REQUEST");
+  const [capExt]=await exts(capacity.id);
+  const listing=await root.rentalListing.findUniqueOrThrow({where:{id:listingId}});
+  await root.rentalOrder.create({data:{
+   id:"r3d02c06a-competitor",orderNumber:"R3D02C06A-COMP",
+   rentalListingId:listingId,ownerId:owner,renterId:renter,
+   startTime:capacity.order.endTime,endTime:capacity.next,
+   quantity:listing.totalQuantity,unitPriceSnapshot:"4.00",
+   pricingUnitSnapshot:"PER_DAY",rentalDuration:1,rentalAmount:"4.00",
+   depositAmount:"0.00",finalAmount:"4.00",
+   pickupLocationSnapshot:"isolated",returnLocationSnapshot:"isolated",
+   status:"IN_RENTAL"
+  }});
+  assert(!succeeds(await approve(capExt.id)),"EXT_CAPACITY_APPROVAL_UNSAFE");
+  const blocked=await root.rentalOrder.findUniqueOrThrow({where:{id:capacity.id}});
+  assert(blocked.endTime.getTime()===capacity.order.endTime.getTime()&&
+   (await exts(capacity.id))[0].status==="PENDING"&&
+   await root.rentalOrderStatusLog.count({where:{orderId:capacity.id}})===0,
+   "EXT_CAPACITY_CONFLICT_MUTATED_ORDER");
+  assert(succeeds(await rejectExt(capExt.id)),"EXT_CAPACITY_PENDING_REJECT");
+  console.log("[worker-cycle] PASS R3D02C06A original peak-capacity SQL rejects approval after conflicting order reserves stock, pending remains until rejection");
+
+
  }
 }finally{await root.$disconnect();}
