@@ -491,6 +491,7 @@ if(!accountPublic.includes('await bestEffortEnforcementNotification("ACCOUNT_SUS
  throw Error("R3D02C07C04A_ORIGINAL_POSTCOMMIT_DRIFT");
 const accountTarget=path.join(root,"enforcement/account-enforcement-service.ts");
 fs.appendFileSync(accountTarget,[
+ 'import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts";',
  'import { logger } from "../logger.ts";',
  'import { emitNotificationTx } from "../notifications/notification-service.ts";',
  // Registry definitions come from the source-of-truth, not from a new
