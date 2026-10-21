@@ -33,7 +33,7 @@ function SubmitButton({
   );
 }
 
-function Feedback({ state }: { state: GovernanceUserActionState }) {
+export function GovernanceUserFeedback({ state }: { state: GovernanceUserActionState }) {
   if (state.error) {
     return (
       <p role="alert" className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -41,14 +41,29 @@ function Feedback({ state }: { state: GovernanceUserActionState }) {
       </p>
     );
   }
-  if (state.success) {
+  if (!state.success) return null;
+
+  if (state.notificationStatus === "FAILED") {
     return (
-      <p role="status" className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-        操作已提交。
+      <p role="status" className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800">
+        账号状态已更新，但站内通知未能生成。无需重复执行账号操作，请检查通知系统。
       </p>
     );
   }
-  return null;
+  if (state.notificationStatus === "NOT_REQUIRED") {
+    return (
+      <p role="status" className="rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        账号已处于目标状态，本次未重复生成通知。
+      </p>
+    );
+  }
+  return (
+    <p role="status" className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+      {state.notificationStatus === "RECORDED"
+        ? "账号操作已生效，站内通知已生成（不代表对方已阅读）。"
+        : "账号操作已生效。"}
+    </p>
+  );
 }
 
 /** 停用账号（canonical authority = suspendAccount；privileged/self 由域 fail closed）。 */
@@ -68,7 +83,7 @@ export function SuspendUserForm({
     <form action={formAction} className="space-y-3" aria-label="停用账号">
       <input type="hidden" name="userId" value={userId} />
       <SubmitButton label="停用账号" pendingLabel="提交中..." variant="primary" />
-      <Feedback state={state} />
+      <GovernanceUserFeedback state={state} />
     </form>
   );
 }
@@ -90,7 +105,7 @@ export function ReinstateUserForm({
     <form action={formAction} className="space-y-3" aria-label="恢复账号">
       <input type="hidden" name="userId" value={userId} />
       <SubmitButton label="恢复账号" pendingLabel="提交中..." variant="secondary" />
-      <Feedback state={state} />
+      <GovernanceUserFeedback state={state} />
     </form>
   );
 }
