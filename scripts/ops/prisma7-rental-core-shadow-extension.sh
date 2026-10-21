@@ -407,5 +407,23 @@ for leader in revoke terminal; do
  }
 done
 echo '[worker-cycle] PASS R3D02C07C02 original role revoke vs dispute terminal real PG two-order authority serializability'
+
+# C07C03 must prove original authoritative account suspension and canonical
+# membership wrapper against terminal with both true PG blocking directions.
+grep -qF 'PASS R3D02C07C03 original account TxLocked and membership suspension public wrapper AST, real RBAC privilege guard and audit provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C03 original account/membership authoritative extraction missing' >&2
+ exit 1
+}
+for mode in account membership; do
+ for leader in enforcement terminal; do
+  grep -qF "PASS R3D02C07C03 original $mode suspension vs terminal leader=$leader observed real PG advisory wait, fresh authority, provenance and exact hold/audit/notice" "$tmp/r3d02c01-runtime.log" || {
+   echo "[worker-cycle][FAIL] R3D02C07C03 missing $mode suspension/terminal real-PG proof leader=$leader" >&2
+   exit 1
+  }
+ done
+done
+echo '[worker-cycle] PASS R3D02C07C03 four real-PG original suspension/terminal serializability scenarios, authoritative enforcement and audit'
+echo '[worker-cycle] LIMIT R3D02C07C03 account post-commit best-effort enforcement notification not exercised; complete production Prisma7 unverified'
+
 echo '[worker-cycle] LIMIT R3D02C07C02 account-suspend and membership-enforcement writers separately pending; full Next.js production Prisma7 still UNVERIFIED'
 
