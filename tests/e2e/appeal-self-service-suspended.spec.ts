@@ -74,6 +74,19 @@ test("停用账户真实登录后只能查看本人处罚并提交一份申诉�
   const page = await ctx.newPage();
   await page.goto("/login");
   await expect(page.getByRole("link", { name: "账号受限？进入申诉" })).toBeVisible();
+  // Issue #115 login DOM instability: on a first CI attempt Playwright
+  // observed TWO email inputs (strict-mode collision) during login render.
+  // Never choose .first() and silently operate on an arbitrary duplicate.
+  // Allow a bounded settling window; persistent duplication is a true FAIL.
+  const firstObservedEmailCount = Math.min(await page.locator('input[name="email"]').count(), 4);
+  if (firstObservedEmailCount > 1) {
+    console.warn("R3D02C07D03_LOGIN_DUPLICATE_INPUT_OBSERVED bounded_count=" + firstObservedEmailCount);
+  }
+  await expect(page.locator('input[name="email"]')).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator('input[name="password"]')).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "登录", exact: true })).toHaveCount(1, {
+    timeout: 15_000,
+  });
   await page.locator('input[name="email"]').fill(own.user.email);
   await page.locator('input[name="password"]').fill(password);
   await page.getByRole("button", { name: "登录", exact: true }).click();
