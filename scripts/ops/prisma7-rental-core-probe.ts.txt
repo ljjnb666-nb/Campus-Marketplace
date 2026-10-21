@@ -18,6 +18,9 @@ import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
 import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "./lib/disputes/dispute-terminal-original.ts";
 import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
 import { revokeRole } from "./lib/rbac/assignment-service.ts";
+import { suspendAccountTxLocked } from "./lib/enforcement/account-enforcement-service.ts";
+import { suspendCampusMembership } from "./lib/enforcement/membership-enforcement-service.ts";
+import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
