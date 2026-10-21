@@ -15,7 +15,8 @@ import {
  RENTAL_REVIEW_PUBLISHED_KIND
 } from "./lib/notifications/notification-registry.ts";
 import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
-import { executeOriginalDisputeTerminalTx } from "./lib/disputes/dispute-terminal-original.ts";
+import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "./lib/disputes/dispute-terminal-original.ts";
+import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -26,6 +27,20 @@ const root=new PrismaClient({adapter:new PrismaPg({
  connectionString:url,max:8,connectionTimeoutMillis:2500,idleTimeoutMillis:10000
 })});
 const db=root.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
+let abortAfterClaimWrites=false;
+let abortAfterReleaseWrites=false;
+bindShadowDisputeTransaction(cb=>db.$transaction(async tx=>{
+ const result=await cb(tx);
+ if(abortAfterClaimWrites){
+  abortAfterClaimWrites=false;
+  throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_CLAIM_AUDIT");
+ }
+ if(abortAfterReleaseWrites){
+  abortAfterReleaseWrites=false;
+  throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT");
+ }
+ return result;
+},{maxWait:5000,timeout:15000}));
 const owner="r3d01-seller",renter="r3d01-buyer",outsider="r3d01-outsider";
 const listingId="r3d01-rental-listing";
 const campus="r3d01-campus-a";
@@ -1757,5 +1772,182 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    await visible(abort.orderId)===0,
    "TERMINAL_ABORT_LEFT_PARTIAL_AUTH_AUDIT_HOLD_NOTICE");
   console.log("[worker-cycle] PASS R3D02C07B02 original terminal after all writes forced PG rollback restores dispute, holds, reviews, audit and canonical notices");
+ }
+ // R3D02C07B03: exact original claimDispute/releaseDispute via real
+ // pg $transaction binder, central RBAC, order-independent actor locks.
+ {
+  const actorA="r3d02c07b02-admin",actorB="r3d02c07b02-admin2";
+  const foreign="r3d02c07b02-wrongcampus";
+  assert(await root.userRoleAssignment.count({where:{
+   userId:{in:[actorA,actorB,foreign]}
+  }})===3,"CLAIM_REAL_CAMPUS_GRANTS_MISSING");
+  const setup=async(label:string)=>{
+   const id=await fixture("claim-release-"+label,"IN_RENTAL");
+   await root.rentalOrder.update({where:{id},data:{
+    status:"COMPLETED",completedAt:new Date()
+   }});
+   assert(succeeds(await run(tx=>initiateDisputeTx(tx,{
+    orderId:id,userId:owner,reason:"original claim lifecycle",evidencePhotos:[]
+   }))),"CLAIM_ORIGINAL_DISPUTE_SETUP");
+   const d=await root.rentalDispute.findFirstOrThrow({where:{orderId:id}});
+   assert(d.status==="OPEN"&&d.assignedToId===null,"CLAIM_OPEN_PRECONDITION");
+   return {id,disputeId:d.id,dueAt:d.dueAt};
+  };
+  const audit=(id:string)=>root.adminLog.findMany({where:{
+   targetType:"RENTAL_DISPUTE",targetId:id
+  }});
+  const holds=(id:string)=>root.dataHold.count({where:{
+   sourceType:"RENTAL_DISPUTE",sourceId:id,status:"ACTIVE"
+  }});
+  const notices=(id:string)=>root.notification.count({where:{
+   kind:RENTAL_DISPUTE_RESOLVED_KIND,dedupeKey:{contains:id}
+  }});
+  const denied=async(fn:()=>Promise<unknown>,code:string)=>{
+   try{await fn();return false}catch(e){
+    return !!e&&typeof e==="object"&&"code" in e&&
+     (e as {code:string}).code===code;
+   }
+  };
+  const state=await setup("lifecycle");
+  assert(await denied(()=>claimDispute({
+   actorId:renter,disputeId:state.disputeId
+  }),"AUTH_PERMISSION_DENIED")&&
+   await denied(()=>claimDispute({
+    actorId:foreign,disputeId:state.disputeId
+   }),"AUTH_CAMPUS_SCOPE_MISMATCH"),
+   "CLAIM_RBAC_OR_CAMPUS_BYPASS");
+  const first=await claimDispute({actorId:actorA,disputeId:state.disputeId});
+  const replay=await claimDispute({actorId:actorA,disputeId:state.disputeId});
+  assert(first.outcome==="CLAIMED"&&replay.outcome==="ALREADY_YOURS"&&
+   (await audit(state.disputeId)).length===1,
+   "CLAIM_SELF_REPLAY_NOT_IDEMPOTENT");
+  assert(await denied(()=>claimDispute({
+   actorId:actorB,disputeId:state.disputeId
+  }),"DISPUTE_ALREADY_CLAIMED")&&
+   await denied(()=>releaseDispute({
+    actorId:actorB,disputeId:state.disputeId
+   }),"DISPUTE_RELEASE_FORBIDDEN")&&
+   await denied(()=>releaseDispute({
+    actorId:foreign,disputeId:state.disputeId
+   }),"AUTH_CAMPUS_SCOPE_MISMATCH"),
+   "CLAIM_RELEASE_NON_OWNER_AUTH");
+  const released=await releaseDispute({actorId:actorA,disputeId:state.disputeId});
+  const releaseReplay=await releaseDispute({actorId:actorA,disputeId:state.disputeId});
+  const reopened=await root.rentalDispute.findUniqueOrThrow({where:{id:state.disputeId}});
+  const changes=await audit(state.disputeId);
+  assert(released.outcome==="RELEASED"&&releaseReplay.outcome==="ALREADY_RELEASED"&&
+   reopened.status==="OPEN"&&reopened.assignedToId===null&&
+   reopened.dueAt.getTime()===state.dueAt.getTime()&&
+   changes.length===2&&changes.filter(v=>v.action==="DISPUTE_CLAIMED").length===1&&
+   changes.filter(v=>v.action==="DISPUTE_RELEASED").length===1&&
+   await holds(state.disputeId)===2&&await notices(state.disputeId)===0,
+   "CLAIM_RELEASE_AUDIT_HOLDS_SLA_OR_REPLAY");
+  console.log("[worker-cycle] PASS R3D02C07B03 exact original claim/release with campus RBAC, assignment, dueAt, hold and audit replay integrity");
+
+  const contested=await setup("concurrent");
+  let unblock!:()=>void,locked!:()=>void;
+  const gate=new Promise<void>(r=>unblock=r),ready=new Promise<void>(r=>locked=r);
+  let firstPid=0;
+  const winning=claimDispute({actorId:actorA,disputeId:contested.disputeId,
+   racePoint:async(tx:any)=>{
+    firstPid=(await tx.$queryRaw<Array<{pid:number}>>`SELECT pg_backend_pid()::int AS pid`)[0]?.pid??0;
+    locked();await gate;
+   }
+  });
+  await ready;
+  const losing=claimDispute({actorId:actorB,disputeId:contested.disputeId});
+  let observed=false;
+  try{
+   for(let i=0;i<120;i++){
+    const q=await root.$queryRaw<Array<{blockers:number[]}>>`
+     SELECT pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+     WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'
+    `;
+    if(q.some(v=>v.blockers.includes(firstPid))){observed=true;break}
+    await new Promise(r=>setTimeout(r,30));
+   }
+   assert(observed,"CLAIM_REAL_PG_BLOCKING_PID_NOT_OBSERVED");
+  }finally{unblock()}
+  const [win,lose]=await Promise.allSettled([winning,losing]);
+  assert(win.status==="fulfilled"&&win.value.outcome==="CLAIMED"&&
+   lose.status==="rejected"&&lose.reason?.code==="DISPUTE_ALREADY_CLAIMED"&&
+   (await root.rentalDispute.findUniqueOrThrow({
+    where:{id:contested.disputeId}
+   })).assignedToId===actorA&&
+   (await audit(contested.disputeId)).length===1&&
+   await holds(contested.disputeId)===2,
+   "CLAIM_CONCURRENT_DOUBLE_WIN");
+  console.log("[worker-cycle] PASS R3D02C07B03 authentic two-reviewer claim uses RentalDispute row mutex and one audit only");
+
+  const ended=await setup("terminal");
+  assert((await claimDispute({actorId:actorA,
+   disputeId:ended.disputeId})).outcome==="CLAIMED","CLAIM_TERMINAL_SETUP");
+  const terminal=await run(tx=>executeOriginalDisputeTerminalTx(tx,{
+   actorId:actorB,disputeId:ended.disputeId,
+   resolutionAction:"RESTORE_PREVIOUS",resolutionCode:"MUTUAL_AGREEMENT"
+  },async inner=>{
+   const x=await inner.rentalDispute.findUniqueOrThrow({where:{id:ended.disputeId},
+    select:{order:{select:{ownerId:true,renterId:true}}}});
+   return x.order;
+  }));
+  assert(terminal.status==="RESOLVED"&&terminal.releasedHolds===2&&
+   await denied(()=>claimDispute({
+    actorId:actorA,disputeId:ended.disputeId
+   }),"DISPUTE_TERMINAL")&&
+   await denied(()=>releaseDispute({
+    actorId:actorA,disputeId:ended.disputeId
+   }),"DISPUTE_TERMINAL")&&
+   (await audit(ended.disputeId)).length===2&&
+   await holds(ended.disputeId)===0&&await notices(ended.disputeId)===2,
+   "CLAIM_REOPENED_AFTER_TERMINAL");
+  console.log("[worker-cycle] PASS R3D02C07B03 original admin terminal blocks subsequent claim/release and emits canonical facts once");
+
+  const aborted=await setup("rollback");
+  abortAfterClaimWrites=true;
+  let thrown=false;
+  try{await claimDispute({actorId:actorA,disputeId:aborted.disputeId})}
+  catch(e){
+   thrown=e instanceof Error&&
+    e.message==="R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_CLAIM_AUDIT";
+  }
+  const rollback=await root.rentalDispute.findUniqueOrThrow({where:{id:aborted.disputeId}});
+  assert(thrown&&!abortAfterClaimWrites&&rollback.status==="OPEN"&&
+   rollback.assignedToId===null&&
+   (await audit(aborted.disputeId)).length===0&&
+   await holds(aborted.disputeId)===2,
+   "CLAIM_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+  console.log("[worker-cycle] PASS R3D02C07B03 original claim and append-only audit fully rollback on forced outer PG transaction error");
+
+  // Release is a distinct transaction path. Verify its status update and
+  // append-only DISPUTE_RELEASED audit cannot partially commit either.
+  const releaseAbort=await setup("release-rollback");
+  assert((await claimDispute({actorId:actorA,disputeId:releaseAbort.disputeId})).outcome==="CLAIMED",
+   "RELEASE_ABORT_CLAIM_PRECONDITION");
+  const beforeRelease=await root.rentalDispute.findUniqueOrThrow({where:{id:releaseAbort.disputeId}});
+  const priorAudit=await audit(releaseAbort.disputeId);
+  assert(beforeRelease.status==="IN_REVIEW"&&beforeRelease.assignedToId===actorA&&
+   priorAudit.length===1&&priorAudit[0].action==="DISPUTE_CLAIMED",
+   "RELEASE_ABORT_WRONG_START_STATE");
+  abortAfterReleaseWrites=true;
+  let releaseThrown=false;
+  try{await releaseDispute({actorId:actorA,disputeId:releaseAbort.disputeId})}
+  catch(e){
+   releaseThrown=e instanceof Error&&
+    e.message==="R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT";
+  }
+  const afterAbort=await root.rentalDispute.findUniqueOrThrow({where:{id:releaseAbort.disputeId}});
+  const afterAudit=await audit(releaseAbort.disputeId);
+  assert(releaseThrown&&!abortAfterReleaseWrites&&
+   afterAbort.status==="IN_REVIEW"&&afterAbort.assignedToId===actorA&&
+   afterAbort.dueAt.getTime()===beforeRelease.dueAt.getTime()&&
+   afterAudit.length===1&&afterAudit[0].action==="DISPUTE_CLAIMED"&&
+   await holds(releaseAbort.disputeId)===2&&await notices(releaseAbort.disputeId)===0,
+   "RELEASE_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+  const recoveredRelease=await releaseDispute({actorId:actorA,disputeId:releaseAbort.disputeId});
+  const finalReleaseAudit=await audit(releaseAbort.disputeId);
+  assert(recoveredRelease.outcome==="RELEASED"&&finalReleaseAudit.length===2&&
+   finalReleaseAudit.filter(x=>x.action==="DISPUTE_RELEASED").length===1,
+   "RELEASE_ABORT_RETRY_NOT_ONCE");
+  console.log("[worker-cycle] PASS R3D02C07B03 original release and audit forced PG rollback preserves assignment, SLA and holds; retry commits once");
  }
 }finally{await root.$disconnect();}

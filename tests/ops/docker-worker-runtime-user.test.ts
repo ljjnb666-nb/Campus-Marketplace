@@ -1167,4 +1167,46 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("original TxLocked kernel exercised with shadow real PG transaction");
   });
 
+
+  it("R3D02C07B03 preserves exact claim/release AST with real PG driver and refuses duplicate audit", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const original=read("src/lib/disputes/dispute-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    for(const name of ["withDisputeAuthority","claimDispute","releaseDispute"]){
+      expect(original).toContain("function "+name+"(");
+      expect(prepare).toContain('"'+name+'"');
+    }
+    expect(prepare).toContain("R3D02C07B03_NO_REAL_PG_TRANSACTION");
+    expect(prepare).toContain("R3D02C07B03_ORIGINAL_CLAIM_RELEASE_DRIFT");
+    expect(probe).toContain("bindShadowDisputeTransaction(");
+    expect(probe).toContain("CLAIM_REAL_PG_BLOCKING_PID_NOT_OBSERVED");
+    expect(probe).toContain("CLAIM_CONCURRENT_DOUBLE_WIN");
+    expect(probe).toContain("CLAIM_RELEASE_AUDIT_HOLDS_SLA_OR_REPLAY");
+    expect(probe).toContain("CLAIM_REOPENED_AFTER_TERMINAL");
+    expect(probe).toContain("CLAIM_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+    expect(probe).toContain("RELEASE_ORIGINAL_ADMIN_AUDIT_ATOMIC_ROLLBACK");
+    expect(probe).toContain("RELEASE_ABORT_RETRY_NOT_ONCE");
+    expect(shell).toContain("R3D02C07B03 release rollback + retry proof missing");
+    expect(shell).toContain("PASS R3D02C07B03 original claim/release true PG locking");
+    expect(shell).toContain("full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED");
+  });
+
+  it("R3D02C07B04 integration keeps original restore eligibility and claim/release proof together", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/disputes/dispute-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(src).toContain("isDisputableStatus(dispute.openedFromOrderStatus as RentalOrderStatus)");
+    expect(prepare).toContain('"DISPUTABLE_STATUSES","isDisputableStatus"');
+    expect(prepare).toContain('"withDisputeAuthority","claimDispute","releaseDispute"');
+    expect(probe).toContain("TERMINAL_INVALID_ORIGIN_FAIL_OPEN_");
+    expect(probe).toContain("TERMINAL_INACTIVE_ACCOUNT_PERMISSION_BYPASS");
+    expect(probe).toContain("CLAIM_REAL_PG_BLOCKING_PID_NOT_OBSERVED");
+    expect(probe).toContain("RELEASE_ABORT_RETRY_NOT_ONCE");
+    expect(shell).toContain("PASS R3D02C07B04 integrated original terminal authorization");
+  });
+
 });
