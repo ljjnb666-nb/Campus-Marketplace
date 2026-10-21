@@ -1253,4 +1253,28 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("PASS R3D02C07C02 original role revoke vs dispute terminal");
   });
 
+
+  it("R3D02C07C03 pins real account and membership enforcement kernels against terminal PG", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const account=read("src/lib/enforcement/account-enforcement-service.ts");
+    const membership=read("src/lib/enforcement/membership-enforcement-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(account).toContain("export async function suspendAccountTxLocked(");
+    expect(account).toContain("await isPrivilegedTarget(");
+    expect(membership).toContain("export async function suspendCampusMembership(");
+    expect(prepare).toContain('"hasFullAdminSurfaceAccess","isPrivilegedTarget"');
+    expect(prepare).toContain('astDeclaration(scopeSrc,"enforcement/risk-scope.ts","resultStateFor")');
+    expect(prepare).toContain("R3D02C07C03_ACCOUNT_TXLOCKED_DRIFT");
+    expect(prepare).toContain("R3D02C07C03_MEMBERSHIP_WRITER_DRIFT");
+    expect(probe).toContain('for(const mode of ["account","membership"] as const)');
+    expect(probe).toContain('for(const leader of ["enforcement","terminal"] as const)');
+    expect(probe).toContain("C07C03_REAL_PG_BLOCKING_PID_MISSING_");
+    expect(probe).toContain("C07C03_ENFORCEMENT_FIRST_STALE_AUTH_ACCEPTED_");
+    expect(probe).toContain("C07C03_ATOMIC_ENFORCEMENT_DISPUTE_EFFECTS_");
+    expect(shell).toContain("R3D02C07C03 missing $mode suspension/terminal real-PG proof");
+    expect(shell).toContain("LIMIT R3D02C07C03 account post-commit best-effort");
+  });
+
 });

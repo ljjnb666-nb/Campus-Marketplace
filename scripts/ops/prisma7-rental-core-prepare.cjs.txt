@@ -189,7 +189,7 @@ const scopeKey=astDeclaration(scopeSrc,"enforcement/risk-scope.ts","riskScopeKey
 const rolesSrc=fs.readFileSync(rolesPath,"utf8");
 const globalKey=astDeclaration(rolesSrc,rolesPath,"GLOBAL_SCOPE_KEY");
 fs.writeFileSync(path.join(root,"enforcement/risk-scope.ts"),
- globalKey+"\n"+scopeKey+"\n");
+ globalKey+"\n"+scopeKey+"\n"+astDeclaration(scopeSrc,"enforcement/risk-scope.ts","resultStateFor")+"\n");
 const exactCopies=[
  "metrics.ts","enforcement/errors.ts","rbac/errors.ts"
 ];
@@ -331,7 +331,7 @@ for(const file of ["rbac/errors.ts","disputes/errors.ts"]){
 const permSrc=path.resolve(path.dirname(sourcePath),"rbac/permissions.ts");
 const permRaw=fs.readFileSync(permSrc,"utf8");
 fs.writeFileSync(path.join(root,"rbac/permissions.ts"),
- ["PERMISSIONS","asPermissionKey"].map(n=>astDeclaration(permRaw,permSrc,n)).join("\n\n")+
+ ["PERMISSIONS","asPermissionKey","LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS"].map(n=>astDeclaration(permRaw,permSrc,n)).join("\n\n")+
  '\nexport type PermissionKey = keyof typeof PERMISSIONS;\n');
 const reviewAccess=path.resolve(path.dirname(sourcePath),"disputes/dispute-access.ts");
 fs.writeFileSync(path.join(root,"disputes/dispute-access.ts"),
@@ -339,11 +339,11 @@ fs.writeFileSync(path.join(root,"disputes/dispute-access.ts"),
 const rbacSrc=path.resolve(path.dirname(sourcePath),"rbac/service.ts");
 const rbacRaw=fs.readFileSync(rbacSrc,"utf8");
 const rbacVars=["authorizationSelect"];
-const rbacFunctions=["isActiveAccount","loadAuthorizationContext","hasPermission","requirePermissionInContext"];
+const rbacFunctions=["isActiveAccount","loadAuthorizationContext","hasPermission","hasFullAdminSurfaceAccess","isPrivilegedTarget","requirePermissionInContext"];
 const rbacOutput=path.join(root,"rbac/service.ts");
 fs.writeFileSync(rbacOutput,[
  'import type { Prisma } from "../../../generated/prisma/client.ts";',
- 'import { asPermissionKey, type PermissionKey } from "./permissions.ts";',
+ 'import { asPermissionKey, LEGACY_ADMIN_EQUIVALENCE_PERMISSION_KEYS, type PermissionKey } from "./permissions.ts";',
  'import { rbacError } from "./errors.ts";',
  'type AuthorizationGrant = { roleKey: string; scope: "GLOBAL" | "CAMPUS"; campusId: string | null; permissionKeys: string[] };',
  'type AuthorizationContext = { userId: string; accountActive: boolean; activeCampusIds: string[]; grants: AuthorizationGrant[] };',
@@ -430,4 +430,53 @@ fs.writeFileSync(path.join(root,"rbac/assignment-service.ts"),[
  revokeBody
 ].join("\n\n")+"\n");
 console.log("[worker-cycle] PASS R3D02C07C02 exact original revokeRole AST, sorted actor/target locks, fresh authorization and append-only audit");
+
+// R3D02C07C03: exact authoritative TxLocked account suspension + exact
+// canonical campus membership suspension public wrapper. No fake admin
+// authorization and no direct fixture mutation used as enforcement writer.
+// Account post-commit best-effort notification is intentionally NOT included:
+// this is a transaction-only seam and that delivery is a separate contract.
+const accountOrigin=path.resolve(path.dirname(sourcePath),"enforcement/account-enforcement-service.ts");
+const accountRaw=fs.readFileSync(accountOrigin,"utf8");
+const accountNames=["validateTargetLocked","suspendAccountTxLocked"];
+const accountBody=accountNames.map(n=>astDeclaration(accountRaw,accountOrigin,n)).join("\n\n");
+if(!accountBody.includes('await tx.enforcementAction.create(')||
+ !accountBody.includes('action: "SUSPEND_USER"')||
+ !accountBody.includes('await isPrivilegedTarget('))
+ throw Error("R3D02C07C03_ACCOUNT_TXLOCKED_DRIFT");
+fs.writeFileSync(path.join(root,"enforcement/account-enforcement-service.ts"),[
+ 'import type { Prisma } from "../../../generated/prisma/client.ts";',
+ 'import { enforcementError } from "./errors.ts";',
+ 'import { resultStateFor } from "./risk-scope.ts";',
+ 'import { recordAdminAudit } from "../governance/admin-audit.ts";',
+ 'import { rbacError } from "../rbac/errors.ts";',
+ 'import { hasPermission, isPrivilegedTarget, loadAuthorizationContext } from "../rbac/service.ts";',
+ 'type AccountEnforcementInput = { actorId: string; targetUserId: string; reasonCode: string; note?: string | null; sourceType?: string | null; sourceId?: string | null; racePoint?: (tx:Prisma.TransactionClient)=>Promise<void> };',
+ 'type AccountAuthoritativeResult = { status:"SUSPENDED" | "ACTIVE"; alreadyInState:boolean };',
+ accountBody
+].join("\n\n")+"\n");
+const membershipOrigin=path.resolve(path.dirname(sourcePath),"enforcement/membership-enforcement-service.ts");
+const membershipRaw=fs.readFileSync(membershipOrigin,"utf8");
+const membershipNames=["MEMBERSHIP_TRANSITIONS","validateActorLocked",
+ "validateTargetMembershipLocked","suspendCampusMembershipTxLocked","suspendCampusMembership"];
+const membershipBody=membershipNames.map(n=>astDeclaration(membershipRaw,membershipOrigin,n)).join("\n\n");
+if(!membershipBody.includes("await acquireGovernanceSubjectLocks(tx, [")||
+ !membershipBody.includes("return suspendCampusMembershipTxLocked(tx, input)")||
+ !membershipBody.includes('action: "SUSPEND_CAMPUS_MEMBERSHIP"'))
+ throw Error("R3D02C07C03_MEMBERSHIP_WRITER_DRIFT");
+fs.writeFileSync(path.join(root,"enforcement/membership-enforcement-service.ts"),[
+ 'import type { Prisma, CampusMembershipStatus } from "../../../generated/prisma/client.ts";',
+ 'import { enforcementError } from "./errors.ts";',
+ 'import { resultStateFor, riskScopeKey } from "./risk-scope.ts";',
+ 'import { recordAdminAudit } from "../governance/admin-audit.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts";',
+ 'import { withShadowDisputeTransaction as withTransaction } from "../disputes/shadow-transaction-runner.ts";',
+ 'import { rbacError } from "../rbac/errors.ts";',
+ 'import { hasPermission, isPrivilegedTarget, loadAuthorizationContext } from "../rbac/service.ts";',
+ 'type MembershipEnforcementInput = { actorId:string; targetUserId:string; campusId:string; reasonCode:string; note?:string | null; sourceType?:string | null; sourceId?:string | null; racePoint?: (tx:Prisma.TransactionClient)=>Promise<void> };',
+ 'type MembershipEnforcementResult = { status:CampusMembershipStatus; alreadyInState:boolean };',
+ membershipBody
+].join("\n\n")+"\n");
+console.log("[worker-cycle] PASS R3D02C07C03 original account TxLocked and membership suspension public wrapper AST, real RBAC privilege guard and audit provenance");
+
 

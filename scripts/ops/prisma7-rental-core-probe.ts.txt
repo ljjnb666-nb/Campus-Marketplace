@@ -18,6 +18,9 @@ import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
 import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "./lib/disputes/dispute-terminal-original.ts";
 import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
 import { revokeRole } from "./lib/rbac/assignment-service.ts";
+import { suspendAccountTxLocked } from "./lib/enforcement/account-enforcement-service.ts";
+import { suspendCampusMembership } from "./lib/enforcement/membership-enforcement-service.ts";
+import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -2200,6 +2203,171 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
     "C07C02_TERMINAL_REPLAY_PERMISSION_"+leader);
    console.log("[worker-cycle] PASS R3D02C07C02 original revokeRole vs terminal leader="+leader+
     " real PG advisory lock wait, fresh RBAC, single audit and atomic hold/notice");
+  }
+ }
+
+ // R3D02C07C03: exact original account TxLocked authoritative core + canonical
+ // membership suspension writer vs original dispute terminal in both orders.
+ // Account post-commit best-effort notice is deliberately outside this seam.
+ {
+  const manager="r3d02c07c03-enforcement-manager";
+  const grantIds:string[]=[];
+  for(const key of ["user.suspend","campus.manage"]){
+   const perm=await root.permission.upsert({where:{key},create:{
+    key,description:"isolated authentic enforcement authority"
+   },update:{}});
+   grantIds.push(perm.id);
+  }
+  const role=await root.role.create({data:{
+   key:"R3D02C07C03_GLOBAL_ENFORCEMENT_MANAGER",name:"isolated enforcement manager",
+   scope:"GLOBAL",rolePermissions:{create:grantIds.map(permissionId=>({permissionId}))}
+  }});
+  const reviewerRole=await root.role.findUniqueOrThrow({where:{
+   key:"R3D02C07B02_CAMPUS_REVIEWER"
+  }});
+  await root.user.create({data:{
+   id:manager,name:"Shadow Enforcement Manager",
+   email:"r3d02c07c03-manager@isolated.invalid",passwordHash:"isolated",
+   schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+  }});
+  await root.userRoleAssignment.create({data:{
+   userId:manager,roleId:role.id,scopeKey:"GLOBAL"
+  }});
+  const setup=async(label:string)=>{
+   const reviewer="r3d02c07c03-"+label;
+   await root.user.create({data:{
+    id:reviewer,name:"Isolated Suspended Reviewer",
+    email:reviewer+"@isolated.invalid",passwordHash:"isolated",
+    schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+   }});
+   const membership=await root.campusMembership.create({data:{
+    userId:reviewer,campusId:campus,status:"ACTIVE"
+   }});
+   await root.userRoleAssignment.create({data:{
+    userId:reviewer,roleId:reviewerRole.id,campusId:campus,scopeKey:"CAMPUS:"+campus
+   }});
+   const orderId=await fixture("c07c03-"+label,"IN_RENTAL");
+   await root.rentalOrder.update({where:{id:orderId},data:{
+    status:"COMPLETED",completedAt:new Date()
+   }});
+   assert(succeeds(await run(tx=>initiateDisputeTx(tx,{
+    orderId,userId:owner,reason:"original suspension/terminal race",evidencePhotos:[]
+   }))),"C07C03_ORIGINAL_DISPUTE_SETUP");
+   const d=await root.rentalDispute.findFirstOrThrow({where:{orderId}});
+   assert(d.status==="OPEN"&&d.openedFromOrderStatus==="COMPLETED",
+    "C07C03_ORIGINAL_DISPUTE_STATUS");
+   return {reviewer,membershipId:membership.id,orderId,disputeId:d.id,dueAt:d.dueAt};
+  };
+  const denied=async(fn:()=>Promise<unknown>,code:string)=>{
+   try{await fn();return false}catch(e){
+    return !!e&&typeof e==="object"&&"code" in e&&(e as {code:string}).code===code;
+   }
+  };
+  for(const mode of ["account","membership"] as const){
+   for(const leader of ["enforcement","terminal"] as const){
+    const current=await setup(mode+"-"+leader);
+    const command=(racePoint?:any)=>mode==="account"
+     ?run(async tx=>{
+       await acquireGovernanceSubjectLocks(tx,[
+        {subjectType:"USER",subjectId:manager},
+        {subjectType:"USER",subjectId:current.reviewer}
+       ]);
+       if(racePoint)await racePoint(tx);
+       return suspendAccountTxLocked(tx,{
+        actorId:manager,targetUserId:current.reviewer,reasonCode:"MANUAL_REVIEW"
+       });
+      })
+     :suspendCampusMembership({
+       actorId:manager,targetUserId:current.reviewer,campusId:campus,
+       reasonCode:"POLICY_VIOLATION",racePoint
+      });
+    const terminal=(racePoint?:any)=>run(tx=>executeOriginalDisputeTerminalTx(tx,{
+     actorId:current.reviewer,disputeId:current.disputeId,
+     resolutionAction:"RESTORE_PREVIOUS",resolutionCode:"MUTUAL_AGREEMENT",
+     racePoint
+    },async inner=>{
+     const record=await inner.rentalDispute.findUniqueOrThrow({where:{
+      id:current.disputeId
+     },select:{order:{select:{ownerId:true,renterId:true}}}});
+     return record.order;
+    }));
+    let release!:()=>void,ready!:()=>void,firstPid=0;
+    const signal=new Promise<void>(resolve=>ready=resolve);
+    const gate=new Promise<void>(resolve=>release=resolve);
+    const hold=async(tx:any)=>{
+     firstPid=(await tx.$queryRaw<Array<{pid:number}>>`
+      SELECT pg_backend_pid()::int AS pid
+     `)[0]?.pid??0;
+     assert(firstPid>0,"C07C03_HOLDER_PID_MISSING");
+     ready();await gate;
+    };
+    const first=leader==="enforcement"?command(hold):terminal(hold);
+    await signal;
+    const second=leader==="enforcement"?terminal():command();
+    let blocked=false;
+    try{
+     for(let i=0;i<120;i++){
+      const rows=await root.$queryRaw<Array<{blockers:number[]}>>`
+       SELECT pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+       WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'
+      `;
+      if(rows.some(row=>row.blockers.includes(firstPid))){blocked=true;break;}
+      await new Promise(resolve=>setTimeout(resolve,30));
+     }
+    }finally{release()}
+    const [a,b]=await Promise.allSettled([first,second]);
+    assert(blocked,"C07C03_REAL_PG_BLOCKING_PID_MISSING_"+mode+"_"+leader);
+    const expectedError=mode==="account"?"AUTH_ACCOUNT_INACTIVE":"AUTH_CAMPUS_SCOPE_MISMATCH";
+    if(leader==="enforcement"){
+     assert(a.status==="fulfilled"&&"status" in a.value&&
+      a.value.status==="SUSPENDED"&&a.value.alreadyInState===false&&
+      b.status==="rejected"&&b.reason?.code===expectedError,
+      "C07C03_ENFORCEMENT_FIRST_STALE_AUTH_ACCEPTED_"+mode);
+    }else{
+     assert(a.status==="fulfilled"&&"status" in a.value&&a.value.status==="RESOLVED"&&
+      b.status==="fulfilled"&&"status" in b.value&&
+      b.value.status==="SUSPENDED"&&b.value.alreadyInState===false,
+      "C07C03_TERMINAL_FIRST_NOT_SERIALIZED_"+mode);
+    }
+    const resolved=leader==="terminal";
+    const dispute=await root.rentalDispute.findUniqueOrThrow({where:{id:current.disputeId}});
+    const order=await root.rentalOrder.findUniqueOrThrow({where:{id:current.orderId}});
+    const user=await root.user.findUniqueOrThrow({where:{id:current.reviewer}});
+    const membership=await root.campusMembership.findUniqueOrThrow({where:{id:current.membershipId}});
+    const enforce=await root.enforcementAction.findMany({where:{
+     targetId:current.reviewer,type:mode==="account"?"ACCOUNT_SUSPEND":"MEMBERSHIP_SUSPEND"
+    }});
+    const action=mode==="account"?"SUSPEND_USER":"SUSPEND_CAMPUS_MEMBERSHIP";
+    const audits=await root.adminLog.findMany({where:{
+     targetType:mode==="account"?"USER":"CAMPUS_MEMBERSHIP",
+     targetId:mode==="account"?current.reviewer:current.membershipId,action
+    }});
+    const disputeAudit=await root.adminLog.findMany({where:{
+     targetType:"RENTAL_DISPUTE",targetId:current.disputeId
+    }});
+    const holds=await root.dataHold.count({where:{
+     sourceType:"RENTAL_DISPUTE",sourceId:current.disputeId,status:"ACTIVE"
+    }});
+    const notices=await root.notification.count({where:{
+     kind:RENTAL_DISPUTE_RESOLVED_KIND,dedupeKey:{contains:current.disputeId}
+    }});
+    assert(dispute.status===(resolved?"RESOLVED":"OPEN")&&
+     order.status===(resolved?"COMPLETED":"IN_DISPUTE")&&
+     dispute.dueAt.getTime()===current.dueAt.getTime()&&
+     user.status===(mode==="account"?"SUSPENDED":"ACTIVE")&&
+     membership.status===(mode==="membership"?"SUSPENDED":"ACTIVE")&&
+     enforce.length===1&&audits.length===1&&
+     enforce[0].previousState===(mode==="account"?"USER:ACTIVE":"CAMPUS_MEMBERSHIP:ACTIVE")&&
+     holds===(resolved?0:2)&&notices===(resolved?2:0)&&
+     disputeAudit.length===(resolved?1:0)&&
+     (!resolved||disputeAudit[0].action==="DISPUTE_RESOLVED"),
+     "C07C03_ATOMIC_ENFORCEMENT_DISPUTE_EFFECTS_"+mode+"_"+leader);
+    assert(await denied(()=>terminal(),expectedError),
+     "C07C03_POST_SUSPEND_AUTH_REPLAY_"+mode+"_"+leader);
+    console.log("[worker-cycle] PASS R3D02C07C03 original "+mode+
+     " suspension vs terminal leader="+leader+
+     " observed real PG advisory wait, fresh authority, provenance and exact hold/audit/notice");
+   }
   }
  }
 
