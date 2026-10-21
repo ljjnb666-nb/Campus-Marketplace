@@ -87,9 +87,17 @@ async function createFixtureUser(name: string) {
 
   // Phase 6B：义务创建入口新增 membership 能力门——fixture 用户必须持有
   // ACTIVE CampusMembership 才能创建订单/义务（与生产注册语义一致）
-  await rawClient!.campusMembership.create({
-    data: { userId: user.id, campusId: campus.id, status: "ACTIVE" },
+  // Integration fixture must converge with a membership that may already
+  // have been inserted by another legitimate registration/fixture path.
+  // Do not drop the DB unique constraint or silently revive inactive rows.
+  const membership = await rawClient!.campusMembership.upsert({
+    where: { userId_campusId: { userId: user.id, campusId: campus.id } },
+    create: { userId: user.id, campusId: campus.id, status: "ACTIVE" },
+    update: {},
   });
+  expect(membership.status).toBe("ACTIVE");
+  expect(membership.userId).toBe(user.id);
+  expect(membership.campusId).toBe(campus.id);
 
   return user;
 }
