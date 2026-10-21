@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 type PunitiveType = "ACCOUNT_SUSPEND" | "MEMBERSHIP_SUSPEND" | "MARKETPLACE_RESTRICT";
