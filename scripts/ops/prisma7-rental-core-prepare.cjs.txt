@@ -480,3 +480,37 @@ fs.writeFileSync(path.join(root,"enforcement/membership-enforcement-service.ts")
 console.log("[worker-cycle] PASS R3D02C07C03 original account TxLocked and membership suspension public wrapper AST, real RBAC privilege guard and audit provenance");
 
 
+// C07C04A: AST-identical public suspendAccount & post-commit best-effort
+// notification wrapper. Real canonical notification writer is imported, but
+// negative-path proof injects failure at post-commit transaction boundary.
+const accountPublicNames=["bestEffortEnforcementNotification","suspendAccount"];
+const accountPublic=accountPublicNames.map(n=>astDeclaration(accountRaw,accountOrigin,n)).join("\n\n");
+if(!accountPublic.includes('await bestEffortEnforcementNotification("ACCOUNT_SUSPEND"')||
+ !accountPublic.includes('event: "ENFORCEMENT_NOTIFICATION_FAILED"')||
+ !accountPublic.includes("return { ...authoritative, notificationDelivered };"))
+ throw Error("R3D02C07C04A_ORIGINAL_POSTCOMMIT_DRIFT");
+const accountTarget=path.join(root,"enforcement/account-enforcement-service.ts");
+fs.appendFileSync(accountTarget,[
+ 'import { logger } from "../logger.ts";',
+ 'import { emitNotificationTx } from "../notifications/notification-service.ts";',
+ // Registry definitions come from the source-of-truth, not from a new
+ // hardcoded KIND spelling in the test-only harness.
+ 'import { ACCOUNT_SUSPENDED_KIND, ACCOUNT_REINSTATED_KIND } from "../notifications/notification-registry.ts";',
+ 'import { withShadowDisputeTransaction as withTransaction } from "../disputes/shadow-transaction-runner.ts";',
+ 'type AccountEnforcementResult = AccountAuthoritativeResult & { notificationDelivered:boolean };',
+ accountPublic
+].join("\n\n")+"\n");
+const originalRegistry=fs.readFileSync(
+ path.resolve(path.dirname(sourcePath),"notifications/notification-registry.ts"),"utf8");
+const registryPath=path.join(root,"notifications/notification-registry.ts");
+let existingRegistry=fs.readFileSync(registryPath,"utf8");
+for(const constant of ["ACCOUNT_SUSPENDED_KIND","ACCOUNT_REINSTATED_KIND"]){
+ if(!new RegExp("\\b(?:const|let|var)\\s+"+constant+"\\b").test(existingRegistry)){
+  fs.appendFileSync(registryPath,"\n"+astDeclaration(originalRegistry,"notification-registry.ts",constant)+"\n");
+  existingRegistry=fs.readFileSync(registryPath,"utf8");
+ }
+}
+console.log("[worker-cycle] PASS R3D02C07C04A exact original suspendAccount public post-commit best-effort notification AST provenance");
+
+
+
