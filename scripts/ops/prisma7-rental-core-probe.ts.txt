@@ -2162,12 +2162,12 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    const [a,b]=await Promise.allSettled([first,second]);
    assert(blocked,"C07C02_GENUINE_PG_BLOCK_NOT_OBSERVED_"+leader);
    if(leader==="revoke"){
-    assert(a.status==="fulfilled"&&a.value.removed===true&&
+    assert(a.status==="fulfilled"&&"removed" in a.value&&a.value.removed===true&&
      b.status==="rejected"&&b.reason?.code==="AUTH_PERMISSION_DENIED",
      "C07C02_REVOKE_FIRST_STALE_AUTH_ACCEPTED");
    }else{
-    assert(a.status==="fulfilled"&&a.value.status==="RESOLVED"&&
-     b.status==="fulfilled"&&b.value.removed===true,
+    assert(a.status==="fulfilled"&&"status" in a.value&&a.value.status==="RESOLVED"&&
+     b.status==="fulfilled"&&"removed" in b.value&&b.value.removed===true,
      "C07C02_TERMINAL_FIRST_REVOKE_OR_TERMINAL_FAILED");
    }
    const expectedResolved=leader==="terminal";
@@ -2196,7 +2196,7 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
     (!expectedResolved||disputeAudit[0].action==="DISPUTE_RESOLVED")&&
     roleAudit.length===1&&remaining===0,
     "C07C02_REVOKE_TERMINAL_ATOMICITY_"+leader);
-   assert(await denied(()=>terminal(),"AUTH_PERMISSION_DENIED")===expectedResolved,
+   assert(await denied(()=>terminal(),"AUTH_PERMISSION_DENIED"),
     "C07C02_TERMINAL_REPLAY_PERMISSION_"+leader);
    console.log("[worker-cycle] PASS R3D02C07C02 original revokeRole vs terminal leader="+leader+
     " real PG advisory lock wait, fresh RBAC, single audit and atomic hold/notice");
