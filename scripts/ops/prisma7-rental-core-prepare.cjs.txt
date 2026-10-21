@@ -396,3 +396,38 @@ if(!terminalBody.includes("await withDisputeAuthority(tx, input)")||
  !terminalBody.includes('throw disputeError("DISPUTE_TERMINAL")'))
  throw Error("R3D02C07B03_ORIGINAL_CLAIM_RELEASE_DRIFT");
 console.log("[worker-cycle] PASS R3D02C07B03 original claim/release/authority AST provenance and real-PG-only transaction binder");
+
+// R3D02C07C02: extract the canonical RBAC revokeRole writer itself, not a
+// hand-written permission-row delete, and bind only outer withTransaction.
+const rolesOrigin=path.resolve(path.dirname(sourcePath),"rbac/roles.ts");
+const rolesRaw=fs.readFileSync(rolesOrigin,"utf8");
+fs.writeFileSync(path.join(root,"rbac/roles.ts"),[
+ astDeclaration(rolesRaw,rolesOrigin,"GLOBAL_SCOPE_KEY"),
+ astDeclaration(rolesRaw,rolesOrigin,"campusScopeKey")
+].join("\n\n")+"\n");
+const assignmentSrc=path.resolve(path.dirname(sourcePath),"rbac/assignment-service.ts");
+const assignmentRaw=fs.readFileSync(assignmentSrc,"utf8");
+const revokeNames=["acquireActorTargetLocks","assertActorMayManageRoles",
+ "assertRoleAssignScope","revokeRole"];
+const revokeBody=revokeNames.map(n=>astDeclaration(assignmentRaw,assignmentSrc,n)).join("\n\n");
+if(!revokeBody.includes("await acquireActorTargetLocks(tx, input.actorId, input.targetUserId)")||
+ !revokeBody.includes("await loadAuthorizationContext(input.actorId, tx)")||
+ !revokeBody.includes("await tx.userRoleAssignment.delete(")||
+ !revokeBody.includes('action: "ROLE_REVOKED"')||
+ !revokeBody.includes("await recordAdminAudit("))
+ throw Error("R3D02C07C02_ORIGINAL_REVOKE_DRIFT");
+fs.writeFileSync(path.join(root,"rbac/assignment-service.ts"),[
+ 'import type { Prisma, UserRoleAssignment } from "../../../generated/prisma/client.ts";',
+ 'import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts";',
+ 'import { recordAdminAudit } from "../governance/admin-audit.ts";',
+ 'import { rbacError } from "./errors.ts";',
+ 'import { campusScopeKey, GLOBAL_SCOPE_KEY } from "./roles.ts";',
+ 'import { loadAuthorizationContext } from "./service.ts";',
+ 'import { withShadowDisputeTransaction as withTransaction } from "../disputes/shadow-transaction-runner.ts";',
+ 'type AuthorizationGrant = { roleKey: string; scope: "GLOBAL" | "CAMPUS"; campusId: string | null; permissionKeys: string[] };',
+ 'type AuthorizationContext = { userId: string; accountActive: boolean; activeCampusIds: string[]; grants: AuthorizationGrant[] };',
+ 'type RoleGrantContext = { actorId: string; targetUserId: string; roleKey: string; campusId?: string | null; racePoint?: (tx: Prisma.TransactionClient)=>Promise<void>; expectedAssignmentId?: string };',
+ revokeBody
+].join("\n\n")+"\n");
+console.log("[worker-cycle] PASS R3D02C07C02 exact original revokeRole AST, sorted actor/target locks, fresh authorization and append-only audit");
+
