@@ -55,7 +55,8 @@ export function RestrictedAppealPortal() {
   const [feedback, setFeedback] = useState("");
 
   const load = useCallback(async (next?: string) => {
-    setView("loading");
+    // Initial view is already "loading". Avoid synchronous setState in the
+    // mount effect; API responses alone advance to ready/denied/error.
     try {
       const params = new URLSearchParams({ limit: "25" });
       if (next) params.set("cursor", next);
@@ -135,7 +136,7 @@ export function RestrictedAppealPortal() {
       {view === "error" ? (
         <div className="mt-4 text-sm text-red-700" role="alert">
           申诉记录暂时无法读取。
-          <button type="button" onClick={() => { void load(); }} className="ml-2 underline">重新查询</button>
+          <button type="button" onClick={() => { setView("loading"); void load(); }} className="ml-2 underline">重新查询</button>
         </div>
       ) : null}
       {view === "ready" && items.length === 0 ? (
