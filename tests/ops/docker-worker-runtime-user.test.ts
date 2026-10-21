@@ -1287,6 +1287,7 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(src).toContain("async function bestEffortEnforcementNotification(");
     expect(src).toContain("return { ...authoritative, notificationDelivered };");
     expect(prep).toContain('"bestEffortEnforcementNotification","suspendAccount"');
+    expect(prep).toContain('import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts"');
     expect(prep).toContain("R3D02C07C04A_ORIGINAL_POSTCOMMIT_DRIFT");
     expect(probe).toContain("pendingPostCommitTarget");
     expect(probe).toContain("C07C04A_NOT_COMMITTED_BEFORE_DELIVERY");
