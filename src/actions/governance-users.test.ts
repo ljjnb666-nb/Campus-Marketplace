@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { GovernanceUserFeedback } from "@/components/governance/user-action-forms";
 
 const {
   revalidatePathMock,
@@ -114,7 +117,7 @@ describe("suspendGovernanceUser / reinstateGovernanceUser（薄 adapter）", () 
 
     const result = await suspendGovernanceUser(formData({ userId: "user-1" }));
 
-    expect(result).toEqual({ success: true });
+    expect(result).toEqual({ success: true, notificationStatus: "RECORDED" });
     expect(suspendAccountMock).toHaveBeenCalledWith({
       actorId: "admin-1",
       targetUserId: "user-1",
@@ -148,12 +151,58 @@ describe("suspendGovernanceUser / reinstateGovernanceUser（薄 adapter）", () 
     expect(result).toEqual({ success: false, error: "当前状态不允许该操作" });
   });
 
+  it("停用已提交但通知失败：保留 success=true，返回明确可见的有限状态", async () => {
+    suspendAccountMock.mockResolvedValue({
+      status: "SUSPENDED", alreadyInState: false, notificationDelivered: false,
+    });
+    const result = await suspendGovernanceUser(formData({ userId: "user-1" }));
+    expect(result).toEqual({ success: true, notificationStatus: "FAILED" });
+    expect(suspendAccountMock).toHaveBeenCalledTimes(1);
+    expect(revalidatePathMock).toHaveBeenCalledWith("/governance/enforcement");
+  });
+
+  it("重复停用幂等：无通知属于 NOT_REQUIRED 而不是通知失败", async () => {
+    suspendAccountMock.mockResolvedValue({
+      status: "SUSPENDED", alreadyInState: true, notificationDelivered: false,
+    });
+    expect(await suspendGovernanceUser(formData({ userId: "user-1" })))
+      .toEqual({ success: true, notificationStatus: "NOT_REQUIRED" });
+  });
+
+  it("恢复已提交但通知失败/无须重复通知均不伪装为命令失败", async () => {
+    reinstateAccountMock
+      .mockResolvedValueOnce({ status: "ACTIVE", alreadyInState: false, notificationDelivered: false })
+      .mockResolvedValueOnce({ status: "ACTIVE", alreadyInState: true, notificationDelivered: false });
+    expect(await reinstateGovernanceUser(formData({ userId: "user-1" })))
+      .toEqual({ success: true, notificationStatus: "FAILED" });
+    expect(await reinstateGovernanceUser(formData({ userId: "user-1" })))
+      .toEqual({ success: true, notificationStatus: "NOT_REQUIRED" });
+    expect(reinstateAccountMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("管理端反馈区分站内通知写入、失败、幂等，且不宣称用户已读", () => {
+    const render = (notificationStatus: "RECORDED" | "FAILED" | "NOT_REQUIRED") =>
+      renderToStaticMarkup(createElement(GovernanceUserFeedback, {
+        state: { success: true, notificationStatus },
+      }));
+    const recorded = render("RECORDED");
+    const failed = render("FAILED");
+    const skipped = render("NOT_REQUIRED");
+    expect(recorded).toContain("站内通知已生成");
+    expect(recorded).toContain("不代表对方已阅读");
+    expect(failed).toContain("账号状态已更新");
+    expect(failed).toContain("站内通知未能生成");
+    expect(failed).toContain("无需重复执行账号操作");
+    expect(skipped).toContain("本次未重复生成通知");
+    expect(failed).not.toContain("role=\"alert\"");
+  });
+
   it("reinstate → canonical reinstateAccount 透传", async () => {
     reinstateAccountMock.mockResolvedValue({ status: "ACTIVE", alreadyInState: false, notificationDelivered: true });
 
     const result = await reinstateGovernanceUser(formData({ userId: "user-1" }));
 
-    expect(result).toEqual({ success: true });
+    expect(result).toEqual({ success: true, notificationStatus: "RECORDED" });
     expect(reinstateAccountMock).toHaveBeenCalledWith({
       actorId: "admin-1",
       targetUserId: "user-1",
