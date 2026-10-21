@@ -30,7 +30,7 @@ function isEligiblePage(data: unknown): data is EligiblePage {
     const row = item as Record<string, unknown>;
     const appeal = row.appeal;
     return typeof row.enforcementActionId === "string" &&
-      Object.prototype.hasOwnProperty.call(LABELS, row.type) &&
+      typeof row.type === "string" && Object.prototype.hasOwnProperty.call(LABELS, row.type) &&
       (row.scopeKind === "GLOBAL" || row.scopeKind === "CAMPUS") &&
       typeof row.createdAt === "string" &&
       (appeal === null ||
