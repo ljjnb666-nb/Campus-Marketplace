@@ -33,7 +33,17 @@ import { governanceUserActionSchema } from "@/validators/governance-user";
 export type GovernanceUserActionState = {
   success: boolean;
   error?: string;
+  // 只返回有限的通知状态，不泄露目标身份或内部错误信息。
+  notificationStatus?: "RECORDED" | "FAILED" | "NOT_REQUIRED";
 };
+
+function accountNoticeStatus(result: {
+  alreadyInState: boolean;
+  notificationDelivered: boolean;
+}): NonNullable<GovernanceUserActionState["notificationStatus"]> {
+  if (result.alreadyInState) return "NOT_REQUIRED";
+  return result.notificationDelivered ? "RECORDED" : "FAILED";
+}
 
 const UNIFORM_DENY_MESSAGE = "没有权限管理该账号";
 
@@ -78,7 +88,7 @@ export async function suspendGovernanceUser(
       return uniformDeny();
     }
 
-    await suspendAccount({
+    const result = await suspendAccount({
       actorId: user.id,
       targetUserId: parsed.data.userId,
       reasonCode: "MANUAL_REVIEW",
@@ -88,7 +98,7 @@ export async function suspendGovernanceUser(
     revalidatePath("/governance/users");
     revalidatePath(`/governance/users/${parsed.data.userId}`);
     revalidatePath("/governance/enforcement");
-    return { success: true };
+    return { success: true, notificationStatus: accountNoticeStatus(result) };
   } catch (error) {
     return governanceUserActionError(error, "suspendGovernanceUser");
   }
@@ -112,7 +122,7 @@ export async function reinstateGovernanceUser(
       return uniformDeny();
     }
 
-    await reinstateAccount({
+    const result = await reinstateAccount({
       actorId: user.id,
       targetUserId: parsed.data.userId,
       reasonCode: "MANUAL_REVIEW",
@@ -122,7 +132,7 @@ export async function reinstateGovernanceUser(
     revalidatePath("/governance/users");
     revalidatePath(`/governance/users/${parsed.data.userId}`);
     revalidatePath("/governance/enforcement");
-    return { success: true };
+    return { success: true, notificationStatus: accountNoticeStatus(result) };
   } catch (error) {
     return governanceUserActionError(error, "reinstateGovernanceUser");
   }
