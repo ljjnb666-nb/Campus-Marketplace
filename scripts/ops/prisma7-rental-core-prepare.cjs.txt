@@ -295,9 +295,12 @@ const terminalHeader=[
  'import { emitNotificationsTx } from "../notifications/notification-service.ts";',
  'import { RENTAL_DISPUTE_RESOLVED_KIND } from "../notifications/notification-registry.ts";',
  'type DisputeRacePoint = (tx: Prisma.TransactionClient) => Promise<void>;',
- 'type ResolveDisputeResult = { disputeId: string; status: "RESOLVED" | "CLOSED"; orderStatus: string; releasedHolds: number };'
+ 'type ResolveDisputeResult = { disputeId: string; status: "RESOLVED" | "CLOSED"; orderStatus: string; releasedHolds: number };',
+ 'type LockedDisputeRow = { id: string; campusId: string; scopeKey: string; status: string; assignedToId: string | null; };',
+ 'import { withShadowDisputeTransaction as withTransaction } from "./shadow-transaction-runner.ts";'
 ].join("\n");
-const terminalNames=["requireDisputeReviewAuthorization","resolveDisputeTxLocked"];
+const terminalNames=["requireDisputeReviewAuthorization","resolveDisputeTxLocked",
+ "withDisputeAuthority","claimDispute","releaseDispute"];
 const terminalBody=terminalNames.map(n=>astDeclaration(terminalRaw,terminalSrc,n)).join("\n\n");
 // Exact eligibility authority is shared by original dispute creation and
 // terminal restore. Copy AST declarations, never shadow-reimplement the list.
@@ -370,3 +373,26 @@ if(fs.readFileSync(holdOutput,"utf8").includes("function releaseHoldsBySourceTxL
  throw Error("R3D02C07B02_DUPLICATE_HOLD_RELEASE");
 fs.appendFileSync(holdOutput,"\n"+holdRelease+"\n");
 console.log("[worker-cycle] PASS R3D02C07B02 exact original dispute terminal, RBAC, source hold release and admin audit AST declarations");
+
+
+// R3D02C07B03: original claimDispute/releaseDispute stay AST-identical.
+// Production withTransaction is environment infrastructure, not a domain
+// writer. Bind it to genuine isolated PG $transaction, and fail unbound.
+const driverOutput=path.join(root,"disputes/shadow-transaction-runner.ts");
+fs.writeFileSync(driverOutput,[
+ 'type ShadowTxFn=(cb:(tx:any)=>Promise<any>)=>Promise<any>;',
+ 'let driver:ShadowTxFn|undefined;',
+ 'export function bindShadowDisputeTransaction(fn:ShadowTxFn){',
+ ' if(driver)throw Error("R3D02C07B03_DRIVER_ALREADY_BOUND");',
+ ' driver=fn;',
+ '}',
+ 'export async function withShadowDisputeTransaction<T>(cb:(tx:any)=>Promise<T>):Promise<T>{',
+ ' if(!driver)throw Error("R3D02C07B03_NO_REAL_PG_TRANSACTION");',
+ ' return driver(cb) as Promise<T>;',
+ '}'
+].join("\n")+"\n");
+if(!terminalBody.includes("await withDisputeAuthority(tx, input)")||
+ !terminalBody.includes("await recordAdminAudit(")||
+ !terminalBody.includes('throw disputeError("DISPUTE_TERMINAL")'))
+ throw Error("R3D02C07B03_ORIGINAL_CLAIM_RELEASE_DRIFT");
+console.log("[worker-cycle] PASS R3D02C07B03 original claim/release/authority AST provenance and real-PG-only transaction binder");
