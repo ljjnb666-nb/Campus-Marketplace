@@ -1277,4 +1277,24 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("LIMIT R3D02C07C03 account post-commit best-effort");
   });
 
+  it("R3D02C07C04A pins original public account suspend post-commit failure and replay", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/enforcement/account-enforcement-service.ts");
+    const prep=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(src).toContain("export async function suspendAccount(");
+    expect(src).toContain("async function bestEffortEnforcementNotification(");
+    expect(src).toContain("return { ...authoritative, notificationDelivered };");
+    expect(prep).toContain('"bestEffortEnforcementNotification","suspendAccount"');
+    expect(prep).toContain('import { acquireGovernanceSubjectLocks } from "../governance/governance-lock.ts"');
+    expect(prep).toContain("R3D02C07C04A_ORIGINAL_POSTCOMMIT_DRIFT");
+    expect(probe).toContain("pendingPostCommitTarget");
+    expect(probe).toContain("C07C04A_NOT_COMMITTED_BEFORE_DELIVERY");
+    expect(probe).toContain("C07C04A_AUTHORITY_ROLLED_BACK_BY_BEST_EFFORT_FAILURE");
+    expect(probe).toContain("C07C04A_IDEMPOTENT_REPLAY_DUPLICATED_ENFORCEMENT_OR_DELIVERY");
+    expect(shell).toContain("R3D02C07C04A authoritative commit / best-effort failure boundary not observed");
+    expect(shell).toContain("LIMIT R3D02C07C04A successful canonical ACCOUNT_SUSPENDED");
+  });
+  
 });

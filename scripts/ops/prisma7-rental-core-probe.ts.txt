@@ -18,7 +18,7 @@ import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
 import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "./lib/disputes/dispute-terminal-original.ts";
 import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
 import { revokeRole } from "./lib/rbac/assignment-service.ts";
-import { suspendAccountTxLocked } from "./lib/enforcement/account-enforcement-service.ts";
+import { suspendAccountTxLocked, suspendAccount } from "./lib/enforcement/account-enforcement-service.ts";
 import { suspendCampusMembership } from "./lib/enforcement/membership-enforcement-service.ts";
 import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
@@ -33,18 +33,41 @@ const root=new PrismaClient({adapter:new PrismaPg({
 const db=root.$extends(softDeleteExtension).$extends(domainEventLedgerExtension);
 let abortAfterClaimWrites=false;
 let abortAfterReleaseWrites=false;
-bindShadowDisputeTransaction(cb=>db.$transaction(async tx=>{
- const result=await cb(tx);
- if(abortAfterClaimWrites){
-  abortAfterClaimWrites=false;
-  throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_CLAIM_AUDIT");
+// Only C07C04A sets this opt-in flag. It allows the authoritative public
+// suspension transaction to COMMIT first; the next (notification) transaction
+// is then rejected before any notification can write.
+let pendingPostCommitTarget:string|null=null;
+let authoritativeSuspensionCommitted=false;
+let postCommitFailureInjected=false;
+bindShadowDisputeTransaction(async cb=>{
+ if(pendingPostCommitTarget!==null&&authoritativeSuspensionCommitted){
+  const target=pendingPostCommitTarget;
+  const user=await root.user.findUniqueOrThrow({where:{id:target}});
+  const count=await root.enforcementAction.count({where:{
+   targetId:target,type:"ACCOUNT_SUSPEND"
+  }});
+  assert(user.status==="SUSPENDED"&&count===1,
+   "C07C04A_NOT_COMMITTED_BEFORE_DELIVERY");
+  pendingPostCommitTarget=null;
+  authoritativeSuspensionCommitted=false;
+  postCommitFailureInjected=true;
+  throw Error("R3D02C07C04A_FORCED_NOTIFICATION_FAILURE_AFTER_COMMIT");
  }
- if(abortAfterReleaseWrites){
-  abortAfterReleaseWrites=false;
-  throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT");
- }
+ const result=await db.$transaction(async tx=>{
+  const answer=await cb(tx);
+  if(abortAfterClaimWrites){
+   abortAfterClaimWrites=false;
+   throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_CLAIM_AUDIT");
+  }
+  if(abortAfterReleaseWrites){
+   abortAfterReleaseWrites=false;
+   throw Error("R3D02C07B03_FORCED_ABORT_AFTER_ORIGINAL_RELEASE_AUDIT");
+  }
+  return answer;
+ },{maxWait:5000,timeout:15000});
+ if(pendingPostCommitTarget!==null)authoritativeSuspensionCommitted=true;
  return result;
-},{maxWait:5000,timeout:15000}));
+});
 const owner="r3d01-seller",renter="r3d01-buyer",outsider="r3d01-outsider";
 const listingId="r3d01-rental-listing";
 const campus="r3d01-campus-a";
@@ -2369,6 +2392,58 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
      " observed real PG advisory wait, fresh authority, provenance and exact hold/audit/notice");
    }
   }
+ }
+
+ // R3D02C07C04A: the exact PUBLIC suspendAccount wrapper must report
+ // post-commit notice failure separately from successful authority, and
+ // replay must not re-run notification or duplicate enforcement/audit.
+ // A targeted test-only transaction driver fault is injected only AFTER
+ // the original authoritative transaction commits on real PostgreSQL.
+ {
+  const actor="r3d02c07c03-enforcement-manager";
+  const target="r3d02c07c04a-account-postcommit";
+  await root.user.create({data:{
+   id:target,name:"Isolated postcommit notification candidate",
+   email:"r3d02c07c04a-account@isolated.invalid",passwordHash:"isolated",
+   schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+  }});
+  pendingPostCommitTarget=target;
+  authoritativeSuspensionCommitted=false;
+  postCommitFailureInjected=false;
+  const first=await suspendAccount({
+   actorId:actor,targetUserId:target,reasonCode:"MANUAL_REVIEW",
+   note:"isolated postcommit delivery fault"
+  });
+  assert(first.status==="SUSPENDED"&&first.alreadyInState===false&&
+   first.notificationDelivered===false&&postCommitFailureInjected&&
+   pendingPostCommitTarget===null&&!authoritativeSuspensionCommitted,
+   "C07C04A_PUBLIC_SUCCESS_MISREPORTED_ON_NOTIFICATION_FAILURE");
+  const after=await root.user.findUniqueOrThrow({where:{id:target}});
+  const actions=await root.enforcementAction.findMany({where:{
+   type:"ACCOUNT_SUSPEND",targetId:target
+  }});
+  const audit=await root.adminLog.findMany({where:{
+   targetType:"USER",targetId:target,action:"SUSPEND_USER"
+  }});
+  const notice=await root.notification.count({where:{userId:target}});
+  assert(after.status==="SUSPENDED"&&actions.length===1&&
+   actions[0].previousState==="USER:ACTIVE"&&
+   audit.length===1&&notice===0,
+   "C07C04A_AUTHORITY_ROLLED_BACK_BY_BEST_EFFORT_FAILURE");
+  const replay=await suspendAccount({
+   actorId:actor,targetUserId:target,reasonCode:"MANUAL_REVIEW"
+  });
+  const secondActions=await root.enforcementAction.count({where:{
+   type:"ACCOUNT_SUSPEND",targetId:target
+  }});
+  const secondAudit=await root.adminLog.count({where:{
+   targetType:"USER",targetId:target,action:"SUSPEND_USER"
+  }});
+  assert(replay.status==="SUSPENDED"&&replay.alreadyInState===true&&
+   replay.notificationDelivered===false&&secondActions===1&&secondAudit===1&&
+   await root.notification.count({where:{userId:target}})===0,
+   "C07C04A_IDEMPOTENT_REPLAY_DUPLICATED_ENFORCEMENT_OR_DELIVERY");
+  console.log("[worker-cycle] PASS R3D02C07C04A exact original public suspendAccount PG commit survives post-commit notification failure, replay produces no second audit or notice");
  }
 
 }finally{await root.$disconnect();}
