@@ -40,6 +40,25 @@ function isEligiblePage(data: unknown): data is EligiblePage {
   });
 }
 
+type FetchResult = { kind: "unauthorized" } | { kind: "ready"; page: EligiblePage };
+
+// Pure I/O: do not mutate component state. It is safe to start this promise
+// in a mount effect; state is updated only from its settled async handlers.
+async function readEligiblePage(next?: string): Promise<FetchResult> {
+  const params = new URLSearchParams({ limit: "25" });
+  if (next) params.set("cursor", next);
+  const response = await fetch("/api/appeals/eligible-actions?" + params.toString(), {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (response.status === 401) return { kind: "unauthorized" };
+  if (!response.ok) throw new Error("appeal list unavailable");
+  const page: unknown = await response.json();
+  if (!isEligiblePage(page)) throw new Error("invalid appeal page");
+  return { kind: "ready", page };
+}
+
 /**
  * No private server props, role bypass or raw enforcement record access.
  * All identity/ownership comes from /api/appeals/**; the public shell leaks
@@ -55,34 +74,42 @@ export function RestrictedAppealPortal() {
   const [feedback, setFeedback] = useState("");
 
   const load = useCallback(async (next?: string) => {
-    // Initial view is already "loading". Avoid synchronous setState in the
-    // mount effect; API responses alone advance to ready/denied/error.
     try {
-      const params = new URLSearchParams({ limit: "25" });
-      if (next) params.set("cursor", next);
-      const response = await fetch("/api/appeals/eligible-actions?" + params.toString(), {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      if (response.status === 401) {
+      const result = await readEligiblePage(next);
+      if (result.kind === "unauthorized") {
         setItems([]);
         setCursor(null);
         setView("unauthorized");
         return;
       }
-      if (!response.ok) throw new Error("appeal list unavailable");
-      const page: unknown = await response.json();
-      if (!isEligiblePage(page)) throw new Error("invalid appeal page");
-      setItems(previous => next ? [...previous, ...page.items] : page.items);
-      setCursor(page.nextCursor);
+      setItems(previous => next ? [...previous, ...result.page.items] : result.page.items);
+      setCursor(result.page.nextCursor);
       setView("ready");
     } catch {
       setView("error");
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    // A request started from an effect may only commit state from settled
+    // async callbacks. Avoid calling the state-mutating load() synchronously.
+    let active = true;
+    void readEligiblePage().then(result => {
+      if (!active) return;
+      if (result.kind === "unauthorized") {
+        setItems([]);
+        setCursor(null);
+        setView("unauthorized");
+      } else {
+        setItems(result.page.items);
+        setCursor(result.page.nextCursor);
+        setView("ready");
+      }
+    }).catch(() => {
+      if (active) setView("error");
+    });
+    return () => { active = false; };
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
