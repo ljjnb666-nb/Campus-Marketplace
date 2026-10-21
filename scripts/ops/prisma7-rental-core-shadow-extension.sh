@@ -423,7 +423,21 @@ for mode in account membership; do
  done
 done
 echo '[worker-cycle] PASS R3D02C07C03 four real-PG original suspension/terminal serializability scenarios, authoritative enforcement and audit'
-echo '[worker-cycle] LIMIT R3D02C07C03 account post-commit best-effort enforcement notification not exercised; complete production Prisma7 unverified'
+echo '[worker-cycle] LIMIT R3D02C07C03 account post-commit best-effort enforcement notification not exercised in C03; complete production Prisma7 unverified'
+
+# C07C04A: the ORIGINAL public wrapper (not just TxLocked) must retain
+# authoritative PG COMMIT when a subsequent best-effort notification tx
+# fails, and its replay must not duplicate enforcement, audit or delivery.
+grep -qF 'PASS R3D02C07C04A exact original suspendAccount public post-commit best-effort notification AST provenance' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C04A exact public wrapper provenance missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07C04A exact original public suspendAccount PG commit survives post-commit notification failure, replay produces no second audit or notice' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C04A authoritative commit / best-effort failure boundary not observed' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07C04A account public post-commit failure is independent of authoritative commit; idempotent replay'
+echo '[worker-cycle] LIMIT R3D02C07C04A successful canonical ACCOUNT_SUSPENDED delivery and email dispatcher remain unverified'
 
 echo '[worker-cycle] LIMIT R3D02C07C02 account-suspend and membership-enforcement writers separately pending; full Next.js production Prisma7 still UNVERIFIED'
 
