@@ -19,6 +19,7 @@ import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "
 import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
 import { revokeRole } from "./lib/rbac/assignment-service.ts";
 import { suspendAccountTxLocked, suspendAccount } from "./lib/enforcement/account-enforcement-service.ts";
+import { ACCOUNT_SUSPENDED_KIND, NOTIFICATION_SCHEMA_VERSION, NOTIFICATION_CHANNEL_IN_APP, resolveNotificationDefinition, validateNotificationIntent } from "./lib/notifications/notification-registry.ts";
 import { suspendCampusMembership } from "./lib/enforcement/membership-enforcement-service.ts";
 import { acquireGovernanceSubjectLocks } from "./lib/governance/governance-lock.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
@@ -2444,6 +2445,102 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
    await root.notification.count({where:{userId:target}})===0,
    "C07C04A_IDEMPOTENT_REPLAY_DUPLICATED_ENFORCEMENT_OR_DELIVERY");
   console.log("[worker-cycle] PASS R3D02C07C04A exact original public suspendAccount PG commit survives post-commit notification failure, replay produces no second audit or notice");
+ }
+
+ // R3D02C07C04B: canonical success path of the exact production public
+ // suspendAccount -> bestEffortEnforcementNotification -> original
+ // notification-service.ts emitNotificationTx and registry, real PostgreSQL.
+ // Distinguish IN_APP materialization from unproven external dispatch.
+ {
+  const actor="r3d02c07c03-enforcement-manager";
+  const contract=resolveNotificationDefinition(
+   ACCOUNT_SUSPENDED_KIND,NOTIFICATION_SCHEMA_VERSION);
+  assert(contract!==null&&
+   contract.channels.length===1&&contract.channels[0]===NOTIFICATION_CHANNEL_IN_APP&&
+   validateNotificationIntent(ACCOUNT_SUSPENDED_KIND,NOTIFICATION_SCHEMA_VERSION,{}).ok&&
+   !validateNotificationIntent(ACCOUNT_SUSPENDED_KIND,NOTIFICATION_SCHEMA_VERSION,
+    {reasonCode:"UNSAFE_PRIVATE_NOTE"}).ok,
+   "C07C04B_ORIGINAL_CANONICAL_REGISTRY_POLICY_OR_SCHEMA_DRIFT");
+  assert(pendingPostCommitTarget===null&&!authoritativeSuspensionCommitted,
+   "C07C04B_TEST_DRIVER_FAULT_LEAKED_FROM_C04A");
+  const initialJobs=await root.asyncJob.count({where:{
+   kind:"NOTIFICATION_DELIVERY"
+  }});
+  const initialDelivery=await root.notificationDelivery.count();
+  const checkMaterialized=async(target:string)=>{
+   const rows=await root.notification.findMany({where:{
+    userId:target,kind:ACCOUNT_SUSPENDED_KIND
+   }});
+   assert(rows.length===1,"C07C04B_NOTIFICATION_NOT_EXACTLY_ONCE_"+target);
+   const record=rows[0];
+   const rendered=contract.renderInApp({} as never,target);
+   assert(record.schemaVersion===NOTIFICATION_SCHEMA_VERSION&&
+    record.type===rendered.type&&record.title===rendered.title&&
+    record.content===rendered.content&&record.isRead===false&&
+    record.orderId===null&&record.sourceEventId===null&&
+    typeof record.dedupeKey==="string"&&
+    record.dedupeKey.startsWith(ACCOUNT_SUSPENDED_KIND+":"+target+":")&&
+    Object.keys(record.payload as object).length===0&&
+    await root.notificationDelivery.count({where:{notificationId:record.id}})===0,
+    "C07C04B_WRONG_CANONICAL_IN_APP_FACTS_"+target);
+   return record.id;
+  };
+  const makeTarget=async(suffix:string)=>{
+   const id="r3d02c07c04b-"+suffix;
+   await root.user.create({data:{
+    id,name:"Isolated canonical suspension "+suffix,
+    email:id+"@isolated.invalid",passwordHash:"isolated",
+    schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+   }});
+   return id;
+  };
+  const id1=await makeTarget("first");
+  const outcome=await suspendAccount({
+   actorId:actor,targetUserId:id1,reasonCode:"MANUAL_REVIEW",
+   note:"private reason must never reach canonical IN_APP payload"
+  });
+  assert(outcome.status==="SUSPENDED"&&outcome.alreadyInState===false&&
+   outcome.notificationDelivered===true,
+   "C07C04B_PUBLIC_SUCCESS_DID_NOT_REPORT_CANONICAL_DELIVERY");
+  const firstId=await checkMaterialized(id1);
+  const replay=await suspendAccount({
+   actorId:actor,targetUserId:id1,reasonCode:"MANUAL_REVIEW",
+   note:"different private note must not be delivered"
+  });
+  const afterId=await checkMaterialized(id1);
+  assert(replay.status==="SUSPENDED"&&replay.alreadyInState===true&&
+   replay.notificationDelivered===false&&afterId===firstId&&
+   await root.enforcementAction.count({where:{
+    targetId:id1,type:"ACCOUNT_SUSPEND"
+   }})===1&&await root.adminLog.count({where:{
+    targetType:"USER",targetId:id1,action:"SUSPEND_USER"
+   }})===1,
+   "C07C04B_REPLAY_DUPLICATED_NOTIFICATION_OR_AUTHORITATIVE_FACT");
+  console.log("[worker-cycle] PASS R3D02C07C04B exact original public suspension canonical IN_APP materializes once with strict source registry, replay no new notice");
+
+  // Two independent public commands race for a new target. The genuine
+  // sorted USER governance locks must serialize to one transition winner,
+  // one notification insert and one append-only admin audit.
+  const id2=await makeTarget("concurrent");
+  const choices=await Promise.all([
+   suspendAccount({actorId:actor,targetUserId:id2,reasonCode:"MANUAL_REVIEW"}),
+   suspendAccount({actorId:actor,targetUserId:id2,reasonCode:"MANUAL_REVIEW"})
+  ]);
+  assert(choices.filter(x=>x.alreadyInState===false&&x.notificationDelivered===true).length===1&&
+   choices.filter(x=>x.alreadyInState===true&&x.notificationDelivered===false).length===1&&
+   choices.every(x=>x.status==="SUSPENDED")&&
+   await root.enforcementAction.count({where:{
+    targetId:id2,type:"ACCOUNT_SUSPEND"
+   }})===1&&await root.adminLog.count({where:{
+    targetType:"USER",targetId:id2,action:"SUSPEND_USER"
+   }})===1,
+   "C07C04B_CONCURRENT_PUBLIC_SUSPEND_MORE_THAN_ONE_WINNER");
+  const secondId=await checkMaterialized(id2);
+  assert(secondId!==firstId&&
+   await root.notificationDelivery.count()===initialDelivery&&
+   await root.asyncJob.count({where:{kind:"NOTIFICATION_DELIVERY"}})===initialJobs,
+   "C07C04B_IN_APP_ONLY_POLICY_CREATED_EMAIL_DELIVERY_OR_JOB");
+  console.log("[worker-cycle] PASS R3D02C07C04B two concurrent original public suspendAccount transactions converge to one audit, enforcement and canonical IN_APP notice, no EMAIL delivery or jobs");
  }
 
 }finally{await root.$disconnect();}
