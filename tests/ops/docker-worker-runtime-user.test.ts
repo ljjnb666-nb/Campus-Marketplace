@@ -1320,4 +1320,21 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("LIMIT R3D02C07C04B ACCOUNT_SUSPENDED is IN_APP only");
   });
 
+  it("R3D02C07D01 keeps governance Action feedback aligned with authentic post-commit notification result", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const authority=read("src/lib/enforcement/account-enforcement-service.ts");
+    const action=read("src/actions/governance-users.ts");
+    const form=read("src/components/governance/user-action-forms.tsx");
+    const audit=read("docs/R3D02C07D_CONVERGENCE_AUDIT.md");
+    expect(authority).toContain("return { ...authoritative, notificationDelivered };");
+    expect(action).toContain('notificationStatus?: "RECORDED" | "FAILED" | "NOT_REQUIRED"');
+    expect(action).toContain("if (result.alreadyInState) return \"NOT_REQUIRED\";");
+    expect(action).toContain('result.notificationDelivered ? "RECORDED" : "FAILED"');
+    expect(action).toContain("actorId: user.id,");
+    expect(form).toContain("站内通知未能生成");
+    expect(form).toContain("无需重复执行账号操作");
+    expect(form).toContain("不代表对方已阅读");
+    expect(audit).toContain("生产 `src/lib/prisma.ts`");
+  });
+
 });
