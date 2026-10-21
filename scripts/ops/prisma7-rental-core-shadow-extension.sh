@@ -379,3 +379,16 @@ echo '[worker-cycle] PASS R3D02C07B03 original claim/release true PG locking, ca
 echo '[worker-cycle] LIMIT R3D02C07B03 only outer withTransaction bound to shadow PG; full application server, role-revoke concurrent action and production Prisma7 cutover UNVERIFIED'
 
 echo '[worker-cycle] PASS R3D02C07B04 integrated original terminal authorization, allowed restore origins and authentic claim/release PG assertions'
+
+# R3D02C07C01: four original-function cross-writer races must be observed
+# via pg_blocking_pids, including both winning orders and both operations.
+for mode in claim release; do
+ for leader in actor terminal; do
+  grep -qF "PASS R3D02C07C01 real PG original $mode vs terminal leader=$leader blocked PID observed, single terminal and atomic audit/holds/notices" "$tmp/r3d02c01-runtime.log" || {
+   echo "[worker-cycle][FAIL] R3D02C07C01 missing original $mode vs terminal leader=$leader real-PG proof" >&2
+   exit 1
+  }
+ done
+done
+echo '[worker-cycle] PASS R3D02C07C01 original claim/release vs authorized terminal, four real PG contention orderings, audit and hold integrity'
+echo '[worker-cycle] LIMIT R3D02C07C01 full production withTransaction, dynamic role revoke and payment transitions not verified'
