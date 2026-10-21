@@ -392,3 +392,20 @@ for mode in claim release; do
 done
 echo '[worker-cycle] PASS R3D02C07C01 original claim/release vs authorized terminal, four real PG contention orderings, audit and hold integrity'
 echo '[worker-cycle] LIMIT R3D02C07C01 full production withTransaction, dynamic role revoke and payment transitions not verified'
+
+# C07C02: real original RBAC revokeRole (not a direct fixture-row mutation),
+# ordered USER:manager+reviewer locks and terminal requirePermission in both
+# commit orders. Assert live PG blocker PID + atomic outputs for both.
+grep -qF 'PASS R3D02C07C02 exact original revokeRole AST, sorted actor/target locks, fresh authorization and append-only audit' "$tmp/r3d02c01-prepare.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C02 original revokeRole AST extraction missing' >&2
+ exit 1
+}
+for leader in revoke terminal; do
+ grep -qF "PASS R3D02C07C02 original revokeRole vs terminal leader=$leader real PG advisory lock wait, fresh RBAC, single audit and atomic hold/notice" "$tmp/r3d02c01-runtime.log" || {
+  echo "[worker-cycle][FAIL] R3D02C07C02 missing real original revocation/terminal blocking proof leader=$leader" >&2
+  exit 1
+ }
+done
+echo '[worker-cycle] PASS R3D02C07C02 original role revoke vs dispute terminal real PG two-order authority serializability'
+echo '[worker-cycle] LIMIT R3D02C07C02 account-suspend and membership-enforcement writers separately pending; full Next.js production Prisma7 still UNVERIFIED'
+

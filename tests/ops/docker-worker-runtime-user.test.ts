@@ -1230,4 +1230,27 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("PASS R3D02C07C01 original claim/release vs authorized terminal");
   });
 
+
+  it("R3D02C07C02 extracts canonical role revoke and fences stale terminal authorization in real PG", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const source=read("src/lib/rbac/assignment-service.ts");
+    const dispute=read("src/lib/disputes/dispute-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(source).toContain("export async function revokeRole(");
+    expect(source).toContain("await acquireActorTargetLocks(tx, input.actorId, input.targetUserId)");
+    expect(dispute).toContain("await requireDisputeReviewAuthorization(tx, input.actorId");
+    expect(prepare).toContain('"assertRoleAssignScope","revokeRole"');
+    expect(prepare).toContain("R3D02C07C02_ORIGINAL_REVOKE_DRIFT");
+    expect(probe).toContain("import { revokeRole }");
+    expect(probe).toContain('for(const leader of ["revoke","terminal"] as const)');
+    expect(probe).toContain("C07C02_GENUINE_PG_BLOCK_NOT_OBSERVED_");
+    expect(probe).toContain("C07C02_REVOKE_FIRST_STALE_AUTH_ACCEPTED");
+    expect(probe).toContain("C07C02_TERMINAL_FIRST_REVOKE_OR_TERMINAL_FAILED");
+    expect(probe).toContain("C07C02_REVOKE_TERMINAL_ATOMICITY_");
+    expect(shell).toContain("R3D02C07C02 original revokeRole AST extraction missing");
+    expect(shell).toContain("PASS R3D02C07C02 original role revoke vs dispute terminal");
+  });
+
 });
