@@ -1209,4 +1209,25 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("PASS R3D02C07B04 integrated original terminal authorization");
   });
 
+
+  it("R3D02C07C01 requires four original claim/release vs terminal PG row-lock races", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const origin=read("src/lib/disputes/dispute-service.ts");
+    const prepare=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(origin).toContain("async function withDisputeAuthority(");
+    expect(origin).toContain("async function resolveDisputeTxLocked(");
+    expect(prepare).toContain('"withDisputeAuthority","claimDispute","releaseDispute"');
+    expect(probe).toContain('for(const mode of ["claim","release"] as const)');
+    expect(probe).toContain('for(const leader of ["actor","terminal"] as const)');
+    expect(probe).toContain("C07C01_REAL_PG_BLOCK_NOT_OBSERVED_");
+    expect(probe).toContain("C07C01_TERMINAL_FIRST_DID_NOT_FENCE_");
+    expect(probe).toContain("C07C01_ACTOR_FIRST_NOT_SERIALIZED_");
+    expect(probe).toContain("C07C01_CROSS_WRITER_ATOMIC_EFFECTS_");
+    expect(probe).toContain("pg_blocking_pids(pid)");
+    expect(shell).toContain("R3D02C07C01 missing original $mode vs terminal leader=$leader real-PG proof");
+    expect(shell).toContain("PASS R3D02C07C01 original claim/release vs authorized terminal");
+  });
+
 });
