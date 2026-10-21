@@ -1297,4 +1297,27 @@ describe("Issue #157 persistent worker runtime UID contract (Dockerfile stage in
     expect(shell).toContain("LIMIT R3D02C07C04A successful canonical ACCOUNT_SUSPENDED");
   });
   
+  it("R3D02C07C04B original public suspend materializes canonical IN_APP once, not EMAIL jobs", () => {
+    const read=(p:string)=>readFileSync(path.join(process.cwd(),p),"utf8");
+    const src=read("src/lib/enforcement/account-enforcement-service.ts");
+    const registry=read("src/lib/notifications/notification-registry.ts");
+    const writer=read("src/lib/notifications/notification-service.ts");
+    const prep=read("scripts/ops/prisma7-rental-core-prepare.cjs.txt");
+    const probe=read("scripts/ops/prisma7-rental-core-probe.ts.txt");
+    const shell=read("scripts/ops/prisma7-rental-core-shadow-extension.sh");
+    expect(src).toContain("await bestEffortEnforcementNotification(\"ACCOUNT_SUSPEND\"");
+    expect(registry).toContain("kind: ACCOUNT_SUSPENDED_KIND,");
+    expect(registry).toContain("channels: [NOTIFICATION_CHANNEL_IN_APP],");
+    expect(writer).toContain("export async function emitNotificationTx(");
+    expect(prep).toContain('"bestEffortEnforcementNotification","suspendAccount"');
+    expect(probe).toContain("C07C04B_PUBLIC_SUCCESS_DID_NOT_REPORT_CANONICAL_DELIVERY");
+    expect(probe).toContain("C07C04B_REPLAY_DUPLICATED_NOTIFICATION_OR_AUTHORITATIVE_FACT");
+    expect(probe).toContain("C07C04B_CONCURRENT_PUBLIC_SUSPEND_MORE_THAN_ONE_WINNER");
+    expect(probe).toContain("C07C04B_IN_APP_ONLY_POLICY_CREATED_EMAIL_DELIVERY_OR_JOB");
+    expect(probe).toContain("resolveNotificationDefinition(");
+    expect(probe).toContain('await root.notificationDelivery.count()===initialDelivery');
+    expect(shell).toContain("R3D02C07C04B genuine concurrent successful suspension not verified");
+    expect(shell).toContain("LIMIT R3D02C07C04B ACCOUNT_SUSPENDED is IN_APP only");
+  });
+
 });
