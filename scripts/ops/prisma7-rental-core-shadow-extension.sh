@@ -437,7 +437,21 @@ grep -qF 'PASS R3D02C07C04A exact original public suspendAccount PG commit survi
  exit 1
 }
 echo '[worker-cycle] PASS R3D02C07C04A account public post-commit failure is independent of authoritative commit; idempotent replay'
-echo '[worker-cycle] LIMIT R3D02C07C04A successful canonical ACCOUNT_SUSPENDED delivery and email dispatcher remain unverified'
+echo '[worker-cycle] LIMIT R3D02C07C04A successful canonical ACCOUNT_SUSPENDED delivery not exercised in negative-path A; email dispatcher unverified'
+
+# C07C04B: genuine original public writer + production canonical registry
+# successfully persists IN_APP in PG; no EMAIL channel for this kind, so no
+# NotificationDelivery row or NOTIFICATION_DELIVERY AsyncJob may appear.
+grep -qF 'PASS R3D02C07C04B exact original public suspension canonical IN_APP materializes once with strict source registry, replay no new notice' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C04B canonical success and replay proof missing' >&2
+ exit 1
+}
+grep -qF 'PASS R3D02C07C04B two concurrent original public suspendAccount transactions converge to one audit, enforcement and canonical IN_APP notice, no EMAIL delivery or jobs' "$tmp/r3d02c01-runtime.log" || {
+ echo '[worker-cycle][FAIL] R3D02C07C04B genuine concurrent successful suspension not verified' >&2
+ exit 1
+}
+echo '[worker-cycle] PASS R3D02C07C04B canonical ACCOUNT_SUSPENDED in-app notification and concurrent replay via original public suspension and real PG'
+echo '[worker-cycle] LIMIT R3D02C07C04B ACCOUNT_SUSPENDED is IN_APP only: email dispatcher, push and full production Next.js runtime not tested'
 
 echo '[worker-cycle] LIMIT R3D02C07C02 account-suspend and membership-enforcement writers separately pending; full Next.js production Prisma7 still UNVERIFIED'
 
