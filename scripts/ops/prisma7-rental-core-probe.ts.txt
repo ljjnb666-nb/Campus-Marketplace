@@ -17,6 +17,7 @@ import {
 import { visibleRentalReviewCondition } from "./lib/reviews/review-query.ts";
 import { executeOriginalDisputeTerminalTx, claimDispute, releaseDispute } from "./lib/disputes/dispute-terminal-original.ts";
 import { bindShadowDisputeTransaction } from "./lib/disputes/shadow-transaction-runner.ts";
+import { revokeRole } from "./lib/rbac/assignment-service.ts";
 import { RENTAL_DISPUTE_RESOLVED_KIND } from "./lib/notifications/notification-registry.ts";
 
 function assert(ok:unknown,code:string):asserts ok{if(!ok)throw Error("R3D02C01_"+code);}
@@ -2059,6 +2060,146 @@ console.log("[worker-cycle] PASS R3D02C02 deterministic real PG renter CANCEL vs
     console.log("[worker-cycle] PASS R3D02C07C01 real PG original "+mode+
      " vs terminal leader="+leader+" blocked PID observed, single terminal and atomic audit/holds/notices");
    }
+  }
+ }
+
+ // R3D02C07C02: authentic role-revocation writer vs original dispute
+ // terminal, two opposite acquisition orders. Permission and audit are
+ // written through production AST; only outer withTransaction is bound.
+ {
+  const mgrId="r3d02c07c02-role-manager";
+  const reviewerRole=await root.role.findUniqueOrThrow({where:{
+   key:"R3D02C07B02_CAMPUS_REVIEWER"
+  }});
+  const assignPermission=await root.permission.upsert({
+   where:{key:"rbac.role.assign"},
+   create:{key:"rbac.role.assign",description:"isolated canonical role revoke"},
+   update:{}
+  });
+  const managerRole=await root.role.create({data:{
+   key:"R3D02C07C02_GLOBAL_ROLE_MANAGER",name:"isolated global role manager",
+   scope:"GLOBAL",rolePermissions:{create:{permissionId:assignPermission.id}}
+  }});
+  await root.user.create({data:{
+   id:mgrId,name:"Isolated RBAC Manager",email:"r3d02c07c02-manager@isolated.invalid",
+   passwordHash:"isolated",schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+  }});
+  await root.userRoleAssignment.create({data:{
+   userId:mgrId,roleId:managerRole.id,scopeKey:"GLOBAL"
+  }});
+  const setup=async(label:string)=>{
+   const target="r3d02c07c02-reviewer-"+label;
+   await root.user.create({data:{
+    id:target,name:"Isolated Revocable Reviewer",
+    email:target+"@isolated.invalid",passwordHash:"isolated",
+    schoolName:"Shadow Campus",campusId:campus,status:"ACTIVE"
+   }});
+   await root.campusMembership.create({data:{
+    userId:target,campusId:campus,status:"ACTIVE"
+   }});
+   const granted=await root.userRoleAssignment.create({data:{
+    userId:target,roleId:reviewerRole.id,
+    campusId:campus,scopeKey:"CAMPUS:"+campus
+   }});
+   const orderId=await fixture("c07c02-revoke-"+label,"IN_RENTAL");
+   await root.rentalOrder.update({where:{id:orderId},data:{
+    status:"COMPLETED",completedAt:new Date()
+   }});
+   assert(succeeds(await run(tx=>initiateDisputeTx(tx,{
+    orderId,userId:owner,reason:"canonical revoke race",evidencePhotos:[]
+   }))),"C07C02_ORIGINAL_DISPUTE_SETUP");
+   const dispute=await root.rentalDispute.findFirstOrThrow({where:{orderId}});
+   assert(dispute.status==="OPEN"&&dispute.openedFromOrderStatus==="COMPLETED",
+    "C07C02_DISPUTE_SETUP_STATUS");
+   return {target,assignmentId:granted.id,orderId,disputeId:dispute.id,dueAt:dispute.dueAt};
+  };
+  const denied=async(fn:()=>Promise<unknown>,expected:string)=>{
+   try{await fn();return false}catch(e){
+    return !!e&&typeof e==="object"&&"code" in e&&(e as {code:string}).code===expected;
+   }
+  };
+  for(const leader of ["revoke","terminal"] as const){
+   const scenario=await setup(leader);
+   const revoke=(point?:any)=>revokeRole({
+    actorId:mgrId,targetUserId:scenario.target,
+    roleKey:reviewerRole.key,campusId:campus,
+    expectedAssignmentId:scenario.assignmentId,racePoint:point
+   });
+   const terminal=(point?:any)=>run(tx=>executeOriginalDisputeTerminalTx(tx,{
+    actorId:scenario.target,disputeId:scenario.disputeId,
+    resolutionAction:"RESTORE_PREVIOUS",resolutionCode:"MUTUAL_AGREEMENT",
+    racePoint:point
+   },async inner=>{
+    const d=await inner.rentalDispute.findUniqueOrThrow({where:{
+     id:scenario.disputeId
+    },select:{order:{select:{ownerId:true,renterId:true}}}});
+    return d.order;
+   }));
+   let firstPid=0,enter!:()=>void,release!:()=>void;
+   const locked=new Promise<void>(resolve=>enter=resolve);
+   const gate=new Promise<void>(resolve=>release=resolve);
+   const hold=async(tx:any)=>{
+    firstPid=(await tx.$queryRaw<Array<{pid:number}>>`
+     SELECT pg_backend_pid()::int AS pid
+    `)[0]?.pid??0;
+    assert(firstPid>0,"C07C02_MISSING_LOCK_OWNER_PID");
+    enter();await gate;
+   };
+   const first=leader==="revoke"?revoke(hold):terminal(hold);
+   await locked;
+   const second=leader==="revoke"?terminal():revoke();
+   let blocked=false;
+   try{
+    for(let i=0;i<120;i++){
+     const rows=await root.$queryRaw<Array<{blockers:number[]}>>`
+      SELECT pg_blocking_pids(pid) AS blockers FROM pg_stat_activity
+      WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'
+     `;
+     if(rows.some(r=>r.blockers.includes(firstPid))){blocked=true;break}
+     await new Promise(resolve=>setTimeout(resolve,30));
+    }
+   }finally{release()}
+   const [a,b]=await Promise.allSettled([first,second]);
+   assert(blocked,"C07C02_GENUINE_PG_BLOCK_NOT_OBSERVED_"+leader);
+   if(leader==="revoke"){
+    assert(a.status==="fulfilled"&&a.value.removed===true&&
+     b.status==="rejected"&&b.reason?.code==="AUTH_PERMISSION_DENIED",
+     "C07C02_REVOKE_FIRST_STALE_AUTH_ACCEPTED");
+   }else{
+    assert(a.status==="fulfilled"&&a.value.status==="RESOLVED"&&
+     b.status==="fulfilled"&&b.value.removed===true,
+     "C07C02_TERMINAL_FIRST_REVOKE_OR_TERMINAL_FAILED");
+   }
+   const expectedResolved=leader==="terminal";
+   const d=await root.rentalDispute.findUniqueOrThrow({where:{id:scenario.disputeId}});
+   const o=await root.rentalOrder.findUniqueOrThrow({where:{id:scenario.orderId}});
+   const holds=await root.dataHold.count({where:{
+    sourceType:"RENTAL_DISPUTE",sourceId:scenario.disputeId,status:"ACTIVE"
+   }});
+   const notices=await root.notification.count({where:{
+    kind:RENTAL_DISPUTE_RESOLVED_KIND,dedupeKey:{contains:scenario.disputeId}
+   }});
+   const disputeAudit=await root.adminLog.findMany({where:{
+    targetType:"RENTAL_DISPUTE",targetId:scenario.disputeId
+   }});
+   const roleAudit=await root.adminLog.findMany({where:{
+    targetType:"USER",targetId:scenario.target,action:"ROLE_REVOKED"
+   }});
+   const remaining=await root.userRoleAssignment.count({where:{
+    userId:scenario.target,roleId:reviewerRole.id
+   }});
+   assert(d.status===(expectedResolved?"RESOLVED":"OPEN")&&
+    o.status===(expectedResolved?"COMPLETED":"IN_DISPUTE")&&
+    d.dueAt.getTime()===scenario.dueAt.getTime()&&
+    holds===(expectedResolved?0:2)&&notices===(expectedResolved?2:0)&&
+    disputeAudit.length===(expectedResolved?1:0)&&
+    (!expectedResolved||disputeAudit[0].action==="DISPUTE_RESOLVED")&&
+    roleAudit.length===1&&remaining===0,
+    "C07C02_REVOKE_TERMINAL_ATOMICITY_"+leader);
+   assert(await denied(()=>terminal(),"AUTH_PERMISSION_DENIED")===expectedResolved,
+    "C07C02_TERMINAL_REPLAY_PERMISSION_"+leader);
+   console.log("[worker-cycle] PASS R3D02C07C02 original revokeRole vs terminal leader="+leader+
+    " real PG advisory lock wait, fresh RBAC, single audit and atomic hold/notice");
   }
  }
 
