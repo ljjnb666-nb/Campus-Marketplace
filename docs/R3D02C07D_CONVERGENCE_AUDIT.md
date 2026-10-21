@@ -56,7 +56,7 @@
 
 ## 四、本切片收敛准入条件
 
-- 本 PR 以 #192 的准确 HEAD 堆叠，代码差异必须限于治理账号 Action、反馈组件、对应测试与本审计文档。
+- 本 PR 以 #192 的准确 HEAD 堆叠，代码差异必须限于治理账号 Action、反馈组件、相应单元测试、Worker 静态防漂移测试与本审计文档。
 - 准确 HEAD 重新执行 Typecheck、Lint、全量 Vitest、Next Build、Playwright 和真实五镜像 Worker，并读取原始测试数量；历史错误与 warning 保留。
 - 对 `FAILED` 的反馈不得把已提交账号状态伪装成失败；`RECORDED` 不得写成“已送达/已读”；`NOT_REQUIRED` 不得冒充通知错误。
 - 未经用户明确授权不得合并 Draft，不修改 master、不执行生产部署、不更改生产 Prisma 6.19.3、UNVERIFIED 或信任/KPI 发布限制。
