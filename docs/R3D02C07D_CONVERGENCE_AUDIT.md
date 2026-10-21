@@ -51,7 +51,7 @@
 2. **事务超时/锁等待（P2）**：真实 `withTransaction` 默认 10s；shadow PG 某些证据事务使用 15s 配置。需以生产预算复验排队并发及必要重试策略，确认超时后无混淆的成功/失败与双写。
 3. **提交后视图刷新（P2 待核）**：`src/actions/governance-users.ts` 先完成 domain COMMIT 后调用 `revalidatePath`。刷新失败可能导致“成功已提交但操作返回错误”的歧义；尚未模拟或验证该异常，不在本 Draft 修复范围。
 4. **真实客户端反馈（P2 待核）**：本 Draft 的客户端状态文本与结构有 Vitest 边界测试，但未做真实 Microsoft Edge 上的管理员账号登录、页面状态切换和网络失败验收。
-5. **端到端通知可见性（P2 待核）**：#192 证明 PG IN_APP 投影，不代表真实用户 Session 能在通知列表读取、分页、标记已读；ACCOUNT_SUSPENDED 的 canonical registry 仅 IN_APP，EMAIL dispatcher 不在本通知类型的成功条件。
+5. **账号停用通知可达性（P2 确认的运营缺口；修复待独立授权）**：`src/lib/notifications/notification-registry.ts` 中 `ACCOUNT_SUSPENDED` 只有 `IN_APP`，`src/app/notifications/page.tsx` 直接调用 `requireUser()`，而 `src/lib/server-auth.ts` 中 `requireUser()` 对 `SUSPENDED` 重定向登录。故被停用者在停用期间**无法从普通站内通知页阅读此次停用通知**，即使 #192 已证明其真实 PG Notification 物化成功。`getAppealEligibleSession()` 是仅面向 `/api/appeals/**` 的受限独立入口，不可拿来放宽 `/notifications` 的 ACTIVE-only 访问边界；后续应设计/审计非敏感的停用告知与申诉可达路径，不暴露普通通知、账号数据、处罚细节或越权判据。EMAIL dispatcher 不是此 `IN_APP`-only 类型的成功条件。
 6. **生产/信任发布门（P1）**：UNVERIFIED、五项 trust=false、G1–G6/KPI 限制以及 #157/#97/#115/#120/#131 OPEN 必须保持。CI/单元测试通过不能提升生产可信度；#170—#192 未合并的堆叠状态必须单独治理，禁止将 Draft 链等同发布版本。
 
 ## 四、本切片收敛准入条件
