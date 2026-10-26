@@ -75,16 +75,15 @@ function bootstrapTempDatabase(): string {
   runPrismaDbExecute(`CREATE DATABASE "${TEMP_DB}";`, maintenanceUrl);
   const tempUrl = swapDatabaseName(integrationDatabaseUrl!, TEMP_DB);
 
-  // 全量迁移重放（单批 db execute；scratch 库无需 _prisma_migrations 台账）
+  // Preserve migration commit boundaries (new enum values require a commit).
   const migrationsDir = join(process.cwd(), "prisma", "migrations");
   const migrations = readdirSync(migrationsDir)
-    .filter((name) => /^\d{14}_/.test(name))
+    .filter((name) => /^\d{12,14}_/.test(name))
     .sort();
   expect(migrations.length).toBeGreaterThan(0);
-  const sql = migrations
-    .map((name) => readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"))
-    .join("\n\n");
-  runPrismaDbExecute(sql, tempUrl);
+  for (const name of migrations) {
+    runPrismaDbExecute(readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"), tempUrl);
+  }
   return tempUrl;
 }
 

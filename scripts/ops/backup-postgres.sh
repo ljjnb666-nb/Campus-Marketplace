@@ -27,6 +27,7 @@
 #     任一失败 → 整体非 0 退出（本次备份判定 FAILED，不得宣称备份成功）
 # =============================================================================
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh

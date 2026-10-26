@@ -95,8 +95,14 @@ export async function killTree(child) {
  * 凭据不进 argv、无 shell）。worker 集成测试用它创建/销毁一次性隔离数据库。
  */
 export function runPrismaCommand(args, env, stdin) {
+  // Prisma 6 db execute requires an explicit schema even when prisma.config.ts
+  // defines it. Keep the connection URL in the environment, never argv.
+  const commandArgs = args[0] === "db" && args[1] === "execute" &&
+    !args.some((arg) => arg === "--schema" || arg.startsWith("--schema=") || arg === "--url" || arg.startsWith("--url="))
+    ? [...args, "--schema", path.join(process.cwd(), "prisma", "schema.prisma")]
+    : args;
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [PRISMA_CLI, ...args], {
+    const child = spawn(process.execPath, [PRISMA_CLI, ...commandArgs], {
       cwd: process.cwd(),
       env: { ...process.env, ...env },
       stdio: ["pipe", "pipe", "pipe"],

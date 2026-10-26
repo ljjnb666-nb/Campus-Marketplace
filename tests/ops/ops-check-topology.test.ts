@@ -107,7 +107,8 @@ describe("生产 ops-check 执行合同静态 gate（R1 P1-01）", () => {
     // release identity 必须 bake 进 artifact（禁止运行时伪装）
     expect(stageBlock).toMatch(/ARG GIT_SHA=unknown/);
     expect(stageBlock).toMatch(/ENV RELEASE_SHA=\$\{GIT_SHA\}/);
-    expect(stageBlock).toMatch(/ENTRYPOINT \["npx", "tsx", "scripts\/ops\/ops-check\.ts"\]/);
+    expect(stageBlock).toMatch(/exec node dist\/ops\/ops-check\.cjs/);
+    expect(stageBlock).toMatch(/cat \/app\/\.release-sha/);
   });
 
   it("ops-check 以 --mode production 为默认 command（mode fail-closed 契约入口）", () => {

@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { sendMessage, createReport, blockUser, unblockUser } = vi.hoisted(() => ({
@@ -73,9 +73,54 @@ const baseListItem = {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ConversationLayout（8A-03 UI policy = server policy）", () => {
+  it("loads history through the real parent wiring and preserves it during polling", async () => {
+    const payload = makePayload({ communicationPolicy: {
+      pairBlocked: false, activeObligation: false, canSendMessage: true, mode: "NORMAL",
+    } });
+    const message = (id: string, content: string) => ({ id, content, senderId: "user-2", senderName: "同学",
+      type: "DIRECT", isRead: true, createdAt: "2026-10-23T00:00:00.000Z" });
+    payload.messages = [message("m2", "当前消息")];
+    payload.nextCursor = "m2";
+    const fetchHistory = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ...payload,
+      messages: [message("m1", "历史交付约定")], nextCursor: null }) });
+    vi.stubGlobal("fetch", fetchHistory);
+    const view = render(<ConversationLayout currentUserId="user-1" conversations={[baseListItem]}
+      activeId={payload.id} activeConversationPayload={payload} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看更多历史消息" }));
+    await screen.findByText("历史交付约定");
+    expect(fetchHistory).toHaveBeenCalledWith("/api/messages/conversations/conversation-1?cursor=m2",
+      expect.objectContaining({ cache: "no-store", signal: expect.any(AbortSignal) }));
+    view.rerender(<ConversationLayout currentUserId="user-1" conversations={[baseListItem]}
+      activeId={payload.id} activeConversationPayload={{ ...payload, messages: [
+        ...payload.messages, message("m3", "新消息"),
+      ] }} />);
+    expect(screen.getByText("历史交付约定")).toBeInTheDocument();
+    expect(screen.getByText("新消息")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看更多历史消息" })).not.toBeInTheDocument();
+    view.rerender(<ConversationLayout currentUserId="user-1" conversations={[baseListItem]}
+      activeId="other" activeConversationPayload={{ ...payload, id: "other", messages: [] }} />);
+    expect(screen.queryByText("历史交付约定")).not.toBeInTheDocument();
+  });
+
+  it("offers retry after a failed history request", async () => {
+    const payload = { ...makePayload({ communicationPolicy: {
+      pairBlocked: false, activeObligation: false, canSendMessage: true, mode: "NORMAL",
+    } }), nextCursor: "m2" };
+    const fetchHistory = vi.fn().mockRejectedValue(new Error("network"));
+    vi.stubGlobal("fetch", fetchHistory);
+    render(<ConversationLayout currentUserId="user-1" conversations={[baseListItem]}
+      activeId={payload.id} activeConversationPayload={payload} />);
+    fireEvent.click(screen.getByRole("button", { name: "查看更多历史消息" }));
+    await screen.findByRole("alert");
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看更多历史消息" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "查看更多历史消息" }));
+    await waitFor(() => expect(fetchHistory).toHaveBeenCalledTimes(2));
+  });
+
   it("NORMAL：输入可用且无屏蔽提示", () => {
     render(
       <ConversationLayout

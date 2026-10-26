@@ -1,5 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/env", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/env")>();
+  return { ...actual, env: { ...actual.env, PUBLIC_ASSET_BASE_URL: "http://localhost:9100/campus-public" } };
+});
+
+const { admitUpload } = vi.hoisted(() => ({ admitUpload: vi.fn() }));
+vi.mock("@/lib/upload-admission", () => ({
+  admitUpload,
+  withUploadSlot: (run: () => Promise<unknown>) => run(),
+}));
+
 const {
   putObject,
   deleteObject,
@@ -183,6 +194,8 @@ function assetWith(
 describe("uploadImageAsset（可恢复状态机）", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    admitUpload.mockReset().mockResolvedValue(undefined);
+    loadAuthorizationContextMock.mockReset().mockResolvedValue({ accountActive: true });
     executeRaw.mockResolvedValue(1);
     putObject.mockResolvedValue(undefined);
     deleteObject.mockResolvedValue(undefined);
@@ -236,9 +249,10 @@ describe("uploadImageAsset（可恢复状态机）", () => {
     );
     // S3 PUT 成功后条件转移 UPLOADED
     expect(assetUpdateMany).toHaveBeenCalledWith({
-      where: { id: "asset-1", status: "UPLOADING" },
+      where: { id: "asset-1", ownerId: "user-1", status: "UPLOADING" },
       data: { status: "UPLOADED" },
     });
+    expect(admitUpload).toHaveBeenCalledExactlyOnceWith("user-1");
   });
 
   it("uploads a private image with no-store cache control and no permanent url", async () => {
@@ -326,8 +340,8 @@ describe("uploadImageAsset（可恢复状态机）", () => {
       bucket: "campus-public",
       objectKey: expect.any(String),
     });
-    // executeRaw 调用 = 预留（T1）+ subject 锁 + 释放（purge 事务内）——无提前/重复释放
-    expect(executeRaw).toHaveBeenCalledTimes(3);
+    // T1 USER 锁 + 预留 + purge USER 锁 + 释放；没有提前/重复释放。
+    expect(executeRaw).toHaveBeenCalledTimes(4);
   });
 
   it("S3 PUT 失败且远端删除仍不可用：停留 PENDING_DELETE，配额保持占用，由 cleanup 重试", async () => {
@@ -343,7 +357,7 @@ describe("uploadImageAsset（可恢复状态机）", () => {
       where: { id: "asset-1", status: "UPLOADING" },
       data: { status: "PENDING_DELETE" },
     });
-    expect(executeRaw).toHaveBeenCalledTimes(2);
+    expect(executeRaw).toHaveBeenCalledTimes(3);
   });
 
   it("S3 PUT 失败且标记 PENDING_DELETE 本身失败：行保持 UPLOADING 走 stale 恢复，不释放配额", async () => {
@@ -357,7 +371,7 @@ describe("uploadImageAsset（可恢复状态机）", () => {
 
     // 标记失败 → 不 purge、不释放配额；行停留 UPLOADING（cleanup stale 恢复）
     expect(deleteObject).not.toHaveBeenCalled();
-    expect(executeRaw).toHaveBeenCalledTimes(1);
+    expect(executeRaw).toHaveBeenCalledTimes(2);
   });
 
   it("S3 成功但状态转移失败：报错且资源停留 UPLOADING 等待 cleanup", async () => {

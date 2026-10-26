@@ -358,6 +358,7 @@ async function seedE2E(prisma: PrismaClient): Promise<void> {
       data: {
         email: account.email,
         name: account.name,
+        emailVerifiedAt: new Date(),
         passwordHash: hashSync(account.password, 10),
         schoolName: campus.schoolName,
         campusId: campus.id,

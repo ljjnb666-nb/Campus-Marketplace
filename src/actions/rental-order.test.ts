@@ -697,7 +697,7 @@ describe("rental-order actions", () => {
       ownerId: "user-owner",
       renterId: "user-renter",
     });
-    txRentalOrderUpdate.mockRejectedValueOnce(new Error("db down"));
+    txRentalOrderUpdateMany.mockRejectedValueOnce(new Error("db down"));
 
     const formData = new FormData();
     formData.set("orderId", "order-1");
@@ -726,9 +726,9 @@ describe("rental-order actions", () => {
     const result = await approveRentalOrder(formData);
 
     expect(result.success).toBe(true);
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith(
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1" },
+        where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
         data: expect.objectContaining({ status: "PENDING_PICKUP" }),
       }),
     );
@@ -812,6 +812,9 @@ describe("rental-order actions", () => {
     const formData = new FormData();
     formData.set("orderId", "order-1");
     formData.set("role", "renter");
+    formData.set("hasDamage", "false");
+    formData.set("needsCleaning", "false");
+    formData.set("accessoriesComplete", "true");
 
     const result = await confirmReturn(formData);
 
@@ -834,15 +837,15 @@ describe("rental-order actions", () => {
 
     const result = await respondDamageClaim(buildClaimFormData({ agreed: "false" }));
 
-    // 拒绝索赔的出口：PENDING_INSPECTION -> COMPLETED（押金不扣除、进入退回流程），
+    // 拒绝索赔的出口：PENDING_INSPECTION -> COMPLETED（资金仍是线下未核实），
     // 出租者若不认可仍可在 COMPLETED 状态发起纠纷。
     expect(result.success).toBe(true);
     expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1", status: "PENDING_INSPECTION" },
+        where: { id: "order-1", renterId: "user-renter", status: "PENDING_INSPECTION" },
         data: expect.objectContaining({
           status: "COMPLETED",
-          depositStatus: "PENDING_REFUND",
+          depositStatus: "OFFLINE_UNVERIFIED",
         }),
       }),
     );
@@ -869,7 +872,7 @@ describe("rental-order actions", () => {
     expect(txUserUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it("completes the order with deduction when the renter agrees to the damage claim", async () => {
+  it("records agreed offline compensation without asserting a real deduction or refund", async () => {
     txRentalDamageClaimFindFirst.mockResolvedValue(pendingInspectionClaim);
 
     const result = await respondDamageClaim(buildClaimFormData({ agreed: "true" }));
@@ -877,14 +880,18 @@ describe("rental-order actions", () => {
     expect(result.success).toBe(true);
     expect(txRentalOrderUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1", status: "PENDING_INSPECTION" },
+        where: { id: "order-1", renterId: "user-renter", status: "PENDING_INSPECTION" },
         data: expect.objectContaining({
           status: "COMPLETED",
-          depositStatus: "PARTIALLY_REFUNDED",
-          depositDeduction: new Prisma.Decimal("30"),
+          depositStatus: "OFFLINE_UNVERIFIED",
         }),
       }),
     );
+    expect(txRentalOrderUpdateMany.mock.calls[0][0].data).not.toHaveProperty("depositDeduction");
+    expect(txRentalDamageClaimUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "claim-1", resolvedAt: null, supersededAt: null },
+      data: expect.objectContaining({ renterAgreed: true, approvedDeduction: new Prisma.Decimal("30") }),
+    }));
   });
 
   it("recomputes rentalPositiveRate as a visible-only ratio when both reviews are submitted", async () => {
@@ -983,8 +990,8 @@ describe("rental-order actions", () => {
     const result = await rejectRentalOrder(formData);
 
     expect(result).toEqual({ success: true, message: "已拒绝租赁申请" });
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: expect.objectContaining({
         status: "REJECTED",
         cancellationNote: "物品已损坏",
@@ -1032,8 +1039,8 @@ describe("rental-order actions", () => {
     const result = await requestReturn(formData);
 
     expect(result).toEqual({ success: true, message: "已提交归还请求" });
-    expect(txRentalOrderUpdate).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(txRentalOrderUpdateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", renterId: "user-renter", status: "IN_RENTAL" },
       data: { status: "PENDING_RETURN" },
     });
     // Phase 9B：canonical RENTAL_RETURN_REQUESTED 通知发给 owner
@@ -1688,7 +1695,7 @@ describe("rental-order actions", () => {
       ownerConfirmed: false, renterConfirmed: true,
     });
     const result = await confirmReturn(
-      buildSimpleFormData(["orderId", "order-1", "role", "renter"]),
+      buildSimpleFormData(["orderId", "order-1", "role", "renter", "hasDamage", "false", "needsCleaning", "false", "accessoriesComplete", "true"]),
     );
     expect(result).toEqual({ success: true, message: "已确认归还" });
     expect(txRentalReturnUpsert).toHaveBeenCalledOnce();

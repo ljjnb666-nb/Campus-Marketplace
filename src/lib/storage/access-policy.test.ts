@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("@/lib/env", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/env")>();
+  return { ...actual, env: { ...actual.env, PUBLIC_ASSET_BASE_URL: "http://localhost:9100/campus-public" } };
+});
 import {
   ASSET_CATEGORY_BY_UPLOAD_CATEGORY,
   assetAccessForCategory,

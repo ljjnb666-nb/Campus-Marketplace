@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { hashSync } from "bcryptjs";
 import { uniqueTag, E2E_ACCOUNTS } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 
 /**
@@ -49,6 +49,7 @@ test("7C-E2E01/02：内容审核员 takedown → owner 安全可见 → restore�
       data: {
         email,
         name,
+        emailVerifiedAt: new Date(),
         passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}Moderator#2026`, 10),
         schoolName: campusA.schoolName,
         campusId,
@@ -77,6 +78,7 @@ test("7C-E2E01/02：内容审核员 takedown → owner 安全可见 → restore�
     data: {
       email: ownerEmail,
       name: "E2E被治理卖家",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}Owner#2026`, 10),
       schoolName: campusA.schoolName,
       campusId: campusA.id,
@@ -223,6 +225,7 @@ test("7C-E2E03/04：appeal-reviewer-only 404；PLATFORM_ADMIN legacy redirect + 
     data: {
       email: reviewerEmail,
       name: "E2E申诉审核员",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}Reviewer#2026`, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,

@@ -54,7 +54,7 @@ describe("LoginForm", () => {
     expect(signIn).not.toHaveBeenCalled();
   });
 
-  it("submits credentials through next-auth signIn", async () => {
+  it.each(["", "123456"])("submits a form-safe MFA value through next-auth signIn (%s)", async (mfaCode) => {
     signIn.mockResolvedValue({ url: "/" });
 
     render(<LoginForm />);
@@ -65,12 +65,16 @@ describe("LoginForm", () => {
     fireEvent.change(screen.getByPlaceholderText("Student123456"), {
       target: { value: TEST_PASSWORD },
     });
+    fireEvent.change(screen.getByLabelText("动态验证码（已启用双重验证时必填）"), {
+      target: { value: mfaCode },
+    });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
 
     await waitFor(() => {
       expect(signIn).toHaveBeenCalledWith("credentials", {
         email: "student1@campus.local",
         password: TEST_PASSWORD,
+        mfaCode,
         redirect: false,
         callbackUrl: "/",
       });
@@ -96,7 +100,7 @@ describe("LoginForm", () => {
     expect(screen.queryByText("SENSITIVE_INTERNAL_AUTH_EXCEPTION")).toBeNull();
 
     fireEvent.click(submit);
-    expect(await screen.findByText("邮箱或密码错误")).toBeTruthy();
+    expect(await screen.findByText("邮箱、密码或动态验证码错误")).toBeTruthy();
     expect(submit.disabled).toBe(false);
     expect(signIn).toHaveBeenCalledTimes(2);
   });
@@ -151,6 +155,6 @@ describe("LoginForm", () => {
     });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
 
-    expect(await screen.findByText("邮箱或密码错误")).toBeTruthy();
+    expect(await screen.findByText("邮箱、密码或动态验证码错误")).toBeTruthy();
   });
 });

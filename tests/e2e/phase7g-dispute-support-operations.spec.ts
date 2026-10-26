@@ -3,7 +3,7 @@ import { hashSync } from "bcryptjs";
 
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { uniqueTag } from "./helpers/e2e";
 
 /**
@@ -43,6 +43,7 @@ async function createE2EUser(input: {
     data: {
       email: input.email,
       name: input.name,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(password, 10),
       schoolName: "E2E 大学",
       campusId: input.campusId ?? (await db.campus.findFirstOrThrow({ where: { slug: "main-campus" } })).id,

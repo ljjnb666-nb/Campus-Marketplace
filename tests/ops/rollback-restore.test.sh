@@ -114,7 +114,7 @@ case "\$ARGS" in
     if [[ "\$ARGS" == *"campus-marketplace-app:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]]; then
       exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-cleanup:"* ]]; then
-      [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]] && exit 1 || exit 0
+      [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" || "\${CLEANUP_STUB_MODE:-post-worker}" == "missing-image" ]] && exit 1 || exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-async-worker:"* ]]; then
       [[ "\${ASYNC_STUB_MODE:-post-async}" == "pre-async" || "\${ASYNC_STUB_MODE:-post-async}" == "missing-image" ]] && exit 1 || exit 0
     else
@@ -211,6 +211,7 @@ STUB
 #!/usr/bin/env bash
 if [[ "$*" != *"cat-file -e"* ]]; then exit 1; fi
 if [[ "$*" == *"scripts/ops/async-worker.ts"* && "${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]]; then exit 1; fi
+if [[ "$*" == *"scripts/ops/storage-cleanup-worker.ts"* && "${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]]; then exit 1; fi
 exit 0
 GIT_STUB
   chmod +x "${SANDBOX}/bin/git"
@@ -857,6 +858,14 @@ assert_exit 1 "$rc" "async stop failure"
 assert_log_contains "async_stop_called"
 assert_log_not_contains "app_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "async 停止未验证不得写日志"; else pass_test; fi
+
+echo "== 9o. post-worker release 镜像已 prune → 不得伪装 pre-worker =="
+make_sandbox
+CLEANUP_STUB_MODE=missing-image run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "cleanup missing image"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup 镜像缺失不得写日志"; else pass_test; fi
 
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox

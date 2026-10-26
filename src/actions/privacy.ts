@@ -37,7 +37,7 @@ export async function requestAccountDeletion(
   _prevState: PrivacyActionState,
   formData: FormData,
 ): Promise<PrivacyActionState> {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return { success: false, message: "请先登录" };
@@ -103,7 +103,7 @@ export async function cancelPrivacyRequest(
   _prevState: PrivacyActionState,
   formData: FormData,
 ): Promise<PrivacyActionState> {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return { success: false, message: "请先登录" };

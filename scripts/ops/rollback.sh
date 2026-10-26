@@ -65,14 +65,22 @@ fi
 
 # -----------------------------------------------------------------------------
 # cleanup worker 目标 release 判定（只读，先于一切 side effect）：
-#   campus-marketplace-cleanup:<PREVIOUS_SHA> 存在 → post-worker 目标
-#   （rollback 必须同时切 worker）；不存在 → pre-worker 目标（停止 worker）。
+#   目标 commit 包含 worker 入口 → post-worker，且必须有该 release 镜像；
+#   目标 commit 不含入口 → pre-worker。镜像被 prune 不能改变历史拓扑。
 # 首次上线 cleanup worker 后，回滚目标可能是 pre-worker release——不得因此
 # 让 rollback 失效，也不得保留 newer cleanup worker 继续运行。
 # -----------------------------------------------------------------------------
 CLEANUP_TARGET_IMAGE="campus-marketplace-cleanup:${PREVIOUS_SHA}"
-if docker image inspect "${CLEANUP_TARGET_IMAGE}" >/dev/null 2>&1; then
+if ! git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+  echo "[rollback][FAIL] 无法验证目标 release commit；拒绝推断 worker 拓扑" >&2
+  exit 1
+fi
+if git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}:scripts/ops/storage-cleanup-worker.ts" 2>/dev/null; then
   CLEANUP_TARGET_MODE="post-worker"
+  if ! docker image inspect "${CLEANUP_TARGET_IMAGE}" >/dev/null 2>&1; then
+    echo "[rollback][FAIL] 目标 release 包含 storage-cleanup，但其 immutable image 不存在，禁止降级为 pre-worker" >&2
+    exit 1
+  fi
 else
   CLEANUP_TARGET_MODE="pre-worker"
 fi
@@ -80,7 +88,7 @@ echo "[rollback] cleanup target mode = ${CLEANUP_TARGET_MODE}（${CLEANUP_TARGET
 
 # async-worker 也是数据库写入方。旧版本没有 async-worker 镜像时必须
 # 保持它停止；旧版本有镜像时必须切换并验证其运行镜像，不能遗留 newer
-# worker。镜像缺失模式沿用 cleanup 的早期 release 兼容策略。
+# worker。与 cleanup 相同，先验证目标 commit，再确认对应镜像存在。
 ASYNC_TARGET_IMAGE="campus-marketplace-async-worker:${PREVIOUS_SHA}"
 # A missing local image is NOT proof that the target release never had the
 # service. Prove its topology against the exact immutable Git commit before

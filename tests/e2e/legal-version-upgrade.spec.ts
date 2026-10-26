@@ -6,7 +6,7 @@ import {
   seedPolicyAcceptanceFor,
 } from "./helpers/db";
 import { flushRateLimits } from "./helpers/rate-limit";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 
 /**
  * Phase 5 Golden Flow — GF-L3 POLICY_VERSION_UPGRADE

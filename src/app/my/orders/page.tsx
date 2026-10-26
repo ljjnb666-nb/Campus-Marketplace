@@ -92,6 +92,7 @@ export default async function MyOrdersPage({
       type: o.type,
       status: o.status,
       amount: o.amount.toString(),
+      servicePricingUnitSnapshot: o.servicePricingUnitSnapshot,
       title,
       imageUrl,
       createdAt: o.createdAt,

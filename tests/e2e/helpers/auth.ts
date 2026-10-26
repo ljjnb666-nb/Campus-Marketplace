@@ -187,7 +187,7 @@ export async function loginViaUI(
     })();
     const pending = await page.getByRole("button", { name: "登录中..." })
       .isVisible().catch(() => false);
-    const invalidCredentials = await page.getByText("邮箱或密码错误", { exact: true })
+    const invalidCredentials = await page.getByText("邮箱、密码或动态验证码错误", { exact: true })
       .isVisible().catch(() => false);
     const sessionCookiePresent = await page.context().cookies(page.url())
       .then((cookies) => cookies.some((cookie) =>

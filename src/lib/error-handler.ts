@@ -10,6 +10,7 @@ import { logger } from "@/lib/logger";
 import { getRequestId } from "@/lib/request-context";
 import { classifyError } from "@/lib/error-taxonomy";
 import { METRIC_NAMES, incrementCounter } from "@/lib/metrics";
+import { AssetServiceError } from "@/lib/asset-errors";
 
 export type HandledError = {
   /** 可直接展示给用户的中文提示 */
@@ -29,6 +30,9 @@ export type HandledError = {
  * 不进入错误率告警关注面。
  */
 export function handleError(error: unknown, context: string): HandledError {
+  if (error instanceof AssetServiceError && error.status < 500) {
+    return { message: error.message, statusCode: error.status };
+  }
   if (error instanceof NewActivityDisabledError) {
     return { message: error.message, statusCode: 503 };
   }

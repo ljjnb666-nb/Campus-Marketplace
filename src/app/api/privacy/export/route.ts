@@ -57,7 +57,7 @@ async function getHandler() {
  *   /api/privacy/export/<requestId>/download 本人授权下载
  */
 async function postHandler() {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(

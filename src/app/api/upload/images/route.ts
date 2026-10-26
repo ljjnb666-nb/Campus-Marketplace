@@ -11,11 +11,7 @@ import {
 } from "@/lib/asset-service";
 import { actionErrorMessage } from "@/lib/error-handler";
 import { logger } from "@/lib/logger";
-import { isRateLimited } from "@/lib/rate-limit";
 import { isUploadCategory, UPLOAD_LIMITS } from "@/lib/upload";
-
-const MAX_REQUESTS_PER_MINUTE = 20;
-const RATE_LIMIT_WINDOW_MS = 60000;
 
 /**
  * OUTER REQUEST ENVELOPE LIMIT（请求体总上限，含 multipart overhead）。
@@ -97,19 +93,6 @@ async function postHandler(request: NextRequest) {
       );
     }
     userId = verified.user.id;
-
-    const { limited } = await isRateLimited({
-      key: userId,
-      limit: MAX_REQUESTS_PER_MINUTE,
-      windowMs: RATE_LIMIT_WINDOW_MS,
-    });
-
-    if (limited) {
-      return NextResponse.json(
-        { error: "上传过于频繁，请稍后再试" },
-        { status: 429 }
-      );
-    }
 
     // 外层信封快速拒绝（A7）：只信任为数值的 Content-Length；缺失/伪造时
     // 仍会进入真实解析，生产公网流量由 Caddy 做字节级保护。
@@ -253,7 +236,7 @@ async function postHandler(request: NextRequest) {
       // LR-071：稳定 machine code 随 body 返回（additive，不删除 error）；
       // 503（外部依赖不可用）附带固定有界的 Retry-After 合同。
       const headers: Record<string, string> =
-        error.status === 503
+        error.status === 503 || error.status === 429
           ? {
               "Retry-After": String(STORAGE_UNAVAILABLE_RETRY_AFTER_SECONDS),
             }

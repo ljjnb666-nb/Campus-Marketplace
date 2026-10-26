@@ -13,7 +13,7 @@
 #           app + migrate + storage-cleanup + async-worker
 #   STEP 3  备份当前数据库
 #   STEP 4  migrate deploy（一次性容器，禁止 app 启动时并发迁移）+ 迁移验证
-#   STEP 5  app 滚动更新
+#   STEP 5  app 单实例替换（会有短暂中断，不宣称滚动发布）
 #   STEP 6  storage-cleanup worker 切换 + 运行时验证 + dry-run smoke；
 #           async-worker 切换 + 运行时验证（Phase 9A）
 #           （worker 使用当前 schema：只在 migrate 完成后切换，绝不让新
@@ -123,15 +123,45 @@ npx --prefix "${PROJECT_DIR}" tsx scripts/production-env-check.ts --file "${ENV_
 echo "[deploy] step 2/7 构建 release artifact set（tag=${GIT_SHA}：app + migrate + storage-cleanup + async-worker）"
 GIT_SHA="${GIT_SHA}" compose_run build app migrate storage-cleanup async-worker
 
+# The migration artifact is part of this release, including on hosts which
+# still have an older :local image. Never let Compose build/pull a fallback.
+MIGRATOR_IMAGE="campus-marketplace-migrator:${GIT_SHA}"
+# `config --images migrate` also lists dependency images (PostgreSQL). Read the
+# named service from the resolved model instead of assuming a one-line result.
+MIGRATOR_RESOLVED="$(GIT_SHA="${GIT_SHA}" compose_run --profile ops config --format json migrate | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const image=JSON.parse(s).services?.migrate?.image;if(typeof image!=="string")process.exit(1);process.stdout.write(image)})')"
+if [[ "${MIGRATOR_RESOLVED}" != "${MIGRATOR_IMAGE}" ]] || ! docker image inspect "${MIGRATOR_IMAGE}" >/dev/null 2>&1; then
+  echo "[deploy][FAIL] MIGRATOR_IMAGE_MISMATCH：迁移镜像必须是当前 release 已构建的镜像" >&2
+  exit 1
+fi
+
 # 3) 迁移（先备份，后迁移）
 echo "[deploy] step 3/7 备份当前数据库"
 "${SCRIPT_DIR}/backup-postgres.sh"
 
+# Stop the old consumer before any migration/app switch. If the release fails,
+# leave it stopped: restarting an old consumer against new job contracts is unsafe.
+echo "[deploy] 停止旧 async-worker，隔离跨版本任务消费"
+if ! compose_run stop async-worker; then
+  echo "[deploy][FAIL] 旧 async-worker 无法停止，拒绝迁移或切换 app" >&2
+  exit 1
+fi
+if ! OLD_WORKER_RUNNING="$(compose_run ps --status running --services)"; then
+  echo "[deploy][FAIL] 无法确认旧 async-worker 停止状态，拒绝发布" >&2
+  exit 1
+fi
+if printf '%s\n' "${OLD_WORKER_RUNNING}" | grep -qx async-worker; then
+  echo "[deploy][FAIL] 旧 async-worker 仍在运行，拒绝发布" >&2
+  exit 1
+fi
+
 echo "[deploy] step 4/7 migrate deploy"
-compose_run --profile ops run --rm migrate
+GIT_SHA="${GIT_SHA}" compose_run --profile ops run --rm --no-deps --no-build --pull never migrate
 
 # 迁移验证：再次执行必须显示 no pending migration
-MIGRATE_OUT="$(compose_run --profile ops run --rm migrate 2>&1 || true)"
+if ! MIGRATE_OUT="$(GIT_SHA="${GIT_SHA}" compose_run --profile ops run --rm --no-deps --no-build --pull never migrate 2>&1)"; then
+  echo "[deploy][FAIL] 迁移重复执行失败" >&2
+  exit 1
+fi
 if ! echo "${MIGRATE_OUT}" | grep -qiE "No pending migrations|already in sync"; then
   echo "[deploy] 迁移重复执行未显示 no pending migration，请人工检查：" >&2
   echo "${MIGRATE_OUT}" >&2
@@ -139,8 +169,8 @@ if ! echo "${MIGRATE_OUT}" | grep -qiE "No pending migrations|already in sync"; 
 fi
 echo "[deploy] 迁移验证通过（no pending migration）"
 
-# 5) app 滚动更新
-echo "[deploy] step 5/7 滚动更新 app"
+# 5) app 单实例替换
+echo "[deploy] step 5/7 替换 app"
 if ! GIT_SHA="${GIT_SHA}" compose_run up -d --no-deps --wait app; then
   echo "[deploy] app 启动失败，回滚见 scripts/ops/rollback.sh" >&2
   exit 1

@@ -252,8 +252,19 @@ describe("rental status-related schemas", () => {
       orderId: "o1",
       role: "owner",
       inspectionNote: "轻微划痕",
+      hasDamage: "true",
+      needsCleaning: "false",
+      accessoriesComplete: "true",
     });
     expect(parsed.success).toBe(true);
+  });
+
+  it.each(["hasDamage", "needsCleaning", "accessoriesComplete"])("requires an explicit %s inspection choice", (field) => {
+    const values: Record<string, unknown> = { orderId: "o1", role: "owner", hasDamage: "false", needsCleaning: "false", accessoriesComplete: "true" };
+    delete values[field];
+    expect(rentalReturnConfirmSchema.safeParse(values).success).toBe(false);
+    values[field] = "";
+    expect(rentalReturnConfirmSchema.safeParse(values).success).toBe(false);
   });
 
   it("rentalCancelSchema validates cancellation reason enum", () => {

@@ -13,7 +13,7 @@ const { evalFn, delFn, mockClient } = vi.hoisted(() => ({
 }));
 
 vi.mock("ioredis", () => ({
-  Redis: vi.fn().mockImplementation(() => mockClient),
+  Redis: vi.fn().mockImplementation(function () { return mockClient; }),
 }));
 
 import {

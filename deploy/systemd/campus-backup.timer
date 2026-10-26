@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily Campus backup (adjust to approved RPO)
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=campus-backup.service
+[Install]
+WantedBy=timers.target

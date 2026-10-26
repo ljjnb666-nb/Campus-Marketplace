@@ -83,6 +83,37 @@ test("站内消息：买家私聊卖家 → 双向收发 → 刷新后仍存在"
     conversation?.participants.map((participant) => participant.userId).sort(),
   ).toEqual([buyerUser?.id, sellerUser?.id].sort());
 
+  // Historical fixture messages are older than the real conversation above.
+  // Verify the actual paginated UI at a phone viewport, including equal dates.
+  const historyTime = new Date(Date.now() - 86_400_000);
+  await e2eDb().message.createMany({ data: Array.from({ length: 105 }, (_, index) => ({
+    id: `${tag}-history-${String(index).padStart(3, "0")}`,
+    conversationId, senderId: sellerUser!.id, type: "DIRECT" as const,
+    content: `${tag} 历史消息 ${String(index).padStart(3, "0")}`, createdAt: historyTime,
+  })) });
+  await buyer.setViewportSize({ width: 390, height: 844 });
+  await buyer.goto("/messages");
+  await expect(buyer.getByPlaceholder(/输入沟通内容/)).toHaveCount(0);
+  await buyer.getByText(title, { exact: false }).first().click();
+  await buyer.waitForURL(`/messages/${conversationId}`);
+  const oldest = buyer.getByText(`${tag} 历史消息 000`, { exact: true });
+  await expect(oldest).toHaveCount(0);
+  // The initial window and each history page contain 20 messages.
+  for (const boundary of ["068", "048", "028", "008", "000"]) {
+    await buyer.getByRole("button", { name: "查看更多历史消息", exact: true }).click();
+    await expect(buyer.getByText(`${tag} 历史消息 ${boundary}`, { exact: true })).toHaveCount(1);
+  }
+  await expect(oldest).toHaveCount(1);
+  await expect(buyer.getByRole("button", { name: "查看更多历史消息", exact: true })).toHaveCount(0);
+  // The hidden desktop conversation list also contains a last-message preview.
+  await expect(buyer.getByText(sellerReply, { exact: true }).filter({ visible: true })).toHaveCount(1);
+  await buyer.screenshot({ path: test.info().outputPath("mobile-message-history.png") });
+  await buyer.getByRole("button", { name: "返回会话列表" }).click();
+  await expect(buyer).toHaveURL((url) => url.pathname === "/messages");
+  await expect(buyer.getByText(title, { exact: false }).first()).toBeVisible();
+  await expect(buyer.getByPlaceholder(/输入沟通内容/)).toHaveCount(0);
+  await buyer.screenshot({ path: test.info().outputPath("mobile-message-list.png") });
+
   await sellerContext.close();
   await buyerContext.close();
 });

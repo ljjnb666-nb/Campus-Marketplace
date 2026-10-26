@@ -158,10 +158,10 @@ describe("rental-order-machine", () => {
     expect(counterpartyId(order, "user-renter")).toBe("user-owner");
   });
 
-  it("moves paid deposits to PENDING_REFUND on completion and keeps zero deposits as-is", () => {
+  it("records positive deposits as unverified offline amounts and keeps zero deposits as-is", () => {
     expect(
       depositStatusAfterCompletion({ depositAmount: new Prisma.Decimal("50"), depositStatus: "PAID" }),
-    ).toBe("PENDING_REFUND");
+    ).toBe("OFFLINE_UNVERIFIED");
     expect(
       depositStatusAfterCompletion({ depositAmount: new Prisma.Decimal("0"), depositStatus: "NOT_REQUIRED" }),
     ).toBe("NOT_REQUIRED");
@@ -229,8 +229,8 @@ describe("rental-order-machine", () => {
     const result = await approveRentalOrderTx(asTx(tx), { orderId: "order-1", userId: "user-owner" });
 
     expect(result).toEqual({ success: true });
-    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: { status: "PENDING_PICKUP" },
     });
     expect(tx.rentalOrderStatusLog.create).toHaveBeenCalledWith({
@@ -276,8 +276,8 @@ describe("rental-order-machine", () => {
     expect(result).toEqual({ success: true });
 
     // 权威列保存原始原因（lifecycle/erasure 策略处理）
-    expect(tx.rentalOrder.update).toHaveBeenCalledWith({
-      where: { id: "order-1" },
+    expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: "order-1", ownerId: "user-owner", status: "PENDING_APPROVAL" },
       data: expect.objectContaining({
         status: "REJECTED",
         cancellationNote: RAW_REASON,
@@ -348,14 +348,14 @@ describe("rental-order-machine", () => {
     expect(result).toEqual({ success: true });
     expect(tx.rentalDamageClaim.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "claim-1", resolvedAt: null },
+        where: { id: "claim-1", resolvedAt: null, supersededAt: null },
         data: expect.objectContaining({ renterAgreed: false }),
       }),
     );
     expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "order-1", status: "PENDING_INSPECTION" },
-        data: expect.objectContaining({ status: "COMPLETED", depositStatus: "PENDING_REFUND" }),
+        where: { id: "order-1", renterId: "user-renter", status: "PENDING_INSPECTION" },
+        data: expect.objectContaining({ status: "COMPLETED", depositStatus: "OFFLINE_UNVERIFIED" }),
       }),
     );
     expect(tx.rentalOrderStatusLog.create).toHaveBeenCalledWith(
@@ -430,10 +430,10 @@ describe("rental-order-machine", () => {
       claimId: "claim-old", userId: "user-renter", agreed: false,
     })).rejects.toThrow("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
     expect(tx.rentalDamageClaim.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: "claim-old", resolvedAt: null } }),
+      expect.objectContaining({ where: { id: "claim-old", resolvedAt: null, supersededAt: null } }),
     );
     expect(tx.rentalOrder.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: "order-1", status: "PENDING_INSPECTION" } }),
+      expect.objectContaining({ where: { id: "order-1", renterId: "user-renter", status: "PENDING_INSPECTION" } }),
     );
     expect(tx.rentalOrderStatusLog.create).not.toHaveBeenCalled();
     expect(txNotificationCreateMany).not.toHaveBeenCalled();

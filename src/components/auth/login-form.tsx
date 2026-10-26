@@ -33,6 +33,9 @@ export function LoginForm() {
           const result = await signIn("credentials", {
             email: formData.get("email"),
             password: formData.get("password"),
+            // next-auth serializes options as form data: undefined becomes the
+            // literal "undefined", which fails the server's credential schema.
+            mfaCode: formData.get("mfaCode") ?? "",
             redirect: false,
             callbackUrl: "/",
           });
@@ -43,7 +46,7 @@ export function LoginForm() {
             return;
           }
           if (result.error) {
-            setError("邮箱或密码错误");
+            setError("邮箱、密码或动态验证码错误");
             return;
           }
           // A non-error object still needs a successful result and a target URL.
@@ -85,6 +88,10 @@ export function LoginForm() {
       </label>
 
       {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+      <label className="flex flex-col gap-2 text-sm">动态验证码（已启用双重验证时必填）
+        <input name="mfaCode" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" className="rounded-2xl border border-slate-200 px-4 py-3" />
+      </label>
+      <Link href="/forgot-password" className="text-sm underline">忘记密码</Link>
 
       <div className="flex items-center justify-between gap-4">
         <button

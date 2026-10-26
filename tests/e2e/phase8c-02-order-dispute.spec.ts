@@ -3,7 +3,7 @@ import { hashSync } from "bcryptjs";
 
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { uniqueTag } from "./helpers/e2e";
 
 /**
@@ -105,6 +105,7 @@ test("8C-02 买家发起普通订单纠纷 → reviewer 统一队列处理（真
     data: {
       email: reviewerEmail,
       name: `E2E8C02纠纷审核员 ${tag}`,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(reviewerPassword, 10),
       schoolName: "E2E 大学",
       campusId: campus.id,

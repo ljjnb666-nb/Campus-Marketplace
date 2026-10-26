@@ -1,4 +1,5 @@
 import React from "react";
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { requireUser } from "@/lib/server-auth";
 import { getRentalOrderDetail } from "@/repositories/rental-order-repository";
@@ -23,13 +24,19 @@ export default async function DamageClaimPage({ params }: { params: Promise<{ id
   }
 
   const depositAmount = Number(order.depositAmount);
+  const pendingClaim = order.damageClaims?.find(claim => !claim.resolvedAt && !claim.supersededAt);
+  if (pendingClaim || depositAmount <= 0) return <div className="mx-auto max-w-2xl space-y-4 p-8">
+    <h1 className="text-2xl font-bold">{pendingClaim ? "已有待处理索赔" : "本订单未约定押金"}</h1>
+    <p>{pendingClaim ? "请等待租客处理现有申请，不必重复提交。" : "如需进一步协助，可在订单详情发起纠纷；也可以结束验收。"}</p>
+    <Link href={`/rental-orders/${id}/return`} className="text-indigo-600 underline">返回验收处理</Link>
+  </div>;
 
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-8 sm:px-6 sm:py-12">
       <div className="mb-8 space-y-2 text-center">
         <h1 className="text-3xl font-bold text-slate-950">提交损坏索赔</h1>
         <p className="text-sm text-slate-600">
-          描述物品损坏情况并申请扣除押金，租客确认后将从押金中扣除相应金额
+          如实说明验收问题并申请线下补偿。租客同意仅记录协商结果，平台不托管押金，也不会自动扣款或退款。
         </p>
       </div>
 
@@ -61,19 +68,19 @@ export default async function DamageClaimPage({ params }: { params: Promise<{ id
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="requestedDeduction" className="text-sm font-medium text-slate-700">申请扣除金额（元）</label>
+          <label htmlFor="requestedDeduction" className="text-sm font-medium text-slate-700">申请线下补偿金额（元）</label>
           <input
             type="number"
             name="requestedDeduction"
             id="requestedDeduction"
             required
-            min={0}
+            min={0.01}
             max={depositAmount}
             step="0.01"
             defaultValue={depositAmount.toFixed(2)}
             className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
           />
-          <p className="text-xs text-slate-500">最高可申请扣除全部押金 ¥{depositAmount.toFixed(2)}</p>
+          <p className="text-xs text-slate-500">申请上限为约定押金 ¥{depositAmount.toFixed(2)}；收付情况由双方线下核对。</p>
         </div>
 
         <div className="space-y-2">

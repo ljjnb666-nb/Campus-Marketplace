@@ -173,6 +173,10 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
     image: campus-marketplace-cleanup:${GIT_SHA:-local}
     <<: *service-defaults
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     env_file: .env.production
     environment:
       NODE_ENV: production
@@ -210,6 +214,10 @@ services:
         GIT_SHA: ${GIT_SHA:-unknown}
     image: campus-marketplace-async-worker:${GIT_SHA:-local}
     <<: *service-defaults
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     stop_grace_period: 20s
     env_file: .env.production
     environment:

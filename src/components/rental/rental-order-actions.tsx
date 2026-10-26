@@ -31,6 +31,7 @@ export function RentalOrderActions({
   orderId,
   status,
   userRole,
+  returnRecord,
   pendingClaim = null,
 }: RentalOrderActionsProps) {
   const [isPending, startTransition] = useTransition();
@@ -180,12 +181,16 @@ export function RentalOrderActions({
           </Link>
         );
       }
+      if (userRole === "renter" && !returnRecord?.renterConfirmed) return (
+        <Link href={`/rental-orders/${orderId}/return`} className="rounded-xl border px-4 py-2 text-sm">记录归还情况</Link>
+      );
     }
 
     if (status === "PENDING_INSPECTION") {
       if (userRole === "owner") {
         return (
           <div className="flex flex-wrap gap-3">
+            <Link href={`/rental-orders/${orderId}/return`} className="rounded-2xl border px-4 py-2 text-sm">查看验收处理</Link>
             <Link
               href={`/rental-orders/${orderId}/claim`}
               className="rounded-2xl border border-red-200 bg-white px-4 py-2 text-sm font-semibold text-red-600 shadow-sm transition hover:bg-red-50"
@@ -201,6 +206,9 @@ export function RentalOrderActions({
           </div>
         );
       }
+      if (userRole === "renter" && !returnRecord?.renterConfirmed) return (
+        <Link href={`/rental-orders/${orderId}/return`} className="rounded-xl border px-4 py-2 text-sm">记录归还情况</Link>
+      );
     }
 
     if (status === "COMPLETED") {
@@ -228,9 +236,9 @@ export function RentalOrderActions({
     return null;
   };
 
-  // 未决损坏索赔：respondDamageClaim 校验 resolvedAt 为空且操作者为订单租客，不限定订单状态
+  // Only an unresolved claim in PENDING_INSPECTION can be answered by the renter.
   const renderPendingClaim = () => {
-    if (userRole !== "renter" || !pendingClaim) return null;
+    if (userRole !== "renter" || status !== "PENDING_INSPECTION" || !pendingClaim) return null;
 
     return (
       <div className="w-full space-y-3 rounded-2xl border border-rose-200 bg-rose-50/60 p-3.5 dark:border-rose-900 dark:bg-rose-950/40">
@@ -242,11 +250,12 @@ export function RentalOrderActions({
             {pendingClaim.damageDescription}
           </p>
           <p className="text-xs text-slate-600 dark:text-slate-300">
-            申请扣除押金：
+            申请线下补偿：
             <span className="font-bold text-rose-600">
               ¥{Number(pendingClaim.requestedDeduction).toFixed(2)}
             </span>
           </p>
+          <p className="text-xs text-slate-500">同意仅记录协商结果，平台不会自动扣款或退还押金。</p>
         </div>
         <div className="flex gap-3">
           <form

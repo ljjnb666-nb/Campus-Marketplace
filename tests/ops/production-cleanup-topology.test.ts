@@ -145,7 +145,10 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     // prisma client 在镜像内生成（运行期不依赖宿主生成产物）
     const targetIndex = dockerfileContent.indexOf("AS cleanup-runner");
     const targetBlock = dockerfileContent.slice(targetIndex);
-    expect(targetBlock).toMatch(/npx prisma generate/);
+    expect(dockerfileContent).toMatch(/AS worker-builder/);
+    expect(dockerfileContent).toMatch(/npx prisma generate/);
+    expect(targetBlock).toMatch(/COPY --from=worker-builder \/app\/node_modules\/\.prisma/);
+    expect(targetBlock).toMatch(/USER node/);
   });
 
   // ---- LR-R2：cleanup worker release identity 构建期 bake ----
@@ -177,7 +180,7 @@ describe("生产 cleanup worker 拓扑 gate（LR-071 OPS recovery）", () => {
     expect(stageBlock).toMatch(/ENTRYPOINT \["\/bin\/sh", "-c",/);
     expect(stageBlock).toMatch(/cat \/app\/\.release-sha/);
     expect(stageBlock).toMatch(/export RELEASE_SHA/);
-    expect(stageBlock).toMatch(/exec npx tsx scripts\/ops\/storage-cleanup-worker\.ts/);
+    expect(stageBlock).toMatch(/exec node dist\/ops\/storage-cleanup-worker\.cjs/);
     // fail closed：set -eu 保证 metadata 缺失即退出，无 dev/unknown fallback
     expect(stageBlock).toMatch(/set -eu;/);
     expect(stageBlock).not.toMatch(/RELEASE_SHA=dev/);

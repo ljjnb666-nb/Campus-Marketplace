@@ -15,6 +15,7 @@ import { createReview } from "@/actions/trust";
 import { initiateGeneralOrderDispute } from "@/actions/order-dispute";
 import { cancelRentalOrder, submitRentalReview, initiateDispute } from "@/actions/rental-order";
 import { isDisputableStatus } from "@/lib/rental-dispute-eligibility";
+import { SERVICE_PRICING_UNIT_LABELS } from "@/constants/service";
 
 /**
  * ERRAND 合法 dispute 发起源 canonical pair（Order.status ↔ ErrandTask.status）。
@@ -34,6 +35,7 @@ export interface UnifiedOrderData {
   type: "PRODUCT" | "ERRAND" | "SERVICE" | "RENTAL";
   status: string;
   amount: number | string;
+  servicePricingUnitSnapshot?: keyof typeof SERVICE_PRICING_UNIT_LABELS | null;
   depositAmount?: number | string;
   title: string;
   imageUrl?: string | null;
@@ -266,8 +268,11 @@ export function OrderCardUnified({ order }: { order: UnifiedOrderData }) {
 
           {/* 右侧金额 */}
           <div className="flex sm:flex-col justify-between sm:justify-center items-end text-right border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100 dark:border-slate-800">
-            <span className="text-xs text-slate-400 font-medium sm:block">实付/应付金额</span>
+            <span className="text-xs text-slate-400 font-medium sm:block">{order.type === "SERVICE" ? "下单时参考报价" : "订单金额（线下结算）"}</span>
             <PriceDisplay price={order.amount} size="md" />
+            {order.type === "SERVICE" && <span className="text-[10px] text-slate-500">
+              {order.servicePricingUnitSnapshot ? SERVICE_PRICING_UNIT_LABELS[order.servicePricingUnitSnapshot] : "历史计价单位未记录"}；时长、数量及总额请双方确认
+            </span>}
             {order.depositAmount && Number(order.depositAmount) > 0 && (
               <span className="text-[10px] text-slate-400 block mt-0.5">
                 (含押金 ¥{Number(order.depositAmount).toFixed(0)})

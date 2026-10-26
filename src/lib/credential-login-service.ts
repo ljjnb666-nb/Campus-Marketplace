@@ -2,6 +2,8 @@ import type { Prisma } from "@prisma/client";
 
 import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { withTransaction } from "@/lib/prisma";
+import { createAccountSessionTx } from "@/lib/account-session-service";
+import { verifyCredentialMfaTx } from "@/lib/account-mfa-service";
 
 /**
  * RB-03 REVIEW FIX：CREDENTIAL_LOGIN_FINALIZATION_CONTRACT。
@@ -37,7 +39,7 @@ import { withTransaction } from "@/lib/prisma";
  * JWT 范围说明：本服务保证 credential finalization 不使用 stale
  * pre-erasure 状态、erase 先提交则 DENY、login 先提交则 erase 后提交并
  * 成为最终 DB authority；erased/deleted 的旧 JWT 仍由 server-auth 中央
- * DB recheck DENY。不引入 tokenVersion / JWT blacklist / revocation table。
+ * DB recheck DENY。AccountSession 是可撤销会话的唯一权威，和登录同事务创建。
  */
 
 export type CredentialLoginSeams = {
@@ -52,9 +54,12 @@ export type CredentialLoginCandidate = {
   id: string;
   passwordHash: string;
   email: string;
+  deviceLabel?: string;
+  mfaCode?: string;
 };
 
 export type CredentialLoginIdentity = {
+  sessionId: string;
   id: string;
   email: string;
   name: string | null;
@@ -104,6 +109,9 @@ export async function finalizeCredentialLogin(
       return null;
     }
 
+    const mfa = await verifyCredentialMfaTx(tx, candidate.id, candidate.mfaCode);
+    if (!mfa.ok) return null;
+
     if (seams?.afterCheck) {
       await seams.afterCheck(tx);
     }
@@ -120,7 +128,9 @@ export async function finalizeCredentialLogin(
       },
     });
 
+    const session = await createAccountSessionTx(tx, identity.id, candidate.deviceLabel ?? "未知设备 · 浏览器", mfa.strongAuthAt);
     return {
+      sessionId: session.id,
       id: identity.id,
       email: identity.email,
       name: identity.name,

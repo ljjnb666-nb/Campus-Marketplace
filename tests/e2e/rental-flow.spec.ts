@@ -167,7 +167,10 @@ test("租赁：发布 → 申请 → 批准 → 双方交接 → 归还 → 验�
   await owner.getByRole("link", { name: "前往验收归还" }).click();
   await owner.waitForURL(/\/return$/, { timeout: 15_000, waitUntil: "commit" });
   await owner.locator('input[name="photos"]').first().setInputFiles(FIXTURE_IMAGES.return);
-  await owner.getByRole("button", { name: "确认完好归还" }).click();
+  await owner.getByLabel("物品是否损坏").selectOption("false");
+  await owner.getByLabel("是否需要额外清洁").selectOption("false");
+  await owner.getByLabel("配件是否齐全").selectOption("true");
+  await owner.getByRole("button", { name: "提交验收结果" }).click();
   await expect
     .poll(async () => (await e2eDb().rentalOrder.findUnique({ where: { id: orderId } }))?.status)
     .toBe("COMPLETED");

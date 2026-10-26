@@ -41,6 +41,7 @@ tsconfig.tsbuildinfo
 # 本地测试/工具运行时产物
 .playwright-mcp
 .tmp-test-uploads
+.tmp-scratch
 tests/e2e/.auth
 tests/e2e/.artifacts
 tests/e2e/.report

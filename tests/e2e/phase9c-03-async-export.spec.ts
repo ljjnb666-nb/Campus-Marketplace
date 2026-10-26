@@ -5,7 +5,7 @@ import { test, expect } from "@playwright/test";
 import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
 import { flushRateLimits } from "./helpers/rate-limit";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { withE2EAsyncWorkerProtocolLock } from "./helpers/async-worker-lock";
 
 /**
@@ -124,6 +124,7 @@ test("9C03-E2E-01：UI 点击 → 真实 worker 异步生成 → 本人授权下
       data: {
         email: counterpartyEmail,
         name: `交易对手${tag.slice(-6)}`,
+        emailVerifiedAt: new Date(),
         passwordHash: "e2e-fixture-not-a-credential",
         schoolName: "E2E 测试大学",
         campusId: user.campusId,

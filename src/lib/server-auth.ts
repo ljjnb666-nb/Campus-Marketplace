@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getUserAcceptanceStatus } from "@/lib/legal/policy-service";
+import { privilegedSessionNeedsMfa } from "@/lib/account-mfa-service";
 import {
   hasFullAdminSurfaceAccess,
   loadAuthorizationContext,
@@ -10,10 +11,10 @@ import {
 /**
  * 中央 active-account resolver（Phase 5 REPAIR）。
  *
- * Auth.js 策略为 JWT（maxAge 7 天）：auth() 只解析令牌，不感知注销/停用。
- * 账号被注销（erasedAt）或停用后，注销前签发的 JWT 仍然"可解析"——因此
+ * Auth.js 使用 JWT（maxAge 7 天），auth() 先复核可撤销的 AccountSession。
+ * 本 resolver 再对照最新账号状态、邮箱证明和权限相关的 MFA 要求。
  * 每一个 authenticated 边界（页面、Server Action、API route）都必须经过
- * 本 resolver 对照数据库最新状态，旧 JWT 不能继续驱动任何身份操作。
+ * 本 resolver，旧 JWT 不能继续驱动身份操作。
  *
  * 合同（永远不可跳过）：
  *   1. 解析 auth session
@@ -31,6 +32,7 @@ async function loadActiveUser(sessionUserId: string) {
       id: true,
       role: true,
       email: true,
+      emailVerifiedAt: true,
       name: true,
       avatarUrl: true,
       verificationStatus: true,
@@ -62,6 +64,11 @@ export async function requireUser() {
   if (!dbUser || !isActiveUser(dbUser)) {
     // 账号被停用/删除/注销后立即失效旧会话（含旧 JWT）
     redirect("/login");
+  }
+
+  if (!dbUser.emailVerifiedAt) redirect("/my/security?step=email");
+  if (await privilegedSessionNeedsMfa(dbUser.id, session.user.sessionId)) {
+    redirect("/my/security?step=mfa");
   }
 
   const acceptance = await getUserAcceptanceStatus(dbUser.id);
@@ -101,9 +108,8 @@ export async function requireAdmin() {
 /**
  * 页面级身份校验（不含 consent gate）。
  *
- * 专用于隐私自助页面（/my/privacy）：数据导出与账号注销是用户的
- * 基本权利，不得以"未同意新版协议"为由阻断（同意门不能堵死退出权）。
- * 其余业务页面一律使用 requireUser()。
+ * 专用于隐私、法律同意与账号安全恢复入口：同意门、邮箱验证和 MFA
+ * 不能堵死退出权，也不能阻断完成这些验证本身。业务页面使用 requireUser()。
  */
 export async function requireVerifiedPageUser() {
   const session = await auth();
@@ -133,7 +139,7 @@ export type VerifiedSessionUser = {
 
 export type VerifiedSession =
   | { ok: true; user: VerifiedSessionUser }
-  | { ok: false; reason: "UNAUTHENTICATED" | "ACCOUNT_INACTIVE" | "LEGAL_ACCEPTANCE_REQUIRED" };
+  | { ok: false; reason: "UNAUTHENTICATED" | "ACCOUNT_INACTIVE" | "LEGAL_ACCEPTANCE_REQUIRED" | "EMAIL_VERIFICATION_REQUIRED" | "STRONG_AUTH_REQUIRED" };
 
 /**
  * Server Action / API Route 的会话校验（带数据库复核 + 可选 consent gate）。
@@ -144,9 +150,11 @@ export type VerifiedSession =
  * @param requireConsent true 用于业务 mutation：required 政策未满足时
  *        返回 LEGAL_ACCEPTANCE_REQUIRED（403）。隐私自助与 re-consent
  *        入口传 false——但账号 active 校验（第 3 步）永远执行。
+ * @param requireStrongAuth 默认 true，包含不要求 consent 的特权读取。
+ *        false 仅允许隐私/法律恢复入口，静态 allowlist 防止业务调用旁路。
  */
 export async function getVerifiedSession(
-  options: { requireConsent?: boolean } = {},
+  options: { requireConsent?: boolean; requireStrongAuth?: boolean } = {},
 ): Promise<VerifiedSession> {
   const session = await auth();
 
@@ -160,7 +168,14 @@ export async function getVerifiedSession(
     return { ok: false, reason: "ACCOUNT_INACTIVE" };
   }
 
+  // Privileged reads (including private assets) need the same MFA gate as
+  // mutations. Only the explicit legal/privacy recovery allowlist opts out.
+  if (options.requireStrongAuth !== false && await privilegedSessionNeedsMfa(dbUser.id, session.user.sessionId)) {
+    return { ok: false, reason: "STRONG_AUTH_REQUIRED" };
+  }
+
   if (options.requireConsent) {
+    if (!dbUser.emailVerifiedAt) return { ok: false, reason: "EMAIL_VERIFICATION_REQUIRED" };
     const acceptance = await getUserAcceptanceStatus(dbUser.id);
 
     if (!acceptance.compliant) {
@@ -186,6 +201,8 @@ export const VERIFIED_SESSION_HTTP_STATUS: Record<
   UNAUTHENTICATED: 401,
   ACCOUNT_INACTIVE: 401,
   LEGAL_ACCEPTANCE_REQUIRED: 403,
+  EMAIL_VERIFICATION_REQUIRED: 403,
+  STRONG_AUTH_REQUIRED: 403,
 };
 
 export type AppealEligibleSession =

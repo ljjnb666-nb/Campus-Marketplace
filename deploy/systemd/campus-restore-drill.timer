@@ -1,0 +1,8 @@
+[Unit]
+Description=Weekly isolated Campus offsite restore drill
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+Unit=campus-restore-drill.service
+[Install]
+WantedBy=timers.target

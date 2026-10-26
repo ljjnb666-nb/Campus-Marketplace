@@ -1,0 +1,12 @@
+[Unit]
+Description=Report failure of Campus unit %i
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/campus-marketplace
+EnvironmentFile=/etc/campus-marketplace/alert.env
+ExecStart=/usr/bin/node scripts/ops/notify-ops-failure.mjs %i
+TimeoutStartSec=20s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

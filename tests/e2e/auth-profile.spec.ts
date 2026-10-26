@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { classifyLoginFailureEvidence, installLoginProbeOnDocument, loginViaUI } from "./helpers/auth";
+import { classifyLoginFailureEvidence, installLoginProbeOnDocument } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { E2E_ACCOUNTS, uniqueTag } from "./helpers/e2e";
 import { flushRateLimits } from "./helpers/rate-limit";
 
@@ -86,7 +87,7 @@ test("认证与个人资料：错误密码登录被拒绝", async ({ page }) => 
     await page.locator('input[name="email"]').first().fill("e2e-buyer@e2e.test");
     await page.locator('input[name="password"]').first().fill("WrongPassword#1");
     await page.getByRole("button", { name: "登录" }).click();
-    await expect(page.getByText("邮箱或密码错误")).toBeVisible();
+    await expect(page.getByText("邮箱、密码或动态验证码错误")).toBeVisible();
     await expect(page).toHaveURL((url) => url.pathname === "/login");
 
     const evidence = await page.evaluate(() => {

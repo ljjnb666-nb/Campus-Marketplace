@@ -1,12 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { requireUser, getRentalOrderDetail, requestReturn, confirmReturn, redirect, notFound } =
+const { requireUser, getRentalOrderDetail, requestReturn, confirmReturn, completeRentalInspection, redirect, notFound } =
   vi.hoisted(() => ({
     requireUser: vi.fn(),
     getRentalOrderDetail: vi.fn(),
     requestReturn: vi.fn(),
     confirmReturn: vi.fn(),
+    completeRentalInspection: vi.fn(),
     redirect: vi.fn(() => {
       throw new Error("redirected");
     }),
@@ -31,6 +32,7 @@ vi.mock("@/repositories/rental-order-repository", () => ({
 vi.mock("@/actions/rental-order", () => ({
   requestReturn,
   confirmReturn,
+  completeRentalInspection,
 }));
 
 import ReturnVerificationPage from "@/app/rental-orders/[id]/return/page";
@@ -58,6 +60,27 @@ afterEach(() => {
 });
 
 describe("ReturnVerificationPage", () => {
+  it("inspection page offers a non-compensation exit without permitting evidence overwrite", async () => {
+    requireUser.mockResolvedValue({ id: "owner-1" });
+    getRentalOrderDetail.mockResolvedValue(buildOrder({ status: "PENDING_INSPECTION", depositAmount: "50", damageClaims: [], returnRecord: { ownerConfirmed: true } }));
+    completeRentalInspection.mockResolvedValue({ success: true, message: "已完成" });
+    const { container } = render(await ReturnVerificationPage({ params: Promise.resolve({ id: "order-1" }) }));
+    expect(screen.getByRole("link", { name: "申请线下补偿" })).toBeTruthy();
+    expect(container.querySelector('select[name="hasDamage"]')).toBeNull();
+    fireEvent.submit(screen.getByRole("button", { name: "不申请补偿，完成订单" }).closest("form")!);
+    await waitFor(() => expect(completeRentalInspection).toHaveBeenCalledTimes(1));
+    expect((completeRentalInspection.mock.calls[0][0] as FormData).get("orderId")).toBe("order-1");
+    expect(confirmReturn).not.toHaveBeenCalled();
+  });
+
+  it("pending claim blocks the no-compensation exit in the UI", async () => {
+    requireUser.mockResolvedValue({ id: "owner-1" });
+    getRentalOrderDetail.mockResolvedValue(buildOrder({ status: "PENDING_INSPECTION", depositAmount: "50", damageClaims: [{ resolvedAt: null, supersededAt: null }] }));
+    render(await ReturnVerificationPage({ params: Promise.resolve({ id: "order-1" }) }));
+    expect(screen.getByText("已有待处理索赔，请等待租客处理。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "不申请补偿，完成订单" })).toBeNull();
+  });
+
   it("租客在 IN_RENTAL 通过 requestReturn 提交归还申请（不展示照片栏）", async () => {
     requireUser.mockResolvedValue({ id: "renter-1" });
     getRentalOrderDetail.mockResolvedValue(buildOrder());
@@ -116,11 +139,14 @@ describe("ReturnVerificationPage", () => {
     );
 
     expect(screen.getByRole("heading", { name: "确认收到归还" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "确认完好归还" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "提交验收结果" })).toBeTruthy();
     // 照片输入挂到 action 读取的 photos 字段，移除装饰性 returnImages
     expect(container.querySelector('input[type="file"][name="photos"]')).toBeTruthy();
     expect(container.querySelector('input[name="returnImages"]')).toBeNull();
 
+    fireEvent.change(screen.getByLabelText("物品是否损坏"), { target: { value: "true" } });
+    fireEvent.change(screen.getByLabelText("是否需要额外清洁"), { target: { value: "false" } });
+    fireEvent.change(screen.getByLabelText("配件是否齐全"), { target: { value: "false" } });
     fireEvent.submit(container.querySelector("form")!);
 
     await waitFor(() => {
@@ -129,12 +155,15 @@ describe("ReturnVerificationPage", () => {
     const formData = confirmReturn.mock.calls[0][0] as FormData;
     expect(formData.get("orderId")).toBe("order-1");
     expect(formData.get("role")).toBe("owner");
+    expect(formData.get("hasDamage")).toBe("true");
+    expect(formData.get("needsCleaning")).toBe("false");
+    expect(formData.get("accessoriesComplete")).toBe("false");
     expect(requestReturn).not.toHaveBeenCalled();
   });
 
-  it("租客在 PENDING_RETURN 走 confirmReturn 双向确认分支", async () => {
+  it.each(["PENDING_RETURN", "PENDING_INSPECTION"])("租客在 %s 可提交独立归还记录", async (status) => {
     requireUser.mockResolvedValue({ id: "renter-1" });
-    getRentalOrderDetail.mockResolvedValue(buildOrder({ status: "PENDING_RETURN" }));
+    getRentalOrderDetail.mockResolvedValue(buildOrder({ status }));
     confirmReturn.mockResolvedValue({ success: true, message: "已确认归还" });
 
     const { container } = render(
@@ -142,6 +171,10 @@ describe("ReturnVerificationPage", () => {
     );
 
     expect(container.querySelector('input[type="file"][name="photos"]')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("物品是否损坏"), { target: { value: "false" } });
+    fireEvent.change(screen.getByLabelText("是否需要额外清洁"), { target: { value: "false" } });
+    fireEvent.change(screen.getByLabelText("配件是否齐全"), { target: { value: "true" } });
 
     fireEvent.submit(container.querySelector("form")!);
 
@@ -151,6 +184,9 @@ describe("ReturnVerificationPage", () => {
     const formData = confirmReturn.mock.calls[0][0] as FormData;
     expect(formData.get("orderId")).toBe("order-1");
     expect(formData.get("role")).toBe("renter");
+    expect(formData.get("hasDamage")).toBe("false");
+    expect(formData.get("needsCleaning")).toBe("false");
+    expect(formData.get("accessoriesComplete")).toBe("true");
     expect(requestReturn).not.toHaveBeenCalled();
   });
 });

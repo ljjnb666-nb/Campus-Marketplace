@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { MessageSquare, ShieldCheck } from "lucide-react";
 import { ConversationList } from "@/components/conversation/conversation-list";
 import { ChatHeader } from "@/components/conversation/chat-header";
-import { ChatMessageList } from "@/components/conversation/chat-message-list";
+import { ConversationHistory } from "@/components/conversation/conversation-history";
 import { ChatInput } from "@/components/conversation/chat-input";
 import type { ConversationListItem, ConversationDetailPayload } from "@/repositories/conversation-repository";
 
@@ -81,10 +81,10 @@ export function ConversationLayout({
             />
 
             {/* 2.2 消息气泡区 */}
-            <ChatMessageList
+            <ConversationHistory
+              key={activeConversationPayload.id}
               currentUserId={currentUserId}
-              messages={activeConversationPayload.messages}
-              nextCursor={activeConversationPayload.nextCursor}
+              payload={activeConversationPayload}
             />
 
             {/* 2.3 消息输入区（8A-03：禁用/放行一律跟随服务器派生沟通策略；

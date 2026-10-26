@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const txStub = {
+  accountSession: { deleteMany: vi.fn() },
+  accountChallenge: { deleteMany: vi.fn() },
   $executeRaw: vi.fn().mockResolvedValue(0),
   user: {
     findUnique: vi.fn(),
@@ -424,9 +426,16 @@ describe("eraseAccount（ANONYMIZATION / FAIL_CLOSED / LISTINGS / RELATIONAL HIS
       data: { ownerNote: null },
     });
 
-    // RentalReturnRecord：inspectionNote 按 order.ownerId
+    // New owner note has exact attribution; legacy shared note clears for either party.
     expect(txStub.rentalReturnRecord.updateMany).toHaveBeenCalledWith({
-      where: { order: { ownerId: "user-1" }, inspectionNote: { not: null } },
+      where: { order: { OR: [{ ownerId: "user-1" }, { renterId: "user-1" }] }, legacyInspectionNote: { not: null } },
+      data: { legacyInspectionNote: null },
+    });
+    expect(txStub.rentalReturnRecord.updateMany).toHaveBeenCalledWith({
+      where: { inspectionNote: { not: null }, OR: [
+        { order: { ownerId: "user-1" } },
+        { ownerInspectionRecordedAt: null, order: { renterId: "user-1" } },
+      ] },
       data: { inspectionNote: null },
     });
 

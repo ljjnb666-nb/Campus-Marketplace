@@ -1,0 +1,10 @@
+[Unit]
+Description=Campus read-only dependency, backup, and public readiness check
+After=docker.service network-online.target
+OnFailure=campus-ops-alert@%n.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/campus-marketplace
+EnvironmentFile=/etc/campus-marketplace/ops.env
+ExecStart=/bin/bash scripts/ops/monitor-production.sh
+TimeoutStartSec=3m

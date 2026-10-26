@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { test as setup } from "@playwright/test";
 import { E2E_ACCOUNTS, storageStatePath } from "./helpers/e2e";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 
 /**
  * setup 依赖项目：为四个 E2E 角色真实登录一次并落盘 storageState。

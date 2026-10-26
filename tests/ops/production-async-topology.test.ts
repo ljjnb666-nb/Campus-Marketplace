@@ -139,7 +139,7 @@ describe("Phase 9A async-worker 生产拓扑 gate", () => {
     expect(dockerfileContent).toMatch(/FROM cleanup-runner AS async-runner/);
     const targetIndex = dockerfileContent.indexOf("AS async-runner");
     const stageBlock = dockerfileContent.slice(targetIndex);
-    expect(stageBlock).toMatch(/exec npx tsx scripts\/ops\/async-worker\.ts/);
+    expect(stageBlock).toMatch(/exec node dist\/ops\/async-worker\.cjs/);
   });
 
   it("async-runner 构建期 bake release identity（ARG GIT_SHA + ENV RELEASE_SHA + /app/.release-sha）", () => {
@@ -148,7 +148,9 @@ describe("Phase 9A async-worker 生产拓扑 gate", () => {
     const stageBlock = dockerfileContent.slice(startIndex);
     expect(stageBlock).toMatch(/ARG GIT_SHA=unknown/);
     expect(stageBlock).toMatch(/ENV RELEASE_SHA=\$\{GIT_SHA\}/);
-    expect(stageBlock).toMatch(/RUN printf '%s\\n' "\$\{GIT_SHA\}" > \/app\/\.release-sha/);
+    // Immutable root-owned metadata is inherited from cleanup-runner.
+    expect(dockerfileContent).toMatch(/RUN printf '%s\\n' "\$\{GIT_SHA\}" > \/app\/\.release-sha/);
+    expect(stageBlock).toMatch(/USER node/);
     // entrypoint 链：cat .release-sha → 显式 export → exec worker（env_file/-e
     // 运行时覆盖无效）；fail closed：set -eu 无 dev/unknown fallback
     expect(stageBlock).toMatch(/ENTRYPOINT \["\/bin\/sh", "-c",/);

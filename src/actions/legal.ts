@@ -30,7 +30,7 @@ export async function acceptRequiredPolicies(
   _prevState: LegalAcceptanceState,
   formData: FormData,
 ): Promise<LegalAcceptanceState> {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return { success: false, message: "请先登录" };

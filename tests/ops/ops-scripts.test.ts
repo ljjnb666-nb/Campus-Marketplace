@@ -1,5 +1,5 @@
 import { execFile, execSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -124,13 +124,6 @@ describe("compose production config（--env-file 统一插值来源）", () => {
   it.skipIf(!hasDocker())(
     "docker compose --env-file <synthetic> -f compose.production.yml config 在 shell 未导出任何生产变量时 PASS",
     async () => {
-      const envFile = path.join(repoRoot, ".env.production");
-      const syntheticFile = path.join(repoRoot, ".env.production.synthetic");
-      const existedBefore = existsSync(envFile);
-      const originalContent = existedBefore ? readFileSync(envFile, "utf8") : null;
-      copyFileSync(syntheticFile, envFile);
-
-      try {
         // 清空 shell 中可能存在的生产变量：插值必须只来自 --env-file
         const cleared = Object.fromEntries(
           Object.entries(process.env).filter(
@@ -154,7 +147,7 @@ describe("compose production config（--env-file 统一插值来源）", () => {
           [
             "compose",
             "--env-file",
-            ".env.production",
+            ".env.production.synthetic",
             "-f",
             "compose.production.yml",
             "--profile",
@@ -162,6 +155,7 @@ describe("compose production config（--env-file 统一插值来源）", () => {
             "--profile",
             "selfhosted-minio",
             "config",
+            "--no-env-resolution",
           ],
           {
             cwd: repoRoot,
@@ -188,13 +182,6 @@ describe("compose production config（--env-file 统一插值来源）", () => {
         ]) {
           expect(stdout).toContain(service);
         }
-      } finally {
-        if (originalContent !== null) {
-          writeFileSync(envFile, originalContent);
-        } else {
-          rmSync(envFile);
-        }
-      }
     },
     150_000,
   );
@@ -265,7 +252,7 @@ describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
     const envCheck = content.indexOf("production-env-check");
     const build = content.indexOf('compose_run build');
     const backup = content.indexOf("backup-postgres.sh");
-    const migrate = content.indexOf("run --rm migrate");
+    const migrate = content.indexOf("run --rm --no-deps --no-build --pull never migrate");
     const up = content.indexOf("up -d --no-deps --wait app");
     const gate = content.indexOf("release readiness gate");
     for (const [name, idx] of [

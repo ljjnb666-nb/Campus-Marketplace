@@ -16,6 +16,13 @@ vi.mock("@/lib/prisma", () => ({
 
 import { finalizeCredentialLogin } from "@/lib/credential-login-service";
 
+vi.mock("@/lib/account-session-service", () => ({
+  createAccountSessionTx: vi.fn(async () => ({ id: "new-session" })),
+}));
+vi.mock("@/lib/account-mfa-service", () => ({
+  verifyCredentialMfaTx: vi.fn(async () => ({ ok: true, strongAuthAt: null })),
+}));
+
 /**
  * RB-03 REVIEW FIX：CREDENTIAL_LOGIN_FINALIZATION_CONTRACT 单元合同。
  *
@@ -72,6 +79,7 @@ describe("finalizeCredentialLogin（RB-03 credential finalizer）", () => {
     const identity = await finalizeCredentialLogin(CANDIDATE);
 
     expect(identity).toEqual({
+      sessionId: "new-session",
       id: "user-1",
       email: "user-1@example.com",
       name: "张同学",

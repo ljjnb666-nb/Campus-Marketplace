@@ -100,6 +100,7 @@ describe.skipIf(!integrationDatabaseUrl)(
         });
         const [owner, renter] = await Promise.all([
           db.user.create({
+            select: { id: true },
             data: {
               name: "owner",
               email: `p10c2-mig-owner-${suffix}@it.local`,
@@ -109,6 +110,7 @@ describe.skipIf(!integrationDatabaseUrl)(
             },
           }),
           db.user.create({
+            select: { id: true },
             data: {
               name: "renter",
               email: `p10c2-mig-renter-${suffix}@it.local`,
