@@ -867,6 +867,16 @@ assert_log_not_contains "cleanup_stop_called"
 assert_log_not_contains "app_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup 镜像缺失不得写日志"; else pass_test; fi
 
+echo "== 9p. cleanup stop failure blocks rollback before app switch =="
+make_sandbox
+STOP_FAILURE_STUB_MODE=storage-cleanup run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "cleanup stop failure"
+assert_log_contains "async_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup stop failure must not write release log"; else pass_test; fi
+
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
 source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
