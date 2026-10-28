@@ -143,32 +143,30 @@ describe("compose production config（--env-file 统一插值来源）", () => {
               ].includes(key),
           ),
         );
-        // --env-file controls Compose variable interpolation, not service-level
-        // env_file. Production services reference the intentionally untracked
-        // .env.production, which must NEVER be required or created by CI.
-        // Override only those service env_file paths in an isolated temporary
-        // Compose overlay; all other production topology stays unchanged.
-        const overrideDir = mkdtempSync(path.join(tmpdir(), "campus-compose-config-"));
+        // Compose env_file is a list that merges across -f overrides, so an
+        // overlay cannot remove the original missing .env.production. Use an
+        // isolated copy of the canonical production topology and redirect ONLY
+        // service env_file paths to the committed nonsecret synthetic fixture.
+        // Never create or read a real .env.production in CI.
+        const configDir = mkdtempSync(path.join(tmpdir(), "campus-compose-config-"));
         let stdout = "";
         try {
-          const overridePath = path.join(overrideDir, "synthetic-env.override.yml");
-          const syntheticPath = path.join(repoRoot, ".env.production.synthetic");
-          const services = [
-            "app", "migrate", "ops-check", "storage-cleanup", "async-worker",
-            "postgres", "redis", "minio", "minio-init",
-          ];
-          writeFileSync(
-            overridePath,
-            ["services:", ...services.map((name) =>
-              `  ${name}:\n    env_file: ${JSON.stringify(syntheticPath)}`)].join("\n") + "\n",
+          const configPath = path.join(configDir, "compose.synthetic.yml");
+          const original = readFileSync(path.join(repoRoot, "compose.production.yml"), "utf8");
+          const sanitized = original.replace(
+            /^([ \t]*env_file:[ \t]*)\.env\.production[ \t]*$/gm,
+            "$1.env.production.synthetic",
           );
+          expect(sanitized).not.toBe(original);
+          expect(sanitized).not.toMatch(/^\s*env_file:\s*\.env\.production\s*$/m);
+          writeFileSync(configPath, sanitized);
           ({ stdout } = await execFileAsync(
             "docker",
             [
               "compose",
+              "--project-directory", repoRoot,
               "--env-file", ".env.production.synthetic",
-              "-f", "compose.production.yml",
-              "-f", overridePath,
+              "-f", configPath,
               "--profile", "ops",
               "--profile", "selfhosted-minio",
               "config", "--no-env-resolution",
@@ -181,7 +179,7 @@ describe("compose production config（--env-file 统一插值来源）", () => {
             },
           ));
         } finally {
-          rmSync(overrideDir, { recursive: true, force: true });
+          rmSync(configDir, { recursive: true, force: true });
         }
         // 插值来自 .env.production：synthetic 值必须出现在渲染结果中
         expect(stdout).toContain("campus.example.edu.cn");
