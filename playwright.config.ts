@@ -50,6 +50,12 @@ const webServerEnv = {
   // E2E 是"production build + 本机 MinIO"的冒烟场景：显式打开 env.ts 的
   // 生产守卫逃生阀（真实生产部署绝不允许设置该变量）
   ALLOW_LOCAL_S3_IN_PRODUCTION: "true",
+  // Playwright runs an isolated production build without a real email provider.
+  // MFA enrollment enqueues a security-email intent in the SAME transaction;
+  // EMAIL_PROVIDER missing in production mode makes that transaction roll back.
+  // Explicitly suppress delivery only in this E2E webServer (never in production
+  // deployment config or .env.production). In-app audit remains transactional.
+  EMAIL_PROVIDER: "disabled",
   // HTTP metrics 黑盒测试（http-metrics.spec.ts）：合法专用 token
   //（>=24 字符，非 NEXTAUTH_SECRET，非危险默认值——与运行时安全契约一致）
   METRICS_BEARER_TOKEN:
