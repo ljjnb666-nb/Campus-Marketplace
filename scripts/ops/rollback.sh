@@ -258,7 +258,7 @@ stop_cleanup_before_switch() {
     echo "[rollback][FAIL] storage-cleanup 停止状态无法确认，拒绝切换 release" >&2
     exit 1
   fi
-  if printf '%s\\n' "${running_services}" | grep -qx storage-cleanup; then
+  if printf '%s\n' "${running_services}" | grep -qx storage-cleanup; then
     echo "[rollback][FAIL] 旧 storage-cleanup 仍在运行，拒绝切换 release" >&2
     exit 1
   fi
