@@ -1,5 +1,6 @@
 import { execFile, execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -142,28 +143,46 @@ describe("compose production config（--env-file 统一插值来源）", () => {
               ].includes(key),
           ),
         );
-        const { stdout } = await execFileAsync(
-          "docker",
-          [
-            "compose",
-            "--env-file",
-            ".env.production.synthetic",
-            "-f",
-            "compose.production.yml",
-            "--profile",
-            "ops",
-            "--profile",
-            "selfhosted-minio",
-            "config",
-            "--no-env-resolution",
-          ],
-          {
-            cwd: repoRoot,
-            env: { NODE_ENV: "test", ...cleared },
-            timeout: 120_000,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
+        // --env-file controls Compose variable interpolation, not service-level
+        // env_file. Production services reference the intentionally untracked
+        // .env.production, which must NEVER be required or created by CI.
+        // Override only those service env_file paths in an isolated temporary
+        // Compose overlay; all other production topology stays unchanged.
+        const overrideDir = mkdtempSync(path.join(tmpdir(), "campus-compose-config-"));
+        let stdout = "";
+        try {
+          const overridePath = path.join(overrideDir, "synthetic-env.override.yml");
+          const syntheticPath = path.join(repoRoot, ".env.production.synthetic");
+          const services = [
+            "app", "migrate", "ops-check", "storage-cleanup", "async-worker",
+            "postgres", "redis", "minio", "minio-init",
+          ];
+          writeFileSync(
+            overridePath,
+            ["services:", ...services.map((name) =>
+              `  ${name}:\\n    env_file: ${JSON.stringify(syntheticPath)}`)].join("\n") + "\n",
+          );
+          ({ stdout } = await execFileAsync(
+            "docker",
+            [
+              "compose",
+              "--env-file", ".env.production.synthetic",
+              "-f", "compose.production.yml",
+              "-f", overridePath,
+              "--profile", "ops",
+              "--profile", "selfhosted-minio",
+              "config", "--no-env-resolution",
+            ],
+            {
+              cwd: repoRoot,
+              env: { NODE_ENV: "test", ...cleared },
+              timeout: 120_000,
+              maxBuffer: 10 * 1024 * 1024,
+            },
+          ));
+        } finally {
+          rmSync(overrideDir, { recursive: true, force: true });
+        }
         // 插值来自 .env.production：synthetic 值必须出现在渲染结果中
         expect(stdout).toContain("campus.example.edu.cn");
         expect(stdout).toContain("campus_marketplace");
