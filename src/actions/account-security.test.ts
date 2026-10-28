@@ -32,8 +32,15 @@ describe("account security action boundaries", () => {
     expect(known).toEqual(unknown);
     expect(mocks.request).toHaveBeenNthCalledWith(1, "owner@example.test", "RESET_PASSWORD", "192.0.2.9");
     expect(mocks.request).toHaveBeenNthCalledWith(2, "", "RESET_PASSWORD", "192.0.2.9");
+    // An existing account may reach provider/DB code that an unknown address
+    // never touches. Public results must stay indistinguishable even then.
     mocks.request.mockRejectedValueOnce(new Error("PRIVATE_PROVIDER_DETAIL"));
-    expect(await requestPasswordResetAction(initial, form())).toEqual({ success: false, message: "服务暂时不可用，请稍后再试。" });
+    const providerFailure = await requestPasswordResetAction(initial, form({ email: "owner@example.test" }));
+    expect(providerFailure).toEqual(known);
+    expect(providerFailure.message).not.toContain("PRIVATE_PROVIDER_DETAIL");
+    mocks.request.mockRejectedValueOnce(new Error("PRIVATE_DATABASE_DETAIL"));
+    const databaseFailure = await requestPasswordResetAction(initial, form({ email: "owner@example.test" }));
+    expect(databaseFailure).toEqual(unknown);
   });
   it("binds verification to the authenticated email and preserves auth failures", async () => {
     expect((await requestEmailVerificationAction()).success).toBe(true);
