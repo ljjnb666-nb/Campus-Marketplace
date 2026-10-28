@@ -196,6 +196,21 @@ case "\$ARGS" in
     elif [[ "\$ARGS" == *"COUNT(*)"* ]]; then
       echo "0"
     fi
+    # Capture the new post-restore SQL transaction, not merely a filename check.
+    # The only -X invocation is the mandatory security invalidation gate.
+    if [[ "\$ARGS" == *"psql -X"* ]]; then
+      security_sql="\$(cat)"
+      if [[ "\$security_sql" == *"RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING"* &&
+            "\$security_sql" == *"RECOVERY_CHALLENGE_INVALIDATION_INCOMPLETE"* &&
+            "\$security_sql" == *'UPDATE "AccountSession"'* &&
+            "\$security_sql" == *'UPDATE "AccountChallenge"'* ]]; then
+        echo "security_invalidate_called" >> "${SANDBOX}/calls.log"
+      else
+        echo "security_invalidation_sql_invalid" >> "${SANDBOX}/calls.log"
+        exit 1
+      fi
+      if [[ "\${RECOVERY_SECURITY_STUB_MODE:-}" == "fail" ]]; then exit 1; fi
+    fi
     exit 0 ;;
   *"compose"*"exec -T postgres pg_dump"*)
     echo "pg_dump_called" >> "${SANDBOX}/calls.log"; echo "DUMMYDUMP"; exit 0 ;;
@@ -512,6 +527,7 @@ assert_log_contains "app_stop_called"
 assert_log_contains "cleanup_stop_called"
 assert_log_contains "async_stop_called"
 assert_log_contains "pg_restore_called"
+assert_log_contains "security_invalidate_called"
 # 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
 stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
 stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
@@ -523,6 +539,21 @@ if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$stop_async_line" &&
 else
   fail_test "必须在 terminate DB connections 之前停止 app / storage-cleanup / async-worker"
 fi
+
+echo "== 5b-security. 恢复后凭据失效失败 → FAIL CLOSED：不可宣告恢复成功 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  RECOVERY_SECURITY_STUB_MODE=fail \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >/tmp/rp-security-fail.$ 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "post-restore auth invalidation failed"
+assert_log_contains "pg_restore_called"
+assert_log_contains "security_invalidate_called"
+if grep -qF "恢复后的登录会话或账号恢复链接未能全部失效" /tmp/rp-security-fail.$; then pass_test; else fail_test "缺少认证失效门禁错误标志"; fi
 
 echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
 make_sandbox
