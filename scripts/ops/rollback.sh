@@ -245,6 +245,25 @@ stop_async_before_switch() {
   fi
 }
 
+# The current cleanup worker may still write DB/S3 with the newer schema.
+# Quiesce it before switching the app to the target release. Post-worker
+# targets restart only after app switch; pre-worker targets remain stopped.
+stop_cleanup_before_switch() {
+  if ! compose_run stop storage-cleanup; then
+    echo "[rollback][FAIL] storage-cleanup 停止失败，拒绝切换 release" >&2
+    exit 1
+  fi
+  local running_services=""
+  if ! running_services="$(compose_run ps --status running --services)"; then
+    echo "[rollback][FAIL] storage-cleanup 停止状态无法确认，拒绝切换 release" >&2
+    exit 1
+  fi
+  if printf '%s\\n' "${running_services}" | grep -qx storage-cleanup; then
+    echo "[rollback][FAIL] 旧 storage-cleanup 仍在运行，拒绝切换 release" >&2
+    exit 1
+  fi
+}
+
 ASYNC_LOG_TAG=""
 switch_async_to() {
   local target_sha="$1" resolved_images="" running_services="" runtime_json=""
@@ -317,6 +336,7 @@ fi
 # 成功后到达这里）：先 app，后 cleanup（release identity 成对，不允许 split）
 echo "[rollback] 先停止旧 async-worker，再切换目标 release ${PREVIOUS_SHA}"
 stop_async_before_switch
+stop_cleanup_before_switch
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
 switch_app_to "${PREVIOUS_SHA}"
 switch_cleanup_to "${PREVIOUS_SHA}"
