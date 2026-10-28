@@ -548,12 +548,12 @@ OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
   RECOVERY_SECURITY_STUB_MODE=fail \
   bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
     --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
-    --target-db campus_marketplace >/tmp/rp-security-fail.$ 2>&1; rc=$?
+    --target-db campus_marketplace >"${SANDBOX}/security-failure.log" 2>&1; rc=$?
 CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
 assert_exit 1 "$rc" "post-restore auth invalidation failed"
 assert_log_contains "pg_restore_called"
 assert_log_contains "security_invalidate_called"
-if grep -qF "恢复后的登录会话或账号恢复链接未能全部失效" /tmp/rp-security-fail.$; then pass_test; else fail_test "缺少认证失效门禁错误标志"; fi
+if grep -qF "恢复后的登录会话或账号恢复链接未能全部失效" "${SANDBOX}/security-failure.log"; then pass_test; else fail_test "缺少认证失效门禁错误标志"; fi
 
 echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
 make_sandbox
