@@ -179,6 +179,44 @@ orphans="$(compose_run exec -T postgres psql -U "${POSTGRES_USER}" -d "${TARGET_
 echo "[prod-restore] Product→User 孤儿引用: ${orphans}"
 [[ "${orphans}" == "0" ]] || fail "存在孤儿引用，恢复不完整"
 
+# A restore rewinds security state as well as business rows. Sessions revoked after
+# the backup and single-use recovery links consumed after the backup would otherwise
+# become valid again. This must finish before rollback.sh may start any writer.
+# No active AccountSession table means an old JWT-only release cannot be forcibly
+# invalidated via database authority: fail closed and require an operator-reviewed
+# secret rotation/recovery procedure before reopening traffic.
+echo "[prod-restore] 撤销备份中恢复的所有登录会话与一次性恢复链接"
+if ! compose_run exec -T postgres psql -X -U "${POSTGRES_USER}" -d "${TARGET_DB}" -v ON_ERROR_STOP=1 <<'SECURITY_SQL'
+BEGIN;
+DO $recovery_security$
+BEGIN
+  IF to_regclass('public."AccountSession"') IS NULL THEN
+    RAISE EXCEPTION 'RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING';
+  END IF;
+  UPDATE "AccountSession"
+  SET "revokedAt" = CURRENT_TIMESTAMP
+  WHERE "revokedAt" IS NULL;
+  IF EXISTS (SELECT 1 FROM "AccountSession" WHERE "revokedAt" IS NULL) THEN
+    RAISE EXCEPTION 'RECOVERY_SESSION_REVOCATION_INCOMPLETE';
+  END IF;
+
+  IF to_regclass('public."AccountChallenge"') IS NOT NULL THEN
+    UPDATE "AccountChallenge"
+    SET "consumedAt" = CURRENT_TIMESTAMP
+    WHERE "consumedAt" IS NULL;
+    IF EXISTS (SELECT 1 FROM "AccountChallenge" WHERE "consumedAt" IS NULL) THEN
+      RAISE EXCEPTION 'RECOVERY_CHALLENGE_INVALIDATION_INCOMPLETE';
+    END IF;
+  END IF;
+END
+$recovery_security$;
+COMMIT;
+SECURITY_SQL
+then
+  fail "恢复后的登录会话或账号恢复链接未能全部失效；禁止重新开放应用"
+fi
+echo "[prod-restore] 恢复后的历史会话与链接已失效（不恢复备份时点的认证权限）"
+
 echo "[prod-restore] ============================================"
 echo "[prod-restore] PRODUCTION RESTORE OK → ${TARGET_DB}"
 echo "[prod-restore] production writers（app / storage-cleanup）当前均处于停止状态。"
