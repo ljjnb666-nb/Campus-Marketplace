@@ -36,10 +36,27 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
-load_production_env
 
-# OPS_RESTORE_SCRIPT 仅供自动化测试注入 stub（生产路径不受影响）
-RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT:-${SCRIPT_DIR}/restore-production-postgres.sh}"
+# HARD RESTORE AUTHORITY: production must always call the checked-in,
+# fail-closed restore script. The OPS_RESTORE_SCRIPT test seam is permitted
+# only with an explicitly redirected, physically distinct sandbox project.
+# In particular, setting OPS_RESTORE_SCRIPT on a real production checkout
+# must never turn a no-op helper into a successful database restoration.
+REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+RESTORE_SCRIPT="${SCRIPT_DIR}/restore-production-postgres.sh"
+if [[ -n "${OPS_RESTORE_SCRIPT:-}" ]]; then
+  if [[ -z "${OPS_PROJECT_DIR:-}" ]]; then
+    echo "[rollback][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN：只有隔离测试沙箱可替换恢复脚本" >&2
+    exit 1
+  fi
+  SANDBOX_ROOT="$(cd "${PROJECT_DIR}" && pwd -P)"
+  if [[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]; then
+    echo "[rollback][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN：真实仓库不允许环境覆盖恢复脚本" >&2
+    exit 1
+  fi
+  RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT}"
+fi
+load_production_env
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
 if [[ ! "${PREVIOUS_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
