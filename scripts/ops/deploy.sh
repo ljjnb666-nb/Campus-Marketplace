@@ -167,7 +167,7 @@ if ! OLD_CLEANUP_RUNNING="$(compose_run ps --status running --services)"; then
   echo "[deploy][FAIL] 无法确认旧 storage-cleanup 停止状态，拒绝发布" >&2
   exit 1
 fi
-if printf '%s\\n' "${OLD_CLEANUP_RUNNING}" | grep -qx storage-cleanup; then
+if printf '%s\n' "${OLD_CLEANUP_RUNNING}" | grep -qx storage-cleanup; then
   echo "[deploy][FAIL] 旧 storage-cleanup 仍在运行，拒绝发布" >&2
   exit 1
 fi
