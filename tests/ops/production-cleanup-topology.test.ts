@@ -300,4 +300,22 @@ describe("release lifecycle 静态 gate（FINAL REPAIR B：deploy / restore / ro
     expect(envCheck).toMatch(/worker 默认 1800s/);
     expect(envCheck).toMatch(/Number\.isInteger\(cleanupInterval\) && cleanupInterval >= 60/);
   });
+  it("deploy/rollback: old cleanup writer must be confirmed stopped before schema or app switches", () => {
+    const deployStop = deploySh.indexOf("compose_run stop storage-cleanup");
+    const deployMigrate = deploySh.indexOf('compose_run --profile ops run --rm --no-deps --no-build --pull never migrate');
+    expect(deployStop).toBeGreaterThan(-1);
+    expect(deployMigrate).toBeGreaterThan(deployStop);
+    expect(deploySh).toContain("旧 storage-cleanup 无法停止，拒绝迁移或切换 app");
+    expect(deploySh).toContain("旧 storage-cleanup 仍在运行，拒绝发布");
+    expect(deploySh).toContain("无法确认旧 storage-cleanup 停止状态，拒绝发布");
+
+    const rollbackStop = rollbackSh.indexOf("\nstop_cleanup_before_switch\n");
+    const rollbackAppSwitch = rollbackSh.indexOf('switch_app_to "${PREVIOUS_SHA}"');
+    expect(rollbackStop).toBeGreaterThan(-1);
+    expect(rollbackAppSwitch).toBeGreaterThan(rollbackStop);
+    expect(rollbackSh).toContain("storage-cleanup 停止失败，拒绝切换 release");
+    expect(rollbackSh).toContain("旧 storage-cleanup 仍在运行，拒绝切换 release");
+    expect(rollbackSh).toContain("storage-cleanup 停止状态无法确认，拒绝切换 release");
+  });
+
 });
