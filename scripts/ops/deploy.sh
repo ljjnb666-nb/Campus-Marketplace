@@ -154,6 +154,24 @@ if printf '%s\n' "${OLD_WORKER_RUNNING}" | grep -qx async-worker; then
   exit 1
 fi
 
+# Cleanup is also a production DB/S3 writer. It must not keep running while
+# Prisma migrations replace the schema or a new app release is switched in.
+# Unknown/failed stop state is a hard blocker; never mistake "ps" failure
+# for a successfully quiesced process.
+echo "[deploy] 停止旧 storage-cleanup，隔离跨版本存储写入"
+if ! compose_run stop storage-cleanup; then
+  echo "[deploy][FAIL] 旧 storage-cleanup 无法停止，拒绝迁移或切换 app" >&2
+  exit 1
+fi
+if ! OLD_CLEANUP_RUNNING="$(compose_run ps --status running --services)"; then
+  echo "[deploy][FAIL] 无法确认旧 storage-cleanup 停止状态，拒绝发布" >&2
+  exit 1
+fi
+if printf '%s\\n' "${OLD_CLEANUP_RUNNING}" | grep -qx storage-cleanup; then
+  echo "[deploy][FAIL] 旧 storage-cleanup 仍在运行，拒绝发布" >&2
+  exit 1
+fi
+
 echo "[deploy] step 4/7 migrate deploy"
 GIT_SHA="${GIT_SHA}" compose_run --profile ops run --rm --no-deps --no-build --pull never migrate
 
