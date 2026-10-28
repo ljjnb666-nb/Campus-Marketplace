@@ -13,7 +13,13 @@ async function source() { return resolveAuthClientSource(Object.fromEntries(awai
 
 export async function requestPasswordResetAction(_state: RecoveryState, form: FormData): Promise<RecoveryState> {
   try { await requestAccountChallenge(String(form.get("email") ?? "").trim(), "RESET_PASSWORD", await source()); }
-  catch { return { success: false, message: "服务暂时不可用，请稍后再试。" }; }
+  catch {
+    // The write/email path is only reached for existing accounts. Returning a
+    // distinct failure here would make transient provider/DB errors an account
+    // enumeration oracle. Keep the external outcome identical for absent,
+    // rate-limited, successful and failed-to-enqueue addresses. Operations
+    // must detect provider failures through monitoring, not this public form.
+  }
   return { success: true, message: generic };
 }
 export async function requestEmailVerificationAction(): Promise<RecoveryState> {
