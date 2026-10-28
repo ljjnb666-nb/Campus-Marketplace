@@ -160,7 +160,7 @@ describe("compose production config（--env-file 统一插值来源）", () => {
           writeFileSync(
             overridePath,
             ["services:", ...services.map((name) =>
-              `  ${name}:\\n    env_file: ${JSON.stringify(syntheticPath)}`)].join("\n") + "\n",
+              `  ${name}:\n    env_file: ${JSON.stringify(syntheticPath)}`)].join("\n") + "\n",
           );
           ({ stdout } = await execFileAsync(
             "docker",
