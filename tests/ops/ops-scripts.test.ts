@@ -204,6 +204,39 @@ describe("compose production config（--env-file 统一插值来源）", () => {
   );
 });
 
+describe("hard rollback restore authority", () => {
+  it("keeps production restore fixed to the checked-in helper", () => {
+    const content = readFileSync(path.join(repoRoot, "scripts/ops/rollback.sh"), "utf8");
+    expect(content).toContain("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN");
+    expect(content).toContain('RESTORE_SCRIPT="${SCRIPT_DIR}/restore-production-postgres.sh"');
+    expect(content).toContain('[[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]');
+    expect(content.indexOf("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN"))
+      .toBeLessThan(content.indexOf("load_production_env"));
+  });
+
+  it.skipIf(!hasBash())("refuses fake successful restores before production side effects, with or without OPS_PROJECT_DIR", async () => {
+    const script = path.join(repoRoot, "scripts/ops/rollback.sh");
+    for (const projectDir of ["", repoRoot]) {
+      let rejected: { code?: number; stderr?: string } | undefined;
+      try {
+        await execFileAsync("bash", [script, "a".repeat(40), "--hard"], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            OPS_PROJECT_DIR: projectDir,
+            OPS_RESTORE_SCRIPT: "/bin/true",
+          },
+          timeout: 30_000,
+        });
+      } catch (error) {
+        rejected = error as { code?: number; stderr?: string };
+      }
+      expect(rejected?.code, "unsafe restore override must exit nonzero").not.toBe(0);
+      expect(rejected?.stderr).toContain("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN");
+    }
+  });
+});
+
 describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
   it("rollback/restore/backup 关键路径不得包含 '&& true' / '|| true'", () => {
     const criticalScripts = [
