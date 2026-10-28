@@ -104,6 +104,7 @@ backups/
 calls.log
 fake-app.out
 async.running
+cleanup.running
 migration.count
 .env.production
 .releases.log
@@ -111,7 +112,7 @@ GITIGNORE
   echo "committed source marker" > "${SANDBOX}/app-source-marker.txt"
   git -C "${SANDBOX}" add .gitignore app-source-marker.txt
   git -C "${SANDBOX}" commit -q -m "sandbox init"
-  touch "${SANDBOX}/async.running"
+  touch "${SANDBOX}/async.running" "${SANDBOX}/cleanup.running"
 
   # ---- docker stub：记录 side_effect 并模拟 compose 行为 ----
   # cleanup worker 相关模式（FINAL REPAIR B release artifact pair）：
@@ -136,6 +137,11 @@ case "\$ARGS" in
     exit 0 ;;
   *"image inspect campus-marketplace-migrator:"*)
     [[ -z "\${MISSING_MIGRATOR_IMAGE:-}" ]]; exit \$? ;;
+  *"compose"*"stop storage-cleanup"*)
+    echo "side_effect:cleanup_stop" >> "${SANDBOX}/calls.log"
+    [[ -n "\${CLEANUP_STOP_FAILURE:-}" ]] && exit 1
+    [[ -n "\${CLEANUP_STOP_STILL_RUNNING:-}" ]] || rm -f "${SANDBOX}/cleanup.running"
+    exit 0 ;;
   *"compose"*"stop async-worker"*)
     echo "side_effect:async_stop" >> "${SANDBOX}/calls.log"
     [[ -n "\${ASYNC_STOP_FAILURE:-}" ]] && exit 1
@@ -176,14 +182,16 @@ case "\$ARGS" in
     exit 0 ;;
   *"compose"*"ps --status running --services"*)
     [[ -n "\${ASYNC_STOP_PS_FAILURE:-}" ]] && exit 1
+    [[ -n "\${CLEANUP_STOP_PS_FAILURE:-}" && ! -f "${SANDBOX}/cleanup.running" ]] && exit 1
     echo "app"
-    [[ -n "\${WORKER_NOT_RUNNING:-}" ]] || echo "storage-cleanup"
+    [[ -n "\${WORKER_NOT_RUNNING:-}" || ! -f "${SANDBOX}/cleanup.running" ]] || echo "storage-cleanup"
     [[ -n "\${ASYNC_WORKER_NOT_RUNNING:-}" || ! -f "${SANDBOX}/async.running" ]] || echo "async-worker"
     exit 0 ;;
   *"compose"*"up -d"*"storage-cleanup"*)
     echo "side_effect:cleanup_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     [[ -n "\${WORKER_UP_FAILURE:-}" ]] && exit 1
+    touch "${SANDBOX}/cleanup.running"
     exit 0 ;;
   *"compose"*"up -d"*"async-worker"*)
     echo "side_effect:async_worker_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
@@ -359,11 +367,17 @@ assert_contains "ASYNC_WORKER=running" "${SANDBOX}/.releases.log" "SOURCE-01 rel
 # 顺序硬门禁：migrate 必须先于 cleanup worker 切换（worker 绝不在 pre-migration schema 上运行）
 migrate_line="$(grep -n "side_effect:migrate" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
 stop_line="$(grep -n "side_effect:async_stop" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+cleanup_stop_line="$(grep -n "side_effect:cleanup_stop" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
 app_line="$(grep -n "side_effect:app_up" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
 if [[ -n "$stop_line" && "$stop_line" -lt "$migrate_line" && "$migrate_line" -lt "$app_line" ]]; then
   pass_test
 else
   fail_test "旧 async-worker 必须在迁移和 app 切换前停止"
+fi
+if [[ -n "$cleanup_stop_line" && "$stop_line" -lt "$cleanup_stop_line" && "$cleanup_stop_line" -lt "$migrate_line" && "$migrate_line" -lt "$app_line" ]]; then
+  pass_test
+else
+  fail_test "旧 storage-cleanup 必须在迁移和 app 切换前停止"
 fi
 if [[ "$(grep -c "side_effect:migrate GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log")" == 2 ]]; then
   pass_test
@@ -385,7 +399,7 @@ else
 fi
 rm -f "${OUT}"
 
-for failure in WRONG_MIGRATOR_IMAGE MISSING_MIGRATOR_IMAGE ASYNC_STOP_FAILURE ASYNC_STOP_STILL_RUNNING ASYNC_STOP_PS_FAILURE MIGRATION_REPEAT_FAILURE; do
+for failure in WRONG_MIGRATOR_IMAGE MISSING_MIGRATOR_IMAGE ASYNC_STOP_FAILURE ASYNC_STOP_STILL_RUNNING ASYNC_STOP_PS_FAILURE CLEANUP_STOP_FAILURE CLEANUP_STOP_STILL_RUNNING CLEANUP_STOP_PS_FAILURE MIGRATION_REPEAT_FAILURE; do
   echo "== 发布失败路径：${failure} =="
   make_sandbox
   refresh_head
