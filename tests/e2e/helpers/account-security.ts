@@ -87,8 +87,17 @@ export async function loginViaUI(page: Page, email: string, password: string, ex
       const confirm = page.getByRole("form", { name: "确认启用双重验证" });
       await confirm.locator('input[name="code"]').fill(totpCode(key, Math.floor(Date.now() / 30_000)));
       await confirm.getByRole("button", { name: "确认启用双重验证", exact: true }).click();
+      // React Server Action completion and the refreshed RSC tree are separate
+      // observations. The authoritative proof is the newly persisted secret;
+      // then revisit the page to verify the strong-auth control actually renders.
+      // Never mutate MFA rows or bypass the real form from this fixture.
+      await expect.poll(async () =>
+        Boolean((await e2eDb().user.findUniqueOrThrow({
+          where: { id: user.id }, select: { mfaSecretEncrypted: true },
+        })).mfaSecretEncrypted),
+      { message: "MFA enable must commit after the real UI submission", timeout: 12_000 }).toBe(true);
+      await page.goto("/my/security");
       await expect(page.getByRole("button", { name: "验证以继续管理操作", exact: true })).toBeVisible();
-      expect((await e2eDb().user.findUniqueOrThrow({ where: { id: user.id } })).mfaSecretEncrypted).not.toBeNull();
     }
     if (!user.emailVerifiedAt || (privileged && !user.mfaSecretEncrypted)) {
       await page.goto(landing.pathname === "/my/security" ? "/" : `${landing.pathname}${landing.search}`);
