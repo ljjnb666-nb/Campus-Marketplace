@@ -66,10 +66,10 @@ describe("LoginForm", () => {
 
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.change(screen.getByLabelText("动态验证码（已启用双重验证时必填）"), {
@@ -93,10 +93,10 @@ describe("LoginForm", () => {
     signIn.mockResolvedValueOnce({ error: "CredentialsSignin" });
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -115,10 +115,10 @@ describe("LoginForm", () => {
   it("treats an absent auth result as failure, not successful navigation", async () => {
     signIn.mockResolvedValue(undefined);
     render(<LoginForm />);
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -135,10 +135,10 @@ describe("LoginForm", () => {
   ])("does not navigate on a non-success signIn object ($label)", async ({ result }) => {
     signIn.mockResolvedValue(result);
     render(<LoginForm />);
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -154,10 +154,10 @@ describe("LoginForm", () => {
 
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: "wrong-password" },
     });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
