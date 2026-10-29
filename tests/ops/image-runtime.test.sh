@@ -20,7 +20,7 @@ cleanup() {
   if [[ "${rc}" != 0 ]]; then
     for log in "${TEMP_DIR}"/*; do [[ ! -f "${log}" ]] || { echo "--- $(basename "${log}")"; tail -25 "${log}"; }; done
   fi
-  docker rm -fv "${NAME}-app" "${NAME}-db" "${NAME}-redis" "${NAME}-minio" >/dev/null 2>&1 || true
+  docker rm -fv "${NAME}-async-a" "${NAME}-async-b" "${NAME}-app" "${NAME}-db" "${NAME}-redis" "${NAME}-minio" >/dev/null 2>&1 || true
   docker network rm "${NAME}" >/dev/null 2>&1 || true
   rm -rf "${TEMP_DIR}"
   exit "${rc}"
@@ -76,6 +76,8 @@ for kind in async cleanup; do
   ! grep -q 'runtime-spoof\|MODULE_NOT_FOUND\|cycle_failed' "${TEMP_DIR}/${kind}"
   PASS=$((PASS+1))
 done
+# Real concurrent CJS workers exercise shared DB leases and terminal replay.
+source "${REPO_ROOT}/tests/ops/worker-concurrent-image-proof.sh"
 # Ops checker must observe dependencies without manufacturing backup readiness.
 docker run --rm --pull never --network "${NAME}" "${ENV_ARGS[@]}" "${PREFIX}-ops:${TAG}" --mode ci > "${TEMP_DIR}/ops-ci" 2>&1
 grep -q '"result":"PASS"' "${TEMP_DIR}/ops-ci"
