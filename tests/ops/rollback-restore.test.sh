@@ -226,6 +226,13 @@ STUB
   # image 被 prune 的情况误认成历史 release 不存在此服务。
   cat > "${SANDBOX}/bin/git" <<'GIT_STUB'
 #!/usr/bin/env bash
+if [[ "$*" == *"cat-file -p"* ]]; then
+  # Target-commit restore credential contract. Legacy release must refuse
+  # hard restore BEFORE any production database or writer mutation.
+  if [[ "${RECOVERY_HOLD_STUB_MODE:-compatible}" == "legacy" ]]; then exit 1; fi
+  echo 'credentialRecoveryRequired'
+  exit 0
+fi
 if [[ "$*" != *"cat-file -e"* ]]; then exit 1; fi
 if [[ "$*" == *"scripts/ops/async-worker.ts"* && "${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]]; then exit 1; fi
 if [[ "$*" == *"scripts/ops/storage-cleanup-worker.ts"* && "${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]]; then exit 1; fi
@@ -502,6 +509,16 @@ make_sandbox   # 新沙箱，BACKUP_DIR 为空
 run_rollback "${PREV_SHA}" --hard; rc=$?
 assert_exit 1 "$rc" "missing backup"
 assert_log_not_contains "restore_called"
+
+echo "== 4b. hard rollback to old app without recovery hold rejects before restore and writers =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(RECOVERY_HOLD_STUB_MODE=legacy)
+run_rollback "${PREV_SHA}" --hard; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "hard rollback incompatible target credential hold"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "app_up_called"
 
 echo "== 5. SHA256 不一致 → 失败（真实 restore 脚本）=="
 make_sandbox
