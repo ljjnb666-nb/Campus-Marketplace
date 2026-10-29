@@ -181,6 +181,37 @@ describe.skipIf(!url)("account challenges and MFA authority (real PostgreSQL)", 
     expect(await db.adminLog.count({ where: { adminId: user.id, action: "ACCOUNT_PASSWORD_RESET" } })).toBe(1);
   });
 
+  it("RECOVERY-HOLD-02：T0 旧哈希恢复后旧密码拒绝；真实邮箱挑战+重置解除隔离", async () => {
+    const user = await account();
+    const oldSession = await signIn(user);
+    // The old bcrypt proof matches the database, but a production restore
+    // quarantines that credential before any writer is restarted.
+    await db.user.update({ where: { id: user.id }, data: { credentialRecoveryRequired: true } });
+    expect(await compare(password, (await db.user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash)).toBe(true);
+    expect(await login.finalizeCredentialLogin(user)).toBeNull();
+    const { isAccountSessionActive } = await import("@/lib/account-session-service");
+    expect(await isAccountSessionActive(user.id, oldSession)).toBe(false);
+
+    const reset = { ...await challenge(user, "RESET_PASSWORD"), newPassword: "RecoveredAndRotatedPassword456" };
+    await challenges.completeAccountChallenge(reset, randomUUID());
+    const recovered = await db.user.findUniqueOrThrow({ where: { id: user.id } });
+    expect(recovered.credentialRecoveryRequired).toBe(false);
+    expect(await compare(password, recovered.passwordHash)).toBe(false);
+    expect(await compare(reset.newPassword, recovered.passwordHash)).toBe(true);
+    expect(await db.accountSession.count({ where: { id: oldSession, revokedAt: null } })).toBe(0);
+    expect(await login.finalizeCredentialLogin(user)).toBeNull();
+    expect(await login.finalizeCredentialLogin({ ...recovered })).not.toBeNull();
+  });
+
+  it("RECOVERY-HOLD-03：邮箱验证不能清除灾后密码隔离", async () => {
+    const user = await account(false);
+    await db.user.update({ where: { id: user.id }, data: { credentialRecoveryRequired: true } });
+    const confirm = await challenge(user, "VERIFY_EMAIL");
+    await challenges.completeAccountChallenge(confirm, randomUUID());
+    expect((await db.user.findUniqueOrThrow({ where: { id: user.id } })).credentialRecoveryRequired).toBe(true);
+    expect(await login.finalizeCredentialLogin(user)).toBeNull();
+  });
+
   it("erasure wins against a waiting challenge completion and clears recovery secrets", async () => {
     const user = await account(false); const input = await challenge(user); const held = barrier(); const release = barrier();
     const { eraseAccount } = await import("@/lib/privacy/account-erasure");
