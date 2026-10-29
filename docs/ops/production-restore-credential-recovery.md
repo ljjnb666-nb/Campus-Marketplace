@@ -22,9 +22,10 @@
 2. 必须核验恢复目标 schema **包含** `User.credentialRecoveryRequired`；旧 schema 备份直接恢复时安全 SQL 会 fail closed，**不可自行临时删除此断言**。若需要从旧 schema 迁移，应另立有审查记录的隔离转换程序，先证明转换安全再允许任何 writer 重启。
 3. 真实生产的 `app`、`storage-cleanup`、`async-worker` 停写和备份完整性必须独立确认；执行正式脚本后核验：
    `SELECT count(*) FROM "User" WHERE "credentialRecoveryRequired" IS DISTINCT FROM TRUE;` → **0**；旧 session/challenge 未消费数量 → 0。任何异常立即停止；不可打印用户哈希、邮箱或恢复令牌到日志。
-4. **不得因为脚本报告数据库恢复完成就重新开放登录或业务流量。** 在恢复的身份和 RBAC 历史状态与外部事实对齐、邮件送达和 MFA 验证能力恢复、受控用户恢复流程及滥用监测得到人工审批之前，保持生产 `BLOCKED`。
-5. 对受影响账号，采用经批准的邮箱/MFA/人工补充核验程序重新确认真实归属；新密码验证后自动解除单账号 hold。历史邮箱可能已被弃用/转移，不能单凭从备份恢复出的旧邮箱确认所有者。
-6. 检查恢复后未授权角色恢复、订单/支付凭据/对象存储或其他外部状态发生时间回退的影响。所有放行须记录审批人、准确 release SHA、证据位置、健康与安全指标、异常回滚计划。
+4. `rollback.sh --hard` 还需在**任何恢复副作用之前**检查目标旧 release 的 `credential-login-service.ts`、`account-challenge-service.ts` 与 `account-session-service.ts` 是否支持 `credentialRecoveryRequired`，否则 `RECOVERY_CREDENTIAL_HOLD_TARGET_INCOMPATIBLE` 拒绝切换。该检查是保守的源码兼容门禁，不等于镜像已通过生产运行时审计；正常 safe rollback 也不能被当成恢复后放行捷径。
+5. **不得因为脚本报告数据库恢复完成就重新开放登录或业务流量。** 在恢复的身份和 RBAC 历史状态与外部事实对齐、邮件送达和 MFA 验证能力恢复、受控用户恢复流程及滥用监测得到人工审批之前，保持生产 `BLOCKED`。
+6. 对受影响账号，采用经批准的邮箱/MFA/人工补充核验程序重新确认真实归属；新密码验证后自动解除单账号 hold。历史邮箱可能已被弃用/转移，不能单凭从备份恢复出的旧邮箱确认所有者。
+7. 检查恢复后未授权角色恢复、订单/支付凭据/对象存储或其他外部状态发生时间回退的影响。所有放行须记录审批人、准确 release SHA、证据位置、健康与安全指标、异常回滚计划。
 
 ## 可重复的隔离工程测试
 
