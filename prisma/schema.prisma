@@ -222,6 +222,9 @@ model User {
   name                    String
   email                   String                    @unique
   passwordHash            String
+  // Disaster recovery: pg_restore can rewind passwordHash to an obsolete password.
+  // A restored credential must not authenticate until verified RESET_PASSWORD.
+  credentialRecoveryRequired Boolean                 @default(false)
   emailVerifiedAt         DateTime?
   mfaSecretEncrypted      String?
   mfaPendingEncrypted     String?
