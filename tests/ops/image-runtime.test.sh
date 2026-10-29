@@ -78,6 +78,8 @@ for kind in async cleanup; do
 done
 # Real concurrent CJS workers exercise shared DB leases and terminal replay.
 source "${REPO_ROOT}/tests/ops/worker-concurrent-image-proof.sh"
+# Actual PRODUCT expiry -> transactional outbox -> two deduped notifications.
+source "${REPO_ROOT}/tests/ops/worker-business-image-proof.sh"
 # Ops checker must observe dependencies without manufacturing backup readiness.
 docker run --rm --pull never --network "${NAME}" "${ENV_ARGS[@]}" "${PREFIX}-ops:${TAG}" --mode ci > "${TEMP_DIR}/ops-ci" 2>&1
 grep -q '"result":"PASS"' "${TEMP_DIR}/ops-ci"
