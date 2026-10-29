@@ -98,28 +98,16 @@ describe.skipIf(!integrationDatabaseUrl)(
             schoolName: "集成测试大学",
           },
         });
-        const [owner, renter] = await Promise.all([
-          db.user.create({
-            select: { id: true },
-            data: {
-              name: "owner",
-              email: `p10c2-mig-owner-${suffix}@it.local`,
-              passwordHash: "test-only",
-              schoolName: "集成测试大学",
-              campusId: campus.id,
-            },
-          }),
-          db.user.create({
-            select: { id: true },
-            data: {
-              name: "renter",
-              email: `p10c2-mig-renter-${suffix}@it.local`,
-              passwordHash: "test-only",
-              schoolName: "集成测试大学",
-              campusId: campus.id,
-            },
-          }),
-        ]);
+        // Historical User table predates credentialRecoveryRequired.
+        // Raw seeding avoids writing current-client columns into old schema.
+        const owner = { id: randomUUID() };
+        const renter = { id: randomUUID() };
+        await db.$executeRaw`
+          INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId")
+          VALUES
+            (${owner.id}, 'owner', ${`p10c2-mig-owner-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id}),
+            (${renter.id}, 'renter', ${`p10c2-mig-renter-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id})
+        `;
         const category = await db.rentalCategory.create({
           data: { name: `P10C2 mig ${suffix}`, slug: `p10c2-mig-${suffix}` },
         });
