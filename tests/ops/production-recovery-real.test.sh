@@ -27,7 +27,7 @@ psql_db() { pg psql -X -v ON_ERROR_STOP=1 -U postgres -d "${1}" "${@:2}"; }
 
 cleanup() {
   if [[ "${proof_db}" =~ ^campus_restore_proof_[0-9]+_[0-9]+$ ]]; then
-    psql_db postgres -c "DROP DATABASE IF EXISTS \\"${proof_db}\\" WITH (FORCE)" >/dev/null 2>&1 ||
+    psql_db postgres -c "DROP DATABASE IF EXISTS \"${proof_db}\" WITH (FORCE)" >/dev/null 2>&1 ||
       echo "[recovery-proof][WARN] isolated database cleanup failed" >&2
   fi
   rm -rf -- "${sandbox}"
@@ -65,7 +65,7 @@ POSTGRES_PASSWORD=postgres
 BACKUP_DIR=${sandbox}/backups
 ENV
 
-psql_db postgres -c "CREATE DATABASE \\"${proof_db}\\"" >/dev/null
+psql_db postgres -c "CREATE DATABASE \"${proof_db}\"" >/dev/null
 psql_db "${proof_db}" >/dev/null <<'FIXTURE'
 CREATE TABLE "User" ("id" text PRIMARY KEY);
 CREATE TABLE "Product" ("id" text PRIMARY KEY, "sellerId" text NOT NULL);
@@ -112,13 +112,13 @@ OPS_PROJECT_DIR="${sandbox}" PATH="${sandbox}/bin:${PATH}" \
 }
 
 result="$(psql_db "${proof_db}" -tAc "
- SELECT (SELECT COUNT(*) FROM \\"User\\" WHERE id = 'restored-user'),
-        (SELECT COUNT(*) FROM \\"AccountSession\\" WHERE \\"revokedAt\\" IS NULL),
-        (SELECT COUNT(*) FROM \\"AccountChallenge\\" WHERE \\"consumedAt\\" IS NULL),
-        (SELECT COUNT(*) FROM \\"AccountSession\\" WHERE id = 'already-revoked'
-         AND \\"revokedAt\\" = TIMESTAMP '2026-01-01 00:00:00'),
-        (SELECT COUNT(*) FROM \\"AccountChallenge\\" WHERE id = 'already-consumed'
-         AND \\"consumedAt\\" = TIMESTAMP '2026-01-01 00:00:00');
+ SELECT (SELECT COUNT(*) FROM \"User\" WHERE id = 'restored-user'),
+        (SELECT COUNT(*) FROM \"AccountSession\" WHERE \"revokedAt\" IS NULL),
+        (SELECT COUNT(*) FROM \"AccountChallenge\" WHERE \"consumedAt\" IS NULL),
+        (SELECT COUNT(*) FROM \"AccountSession\" WHERE id = 'already-revoked'
+         AND \"revokedAt\" = TIMESTAMP '2026-01-01 00:00:00'),
+        (SELECT COUNT(*) FROM \"AccountChallenge\" WHERE id = 'already-consumed'
+         AND \"consumedAt\" = TIMESTAMP '2026-01-01 00:00:00');
 ")"
 [[ "${result}" == "1|0|0|1|1" ]] || {
   echo "[recovery-proof][FAIL] restored data/invalidated credentials contract mismatched" >&2
