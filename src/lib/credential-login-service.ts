@@ -88,6 +88,7 @@ export async function finalizeCredentialLogin(
         avatarUrl: true,
         role: true,
         passwordHash: true,
+        credentialRecoveryRequired: true,
         status: true,
         deletedAt: true,
         erasedAt: true,
@@ -98,6 +99,9 @@ export async function finalizeCredentialLogin(
       fresh !== null &&
       fresh.deletedAt === null &&
       fresh.erasedAt === null &&
+      // An old hash restored from T0 must not authorize a new session after
+      // a user rotated the password at T1. Only verified reset clears this.
+      fresh.credentialRecoveryRequired === false &&
       (fresh.status === "ACTIVE" || fresh.status === "SUSPENDED");
 
     if (!lifecycleOk) {
