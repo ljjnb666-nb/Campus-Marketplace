@@ -7,6 +7,7 @@ on:
       - scripts/ops/build-runtime.mjs
       - tests/ops/image-runtime.test.sh
       - tests/ops/worker-concurrent-image-proof.sh
+      - tests/ops/worker-business-image-proof.sh
       - .env.production.synthetic
       - .github/workflows/production-image-runtime.yml
 
