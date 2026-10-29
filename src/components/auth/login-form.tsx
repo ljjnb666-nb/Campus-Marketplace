@@ -71,7 +71,7 @@ export function LoginForm() {
           name="email"
           type="email"
           className="rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none ring-0 transition focus:border-slate-400"
-          placeholder="student1@campus.local"
+          placeholder="请输入校园邮箱"
           required
         />
       </label>
@@ -82,7 +82,7 @@ export function LoginForm() {
           name="password"
           type="password"
           className="rounded-2xl border border-slate-200 bg-white px-4 py-3 outline-none ring-0 transition focus:border-slate-400"
-          placeholder="Student123456"
+          placeholder="请输入密码"
           required
         />
       </label>
