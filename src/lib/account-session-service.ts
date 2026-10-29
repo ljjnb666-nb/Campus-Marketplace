@@ -35,7 +35,7 @@ export async function isAccountSessionActive(userId?: string, sessionId?: string
   const now = new Date();
   const session = await prisma.accountSession.findFirst({ where: {
     id: sessionId, userId, revokedAt: null, expiresAt: { gt: now },
-    user: { deletedAt: null, erasedAt: null, status: { in: ["ACTIVE", "SUSPENDED"] } },
+    user: { deletedAt: null, erasedAt: null, credentialRecoveryRequired: false, status: { in: ["ACTIVE", "SUSPENDED"] } },
   }, select: { id: true, lastSeenAt: true } });
   if (!session) return false;
   if (session.lastSeenAt.getTime() < now.getTime() - 5 * 60_000) {
@@ -58,7 +58,7 @@ export async function requireCurrentSessionTx(tx: Prisma.TransactionClient, user
   const session = await tx.accountSession.findFirst({ where: {
     id: sessionId, userId, revokedAt: null, expiresAt: { gt: new Date() },
   } });
-  if (!user || !session || user.deletedAt || user.erasedAt || user.status !== "ACTIVE") {
+  if (!user || !session || user.deletedAt || user.erasedAt || user.credentialRecoveryRequired || user.status !== "ACTIVE") {
     throw new Error("请重新登录后操作");
   }
   return user;
