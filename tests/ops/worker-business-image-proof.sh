@@ -9,10 +9,11 @@
 pg="${NAME}-db"
 database=proofdb
 tmp="${TEMP_DIR}"
-# Docker -e NAME with NAME absent from host removes the EMAIL_PROVIDER supplied
-# by synthetic env file. Missing provider must not publish half-formed outbox.
-unset EMAIL_PROVIDER
-worker_env=("${ENV_ARGS[@]}" -e EMAIL_PROVIDER)
+# Explicitly inject an invalid sender while choosing the real 'resend' mode.
+# Docker --env-file sets valid synthetic email values; a bare '-e NAME' does not
+# reliably erase those values. This is a deterministic production config error,
+# detected during transaction materialization BEFORE any provider HTTP call.
+worker_env=("${ENV_ARGS[@]}" -e EMAIL_PROVIDER=resend -e EMAIL_FROM=not-an-email)
 run_worker() {
   local label="$1" image="$2" expected="$3"; shift 3
   if ! timeout --signal=TERM --kill-after=10s 150s docker run --rm --pull never \
@@ -105,7 +106,7 @@ SELECT
  (SELECT COUNT(*)::text FROM "Notification" WHERE "orderId"='proof-order');
 SQL
 }
-# Phase 1: the production-mode worker deliberately starts with no EMAIL_PROVIDER.
+# Phase 1: the production-mode worker deliberately receives invalid EMAIL_FROM.
 # The order/Job must succeed, but EMAIL notification materialization is
 # RETRYABLE (not DEAD_LETTER) and must publish zero incomplete notifications.
 run_worker valid-expiry "${PREFIX}-async:${TAG}" async_worker_started --run-once
