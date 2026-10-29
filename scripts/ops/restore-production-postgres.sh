@@ -190,6 +190,25 @@ if ! compose_run exec -T postgres psql -X -U "${POSTGRES_USER}" -d "${TARGET_DB}
 BEGIN;
 DO $recovery_security$
 BEGIN
+  -- Credential hashes are also rewound by pg_restore. Never allow a restored
+  -- password to mint a new session until the mailbox/MFA reset flow succeeds.
+  -- Old snapshots without this schema must fail closed with writers stopped.
+  IF to_regclass('public."User"') IS NULL THEN
+    RAISE EXCEPTION 'RECOVERY_USER_SCHEMA_MISSING';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'User'
+      AND column_name = 'credentialRecoveryRequired'
+  ) THEN
+    RAISE EXCEPTION 'RECOVERY_CREDENTIAL_HOLD_SCHEMA_MISSING';
+  END IF;
+  UPDATE "User"
+  SET "credentialRecoveryRequired" = TRUE
+  WHERE "credentialRecoveryRequired" = FALSE;
+  IF EXISTS (SELECT 1 FROM "User" WHERE "credentialRecoveryRequired" IS DISTINCT FROM TRUE) THEN
+    RAISE EXCEPTION 'RECOVERY_CREDENTIAL_HOLD_INCOMPLETE';
+  END IF;
   IF to_regclass('public."AccountSession"') IS NULL THEN
     RAISE EXCEPTION 'RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING';
   END IF;
@@ -215,11 +234,12 @@ SECURITY_SQL
 then
   fail "恢复后的登录会话或账号恢复链接未能全部失效；禁止重新开放应用"
 fi
-echo "[prod-restore] 恢复后的历史会话与链接已失效（不恢复备份时点的认证权限）"
+echo "[prod-restore] 历史会话及链接已失效；所有恢复账号已进入凭据隔离，旧密码不得直接重新登录"
+echo "[prod-restore] 只有完成邮箱/MFA 验证后的密码重置才可解除单个账号隔离；不得人工批量清除此标记"
 
 echo "[prod-restore] ============================================"
-echo "[prod-restore] PRODUCTION RESTORE OK → ${TARGET_DB}"
-echo "[prod-restore] production writers（app / storage-cleanup）当前均处于停止状态。"
+echo "[prod-restore] DATABASE RESTORE AND CREDENTIAL ISOLATION OK → ${TARGET_DB} (LOGIN REOPEN NOT AUTHORIZED)"
+echo "[prod-restore] production writers（app / storage-cleanup / async-worker）当前均处于停止状态。"
 echo "[prod-restore] 后续按目标 release 的 runtime topology 恢复："
 echo "[prod-restore]   post-worker release：人工核对目标 image/runtime topology 后切换 app / storage-cleanup / async-worker"
 echo "[prod-restore]   pre-worker 目标 release：只启动目标版本实际存在的 writers（其余保持停止）"
