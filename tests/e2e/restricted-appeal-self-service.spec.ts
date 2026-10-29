@@ -31,6 +31,8 @@ test("受限账号：登录 → 本人申诉 → 普通业务仍拒绝", async (
 
   // Anonymous appeal shell must remain public, but reveal no private rows.
   await page.goto("/login");
+  await expect(page.getByText(/测试学生账号/)).toHaveCount(0);
+  await expect(page.getByText("student1@campus.local / Student123456")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "账号受限？进入申诉" })).toBeVisible();
   await expect(page.getByRole("link", { name: "忘记密码" })).toBeVisible();
   await expect(page.locator('input[name="mfaCode"]')).toBeVisible();
