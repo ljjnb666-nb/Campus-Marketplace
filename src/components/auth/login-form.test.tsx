@@ -45,6 +45,13 @@ describe("LoginForm", () => {
     expect(signIn).not.toHaveBeenCalled();
   });
 
+  it("exposes appeal self-service while retaining MFA and password recovery", () => {
+    render(<LoginForm />);
+    expect(screen.getByRole("link", { name: "账号受限？进入申诉" })).toHaveAttribute("href", "/appeals");
+    expect(screen.getByRole("link", { name: "忘记密码" })).toHaveAttribute("href", "/forgot-password");
+    expect(screen.getByLabelText("动态验证码（已启用双重验证时必填）")).toHaveAttribute("name", "mfaCode");
+  });
+
   it("enables credentials submission when mounted client-side", async () => {
     render(<LoginForm />);
     await waitFor(() => {
