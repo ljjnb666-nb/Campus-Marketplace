@@ -201,6 +201,8 @@ case "\$ARGS" in
     if [[ "\$ARGS" == *"psql -X"* ]]; then
       security_sql="\$(cat)"
       if [[ "\$security_sql" == *"RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING"* &&
+            "\$security_sql" == *"RECOVERY_CREDENTIAL_HOLD_SCHEMA_MISSING"* &&
+            "\$security_sql" == *'UPDATE "User"'* &&
             "\$security_sql" == *"RECOVERY_CHALLENGE_INVALIDATION_INCOMPLETE"* &&
             "\$security_sql" == *'UPDATE "AccountSession"'* &&
             "\$security_sql" == *'UPDATE "AccountChallenge"'* ]]; then
