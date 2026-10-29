@@ -79,6 +79,7 @@ const ACTIVE_USER = {
   status: "ACTIVE",
   deletedAt: null,
   passwordHash: "hashed-password",
+  credentialRecoveryRequired: false,
 };
 
 function mockValidCredentials() {
@@ -202,6 +203,15 @@ describe("auth options", () => {
 
     expect(result).toBeNull();
     expect(compare).not.toHaveBeenCalled();
+  });
+
+  it("RECOVERY-HOLD-04：恢复账号拒绝密码登录，且不消耗 bcrypt/新建会话", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue({ ...ACTIVE_USER, credentialRecoveryRequired: true });
+    const result = await authorize?.({ email: ACTIVE_USER.email, password: TEST_PASSWORD });
+    expect(result).toBeNull();
+    expect(compare).not.toHaveBeenCalled();
+    expect(finalizeCredentialLogin).not.toHaveBeenCalled();
   });
 
   it("returns the session user and updates last login time after a successful login", async () => {
