@@ -45,6 +45,8 @@ describe.skipIf(!integrationUrl)("post-restore authentication replay gate (isola
       await admin.$executeRawUnsafe(`CREATE DATABASE "${name}"`);
       created = true;
       probe = new PrismaClient({ datasources: { db: { url: isolatedUrl.toString() } } });
+      await probe.$executeRawUnsafe('CREATE TABLE "User" ("id" TEXT PRIMARY KEY, "passwordHash" TEXT NOT NULL, "credentialRecoveryRequired" BOOLEAN NOT NULL DEFAULT FALSE)');
+      await probe.$executeRawUnsafe(`INSERT INTO "User" ("id", "passwordHash") VALUES ('restored-user', 'OLD_PASSWORD_HASH_FROM_T0')`);
       await probe.$executeRawUnsafe('CREATE TABLE "AccountSession" ("id" TEXT PRIMARY KEY, "revokedAt" TIMESTAMP(3))');
       await probe.$executeRawUnsafe('CREATE TABLE "AccountChallenge" ("id" TEXT PRIMARY KEY, "consumedAt" TIMESTAMP(3))');
       await probe.$executeRawUnsafe(
@@ -63,6 +65,10 @@ describe.skipIf(!integrationUrl)("post-restore authentication replay gate (isola
       const challenges = await probe.$queryRawUnsafe<Array<{ id: string; consumedAt: Date | null }>>(
         'SELECT "id", "consumedAt" FROM "AccountChallenge" ORDER BY "id"',
       );
+      const credentials = await probe.$queryRawUnsafe<Array<{ passwordHash: string; credentialRecoveryRequired: boolean }>>(
+        'SELECT "passwordHash", "credentialRecoveryRequired" FROM "User" WHERE "id" = \'restored-user\'',
+      );
+      expect(credentials).toEqual([{ passwordHash: "OLD_PASSWORD_HASH_FROM_T0", credentialRecoveryRequired: true }]);
       expect(sessions).toHaveLength(2);
       expect(sessions.every((row) => row.revokedAt instanceof Date)).toBe(true);
       expect(sessions.find((row) => row.id === "already-revoked")?.revokedAt?.toISOString()).toBe("2026-01-01T00:00:00.000Z");
@@ -79,18 +85,27 @@ describe.skipIf(!integrationUrl)("post-restore authentication replay gate (isola
       // Simulate schema damage *after* session UPDATE: challenge UPDATE fails.
       // The entire transaction must roll back, not leave partially revoked state
       // while the caller might be tempted to reopen app traffic.
+      await probe.$executeRawUnsafe('UPDATE "User" SET "credentialRecoveryRequired" = FALSE');
       await probe.$executeRawUnsafe(`UPDATE "AccountSession" SET "revokedAt" = NULL WHERE "id" = 'live-session'`);
       await probe.$executeRawUnsafe('ALTER TABLE "AccountChallenge" DROP COLUMN "consumedAt"');
       await expect(probe.$transaction(async (tx) => { await tx.$executeRawUnsafe(sql); })).rejects.toThrow();
       expect(await probe.$queryRawUnsafe<Array<{ id: string }>>(
         `SELECT "id" FROM "AccountSession" WHERE "id" = 'live-session' AND "revokedAt" IS NULL`,
       )).toHaveLength(1);
+      expect(await probe.$queryRawUnsafe<Array<{ credentialRecoveryRequired: boolean }>>(
+        'SELECT "credentialRecoveryRequired" FROM "User"',
+      )).toEqual([{ credentialRecoveryRequired: false }]);
 
       // A backup from a pre-AccountSession era cannot establish JWT revocation:
       // failing closed is safer than opening an unverifiable old session state.
       await probe.$executeRawUnsafe('DROP TABLE "AccountSession"');
       await expect(probe.$transaction(async (tx) => { await tx.$executeRawUnsafe(sql); }))
         .rejects.toThrow(/RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING/);
+      // An old backup without the credential-hold column must fail closed.
+      await probe.$executeRawUnsafe('CREATE TABLE "AccountSession" ("id" TEXT PRIMARY KEY, "revokedAt" TIMESTAMP(3))');
+      await probe.$executeRawUnsafe('ALTER TABLE "User" DROP COLUMN "credentialRecoveryRequired"');
+      await expect(probe.$transaction(async (tx) => { await tx.$executeRawUnsafe(sql); }))
+        .rejects.toThrow(/RECOVERY_CREDENTIAL_HOLD_SCHEMA_MISSING/);
     } finally {
       if (probe) await probe.$disconnect();
       if (created) await admin.$executeRawUnsafe(`DROP DATABASE "${name}" WITH (FORCE)`);
