@@ -67,7 +67,7 @@ ENV
 
 psql_db postgres -c "CREATE DATABASE \"${proof_db}\"" >/dev/null
 psql_db "${proof_db}" >/dev/null <<'FIXTURE'
-CREATE TABLE "User" ("id" text PRIMARY KEY);
+CREATE TABLE "User" ("id" text PRIMARY KEY, "passwordHash" text NOT NULL, "credentialRecoveryRequired" boolean NOT NULL DEFAULT false);
 CREATE TABLE "Product" ("id" text PRIMARY KEY, "sellerId" text NOT NULL);
 CREATE TABLE "ErrandTask" ("id" text PRIMARY KEY);
 CREATE TABLE "ServiceListing" ("id" text PRIMARY KEY);
@@ -78,7 +78,7 @@ CREATE TABLE "UploadedAsset" ("id" text PRIMARY KEY);
 CREATE TABLE "_prisma_migrations" ("finished_at" timestamp);
 CREATE TABLE "AccountSession" ("id" text PRIMARY KEY, "revokedAt" timestamp);
 CREATE TABLE "AccountChallenge" ("id" text PRIMARY KEY, "consumedAt" timestamp);
-INSERT INTO "User" VALUES ('restored-user');
+INSERT INTO "User" ("id", "passwordHash") VALUES ('restored-user', 'T0_OBSOLETE_PASSWORD_HASH');
 INSERT INTO "Product" VALUES ('restored-product', 'restored-user');
 INSERT INTO "_prisma_migrations" VALUES (CURRENT_TIMESTAMP);
 INSERT INTO "AccountSession" VALUES
@@ -94,7 +94,9 @@ pg pg_dump -Fc -U postgres -d "${proof_db}" > "${sandbox}/backups/proof.dump"
 )
 # Mutate database after snapshot to prove a real backward restore occurs.
 psql_db "${proof_db}" >/dev/null <<'MUTATE'
-DELETE FROM "User" WHERE "id" = 'restored-user';
+-- T1 password rotation happens AFTER backup, but T2 restore reintroduces T0.
+UPDATE "User" SET "passwordHash" = 'T1_ROTATED_PASSWORD_HASH'
+WHERE "id" = 'restored-user';
 UPDATE "AccountSession" SET "revokedAt" = CURRENT_TIMESTAMP WHERE "revokedAt" IS NULL;
 UPDATE "AccountChallenge" SET "consumedAt" = CURRENT_TIMESTAMP WHERE "consumedAt" IS NULL;
 MUTATE
@@ -112,7 +114,9 @@ OPS_PROJECT_DIR="${sandbox}" PATH="${sandbox}/bin:${PATH}" \
 }
 
 result="$(psql_db "${proof_db}" -tAc "
- SELECT (SELECT COUNT(*) FROM \"User\" WHERE id = 'restored-user'),
+ SELECT (SELECT COUNT(*) FROM \"User\" WHERE id = 'restored-user'
+           AND \"passwordHash\" = 'T0_OBSOLETE_PASSWORD_HASH'
+           AND \"credentialRecoveryRequired\" = TRUE),
         (SELECT COUNT(*) FROM \"AccountSession\" WHERE \"revokedAt\" IS NULL),
         (SELECT COUNT(*) FROM \"AccountChallenge\" WHERE \"consumedAt\" IS NULL),
         (SELECT COUNT(*) FROM \"AccountSession\" WHERE id = 'already-revoked'
@@ -130,4 +134,4 @@ grep -q 'pg_restore' "${sandbox}/events.log" || {
 grep -q 'psql -X' "${sandbox}/events.log" || {
   echo "[recovery-proof][FAIL] security SQL was not invoked" >&2; exit 1;
 }
-echo "[recovery-proof] PASS: real dump/restore + restored rows + all active credentials revoked + previous revocations preserved"
+echo "[recovery-proof] PASS: T0/T1 dump/restore + obsolete hash quarantined + sessions/challenges revoked + idempotence"
