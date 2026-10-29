@@ -74,7 +74,7 @@ describe.skipIf(!integrationUrl)("post-restore authentication replay gate (isola
       await probe.$transaction(async (tx) => { await tx.$executeRawUnsafe(sql); });
       expect(await probe.$queryRawUnsafe<Array<{ active: bigint }>>(
         'SELECT COUNT(*)::bigint AS active FROM "AccountSession" WHERE "revokedAt" IS NULL',
-      )).toEqual([{ active: 0n }]);
+      )).toEqual([{ active: BigInt(0) }]);
 
       // Simulate schema damage *after* session UPDATE: challenge UPDATE fails.
       // The entire transaction must roll back, not leave partially revoked state
