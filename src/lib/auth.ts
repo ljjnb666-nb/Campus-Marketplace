@@ -60,6 +60,7 @@ export const authOptions: NextAuthOptions = {
           !user ||
           user.deletedAt ||
           user.erasedAt ||
+          user.credentialRecoveryRequired ||
           (user.status !== "ACTIVE" && user.status !== "SUSPENDED")
         ) {
           return null;
