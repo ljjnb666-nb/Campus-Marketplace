@@ -140,27 +140,17 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
           schoolName: "集成测试大学",
         },
       });
-      const erased = await db.user.create({
-        select: { id: true },
-        data: {
-          name: "历史注销用户",
-          email: `erased-${randomUUID().slice(0, 8)}@it.local`,
-          passwordHash: "test-only",
-          schoolName: "示例大学",
-          campusId: campus.id,
-          erasedAt: new Date("2026-09-01T00:00:00Z"),
-        },
-      });
-      const survivor = await db.user.create({
-        select: { id: true },
-        data: {
-          name: "在册对照用户",
-          email: `survivor-${randomUUID().slice(0, 8)}@it.local`,
-          passwordHash: "test-only",
-          schoolName: "示例大学",
-          campusId: campus.id,
-        },
-      });
+      const erased = { id: randomUUID() };
+      const survivor = { id: randomUUID() };
+      // The current Prisma client would write columns absent before this migration.
+      await db.$executeRaw`
+        INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId", "erasedAt")
+        VALUES (${erased.id}, '历史注销用户', ${`erased-${randomUUID().slice(0,8)}@it.local`}, 'test-only', '示例大学', ${campus.id}, ${new Date('2026-09-01T00:00:00Z')})
+      `;
+      await db.$executeRaw`
+        INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId")
+        VALUES (${survivor.id}, '在册对照用户', ${`survivor-${randomUUID().slice(0,8)}@it.local`}, 'test-only', '示例大学', ${campus.id})
+      `;
       const erasedMembership = await db.campusMembership.create({
         data: { userId: erased.id, campusId: campus.id, status: "LEFT" },
       });
