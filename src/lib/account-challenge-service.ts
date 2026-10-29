@@ -61,7 +61,7 @@ export async function completeAccountChallenge(input: {
       || !equalDigest(current.bindingHash, binding(user.email, user.passwordHash))) throw new Error("SECURITY_LINK_INVALID");
     if (input.purpose === "RESET_PASSWORD") {
       if (!(await verifyCredentialMfaTx(tx, user.id, input.mfaCode)).ok) throw new Error("SECURITY_CODE_INVALID");
-      await tx.user.update({ where: { id: user.id }, data: { passwordHash, mfaPendingEncrypted: null, mfaPendingExpiresAt: null, mfaPendingSessionId: null } });
+      await tx.user.update({ where: { id: user.id }, data: { passwordHash, credentialRecoveryRequired: false, mfaPendingEncrypted: null, mfaPendingExpiresAt: null, mfaPendingSessionId: null } });
       await tx.accountSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       await recordAdminAudit({ actorId: user.id, action: "ACCOUNT_PASSWORD_RESET", targetType: "USER", targetId: user.id }, tx);
       await emitAccountSecurityNoticeTx(tx, user.id, "PASSWORD_RESET", input.id);
