@@ -101,9 +101,14 @@ export function LoginForm() {
         >
           {pending ? "登录中..." : "登录"}
         </button>
-        <Link href="/register" className="text-sm text-slate-600 transition hover:text-slate-950">
-          没有账号，去注册
-        </Link>
+        <div className="flex flex-col items-end gap-2">
+          <Link href="/register" className="text-sm text-slate-600 transition hover:text-slate-950">
+            没有账号，去注册
+          </Link>
+          <Link href="/appeals" className="text-sm text-slate-600 underline hover:text-slate-950">
+            账号受限？进入申诉
+          </Link>
+        </div>
       </div>
     </form>
   );
