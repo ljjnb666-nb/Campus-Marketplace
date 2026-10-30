@@ -955,6 +955,18 @@ assert_log_not_contains "app_up_called"
 assert_log_not_contains "cleanup_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup stop failure must not write release log"; else pass_test; fi
 
+echo "== 9q. recovered host hold blocks safe rollback before image/writer actions =="
+make_sandbox
+printf 'RECOVERY_HOLD=1\n' > "${SANDBOX}/.production-recovery-hold"
+run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "safe rollback while recovery hold active"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "image inspect"
+assert_contains_file "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "/tmp/rb-out.$" "recovery hold prevents rollback"
+
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
 source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
