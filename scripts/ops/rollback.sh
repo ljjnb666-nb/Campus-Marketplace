@@ -37,6 +37,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Fail before any image, migration, restore or writer side effect.
+require_no_production_recovery_hold
+
 # HARD RESTORE AUTHORITY: production must always call the checked-in,
 # fail-closed restore script. The OPS_RESTORE_SCRIPT test seam is permitted
 # only with an explicitly redirected, physically distinct sandbox project.
