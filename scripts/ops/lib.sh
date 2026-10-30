@@ -109,3 +109,15 @@ app_url_from_env() {
   site_address="$(require_env_var SITE_ADDRESS)"
   printf 'https://%s' "$site_address"
 }
+
+# A database restore must not silently become a normal deploy/rollback.
+# This host-local marker is a defense-in-depth stop, NOT an approval record.
+# Operators must never clear it merely because health checks are green.
+RECOVERY_HOLD_FILE="${PROJECT_DIR}/.production-recovery-hold"
+
+require_no_production_recovery_hold() {
+  if [[ -e "${RECOVERY_HOLD_FILE}" || -L "${RECOVERY_HOLD_FILE}" ]]; then
+    echo "[ops][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: recovery hold exists; service restart/rollback prohibited until independently reviewed recovery procedure exists" >&2
+    return 1
+  fi
+}
