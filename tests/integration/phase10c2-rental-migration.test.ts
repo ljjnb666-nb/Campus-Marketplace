@@ -103,10 +103,10 @@ describe.skipIf(!integrationDatabaseUrl)(
         const owner = { id: randomUUID() };
         const renter = { id: randomUUID() };
         await db.$executeRaw`
-          INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId")
+          INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId", "updatedAt")
           VALUES
-            (${owner.id}, 'owner', ${`p10c2-mig-owner-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id}),
-            (${renter.id}, 'renter', ${`p10c2-mig-renter-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id})
+            (${owner.id}, 'owner', ${`p10c2-mig-owner-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id}, CURRENT_TIMESTAMP),
+            (${renter.id}, 'renter', ${`p10c2-mig-renter-${suffix}@it.local`}, 'test-only', '集成测试大学', ${campus.id}, CURRENT_TIMESTAMP)
         `;
         const category = await db.rentalCategory.create({
           data: { name: `P10C2 mig ${suffix}`, slug: `p10c2-mig-${suffix}` },
