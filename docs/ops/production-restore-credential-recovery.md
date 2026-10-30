@@ -10,10 +10,10 @@
 
 ## 本次安全防线
 
-- `User.credentialRecoveryRequired` 非空布尔值，正常迁移默认 `false`。此字段**只能在可信的密码重置完成交易**自动置回 `false`；不允许运营人员直接批量 UPDATE 解锁。
+- `User.credentialRecoveryRequired` 非空布尔值，正常迁移默认 `false`。**灾后隔离账号不得通过普通邮箱重置自动解除**；禁止运营人员直接批量 UPDATE 解锁。未来解除隔离须先实现并独立验收外部不可回退身份/权限事实校验的专用恢复流程。
 - `restore-production-postgres.sh` 在全体 writers 已停止、备份 SHA256 和真实 PG 还原校验后，**同一事务**将所有 `User.credentialRecoveryRequired=true`、撤销 `AccountSession` 并消费 `AccountChallenge`。任何表或字段缺失/更新异常 → 脚本非零失败、保留停止状态，禁止重新开放。
 - 登录在 bcrypt 前拒绝隔离账户；**USER 治理锁内**的 finalizer 再核验 `credentialRecoveryRequired === false` 防止竞态或旧 bcrypt 成功后再登录；会话读取也拒绝隔离账号。不得通过重新签发 JWT 绕过。
-- 现有 `RESET_PASSWORD` 邮件挑战（15 分钟、一次性、哈希绑定、限流；已启用 MFA 时仍需正确 TOTP）在**同一数据库事务**变更密码哈希、清除隔离标记、撤销全部旧 session。单独 `VERIFY_EMAIL` 不能清除标记。无法获得可信邮箱/MFA 的账号必须继续锁定，进入人工身份恢复流程。
+- 普通未隔离账号的 `RESET_PASSWORD` 邮件挑战照常运行（15 分钟、一次性、哈希绑定、限流及 MFA）。**处于灾后隔离状态的账号既不能申请普通重置链接，也不能消费灾前已签发的重置链接解除隔离**；锁内二次拒绝。`VERIFY_EMAIL` 不得解除隔离。外部可信身份恢复流程尚未实现，故隔离账号保持不可登录，这是明确的可用性限制。
 - 以上不会在恢复阶段自动批量生成新密码、泄露哈希或发送账户密码。
 
 ## 2026-10-30 临时封锁（P1）
@@ -39,7 +39,7 @@
 
 - `tests/integration/production-restore-recovery-proof.test.ts`：提取**生产原 SQL** 至 disposable PG 运行、事务 rollback、缺字段 fail-closed；旧密码 hash 保留但隔离标记 true。
 - `tests/ops/production-recovery-real.test.sh`：CI 专用真实 `pg_dump` T0 → T1 passwordHash rotation → `pg_restore` T0；验证旧 hash 被恢复，但 hold true、旧 session/challenge 失效。
-- `tests/integration/account-security-lifecycle.test.ts`：真实 PG 旧密码 hash 相等时仍不能建立 session；完成 `RESET_PASSWORD` 后解除 hold、旧 hash 失效；仅 `VERIFY_EMAIL` 不解锁。
+- `tests/integration/account-security-lifecycle.test.ts`：真实 PG 旧密码 hash 相等时不能建立 session；灾前有效的 `RESET_PASSWORD` 链接不能解除隔离，灾后不签发普通重置链接；`VERIFY_EMAIL` 亦不解锁。
 - `src/lib/credential-login-service.test.ts`、`src/lib/auth.test.ts`：fail-closed 单元边界。
 - 不向真实生产写入 fixture，不重复使用生产用户数据。
 
