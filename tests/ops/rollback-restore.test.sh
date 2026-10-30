@@ -360,6 +360,21 @@ PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
 
+# Production hard rollback must be rejected before env, Docker or restore.
+# The fixture uses the actual checkout, without OPS test hooks.
+echo "== P1. production hard restore requires independently audited identity release gate =="
+HARD_GUARD_OUTPUT="$(mktemp)"
+env -u OPS_PROJECT_DIR -u OPS_RESTORE_SCRIPT \
+  bash "${REPO_ROOT}/scripts/ops/rollback.sh" "${PREV_SHA}" --hard \
+  > "${HARD_GUARD_OUTPUT}" 2>&1
+HARD_GUARD_RC=$?
+if [[ "${HARD_GUARD_RC}" -ne 0 ]] && grep -qF 'RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED' "${HARD_GUARD_OUTPUT}"; then
+  pass_test
+else
+  fail_test "production --hard must fail closed without restore or writer launch"
+fi
+rm -f "${HARD_GUARD_OUTPUT}"
+
 # Issue #97: validate both assertions in every synthetic large-log scenario.
 echo "== 0. pipefail 长日志位置矩阵 =="
 PIPEFAIL_ASSERT_RESULT="$(
