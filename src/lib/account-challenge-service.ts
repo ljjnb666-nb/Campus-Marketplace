@@ -29,6 +29,9 @@ export async function requestAccountChallenge(email: string, purpose: ChallengeP
     await acquireGovernanceSubjectLock(tx, "USER", snapshot.id);
     const user = await tx.user.findUnique({ where: { id: snapshot.id } });
     if (!user || !active(user) || user.email !== email || (purpose === "VERIFY_EMAIL" && user.emailVerifiedAt)) return;
+    // A restored T0 mailbox/MFA is not independent identity proof. Do not
+    // issue ordinary reset links for quarantined accounts.
+    if (purpose === "RESET_PASSWORD" && user.credentialRecoveryRequired) return;
     const now = new Date();
     const bindingHash = binding(user.email, user.passwordHash);
     // Resending must not invalidate an earlier link: an unauthenticated attacker
@@ -60,6 +63,9 @@ export async function completeAccountChallenge(input: {
       || current.purpose !== input.purpose || !equalDigest(current.tokenHash, digest(input.token))
       || !equalDigest(current.bindingHash, binding(user.email, user.passwordHash))) throw new Error("SECURITY_LINK_INVALID");
     if (input.purpose === "RESET_PASSWORD") {
+      // Existing links can predate the disaster hold; reject inside the USER
+      // lock so even a previously issued valid link cannot lift quarantine.
+      if (user.credentialRecoveryRequired) throw new Error("SECURITY_LINK_INVALID");
       if (!(await verifyCredentialMfaTx(tx, user.id, input.mfaCode)).ok) throw new Error("SECURITY_CODE_INVALID");
       await tx.user.update({ where: { id: user.id }, data: { passwordHash, credentialRecoveryRequired: false, mfaPendingEncrypted: null, mfaPendingExpiresAt: null, mfaPendingSessionId: null } });
       await tx.accountSession.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
