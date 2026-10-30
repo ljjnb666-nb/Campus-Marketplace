@@ -245,7 +245,7 @@ then
   fail "恢复后的登录会话或账号恢复链接未能全部失效；禁止重新开放应用"
 fi
 echo "[prod-restore] 历史会话及链接已失效；所有恢复账号已进入凭据隔离，旧密码不得直接重新登录"
-echo "[prod-restore] 只有完成邮箱/MFA 验证后的密码重置才可解除单个账号隔离；不得人工批量清除此标记"
+echo "[prod-restore] 灾后隔离账号禁止普通邮件重置解锁；必须等待独立可信身份恢复流程，禁止人工批量清除此标记"
 
 echo "[prod-restore] ============================================"
 echo "[prod-restore] DATABASE RESTORE AND CREDENTIAL ISOLATION OK → ${TARGET_DB} (LOGIN REOPEN NOT AUTHORIZED)"
