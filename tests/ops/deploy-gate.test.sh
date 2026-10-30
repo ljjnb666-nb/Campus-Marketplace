@@ -644,6 +644,18 @@ assert_contains "运行中的 async-worker 容器镜像" "${OUT}" "ASYNC-WORKER-
 assert_file_absent "${SANDBOX}/.releases.log" "ASYNC-WORKER-WRONG-IMAGE 不写 release log"
 rm -f "${OUT}"
 
+echo "== RECOVERY-HOLD: host-local disaster hold denies deploy before side effects =="
+make_sandbox
+refresh_head
+printf 'RECOVERY_HOLD=1\n' > "${SANDBOX}/.production-recovery-hold"
+OUT="$(mktemp)"
+EXTRA_ENV=()
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "recovery-held deploy"
+assert_contains "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "${OUT}" "restore hold blocks deploy"
+assert_zero_side_effects "restore hold rejects release"
+rm -f "${OUT}"
+
 echo "=============================="
 echo "PASS=${PASS} FAIL=${FAIL}"
 if [[ "${FAIL}" != "0" ]]; then exit 1; fi
