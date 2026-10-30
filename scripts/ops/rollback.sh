@@ -56,6 +56,23 @@ if [[ -n "${OPS_RESTORE_SCRIPT:-}" ]]; then
   fi
   RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT}"
 fi
+# P1 recovery safety: a destructive production rollback cannot both restore
+# historic identity/role data and automatically reopen writers. An external,
+# independently reviewed identity/RBAC reconciliation gate does not yet exist.
+# Block the entire production --hard flow before any destructive side effect.
+# The physically separate OPS_PROJECT_DIR fixture remains for isolated tests.
+# Do NOT replace this with an environment flag or a self-attested file.
+if [[ " ${*:1} " == *" --hard "* ]]; then
+  if [[ -z "${OPS_PROJECT_DIR:-}" ]]; then
+    echo "[rollback][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: production --hard is disabled until externally verified identity/RBAC reconciliation and an independently audited release gate exist" >&2
+    exit 1
+  fi
+  SANDBOX_ROOT="$(cd "${PROJECT_DIR}" && pwd -P)" || exit 1
+  if [[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]; then
+    echo "[rollback][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: refusing production hard rollback" >&2
+    exit 1
+  fi
+fi
 load_production_env
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
