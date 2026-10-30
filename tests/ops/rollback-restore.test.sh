@@ -965,7 +965,7 @@ assert_log_not_contains "cleanup_up_called"
 assert_log_not_contains "async_up_called"
 assert_log_not_contains "restore_called"
 assert_log_not_contains "image inspect"
-assert_contains_file "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "/tmp/rb-out.$" "recovery hold prevents rollback"
+assert_contains_file "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "/tmp/rb-out.${BASHPID}" "recovery hold prevents rollback"
 
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
