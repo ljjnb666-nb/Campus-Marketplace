@@ -90,20 +90,18 @@ fi
 
 echo "[rollback] 回滚目标: ${PREVIOUS_SHA}（mode=${MODE:-safe}）"
 
-# A destructive restore quarantines all credentials, but an old app release
-# without the quarantine guard would ignore the recovered User flag and mint
-# sessions using the obsolete T0 hashes. Reject those targets BEFORE any
-# destructive restore or writer restart. Checking immutable target Git content
-# is a conservative compatibility gate, not a replacement for runtime proof.
-if [[ "${MODE}" == "--hard" ]]; then
-  for source in src/lib/credential-login-service.ts src/lib/account-challenge-service.ts src/lib/account-session-service.ts; do
-    if ! target_source="$(git -C "${PROJECT_DIR}" cat-file -p "${PREVIOUS_SHA}:${source}" 2>/dev/null)" \
-      || ! grep -Fq 'credentialRecoveryRequired' <<< "${target_source}"; then
-      echo "[rollback][FAIL] RECOVERY_CREDENTIAL_HOLD_TARGET_INCOMPATIBLE：目标旧版本不支持恢复后凭据隔离，禁止 hard restore 后重新开放旧密码登录" >&2
-      exit 1
-    fi
-  done
-fi
+# A destructive restore quarantines all credentials; a subsequent SAFE
+# rollback to a legacy app would ignore the restored credential hold and
+# reauthorize obsolete password hashes. Therefore BOTH modes must reject
+# incompatible target releases, before any image/writer side effect.
+# This source check is conservative, NOT proof of deployed image identity.
+for source in src/lib/credential-login-service.ts src/lib/account-challenge-service.ts src/lib/account-session-service.ts; do
+  if ! target_source="$(git -C "${PROJECT_DIR}" cat-file -p "${PREVIOUS_SHA}:${source}" 2>/dev/null)" \
+    || ! grep -Fq 'credentialRecoveryRequired' <<< "${target_source}"; then
+    echo "[rollback][FAIL] RECOVERY_CREDENTIAL_HOLD_TARGET_INCOMPATIBLE：目标版本缺少恢复凭据隔离合同，禁止 safe/hard 回滚后重新开放旧密码登录" >&2
+    exit 1
+  fi
+done
 
 # 旧镜像必须存在（不可变 tag 保留）
 if ! docker image inspect "campus-marketplace-app:${PREVIOUS_SHA}" >/dev/null 2>&1; then
