@@ -200,7 +200,10 @@ describe.skipIf(!url)("account challenges and MFA authority (real PostgreSQL)", 
     expect(recovered.credentialRecoveryRequired).toBe(true);
     expect(await compare(password, recovered.passwordHash)).toBe(true);
     expect(await compare(reset.newPassword, recovered.passwordHash)).toBe(false);
-    expect(await db.accountSession.count({ where: { id: oldSession, revokedAt: null } })).toBe(0);
+    // This fixture toggles only the hold flag, unlike a full production restore
+    // which also revokes sessions. The session row may persist but is unusable.
+    expect(await db.accountSession.count({ where: { id: oldSession, revokedAt: null } })).toBe(1);
+    expect(await isAccountSessionActive(user.id, oldSession)).toBe(false);
     expect(await login.finalizeCredentialLogin(user)).toBeNull();
   });
 
