@@ -535,6 +535,19 @@ assert_log_not_contains "restore_called"
 assert_log_not_contains "app_stop_called"
 assert_log_not_contains "app_up_called"
 
+echo "== 4c. safe rollback to legacy app must reject before any writer switch =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(RECOVERY_HOLD_STUB_MODE=legacy)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "safe rollback incompatible target credential hold"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "config --images"
+
 echo "== 5. SHA256 不一致 → 失败（真实 restore 脚本）=="
 make_sandbox
 printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
