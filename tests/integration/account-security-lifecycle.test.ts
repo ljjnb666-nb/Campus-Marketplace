@@ -181,26 +181,27 @@ describe.skipIf(!url)("account challenges and MFA authority (real PostgreSQL)", 
     expect(await db.adminLog.count({ where: { adminId: user.id, action: "ACCOUNT_PASSWORD_RESET" } })).toBe(1);
   });
 
-  it("RECOVERY-HOLD-02：T0 旧哈希恢复后旧密码拒绝；真实邮箱挑战+重置解除隔离", async () => {
+  it("RECOVERY-HOLD-02：隔离账号禁止通过备份旧邮箱重置解除隔离（包括灾前有效链接）", async () => {
     const user = await account();
     const oldSession = await signIn(user);
-    // The old bcrypt proof matches the database, but a production restore
-    // quarantines that credential before any writer is restarted.
+    // A valid reset link from before the hold must become unusable.
+    const reset = { ...await challenge(user, "RESET_PASSWORD"), newPassword: "RecoveredAndRotatedPassword456" };
     await db.user.update({ where: { id: user.id }, data: { credentialRecoveryRequired: true } });
     expect(await compare(password, (await db.user.findUniqueOrThrow({ where: { id: user.id } })).passwordHash)).toBe(true);
     expect(await login.finalizeCredentialLogin(user)).toBeNull();
     const { isAccountSessionActive } = await import("@/lib/account-session-service");
     expect(await isAccountSessionActive(user.id, oldSession)).toBe(false);
 
-    const reset = { ...await challenge(user, "RESET_PASSWORD"), newPassword: "RecoveredAndRotatedPassword456" };
-    await challenges.completeAccountChallenge(reset, randomUUID());
+    await expect(challenges.completeAccountChallenge(reset, randomUUID())).rejects.toThrow("SECURITY_LINK_INVALID");
+    const preexisting = await db.accountChallenge.count({ where: { userId: user.id, purpose: "RESET_PASSWORD" } });
+    await challenges.requestAccountChallenge(user.email, "RESET_PASSWORD", randomUUID());
+    expect(await db.accountChallenge.count({ where: { userId: user.id, purpose: "RESET_PASSWORD" } })).toBe(preexisting);
     const recovered = await db.user.findUniqueOrThrow({ where: { id: user.id } });
-    expect(recovered.credentialRecoveryRequired).toBe(false);
-    expect(await compare(password, recovered.passwordHash)).toBe(false);
-    expect(await compare(reset.newPassword, recovered.passwordHash)).toBe(true);
+    expect(recovered.credentialRecoveryRequired).toBe(true);
+    expect(await compare(password, recovered.passwordHash)).toBe(true);
+    expect(await compare(reset.newPassword, recovered.passwordHash)).toBe(false);
     expect(await db.accountSession.count({ where: { id: oldSession, revokedAt: null } })).toBe(0);
     expect(await login.finalizeCredentialLogin(user)).toBeNull();
-    expect(await login.finalizeCredentialLogin({ ...recovered })).not.toBeNull();
   });
 
   it("RECOVERY-HOLD-03：邮箱验证不能清除灾后密码隔离", async () => {
