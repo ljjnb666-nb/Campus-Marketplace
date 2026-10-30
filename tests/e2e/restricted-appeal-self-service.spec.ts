@@ -33,6 +33,9 @@ test("受限账号：登录 → 本人申诉 → 普通业务仍拒绝", async (
   await page.goto("/login");
   await expect(page.getByText(/测试学生账号/)).toHaveCount(0);
   await expect(page.getByText("student1@campus.local / Student123456")).toHaveCount(0);
+  // Route transitions may temporarily render duplicate login forms. Wait for
+  // exactly one authoritative form; do not hide persistent duplicates via .first().
+  await expect(page.locator('input[name="email"]')).toHaveCount(1);
   await expect(page.locator('input[name="email"]')).toHaveAttribute("placeholder", "请输入校园邮箱");
   await expect(page.locator('input[name="password"]')).toHaveAttribute("placeholder", "请输入密码");
   await expect(page.getByRole("link", { name: "账号受限？进入申诉" })).toBeVisible();
