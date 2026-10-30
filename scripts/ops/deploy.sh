@@ -42,6 +42,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+
+# Fail before any image, migration, restore or writer side effect.
+require_no_production_recovery_hold
 load_production_env
 
 APP_URL="${APP_URL:-$(app_url_from_env)}"
