@@ -62,8 +62,8 @@ fi
 # Block the entire production --hard flow before any destructive side effect.
 # The physically separate OPS_PROJECT_DIR fixture remains for isolated tests.
 # Do NOT replace this with an environment flag or a self-attested file.
-if [[ " ${*:1} " == *" --hard "* ]]; then
-  if [[ -z "${OPS_PROJECT_DIR:-}" ]]; then
+if [[ "${2:-}" == "--hard" ]]; then
+  if [[ -z "${OPS_PROJECT_DIR:-}" || -z "${OPS_RESTORE_SCRIPT:-}" ]]; then
     echo "[rollback][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: production --hard is disabled until externally verified identity/RBAC reconciliation and an independently audited release gate exist" >&2
     exit 1
   fi
