@@ -90,6 +90,16 @@ echo "[prod-restore] 校验 SHA256..."
   || fail "SHA256 校验失败：备份文件损坏或被篡改，拒绝恢复"
 echo "[prod-restore] SHA256 一致"
 
+# Persist an out-of-database quarantine before touching production writers/DB.
+# Fail closed if the marker cannot be written. Never remove it automatically.
+# A local file is defense in depth and does not substitute for an external
+# authority / cross-host approval gate.
+(umask 077; printf 'RECOVERY_HOLD=1\n' > "${RECOVERY_HOLD_FILE}") \
+  || fail "无法持久化恢复安全封锁标记，禁止执行生产恢复"
+[[ -f "${RECOVERY_HOLD_FILE}" && ! -L "${RECOVERY_HOLD_FILE}" ]] \
+  || fail "恢复封锁标记不可信，禁止执行生产恢复"
+echo "[prod-restore] RECOVERY HOLD ACTIVE: production deploy/rollback must remain blocked"
+
 # -----------------------------------------------------------------------------
 # 停止全部生产 DB writers（Phase 9A）：app + storage-cleanup + async-worker 都是
 # 数据库写入方，覆盖生产库之前必须全部 quiesce。
