@@ -14,10 +14,12 @@ MC_IMAGE="${OPS_PROOF_MC_IMAGE:-minio/mc:RELEASE.2025-05-21T01-59-54Z}"
 NAME="campus-image-proof-${RANDOM}-$$"
 TEMP_DIR="$(mktemp -d)"
 PASS=0
+PROOF_STAGE="preflight"
 cleanup() {
   local rc=$?
   trap - EXIT
   if [[ "${rc}" != 0 ]]; then
+    echo "FAIL: isolated image runtime stage=${PROOF_STAGE} rc=${rc}" >&2
     for log in "${TEMP_DIR}"/*; do [[ ! -f "${log}" ]] || { echo "--- $(basename "${log}")"; tail -25 "${log}"; }; done
   fi
   docker rm -fv "${NAME}-async-a" "${NAME}-async-b" "${NAME}-app" "${NAME}-db" "${NAME}-redis" "${NAME}-minio" >/dev/null 2>&1 || true
@@ -27,12 +29,16 @@ cleanup() {
 }
 trap cleanup EXIT
 for kind in app async cleanup ops migrator; do docker image inspect "${PREFIX}-${kind}:${TAG}" >/dev/null; done
+PROOF_STAGE="network-create"
 docker network create --internal "${NAME}" >/dev/null
+PROOF_STAGE="postgres-start"
 docker run -d --pull never --name "${NAME}-db" --network "${NAME}" --network-alias postgres \
   --tmpfs /var/lib/postgresql/data -e POSTGRES_USER=proof -e POSTGRES_PASSWORD=ProofLocalOnly-Password1 \
   -e POSTGRES_DB=proofdb postgres:16-alpine >/dev/null
+PROOF_STAGE="redis-start"
 docker run -d --pull never --name "${NAME}-redis" --network "${NAME}" --network-alias redis \
   redis:7-alpine redis-server --requirepass ProofLocalOnly-Redis1 >/dev/null
+PROOF_STAGE="minio-start"
 docker run -d --pull never --name "${NAME}-minio" --network "${NAME}" --network-alias minio \
   --tmpfs /data -e MINIO_ROOT_USER=proof-storage-admin -e MINIO_ROOT_PASSWORD=ProofLocalOnly-Storage1 \
   "${MINIO_IMAGE}" server /data >/dev/null
@@ -48,6 +54,7 @@ for _ in $(seq 1 40); do
 done
 if grep -q '<ERROR>' "${TEMP_DIR}/storage"; then cat "${TEMP_DIR}/storage"; exit 1; fi
 
+PROOF_STAGE="storage-bootstrap"
 ENVFILE="${REPO_ROOT}/.env.production.synthetic"
 if command -v cygpath >/dev/null 2>&1; then ENVFILE="$(cygpath -m "${ENVFILE}")"; fi
 ENV_ARGS=(--env-file "${ENVFILE}"
@@ -56,6 +63,7 @@ ENV_ARGS=(--env-file "${ENVFILE}"
   -e S3_ENDPOINT=http://minio:9000 -e S3_ACCESS_KEY_ID=proof-storage-admin
   -e S3_SECRET_ACCESS_KEY=ProofLocalOnly-Storage1 -e ALLOW_LOCAL_S3_IN_PRODUCTION=false
   -e RELEASE_SHA=runtime-spoof -e BACKUP_DIR=/backups)
+PROOF_STAGE="migration"
 docker run --rm --pull never --network "${NAME}" "${ENV_ARGS[@]}" "${PREFIX}-migrator:${TAG}" > "${TEMP_DIR}/migration" 2>&1
 PASS=$((PASS+1))
 for kind in async cleanup; do
