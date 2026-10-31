@@ -315,8 +315,8 @@ run_rollback() {
   local proof_id="sha256:$(printf '%064d' 1)"
   local proof_line="RELEASE_SHA=${PREV_SHA} APP_IMAGE_ID=${proof_id} CLEANUP_IMAGE_ID=${proof_id} ASYNC_WORKER_IMAGE_ID=${proof_id}"
   if [[ "${PROOF_LOG_STUB_MODE:-valid}" != "missing" ]]; then
-    printf '%s\\n' "${proof_line}" > "${SANDBOX}/.releases.log"
-    printf '%s\\n' "${proof_line}" > "${SANDBOX}/.release-image-ids.log"
+    printf '%s\n' "${proof_line}" > "${SANDBOX}/.releases.log"
+    printf '%s\n' "${proof_line}" > "${SANDBOX}/.release-image-ids.log"
   fi
   # 一律经 env 命令注入环境：展开形式的 VAR=v 不能作为 assignment 前缀
   env "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
