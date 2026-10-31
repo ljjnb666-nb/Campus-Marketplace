@@ -158,6 +158,22 @@ else
 fi
 echo "[rollback] async-worker target mode = ${ASYNC_TARGET_MODE}（${ASYNC_TARGET_IMAGE}）"
 
+# Historical SHA tags can be reassigned. A rollback is authorized only when
+# the tag's current Docker image ID matches BOTH prior deployment inventories.
+# Check before any writer stop/start or destructive restore.
+require_release_image_inventory "${PREVIOUS_SHA}" "APP" "campus-marketplace-app:${PREVIOUS_SHA}" || exit 1
+APP_TARGET_ID="$(release_image_id "campus-marketplace-app:${PREVIOUS_SHA}")" || exit 1
+CLEANUP_TARGET_ID=""
+ASYNC_TARGET_ID=""
+if [[ "${CLEANUP_TARGET_MODE}" == "post-worker" ]]; then
+  require_release_image_inventory "${PREVIOUS_SHA}" "CLEANUP" "${CLEANUP_TARGET_IMAGE}" || exit 1
+  CLEANUP_TARGET_ID="$(release_image_id "${CLEANUP_TARGET_IMAGE}")" || exit 1
+fi
+if [[ "${ASYNC_TARGET_MODE}" == "post-async" ]]; then
+  require_release_image_inventory "${PREVIOUS_SHA}" "ASYNC_WORKER" "${ASYNC_TARGET_IMAGE}" || exit 1
+  ASYNC_TARGET_ID="$(release_image_id "${ASYNC_TARGET_IMAGE}")" || exit 1
+fi
+
 APP_URL="${APP_URL:-$(app_url_from_env)}"
 # OPS_HEALTH_TIMEOUT 仅调整门禁等待预算（不能把失败变成功）：
 # 必须是正整数，否则回默认；正则白名单保证无注入面。
@@ -404,16 +420,16 @@ fi
 
 # 记录完整 runtime artifact 集合。pre-async / pre-cleanup 只能记录已停止，
 # 绝不写不存在的 IMAGE 或把未确认的 worker 标记为 running。
-RELEASE_LOG="$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA}"
+RELEASE_LOG="$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA} APP_IMAGE_ID=${APP_TARGET_ID}"
 if [[ "${CLEANUP_TARGET_MODE}" == "pre-worker" ]]; then
   RELEASE_LOG="${RELEASE_LOG} CLEANUP=${CLEANUP_LOG_TAG}"
 else
-  RELEASE_LOG="${RELEASE_LOG} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP=${CLEANUP_LOG_TAG}"
+  RELEASE_LOG="${RELEASE_LOG} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP_IMAGE_ID=${CLEANUP_TARGET_ID} CLEANUP=${CLEANUP_LOG_TAG}"
 fi
 if [[ "${ASYNC_TARGET_MODE}" == "pre-async" ]]; then
   RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER=${ASYNC_LOG_TAG}"
 else
-  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER=${ASYNC_LOG_TAG}"
+  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER_IMAGE_ID=${ASYNC_TARGET_ID} ASYNC_WORKER=${ASYNC_LOG_TAG}"
 fi
 printf '%s MODE=%s READINESS=ready\n' "${RELEASE_LOG}" "${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
 echo "[rollback] SUCCESS → ${PREVIOUS_SHA}（cleanup=${CLEANUP_LOG_TAG}, async-worker=${ASYNC_LOG_TAG}）"
