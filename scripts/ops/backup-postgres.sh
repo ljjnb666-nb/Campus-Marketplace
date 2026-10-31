@@ -32,6 +32,8 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# Prevent a redirected checkout from addressing the production Compose namespace.
+check_ops_project_scope
 load_production_env
 
 # ---- 第一个必需配置：备份目录（状态产物落点）----
