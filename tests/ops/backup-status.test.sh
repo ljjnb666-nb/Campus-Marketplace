@@ -34,6 +34,9 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  # OPS_PROJECT_DIR must be a physically separate, explicitly named test-only
+  # Compose project; never relax production namespace isolation for fixtures.
+  printf 'name: campus-ops-test-backup-status\n' > "${SANDBOX}/compose.production.yml"
 
   cat > "${SANDBOX}/.env.production" <<ENV
 SITE_ADDRESS=campus.example.edu.cn
