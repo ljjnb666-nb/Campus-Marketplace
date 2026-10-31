@@ -115,6 +115,10 @@ export default async function ProfilePage() {
                 协议同意记录 · 导出数据 · 注销账号
               </p>
             </Link>
+            <Link href="/my/security" className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
+              <p className="text-sm text-slate-500">账号安全</p>
+              <p className="mt-3 text-sm font-medium text-sky-700">修改密码 · 登录设备 · 邮箱验证 · 二次认证</p>
+            </Link>
           </section>
 
           <section className="rounded-[32px] border border-slate-200 bg-white p-6 shadow-sm">

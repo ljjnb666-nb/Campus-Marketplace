@@ -76,7 +76,7 @@ export function OrderCancelDialog({
           <input type="hidden" name="status" value="CANCELLED" />
 
           <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-            订单取消后将不可恢复。如有押金或预付款，系统将按约定原路退回。
+            订单取消后将不可恢复。如已线下支付押金或预付款，请双方协商返还；平台不托管资金，也不会自动退款。
           </p>
 
           <div className="space-y-1">

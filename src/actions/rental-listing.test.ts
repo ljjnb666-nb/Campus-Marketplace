@@ -150,6 +150,13 @@ function buildListingFormData(overrides: Record<string, string> = {}) {
 }
 
 describe("rental listing actions", () => {
+  it.each([createRentalListing, updateRentalListing])("rejects excess files before any upload (%s)", async (action) => {
+    const form = buildListingFormData();
+    for (let i = 0; i < 25; i++) form.append("imageFiles", new File(["x"], `photo-${i}.png`, { type: "image/png" }));
+    expect(await action(null, form)).toMatchObject({ success: false, message: "最多上传 9 张图片" });
+    expect(uploadImageAsset).not.toHaveBeenCalled();
+    expect(transactionMock).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     requireUser.mockResolvedValue({ id: "user-1", role: "STUDENT" });

@@ -222,8 +222,9 @@ export async function createServiceOrderTx(
       // Phase 7C（R2-02）：锁内现势行 = 义务权威（amount = fresh.price）。
       const lockedRows = await tx.$queryRaw<Array<{
         id: string; campusId: string; status: string; price: string; providerId: string; deletedAt: Date | null;
+        pricingUnit: "PER_SESSION" | "PER_HOUR" | "PER_ORDER" | "NEGOTIABLE";
       }>>`
-        SELECT id, "campusId", status, price, "providerId", "deletedAt"
+        SELECT id, "campusId", status, price, "providerId", "deletedAt", "pricingUnit"
         FROM "ServiceListing"
         WHERE id = ${input.service.id}
         FOR UPDATE
@@ -252,6 +253,7 @@ export async function createServiceOrderTx(
           orderNo: createOrderNo(),
           type: "SERVICE",
           amount: decimalValue(fresh.price),
+          servicePricingUnitSnapshot: fresh.pricingUnit,
           meetingLocation: input.meetingLocation,
           note: input.note,
           paymentStatus: "OFFLINE_PENDING",

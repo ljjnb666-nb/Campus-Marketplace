@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { hashSync } from "bcryptjs";
 import { uniqueTag, E2E_ACCOUNTS } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 
 /**
@@ -39,6 +39,7 @@ test("申诉审核治理面：campus reviewer 队列 → 详情 → 开始审核
     data: {
       email: reviewerEmail,
       name: "E2E审核员",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}Reviewer#2026`, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,
@@ -62,6 +63,7 @@ test("申诉审核治理面：campus reviewer 队列 → 详情 → 开始审核
     data: {
       email: appellantEmail,
       name: "E2E申诉人",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}Appellant#2026`, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,

@@ -227,7 +227,7 @@ export function RentalBookingDrawer({
                 <span className="font-semibold text-slate-900 dark:text-slate-100">¥{estimatedRent.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-slate-500">
-                <span>物品押金 (验收归还后退还)</span>
+                <span>线下押金（归还后双方核对）</span>
                 <span className="font-semibold text-slate-900 dark:text-slate-100">¥{deposit.toFixed(2)}</span>
               </div>
               <div className="border-t border-slate-100 pt-2 flex justify-between font-bold text-slate-900 dark:border-slate-800 dark:text-slate-100">

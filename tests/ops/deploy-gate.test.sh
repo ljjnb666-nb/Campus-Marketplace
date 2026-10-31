@@ -60,6 +60,8 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  # An OPS_PROJECT_DIR fixture must never target the production Compose namespace.
+  printf 'name: campus-restore-drill-test\n' > "${SANDBOX}/compose.production.yml"
   cat > "${SANDBOX}/.env.production" <<'ENV'
 SITE_ADDRESS=campus.example.edu.cn
 POSTGRES_USER=campus_app
@@ -101,14 +103,24 @@ ENV
   cat > "${SANDBOX}/.gitignore" <<'GITIGNORE'
 bin/
 backups/
+# The production lifecycle lock lives outside the checkout; the synthetic
+# project is itself the checkout, so ignore only this operational lock file.
+.production-lifecycle.lock
 calls.log
 fake-app.out
+async.running
+cleanup.running
+migration.count
+compose.production.yml
 .env.production
 .releases.log
+compose.production.yml
+.release-image-ids.log
 GITIGNORE
   echo "committed source marker" > "${SANDBOX}/app-source-marker.txt"
   git -C "${SANDBOX}" add .gitignore app-source-marker.txt
   git -C "${SANDBOX}" commit -q -m "sandbox init"
+  touch "${SANDBOX}/async.running" "${SANDBOX}/cleanup.running"
 
   # ---- docker stub：记录 side_effect 并模拟 compose 行为 ----
   # cleanup worker 相关模式（FINAL REPAIR B release artifact pair）：
@@ -126,12 +138,39 @@ GITIGNORE
 ARGS="\$*"
 echo "docker_called:\${ARGS}" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
-  *"compose"*"build"*)
+  *"image inspect --format "*"{{.Id}}"*)
+    if [[ -n "\${WRONG_IMAGE_ID_STUB_MODE:-}" ]]; then
+      printf 'sha256:%064d\\n' 2
+    else
+      printf 'sha256:%064d\\n' 1
+    fi
+    exit 0 ;;
+  *"compose"*"config --format json migrate"*)
+    if [[ -n "\${WRONG_MIGRATOR_IMAGE:-}" ]]; then image="campus-marketplace-migrator:local";
+    else image="campus-marketplace-migrator:\${GIT_SHA:-local}"; fi
+    printf '{"services":{"postgres":{"image":"postgres:16-alpine"},"migrate":{"image":"%s"}}}\n' "\$image"
+    exit 0 ;;
+  *"image inspect campus-marketplace-migrator:"*)
+    [[ -z "\${MISSING_MIGRATOR_IMAGE:-}" ]]; exit \$? ;;
+  *"compose"*"stop storage-cleanup"*)
+    echo "side_effect:cleanup_stop" >> "${SANDBOX}/calls.log"
+    [[ -n "\${CLEANUP_STOP_FAILURE:-}" ]] && exit 1
+    [[ -n "\${CLEANUP_STOP_STILL_RUNNING:-}" ]] || rm -f "${SANDBOX}/cleanup.running"
+    exit 0 ;;
+  *"compose"*"stop async-worker"*)
+    echo "side_effect:async_stop" >> "${SANDBOX}/calls.log"
+    [[ -n "\${ASYNC_STOP_FAILURE:-}" ]] && exit 1
+    [[ -n "\${ASYNC_STOP_STILL_RUNNING:-}" ]] || rm -f "${SANDBOX}/async.running"
+    exit 0 ;;
+  *"compose"*" build "*)
     echo "side_effect:build ARGS=\$ARGS GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     exit 0 ;;
-  *"compose"*"run --rm migrate"*)
-    echo "side_effect:migrate" >> "${SANDBOX}/calls.log"
+  *"compose"*"run --rm --no-deps --no-build --pull never migrate"*)
+    echo "side_effect:migrate GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
+    [[ "\${GIT_SHA:-}" == "$(git -C "${SANDBOX}" rev-parse HEAD)" ]] || exit 1
     echo "No pending migrations"
+    [[ -n "\${MIGRATION_REPEAT_FAILURE:-}" && -f "${SANDBOX}/migration.count" ]] && exit 1
+    touch "${SANDBOX}/migration.count"
     exit 0 ;;
   *"compose"*"run --rm storage-cleanup"*)
     echo "side_effect:worker_smoke" >> "${SANDBOX}/calls.log"
@@ -157,19 +196,23 @@ case "\$ARGS" in
     fi
     exit 0 ;;
   *"compose"*"ps --status running --services"*)
+    [[ -n "\${ASYNC_STOP_PS_FAILURE:-}" ]] && exit 1
+    [[ -n "\${CLEANUP_STOP_PS_FAILURE:-}" && ! -f "${SANDBOX}/cleanup.running" ]] && exit 1
     echo "app"
-    [[ -n "\${WORKER_NOT_RUNNING:-}" ]] || echo "storage-cleanup"
-    [[ -n "\${ASYNC_WORKER_NOT_RUNNING:-}" ]] || echo "async-worker"
+    [[ -n "\${WORKER_NOT_RUNNING:-}" || ! -f "${SANDBOX}/cleanup.running" ]] || echo "storage-cleanup"
+    [[ -n "\${ASYNC_WORKER_NOT_RUNNING:-}" || ! -f "${SANDBOX}/async.running" ]] || echo "async-worker"
     exit 0 ;;
   *"compose"*"up -d"*"storage-cleanup"*)
     echo "side_effect:cleanup_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     echo "cleanup_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     [[ -n "\${WORKER_UP_FAILURE:-}" ]] && exit 1
+    touch "${SANDBOX}/cleanup.running"
     exit 0 ;;
   *"compose"*"up -d"*"async-worker"*)
     echo "side_effect:async_worker_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
     echo "async_worker_up_called GIT_SHA=\${GIT_SHA:-<unset>}" >> "${SANDBOX}/calls.log"
     [[ -n "\${ASYNC_WORKER_UP_FAILURE:-}" ]] && exit 1
+    touch "${SANDBOX}/async.running"
     exit 0 ;;
   *"compose"*"up -d"*)
     echo "side_effect:app_up GIT_SHA=\${GIT_SHA:-<unset>} ARGS=\$ARGS" >> "${SANDBOX}/calls.log"
@@ -281,11 +324,11 @@ UNSET_ENV_ARGS=(
   -u S3_BUCKET_PUBLIC -u S3_BUCKET_PRIVATE -u S3_FORCE_PATH_STYLE
   -u PUBLIC_ASSET_BASE_URL -u SITE_ADDRESS -u APP_NAME -u DEFAULT_CAMPUS_SLUG
   -u ALLOW_LOCAL_S3_IN_PRODUCTION -u BACKUP_DIR -u BACKUP_OFFSITE_TARGET
-  -u BACKUP_RETENTION_DAYS -u METRICS_BEARER_TOKEN -u RELEASE_SHA
+  -u BACKUP_RETENTION_DAYS -u METRICS_BEARER_TOKEN -u RELEASE_SHA -u GIT_SHA
 )
 
 run_deploy() {  # $1=输出文件；$2=可选显式 SHA；APP_URL 等经 EXTRA_ENV 注入
-  rm -f "${SANDBOX}/.releases.log" "${SANDBOX}/calls.log"
+  rm -f "${SANDBOX}/.releases.log" "${SANDBOX}/.release-image-ids.log" "${SANDBOX}/calls.log"
   if [[ $# -ge 2 && -n "${2:-}" ]]; then
     env "${UNSET_ENV_ARGS[@]}" "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
       OPS_PROJECT_DIR="${SANDBOX}" \
@@ -317,6 +360,8 @@ OUT="$(mktemp)"
 OPS_HEALTH_TIMEOUT=15 run_deploy "${OUT}"; rc=$?
 assert_exit 0 "$rc" "SOURCE-01 deploy"
 assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 以 HEAD 为 release 更新 app"
+assert_contains "APP_IMAGE_ID=sha256:" "${SANDBOX}/.releases.log" "SOURCE-01 release log includes app image ID"
+assert_contains "ASYNC_WORKER_IMAGE_ID=sha256:" "${SANDBOX}/.release-image-ids.log" "SOURCE-01 independent inventory includes worker ID"
 assert_contains "RELEASE_SHA=${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 HEAD"
 assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "SOURCE-01 release log readiness"
 
@@ -338,6 +383,24 @@ assert_contains "ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${SANDBOX_HE
 assert_contains "ASYNC_WORKER=running" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 async-worker running"
 # 顺序硬门禁：migrate 必须先于 cleanup worker 切换（worker 绝不在 pre-migration schema 上运行）
 migrate_line="$(grep -n "side_effect:migrate" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+stop_line="$(grep -n "side_effect:async_stop" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+cleanup_stop_line="$(grep -n "side_effect:cleanup_stop" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+app_line="$(grep -n "side_effect:app_up" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
+if [[ -n "$stop_line" && "$stop_line" -lt "$migrate_line" && "$migrate_line" -lt "$app_line" ]]; then
+  pass_test
+else
+  fail_test "旧 async-worker 必须在迁移和 app 切换前停止"
+fi
+if [[ -n "$cleanup_stop_line" && "$stop_line" -lt "$cleanup_stop_line" && "$cleanup_stop_line" -lt "$migrate_line" && "$migrate_line" -lt "$app_line" ]]; then
+  pass_test
+else
+  fail_test "旧 storage-cleanup 必须在迁移和 app 切换前停止"
+fi
+if [[ "$(grep -c "side_effect:migrate GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log")" == 2 ]]; then
+  pass_test
+else
+  fail_test "两次迁移都必须使用当前 release 的 immutable 镜像"
+fi
 cleanup_up_line="$(grep -n "cleanup_up_called" "${SANDBOX}/calls.log" | head -1 | cut -d: -f1)"
 if [[ -n "$migrate_line" && -n "$cleanup_up_line" && "$migrate_line" -lt "$cleanup_up_line" ]]; then
   pass_test
@@ -352,6 +415,24 @@ else
   fail_test "async-worker 切换必须发生在 migrate 之后"
 fi
 rm -f "${OUT}"
+
+for failure in WRONG_MIGRATOR_IMAGE MISSING_MIGRATOR_IMAGE ASYNC_STOP_FAILURE ASYNC_STOP_STILL_RUNNING ASYNC_STOP_PS_FAILURE CLEANUP_STOP_FAILURE CLEANUP_STOP_STILL_RUNNING CLEANUP_STOP_PS_FAILURE MIGRATION_REPEAT_FAILURE; do
+  echo "== 发布失败路径：${failure} =="
+  make_sandbox
+  refresh_head
+  EXTRA_ENV=("${failure}=1" APP_URL=http://127.0.0.1:9)
+  OUT="$(mktemp)"
+  OPS_HEALTH_TIMEOUT=1 run_deploy "${OUT}"; rc=$?
+  if [[ "$rc" != 1 ]]; then cat "${OUT}" >&2; fi
+  assert_exit 1 "$rc" "${failure} must fail closed"
+  assert_not_contains "side_effect:app_up" "${SANDBOX}/calls.log" "${failure} 禁止 app 切换"
+  assert_not_contains "side_effect:async_worker_up" "${SANDBOX}/calls.log" "${failure} 禁止旧 worker 自动重启"
+  assert_file_absent "${SANDBOX}/.releases.log" "${failure} 禁止成功日志"
+  if [[ "${failure}" != MIGRATION_REPEAT_FAILURE ]]; then
+    assert_not_contains "side_effect:migrate" "${SANDBOX}/calls.log" "${failure} 禁止迁移"
+  fi
+  rm -f "${OUT}"
+done
 
 echo "== SOURCE-02：clean tree + 显式 HEAD（大写）→ 正常化后放行 =="
 make_sandbox
@@ -578,6 +659,40 @@ EXTRA_ENV=()
 assert_exit 1 "$rc" "ASYNC-WORKER-WRONG-IMAGE deploy"
 assert_contains "运行中的 async-worker 容器镜像" "${OUT}" "ASYNC-WORKER-WRONG-IMAGE 失败原因"
 assert_file_absent "${SANDBOX}/.releases.log" "ASYNC-WORKER-WRONG-IMAGE 不写 release log"
+rm -f "${OUT}"
+
+echo "== RECOVERY-HOLD: host-local disaster hold denies deploy before side effects =="
+make_sandbox
+refresh_head
+printf 'RECOVERY_HOLD=1\n' > "${SANDBOX}/.production-recovery-hold"
+OUT="$(mktemp)"
+EXTRA_ENV=()
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "recovery-held deploy"
+assert_contains "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "${OUT}" "restore hold blocks deploy"
+assert_zero_side_effects "restore hold rejects release"
+rm -f "${OUT}"
+
+echo "== PROJECT-OVERRIDE: production Compose namespace must be denied before side effects =="
+make_sandbox
+printf 'name: campus-marketplace-production\n' > "${SANDBOX}/compose.production.yml"
+OUT="$(mktemp)"
+EXTRA_ENV=()
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "production namespace override"
+assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "production namespace rejected"
+assert_zero_side_effects "production namespace fail-closed"
+rm -f "${OUT}"
+
+echo "== P1-A: COMPOSE_PROJECT_NAME override cannot change sandbox namespace =="
+make_sandbox
+OUT="$(mktemp)"
+EXTRA_ENV=(COMPOSE_PROJECT_NAME=campus-marketplace-production)
+run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "environment project-name override must be rejected"
+assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "env project-name override denial"
+assert_zero_side_effects "COMPOSE_PROJECT_NAME bypass"
 rm -f "${OUT}"
 
 echo "=============================="

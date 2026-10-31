@@ -66,6 +66,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // vitest coverage HTML 输出目录:
     "coverage/**",
+    ".tmp-scratch/**",
+    ".audit/**",
   ]),
 ]);
 

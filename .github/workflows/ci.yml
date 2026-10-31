@@ -132,6 +132,12 @@ jobs:
       - name: Deploy database migrations (idempotent re-run)
         run: npx prisma migrate deploy
 
+      # Dedicated disposable database; executes checked-in restore script with
+      # real postgres:16 pg_dump/pg_restore and fail-closed credential revocation.
+      # No production containers, credentials or shared business rows are touched.
+      - name: Isolated PostgreSQL backup-restore and credential revocation proof
+        run: bash tests/ops/production-recovery-real.test.sh
+
       - name: Test with coverage thresholds
         run: npm run test:coverage
         env:

@@ -24,7 +24,7 @@ export default async function ExtendRentalOrderPage({ params }: { params: Promis
       <div className="mb-8 space-y-2 text-center">
         <h1 className="text-3xl font-bold text-slate-950">申请续租</h1>
         <p className="text-sm text-slate-600">
-          延长租用时间，续租成功后将自动扣除相应费用
+          延长租用时间，续租成功后请双方核对新增费用并线下结算；平台不会自动扣款。
         </p>
       </div>
 

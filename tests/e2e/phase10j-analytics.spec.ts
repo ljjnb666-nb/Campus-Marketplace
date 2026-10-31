@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { hashSync } from "bcryptjs";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { e2eDb } from "./helpers/db";
 import { uniqueTag } from "./helpers/e2e";
 import { expectHeadingSettled } from "./helpers/hydration-settlement";
@@ -23,6 +23,7 @@ test("10J-E2E01：analytics.read 多校区与 7/30 天精确隔离，非授权�
   const analyst = await db.user.create({
     data: {
       name: "E2E独立校区分析员", email: "p10j-analyst-" + tag + "@e2e.test",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(password, 10), schoolName: a.schoolName,
       campusId: a.id, role: "STUDENT", verificationStatus: "VERIFIED",
     },

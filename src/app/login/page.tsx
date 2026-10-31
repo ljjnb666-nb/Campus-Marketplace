@@ -13,11 +13,8 @@ export default function LoginPage() {
           <p className="text-sm font-medium text-sky-700">欢迎回来</p>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-950">登录校园集市</h1>
           <p className="text-sm leading-7 text-slate-600">
-            当前阶段已启用本地凭证登录。测试学生账号：
-            <br />
-            <code className="rounded bg-slate-100 px-2 py-1 text-xs text-slate-700">
-              student1@campus.local / Student123456
-            </code>
+            使用你的校园集市账号登录。若已启用双重验证，请同时填写验证器中的动态验证码。
+            遇到账号访问问题时，可通过密码找回或受限账号申诉入口继续处理。
           </p>
         </div>
         <LoginForm />

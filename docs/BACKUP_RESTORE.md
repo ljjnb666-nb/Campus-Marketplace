@@ -3,6 +3,20 @@
 > 备份是 Production Phase 3A 硬门禁：**只有实际执行过 restore drill 才允许标记 BACKUP_RESTORE PASS**。
 > 部署流程见 [PRODUCTION_DEPLOYMENT.md](./PRODUCTION_DEPLOYMENT.md)。
 
+> **2026-10-31 生产阻断声明：** 隔离 CI 中的恢复演练成功不意味着
+> 当前生产可以进行数据库覆盖恢复或重新开放服务。生产 hard rollback
+> 仍禁用，凭据/RBAC 权威对账与独立审批见
+> [专用恢复手册](./ops/production-restore-credential-recovery.md)。
+> 生产 restore 只允许进入停止 writer + 持久化隔离状态，不会自动
+> 解除 `production-recovery-hold` 或重启任何 writer。
+>
+> 生产受控 deploy/rollback/restore 统一使用宿主机固定路径
+> `/var/lib/campus-marketplace/.production-lifecycle.lock`，并由
+> 受信 ops 账号预先创建隔离目录、验收所有者和权限；恢复与备份仍共享
+> `BACKUP_DIR/.backup-restore.lock`。锁只覆盖同一主机的受控脚本，
+> 绝非跨主机审批。目录缺失、安全校验失败一律不执行；禁止改用
+> `OPS_PROJECT_DIR`、直接 Docker/Compose 或手动删锁/删 hold 绕过。
+
 ## 1. 备份
 
 脚本：`scripts/ops/backup-postgres.sh`（读取 `.env.production`）。
@@ -64,10 +78,17 @@
   --target-db <POSTGRES_DB 的字面值>   # 显式确认生产目标
 ```
 
-流程：SHA256 强校验（伴随文件必须存在）→ 停止 app 写流量 → 终止现存连接 →
-DROP/CREATE → `pg_restore --exit-on-error` → 完整性检查（核心表 /
-`_prisma_migrations` / 孤儿引用）。恢复失败时**应用保持停止状态**——绝不带
-坏库恢复服务；`rollback.sh --hard` 在此脚本失败时会阻断应用切换。
+流程：先获取宿主机生命周期锁及备份/恢复互斥锁 → SHA256 强校验
+（伴随文件必须存在）→ 持久化 host recovery hold → 停止
+app、storage-cleanup、async-worker 并验证 → 终止数据库连接 →
+DROP/CREATE → `pg_restore --exit-on-error` → 完整性检查 →
+恢复所有用户的凭据隔离、会话撤销及挑战失效。
+
+**只有全部 writers 经验证已停止后的失败，才能声明其保持停止；**
+停止流程之前失败时，writer 状态仍未知，必须人工检查。
+**即使数据库完整性检查通过也禁止恢复流量或登录**；生产
+`rollback.sh --hard` 目前始终在执行副作用前拒绝，外部审批系统
+尚未实现。不得以删除 hold、手工 Compose 或旧脚本代替审批。
 
 ## 3. Restore Drill（恢复演练）
 
@@ -90,4 +111,4 @@ DROP/CREATE → `pg_restore --exit-on-error` → 完整性检查（核心表 /
 
 - 恢复出的库自带 `_prisma_migrations` 记录，`migrate deploy` 会显示
   no pending migration——不要对恢复库执行 `db push` 强行对齐。
-- 回滚场景（schema 不兼容的 --hard 路径）先恢复备份再切应用，见 ROLLBACK.md。
+- 原设计中的“schema 不兼容时 --hard 先恢复备份再切应用”**在当前生产已停用**；不得据此操作，见 ROLLBACK.md 的安全封锁说明。

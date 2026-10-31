@@ -60,6 +60,7 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
+RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
 
 # standalone 产物（自包含精简 node_modules）+ 静态资源
 COPY --from=builder --chown=node:node /app/.next/standalone ./
@@ -76,7 +77,7 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-CMD ["node", "server.js"]
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec node server.js \"$@\"", "--"]
 
 # ---------- migrator（一次性迁移任务）----------
 FROM node:${NODE_VERSION}-bookworm-slim AS migrator
@@ -89,21 +90,43 @@ ENV NODE_ENV=production \
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json prisma.config.ts ./
 COPY prisma ./prisma
+# deps has no OpenSSL and Prisma may select its 1.1 fallback there. Resolve the
+# engines again in this OpenSSL 3 runtime at build time, so deployment never
+# depends on downloading a missing schema engine from the public internet.
+RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
+    && npx prisma generate
 # 只允许 migrate deploy（禁止 dev / db push），由 compose/ops 脚本触发
 ENTRYPOINT ["npx", "prisma", "migrate", "deploy"]
 
-# ---------- cleanup-runner（存储清理 worker，常驻单实例）----------
-# LR-071 审计修复：PENDING_DELETE 的生产自动恢复。与 migrator 同模型：
-# 完整 node_modules（tsx 运行 TS 入口）+ prisma client + src/scripts 源码。
-# 由 compose.production.yml 的 storage-cleanup 服务消费（backend 网络、
-# 无端口、单实例、restart: unless-stopped），周期执行幂等的
-# runStorageCleanup（详见 scripts/ops/storage-cleanup-worker.ts）。
-# LR-R2（LAUNCH_REHEARSAL_REPAIR R2）：release identity bake 进 worker
-# artifact（与 runner/migrator/ops-runner 同一 provenance 模式）——不可变
-# image tag 是 campus-marketplace-cleanup:${GIT_SHA}，worker 结构化日志的
-# release 字段（src/lib/logger.ts 读 RELEASE_SHA，缺省 "dev"）必须来自同
-# 一构建期 GIT_SHA，否则新镜像的日志身份恒为 "dev"（launch rehearsal 实测）。
-# RELEASE_SHA 是公开的 artifact 元数据（非秘密）；凭据绝不进构建期。
+# ---------- worker-builder（编译 TS；不进入常驻镜像）----------
+FROM deps AS worker-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
+COPY package.json tsconfig.json prisma.config.ts ./
+COPY prisma ./prisma
+COPY src ./src
+COPY scripts ./scripts
+RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
+    && npx prisma generate \
+    && node scripts/ops/build-runtime.mjs
+
+# Install only locked production dependencies. Omit peer-only tooling as well:
+# @prisma/client declares the Prisma CLI as an optional peer; --omit=dev alone
+# retains that CLI and its build-tool dependency chain. Explicit runtime deps
+# (including React required by Next) remain installed even if also peers.
+# Generated Prisma engines come from worker-builder, with no runtime generation.
+FROM node:${NODE_VERSION}-bookworm-slim AS worker-deps
+WORKDIR /app
+COPY --from=worker-builder /app/dist/ops/package.json /app/dist/ops/package-lock.json ./
+COPY --from=deps /root/.npm /root/.npm
+RUN npm ci --omit=dev --omit=peer --ignore-scripts --prefer-offline \
+    && test ! -d node_modules/tsx \
+    && test ! -d node_modules/prisma \
+    && test ! -d node_modules/vitest \
+    && test ! -d node_modules/next
+
+# ---------- cleanup-runner（常驻非 root；仅生产依赖 + 编译后的入口）----------
 FROM node:${NODE_VERSION}-bookworm-slim AS cleanup-runner
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssl \
@@ -111,59 +134,29 @@ RUN apt-get update \
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json tsconfig.json prisma.config.ts ./
-COPY prisma ./prisma
-COPY src ./src
-COPY scripts ./scripts
-# prisma.config.ts 加载即要求 DATABASE_URL：生成期使用占位值（非秘密，
-# 运行时凭据一律由 compose env 注入），与 builder 阶段同模式
-RUN export DATABASE_URL="postgresql://build-placeholder:build-placeholder@localhost:5432/build" \
-    && npx prisma generate
-# ---- LR-R2（R2 评审修复 CLEANUP_RELEASE_IDENTITY_RUNTIME_OVERRIDE）----
-# release identity 必须是构建期 immutable artifact metadata：ARG/ENV bake
-# 之外，还把值写死进镜像文件 /app/.release-sha。ARG/ENV 置于 COPY 层之后，
-# SHA 变化只 bust 轻量 config 层（deps/prisma 层跨 release 缓存）。
-# ENTRYPOINT 在 worker 进程启动前从 .release-sha 恢复 RELEASE_SHA 并显式
-# export——该赋值发生在容器 env（compose env_file / docker -e）之后，
-# 因此 .env.production 里的任意 RELEASE_SHA 无法伪造日志身份（env_file
-# 优先级高于镜像 Dockerfile ENV，但低于 entrypoint 的显式赋值）。
-# fail closed：.release-sha 缺失/不可读 → set -eu 使 cat 失败 → 非零退出，
-# 绝不 fallback 到 dev/unknown/运行时值（artifact 身份缺失 = 镜像完整性
-# 错误）。形态说明：用内联 sh -c 而非独立 .sh 文件——仓库 core.autocrlf=true
-# 且无 .gitattributes，Windows checkout 会把新增 .sh 以 CRLF 带进镜像
-# （Debian 容器内必然解析失败）；内联在 Dockerfile 中免疫该问题。
-# RELEASE_SHA 为公开 artifact 元数据，凭据绝不进构建期。
+COPY --from=worker-deps /app/node_modules ./node_modules
+COPY --from=worker-builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=worker-builder /app/dist/ops ./dist/ops
+# Root-owned metadata cannot be rewritten by the worker. Runtime env is not the
+# release authority; a missing metadata file must prevent startup.
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
 RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
-ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/storage-cleanup-worker.ts \"$@\"", "--"]
+USER node
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec node dist/ops/storage-cleanup-worker.cjs \"$@\"", "--"]
 
-# ---------- ops-runner（一次性生产运维检查，compose ops-check 服务）----------
-# LAUNCH_REHEARSAL_REPAIR R1（P1-01）：ops-check 的生产执行合同。
-# 与 migrator/cleanup-runner 同模型（完整 node_modules + tsx 运行 TS 入口），
-# 复用 cleanup-runner 的全部产物层（node_modules/prisma/src/scripts）。
-# release identity 必须 bake 进 artifact（与 runner/migrator 同一 provenance
-# 模式）：release_identity 检查读取的 RELEASE_SHA 来自构建期 GIT_SHA，
-# 绝不允许运行时向无 provenance 的镜像注入任意身份。
-# 诊断工件（非 production writer/runtime dependency）：不进入 deploy.sh
-# 的 release artifact set，由 canonical 命令按需 --build（immutable
-# GIT_SHA tag）。
+# ---------- ops-runner（一次性只读诊断）----------
+# BACKUP_DIR is root-only on the host; only this one-shot checker gets root to
+# read its read-only bind mount. Neither long-running worker gets that mount.
 FROM cleanup-runner AS ops-runner
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
-ENTRYPOINT ["npx", "tsx", "scripts/ops/ops-check.ts"]
+USER root
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec node dist/ops/ops-check.cjs \"$@\"", "--"]
 
-# ---------- async-runner（Phase 9A 统一 async worker，常驻单实例）----------
-# compose.production.yml 的 async-worker 服务消费（backend 网络、无端口、
-# restart: unless-stopped、依赖 PostgreSQL healthy）：SKIP LOCKED claim +
-# lease token fencing 消费 AsyncJob / OutboxEvent（PostgreSQL = durable
-# queue authority；不依赖 Redis 才能正确运行）。
-# 与 cleanup-runner 同模型且复用其全部产物层；release identity 同 LR-R2
-# provenance 模式（构建期 GIT_SHA → /app/.release-sha → ENTRYPOINT 显式
-# export，运行时 env 无法伪造日志身份；缺失 fail closed）。
+# ---------- async-runner（常驻非 root；继承相同 immutable release metadata）----------
 FROM cleanup-runner AS async-runner
 ARG GIT_SHA=unknown
 ENV RELEASE_SHA=${GIT_SHA}
-RUN printf '%s\n' "${GIT_SHA}" > /app/.release-sha
-ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec npx tsx scripts/ops/async-worker.ts \"$@\"", "--"]
+USER node
+ENTRYPOINT ["/bin/sh", "-c", "set -eu; RELEASE_SHA=\"$(cat /app/.release-sha)\"; export RELEASE_SHA; exec node dist/ops/async-worker.cjs \"$@\"", "--"]

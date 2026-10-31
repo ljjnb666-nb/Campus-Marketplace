@@ -28,7 +28,7 @@ async function getHandler(
 ) {
   const { requestId } = await params;
 
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(

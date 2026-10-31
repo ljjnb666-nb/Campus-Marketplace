@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { hashSync } from "bcryptjs";
 import { uniqueTag, E2E_ACCOUNTS } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 
 /**
@@ -97,6 +97,7 @@ test("7D-E2E02：执法队列因果序 → 目标详情（历史 + 当前限制�
     data: {
       email: `p7d-target-${tag}@e2e.test`,
       name: "P7D执法目标",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(password, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,
@@ -210,6 +211,7 @@ async function createCampusRoleUser(tag: string, roleKey: string, name: string) 
     data: {
       email: `p7d-${roleKey.toLowerCase()}-${tag}@e2e.test`,
       name,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(password, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,

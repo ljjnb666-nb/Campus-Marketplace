@@ -222,6 +222,15 @@ model User {
   name                    String
   email                   String                    @unique
   passwordHash            String
+  // Disaster recovery: pg_restore can rewind passwordHash to an obsolete password.
+  // A restored credential must not authenticate until verified RESET_PASSWORD.
+  credentialRecoveryRequired Boolean                 @default(false)
+  emailVerifiedAt         DateTime?
+  mfaSecretEncrypted      String?
+  mfaPendingEncrypted     String?
+  mfaPendingSessionId     String?
+  mfaPendingExpiresAt     DateTime?
+  mfaLastCounter          BigInt?
   avatarUrl               String?
   bio                     String?
   schoolName              String
@@ -276,6 +285,8 @@ model User {
   reports                 Report[]                  @relation("ReportReporter")
   receivedReports         Report[]                  @relation("ReportTargetUser")
   notifications           Notification[]
+  accountSessions         AccountSession[]
+  accountChallenges       AccountChallenge[]
   blockedUsers            BlockedUser[]             @relation("BlockedByUser")
   blockedByUsers          BlockedUser[]             @relation("BlockedTargetUser")
   adminLogs               AdminLog[]                @relation("AdminActor")
@@ -673,6 +684,8 @@ model Order {
   status           OrderStatus     @default(PENDING)
   paymentStatus    PaymentStatus   @default(UNPAID)
   amount           Decimal         @db.Decimal(10, 2)
+  // SERVICE amount is a quoted unit price, never evidence of a settled total.
+  servicePricingUnitSnapshot ServicePricingUnit?
   // Phase 8D-01 权威状态冻结：本字段只是下单时的初始见面偏好快照
   // （buyer-authored），绝不是正式见面约定 authority。正式约定 = OrderMeetup
   // （locationTextSnapshot / scheduledAt / status / arrival fields）。
@@ -715,6 +728,35 @@ model Order {
   @@index([type, status])
   // Phase 9 scheduler 发现 PRODUCT PENDING expiresAt <= now 的预留扫描索引
   @@index([type, status, productReservationExpiresAt])
+}
+
+// JWT contains only this opaque session ID. Revocation authority is this row;
+// old JWTs without a session ID must sign in again after the migration.
+model AccountChallenge {
+  id           String   @id
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose      String
+  tokenHash    String
+  bindingHash  String
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  createdAt    DateTime @default(now())
+  @@index([userId, purpose, expiresAt])
+}
+
+model AccountSession {
+  id           String    @id @default(uuid())
+  userId       String
+  deviceLabel  String
+  createdAt    DateTime  @default(now())
+  lastSeenAt   DateTime  @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  strongAuthAt DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
 }
 
 model Conversation {
@@ -765,6 +807,7 @@ model Message {
   createdAt      DateTime     @default(now())
 
   @@index([conversationId, createdAt])
+  @@index([conversationId, createdAt(sort: Desc), id(sort: Desc)])
 }
 
 model Review {
@@ -1214,6 +1257,7 @@ enum RentalOrderStatus {
 
 enum DepositStatus {
   NOT_REQUIRED // 无需押金
+  OFFLINE_UNVERIFIED // 线下协商，平台未核实收款、扣款或退还
   PENDING_PAYMENT // 待支付
   PAID // 已支付
   FROZEN // 已冻结
@@ -1463,6 +1507,12 @@ model RentalHandoverRecord {
   orderId           String      @unique
   order             RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   photos            String[] // 图片 URL 数组
+  ownerPhotos       String[]    @default([])
+  renterPhotos      String[]    @default([])
+  ownerCurrentCondition String? @db.Text
+  renterCurrentCondition String? @db.Text
+  ownerKnownIssues String? @db.Text
+  renterKnownIssues String? @db.Text
   accessories       String?     @db.Text // 配件清单
   currentCondition  String?     @db.Text // 物品当前状态
   knownIssues       String?     @db.Text // 已知问题
@@ -1479,6 +1529,19 @@ model RentalReturnRecord {
   orderId             String      @unique
   order               RentalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   photos              String[] // 图片 URL 数组
+  ownerPhotos         String[]    @default([])
+  renterPhotos        String[]    @default([])
+  renterHasDamage     Boolean?
+  renterNeedsCleaning Boolean?
+  renterAccessoriesComplete Boolean?
+  renterInspectionNote String?    @db.Text
+  // Null for historical shared inspection fields whose author is unknowable.
+  ownerInspectionRecordedAt DateTime?
+  // Immutable legacy snapshot, intentionally not attributed to either party.
+  legacyInspectionNote String?    @db.Text
+  legacyHasDamage Boolean?
+  legacyNeedsCleaning Boolean?
+  legacyAccessoriesComplete Boolean?
   accessoriesComplete Boolean     @default(true)
   hasDamage           Boolean     @default(false)
   needsCleaning       Boolean     @default(false)
@@ -1520,6 +1583,8 @@ model RentalDamageClaim {
   renterAgreed       Boolean?
   renterNote         String?
   resolvedAt         DateTime?
+  // Historical duplicate/unactionable claim retained without inventing agreement.
+  supersededAt       DateTime?
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 

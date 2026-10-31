@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { hashSync } from "bcryptjs";
 import { uniqueTag, E2E_ACCOUNTS } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 
 /**
@@ -33,6 +33,7 @@ test("角色管理治理面：查找 → 授予 → 被授予者可达 appeals �
     data: {
       email: candidateEmail,
       name: candidateName,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(candidatePassword, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,
@@ -165,6 +166,7 @@ test("E2E03：appeal-reviewer-only 访问 /governance/roles → 404（页面自�
     data: {
       email: reviewerEmail,
       name: "E2E仅申诉审核员",
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(reviewerPassword, 10),
       schoolName: campus.schoolName,
       campusId: campus.id,

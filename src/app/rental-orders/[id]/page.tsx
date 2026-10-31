@@ -8,6 +8,7 @@ import { PriceDisplay } from "@/components/ui/price-display";
 import { OrderStatusBadgeUnified } from "@/components/order/order-status-badge-unified";
 import { OrderTimeline, TimelineStep } from "@/components/order/order-timeline";
 import { RentalOrderActions } from "@/components/rental/rental-order-actions";
+import { RentalEvidenceRecords } from "@/components/rental/rental-evidence-records";
 import { requireUser } from "@/lib/server-auth";
 import { getRentalOrderDetail } from "@/repositories/rental-order-repository";
 import { MapPin, Calendar, Clock, CheckCircle2 } from "lucide-react";
@@ -27,7 +28,8 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
   const userRole = isOwner ? "owner" : "renter";
   const counterparty = isOwner ? order.renter : order.owner;
   // 未决损坏索赔（resolvedAt 为空）供租客在订单详情中处理
-  const pendingClaim = order.damageClaims.find((claim) => claim.resolvedAt === null) ?? null;
+  const pendingClaim = order.status === "PENDING_INSPECTION"
+    ? order.damageClaims.find((claim) => claim.resolvedAt === null && !claim.supersededAt) ?? null : null;
 
   function formatDate(value: Date | string) {
     return new Intl.DateTimeFormat("zh-CN", {
@@ -75,7 +77,7 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
     },
     {
       key: "completed",
-      title: "评价结清",
+      title: "履约完成",
       time: order.completedAt,
       isCompleted: isCompleted,
       isCurrent: isCompleted,
@@ -216,7 +218,7 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
                   约定取货位置
                 </span>
                 <span className="font-bold text-slate-900 dark:text-slate-100">
-                  {order.rentalListing.pickupLocation}
+                  {order.pickupLocationSnapshot}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -225,7 +227,7 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
                   约定归还位置
                 </span>
                 <span className="font-bold text-slate-900 dark:text-slate-100">
-                  {order.rentalListing.returnLocation}
+                  {order.returnLocationSnapshot}
                 </span>
               </div>
             </div>
@@ -259,6 +261,12 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
                 </p>
               </div>
             </div>
+            <RentalEvidenceRecords handover={order.handoverRecord} returned={order.returnRecord} />
+            {order.damageClaims.map(claim => <div className="rounded-xl border p-3 text-sm" key={claim.id}>
+              <p className="font-semibold">补偿协商：{claim.supersededAt ? "已归档，无需处理" : claim.resolvedAt ? claim.renterAgreed ? "租客已同意" : "租客已拒绝" : "待租客处理"}</p>
+              <p>{claim.damageDescription}</p>
+              <p>申请金额 ¥{Number(claim.requestedDeduction).toFixed(2)}；{claim.approvedDeduction != null && `协商同意金额 ¥${Number(claim.approvedDeduction).toFixed(2)}；`}实际收付未经平台核实。</p>
+            </div>)}
           </div>
         </div>
 
@@ -281,7 +289,7 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
                 </span>
               </div>
               <div className="flex justify-between border-b border-slate-100 pb-2 text-slate-600 dark:border-slate-800 dark:text-slate-400">
-                <span>押金 (可结算退还)</span>
+                <span>约定押金（线下处理）</span>
                 <span className="font-semibold text-slate-900 dark:text-slate-100">
                   ¥{Number(order.depositAmount).toFixed(2)}
                 </span>
@@ -294,14 +302,15 @@ export default async function RentalOrderDetailPage({ params }: { params: Promis
               )}
               {Number(order.depositDeduction) > 0 && (
                 <div className="flex justify-between border-b border-slate-100 pb-2 text-rose-600">
-                  <span>押金损坏扣除</span>
+                  <span>历史登记扣款（未核实）</span>
                   <span className="font-semibold">¥{Number(order.depositDeduction).toFixed(2)}</span>
                 </div>
               )}
               <div className="flex justify-between pt-1 font-bold text-slate-900 dark:text-slate-100">
-                <span>结算总金额</span>
+                <span>约定金额合计</span>
                 <PriceDisplay price={order.finalAmount.toString()} size="md" />
               </div>
+              <p className="text-slate-500">平台不托管资金；订单完成或索赔同意不代表已收款、扣款或退款，请双方核对线下凭证。</p>
             </div>
           </div>
         </div>

@@ -109,3 +109,129 @@ app_url_from_env() {
   site_address="$(require_env_var SITE_ADDRESS)"
   printf 'https://%s' "$site_address"
 }
+
+# All backup and destructive restore jobs on one host use the same flock inode.
+# Do not move the lock relative to a selected backup filename or latest dump.
+BACKUP_RESTORE_LOCK_NAME=".backup-restore.lock"
+
+# Disaster-recovery hold belongs to the production HOST, not to a checkout.
+# In production the path cannot be redirected using OPS_PROJECT_DIR.
+# Sandboxes remain isolated and must declare an unambiguously non-production
+# Compose project; COMPOSE_PROJECT_NAME would override its YAML name.
+PRODUCTION_RECOVERY_HOLD_FILE="/var/lib/campus-marketplace/production-recovery-hold"
+RECOVERY_HOLD_FILE="${PRODUCTION_RECOVERY_HOLD_FILE}"
+
+check_ops_project_scope() {
+  if [[ -z "${OPS_PROJECT_DIR}" ]]; then
+    RECOVERY_HOLD_FILE="${PRODUCTION_RECOVERY_HOLD_FILE}"
+    return 0
+  fi
+  local root scope compose_name
+  root="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+  if ! scope="$(cd "${PROJECT_DIR}" && pwd -P)" || [[ "${scope}" == "${root}" ]]; then
+    echo "[ops][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN: invalid sandbox root" >&2
+    return 1
+  fi
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" || ! -f "${COMPOSE_FILE}" ]] || { [[ -f "${ENV_FILE}" ]] && grep -Eq '^[[:space:]]*COMPOSE_PROJECT_NAME[[:space:]]*=' "${ENV_FILE}"; }; then
+    echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: missing isolated Compose model or external project-name override" >&2
+    return 1
+  fi
+  compose_name="$(awk '/^[[:space:]]*name:[[:space:]]*/ {print $2; exit}' "${COMPOSE_FILE}")"
+  case "${compose_name}" in
+    campus-restore-drill-*|campus-ops-test-*) ;;
+    *) echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: sandbox requires isolated project name" >&2; return 1 ;;
+  esac
+  # This only scopes test adapters. Host administrators still can bypass a
+  # shell script; it is not an external disaster-recovery approval authority.
+  RECOVERY_HOLD_FILE="${scope}/.production-recovery-hold"
+}
+
+# Serialize all production writer lifecycle operations with destructive recovery.
+# The backup/restore flock remains a separate nested lock: deploy holds this
+# lifecycle lock while its backup subprocess takes only the backup lock.
+# A production host must pre-provision /var/lib/campus-marketplace, writable
+# only by the trusted ops account; NEVER fall back to a checkout-local lock.
+OPS_LIFECYCLE_LOCK_NAME=".production-lifecycle.lock"
+acquire_ops_lifecycle_lock() {
+  check_ops_project_scope || return 1
+  local lock_dir lock_path
+  if [[ -n "${OPS_PROJECT_DIR}" ]]; then
+    lock_dir="$(cd "${PROJECT_DIR}" && pwd -P)" || return 1
+  else
+    lock_dir="/var/lib/campus-marketplace"
+  fi
+  if [[ ! -d "${lock_dir}" || -L "${lock_dir}" ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: trusted host lock directory is missing" >&2
+    return 1
+  fi
+  # POSIX Linux host trust boundary: an unrelated local user must not be
+  # able to replace the flock inode while another process holds its FD.
+  # Require the actual running ops identity to own a private 0700 directory.
+  # An ACL granting other identities access is reflected in group mode bits.
+  local owner_and_mode lock_owner lock_mode
+  if ! owner_and_mode="$(stat -c '%u %a' -- "${lock_dir}")"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: cannot stat host lock directory" >&2
+    return 1
+  fi
+  read -r lock_owner lock_mode <<< "${owner_and_mode}"
+  if [[ ! "${lock_owner}" =~ ^[0-9]+$ || ! "${lock_mode}" =~ ^[0-7]{3,4}$ ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: invalid owner/mode" >&2
+    return 1
+  fi
+  if [[ "${lock_owner}" != "$(id -u)" ]] || (( (8#${lock_mode} & 0077) != 0 )); then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: must be owned by running ops account and private (0700)" >&2
+    return 1
+  fi
+  lock_path="${lock_dir}/${OPS_LIFECYCLE_LOCK_NAME}"
+  if [[ -L "${lock_path}" ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: symlink lock is forbidden" >&2
+    return 1
+  fi
+  if ! exec {OPS_LIFECYCLE_LOCK_FD}> "${lock_path}"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: cannot open host lock" >&2
+    return 1
+  fi
+  if ! flock -n "${OPS_LIFECYCLE_LOCK_FD}"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_BUSY: a deploy, rollback or restore is already active" >&2
+    return 1
+  fi
+}
+
+require_no_production_recovery_hold() {
+  check_ops_project_scope || return 1
+  if [[ -e "${RECOVERY_HOLD_FILE}" || -L "${RECOVERY_HOLD_FILE}" ]]; then
+    echo "[ops][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: recovery hold exists; service restart/rollback prohibited until independently reviewed recovery procedure exists" >&2
+    return 1
+  fi
+}
+
+# Docker tags can be reassigned. Verify the content-addressed local image ID
+# against BOTH recorded release logs before a rollback switches any writer.
+release_image_id() {
+  local id
+  id="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null)" || return 1
+  [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$id"
+}
+
+require_release_image_inventory() {
+  local sha="$1" key="$2" image="$3" manifest_line release_line expected release_id actual
+  local inventory_file="${PROJECT_DIR}/.release-image-ids.log"
+  local release_file="${PROJECT_DIR}/.releases.log"
+  [[ -f "$inventory_file" && -f "$release_file" ]] || {
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_EVIDENCE_MISSING: no verified deployment inventory" >&2
+    return 1
+  }
+  manifest_line="$(awk -v key="RELEASE_SHA=$sha" '{for(i=1;i<=NF;i++)if($i==key){print;break}}' "$inventory_file" | tail -n 1)"
+  release_line="$(awk -v key="RELEASE_SHA=$sha" '{for(i=1;i<=NF;i++)if($i==key){print;break}}' "$release_file" | tail -n 1)"
+  expected="$(printf '%s\n' "$manifest_line" | tr ' ' '\n' | grep -E "^${key}_IMAGE_ID=sha256:[0-9a-f]{64}$" | cut -d= -f2- | head -n 1)"
+  release_id="$(printf '%s\n' "$release_line" | tr ' ' '\n' | grep -E "^${key}_IMAGE_ID=sha256:[0-9a-f]{64}$" | cut -d= -f2- | head -n 1)"
+  if [[ -z "$expected" || "$expected" != "$release_id" ]]; then
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_EVIDENCE_MISSING: missing or inconsistent recorded image identity for $key" >&2
+    return 1
+  fi
+  if ! actual="$(release_image_id "$image")" || [[ "$actual" != "$expected" ]]; then
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_MISMATCH: target image differs from verified deployment identity for $key" >&2
+    return 1
+  fi
+}

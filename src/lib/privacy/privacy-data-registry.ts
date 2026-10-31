@@ -94,6 +94,8 @@ function entry(
 
 export const FROZEN_PERSONAL_MODELS = [
   "User",
+  "AccountSession",
+  "AccountChallenge",
   "UserVerification",
   "Message",
   "Review",
@@ -130,6 +132,14 @@ export type FrozenPersonalModel = (typeof FROZEN_PERSONAL_MODELS)[number];
  * 字段级差异由 SENSITIVE_FIELD_EXPECTATIONS 细化（如 User.passwordHash）。
  */
 export const MODEL_PRIVACY_POLICIES: Record<FrozenPersonalModel, ModelPrivacyPolicy> = {
+  AccountChallenge: {
+    model: "AccountChallenge",
+    ...entry("CREDENTIAL_SECRET", "EXCLUDE", "DELETE", false, false),
+  },
+  AccountSession: {
+    model: "AccountSession",
+    ...entry("CREDENTIAL_SECRET", "EXCLUDE", "DELETE", false, false),
+  },
   User: {
     model: "User",
     ...entry("DIRECT_IDENTITY", "INCLUDE", "PSEUDONYMIZE", false, false),
@@ -286,6 +296,14 @@ export const SENSITIVE_FIELD_EXPECTATIONS: FieldPrivacyPolicy[] = [
   // 注销 = REDACT（ERASED_USER_DISPLAY_NAME 哨兵；运行时与迁移一致）
   field("User", "schoolName", entry("DIRECT_IDENTITY", "INCLUDE", "REDACT", false, false)),
   field("User", "passwordHash", entry("CREDENTIAL_SECRET", "EXCLUDE", "PSEUDONYMIZE", false, false)),
+  field("User", "emailVerifiedAt", entry("DIRECT_IDENTITY", "EXCLUDE", "CLEAR", false, false)),
+  field("User", "mfaSecretEncrypted", entry("CREDENTIAL_SECRET", "EXCLUDE", "CLEAR", false, false)),
+  field("User", "mfaPendingEncrypted", entry("CREDENTIAL_SECRET", "EXCLUDE", "CLEAR", false, false)),
+  field("User", "mfaPendingSessionId", entry("CREDENTIAL_SECRET", "EXCLUDE", "CLEAR", false, false)),
+  field("User", "mfaPendingExpiresAt", entry("CREDENTIAL_SECRET", "EXCLUDE", "CLEAR", false, false)),
+  field("User", "mfaLastCounter", entry("CREDENTIAL_SECRET", "EXCLUDE", "CLEAR", false, false)),
+  field("AccountChallenge", "tokenHash", entry("CREDENTIAL_SECRET", "EXCLUDE", "DELETE", false, false)),
+  field("AccountChallenge", "bindingHash", entry("CREDENTIAL_SECRET", "EXCLUDE", "DELETE", false, false)),
   // ---- UserVerification：认证证据 + 审核自由文本（schoolName/campusName/
   //      studentIdLast4 均为非空列 → REDACT 哨兵，与运行时一致）----
   field("UserVerification", "schoolName", entry("DIRECT_IDENTITY", "SAFE_SUBSET", "REDACT", false, false)),
@@ -495,23 +513,34 @@ export const LISTING_USER_CONTENT_FIELD_POLICIES: FieldPrivacyPolicy[] = [
   field("RentalHandoverRecord", "accessories", CLEARED_USER_CONTENT),
   field("RentalHandoverRecord", "currentCondition", CLEARED_USER_CONTENT),
   field("RentalHandoverRecord", "knownIssues", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "ownerCurrentCondition", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "renterCurrentCondition", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "ownerKnownIssues", CLEARED_USER_CONTENT),
+  field("RentalHandoverRecord", "renterKnownIssues", CLEARED_USER_CONTENT),
   // ---- RentalDamageClaim / Extension / Return / Unavailable ----
   field("RentalDamageClaim", "damageDescription", REDACTED_USER_CONTENT),
   field("RentalDamageClaim", "renterNote", CLEARED_USER_CONTENT),
   field("RentalDamageClaim", "photos", entry("USER_AUTHORED_CONTENT", "EXCLUDE", "CLEAR", false, false)),
   field("RentalExtensionRequest", "ownerNote", CLEARED_USER_CONTENT),
-  // inspectionNote = owner 验收自由文本（order.ownerId 精确归属）
+  // New inspectionNote is owner-authored; historical shared notes are cleared
+  // on either participant's erasure because their author cannot be inferred.
   field("RentalReturnRecord", "inspectionNote", CLEARED_USER_CONTENT),
+  field("RentalReturnRecord", "renterInspectionNote", CLEARED_USER_CONTENT),
+  field("RentalReturnRecord", "legacyInspectionNote", CLEARED_USER_CONTENT),
   field("RentalUnavailablePeriod", "reason", CLEARED_USER_CONTENT),
   // ---- STORAGE_METADATA 引用面（非自由文本）----
-  // RentalHandoverRecord.photos / RentalReturnRecord.photos 是双确认覆盖
-  // 语义的混合归属资产引用数组（ownerConfirmed/renterConfirmed 无 per-photo
-  // attribution）——不得按作者清空。它们不是 personal free text 而是
+  // RentalHandoverRecord.photos / RentalReturnRecord.photos retain the legacy
+  // unattributed references plus an append-only union of new party evidence.
+  // They are not personal free text but
   // controlled-asset locator：被引用 HANDOVER/RETURN 资产在 erasure 时
   // PENDING_DELETE → 对象物理删除，locator 保留与 bucket/objectKey 同构
   // （cleanup provenance）。
   field("RentalHandoverRecord", "photos", STORAGE_INTERNAL_FIELD),
   field("RentalReturnRecord", "photos", STORAGE_INTERNAL_FIELD),
+  field("RentalHandoverRecord", "ownerPhotos", STORAGE_INTERNAL_FIELD),
+  field("RentalHandoverRecord", "renterPhotos", STORAGE_INTERNAL_FIELD),
+  field("RentalReturnRecord", "ownerPhotos", STORAGE_INTERNAL_FIELD),
+  field("RentalReturnRecord", "renterPhotos", STORAGE_INTERNAL_FIELD),
   // ---- OrderMeetup（Phase 8D-01：proposedById 唯一作者）。custom location
   // 快照是 user-authored 非空列（erasure = REDACT 哨兵，作者注销后不得保留
   // 明文）；custom 判定依据 immutable locationSource（RB01）而非可空的
@@ -619,14 +648,17 @@ export const USER_INPUT_FIELD_EXPECTATIONS: UserInputFieldExpectation[] = [
   // 无 per-field author attribution → participant-erasure 规则清空）。
   // accessories 无当前生产 writer（schema 只有 currentCondition/knownIssues），
   // 属 HISTORICAL_ONLY——保留 field policy 与 erasure coverage，不入本清单。
-  { model: "RentalHandoverRecord", field: "currentCondition", sources: ["rentalPickupConfirmSchema.currentCondition"] },
-  { model: "RentalHandoverRecord", field: "knownIssues", sources: ["rentalPickupConfirmSchema.knownIssues"] },
+  { model: "RentalHandoverRecord", field: "ownerCurrentCondition", sources: ["rentalPickupConfirmSchema.currentCondition"] },
+  { model: "RentalHandoverRecord", field: "renterCurrentCondition", sources: ["rentalPickupConfirmSchema.currentCondition"] },
+  { model: "RentalHandoverRecord", field: "ownerKnownIssues", sources: ["rentalPickupConfirmSchema.knownIssues"] },
+  { model: "RentalHandoverRecord", field: "renterKnownIssues", sources: ["rentalPickupConfirmSchema.knownIssues"] },
   // RentalDamageClaim / Extension / Return / Unavailable
   { model: "RentalDamageClaim", field: "damageDescription", sources: ["rentalDamageClaimSchema.damageDescription"] },
   { model: "RentalDamageClaim", field: "renterNote", sources: ["rentalDamageRespondSchema.renterNote"] },
   // ownerNote 无当前生产 writer（approveExtensionTx/rejectExtensionTx input
   // 仅 id+userId）→ HISTORICAL_ONLY，保留 policy 与 erasure coverage。
   { model: "RentalReturnRecord", field: "inspectionNote", sources: ["rentalReturnConfirmSchema.inspectionNote"] },
+  { model: "RentalReturnRecord", field: "renterInspectionNote", sources: ["rentalReturnConfirmSchema.inspectionNote"] },
   { model: "RentalUnavailablePeriod", field: "reason", sources: ["rentalUnavailablePeriodForm.reason"] },
   // Order（productOrderFormSchema / serviceOrderFormSchema）
   { model: "Order", field: "meetingLocation", sources: ["productOrderFormSchema.meetingLocation", "serviceOrderFormSchema.meetingLocation"] },
@@ -740,12 +772,18 @@ export const ERASURE_FIELD_COVERAGE: ReadonlySet<string> = new Set([
   "RentalHandoverRecord.accessories",
   "RentalHandoverRecord.currentCondition",
   "RentalHandoverRecord.knownIssues",
+  "RentalHandoverRecord.ownerCurrentCondition",
+  "RentalHandoverRecord.renterCurrentCondition",
+  "RentalHandoverRecord.ownerKnownIssues",
+  "RentalHandoverRecord.renterKnownIssues",
   // RentalDamageClaim / Extension / Return / Unavailable
   "RentalDamageClaim.damageDescription",
   "RentalDamageClaim.renterNote",
   "RentalDamageClaim.photos",
   "RentalExtensionRequest.ownerNote",
   "RentalReturnRecord.inspectionNote",
+  "RentalReturnRecord.renterInspectionNote",
+  "RentalReturnRecord.legacyInspectionNote",
   "RentalUnavailablePeriod.reason",
   // Blocked / Dispute / Report / Review / Message / Support / Appeal
   "BlockedUser.reason",

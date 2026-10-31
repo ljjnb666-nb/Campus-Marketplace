@@ -1,0 +1,13 @@
+[Unit]
+Description=Campus PostgreSQL backup and offsite copy
+Requires=docker.service
+After=docker.service network-online.target
+OnFailure=campus-ops-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/campus-marketplace
+UMask=0077
+RuntimeDirectory=campus-backup
+ExecStart=/usr/bin/flock --nonblock /run/campus-backup/backup.lock /bin/bash scripts/ops/backup-postgres.sh
+TimeoutStartSec=2h

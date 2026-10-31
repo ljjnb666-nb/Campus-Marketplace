@@ -16,6 +16,13 @@ vi.mock("@/lib/prisma", () => ({
 
 import { finalizeCredentialLogin } from "@/lib/credential-login-service";
 
+vi.mock("@/lib/account-session-service", () => ({
+  createAccountSessionTx: vi.fn(async () => ({ id: "new-session" })),
+}));
+vi.mock("@/lib/account-mfa-service", () => ({
+  verifyCredentialMfaTx: vi.fn(async () => ({ ok: true, strongAuthAt: null })),
+}));
+
 /**
  * RB-03 REVIEW FIX：CREDENTIAL_LOGIN_FINALIZATION_CONTRACT 单元合同。
  *
@@ -32,6 +39,7 @@ const FRESH_USER = {
   avatarUrl: "http://x/a.webp",
   role: "STUDENT" as const,
   passwordHash: "$2a$10$verifiedhash",
+  credentialRecoveryRequired: false,
   status: "ACTIVE" as const,
   deletedAt: null,
   erasedAt: null,
@@ -72,6 +80,7 @@ describe("finalizeCredentialLogin（RB-03 credential finalizer）", () => {
     const identity = await finalizeCredentialLogin(CANDIDATE);
 
     expect(identity).toEqual({
+      sessionId: "new-session",
       id: "user-1",
       email: "user-1@example.com",
       name: "张同学",
@@ -99,6 +108,18 @@ describe("finalizeCredentialLogin（RB-03 credential finalizer）", () => {
     expect(tx.user.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { lastLoginAt: expect.any(Date) } }),
     );
+  });
+
+  it("RECOVERY-HOLD-01：即使旧密码哈希及邮箱正确，恢复隔离状态也拒绝新会话", async () => {
+    const tx = makeTx();
+    tx.user.findUnique.mockResolvedValue({
+      ...FRESH_USER, credentialRecoveryRequired: true,
+    });
+    withTransaction.mockImplementation(async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
+      callback(tx),
+    );
+    expect(await finalizeCredentialLogin(CANDIDATE)).toBeNull();
+    expect(tx.user.update).not.toHaveBeenCalled();
   });
 
   it("LOGIN-03：erased → null（不写 lastLoginAt）", async () => {

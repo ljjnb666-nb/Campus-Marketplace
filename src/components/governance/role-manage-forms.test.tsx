@@ -27,8 +27,8 @@ function denyState(): GovernanceRoleActionState {
 }
 
 describe("CampusRoleGrantForm", () => {
-  let grantAction: ReturnType<typeof vi.fn>;
-  let lookupAction: ReturnType<typeof vi.fn>;
+  let grantAction: ReturnType<typeof vi.fn<(formData: FormData) => Promise<GovernanceRoleActionState>>>;
+  let lookupAction: ReturnType<typeof vi.fn<(formData: FormData) => Promise<GovernanceRoleActionState>>>;
 
   beforeEach(() => {
     grantAction = vi.fn();

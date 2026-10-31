@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { E2E_ACCOUNTS, storageStatePath, uniqueTag } from "./helpers/e2e";
 import { e2eDb, eraseUserFixture, seedActiveDataHold } from "./helpers/db";
 import { flushRateLimits } from "./helpers/rate-limit";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 
 /**
  * Phase 5 Golden Flows — 隐私请求治理（Phase 9C-03 异步导出语义更新）
@@ -199,7 +199,8 @@ test("GF-P5 STALE_JWT（business mutation + pages）：注销后残留 cookie �
     },
   });
   expect(upload.status()).toBe(401);
-  expect((await upload.json()).code).toBe("ACCOUNT_INACTIVE");
+  // Erasure now revokes the server-owned session before business authorization.
+  expect((await upload.json()).code).toBe("UNAUTHENTICATED");
 
   // 5. 数据库无新 mutation（没有为该用户创建任何 asset）
   const user = await e2eDb().user.findUniqueOrThrow({ where: { email } });
@@ -314,7 +315,7 @@ test("GF-P2 账号注销：显式确认 → 匿名化 → listing 下架 → 登
   await page.locator('input[name="email"]').first().fill(email);
   await page.locator('input[name="password"]').first().fill("P2Pass#2026");
   await page.getByRole("button", { name: "登录" }).click();
-  await expect(page.getByText("邮箱或密码错误")).toBeVisible();
+  await expect(page.getByText("邮箱、密码或动态验证码错误")).toBeVisible();
 
   await context.close();
 });

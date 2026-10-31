@@ -66,7 +66,7 @@ describe("DamageClaimPage", () => {
     expect(screen.getByText("提交损坏索赔")).toBeTruthy();
     expect(screen.getByText("押金金额：¥200.00")).toBeTruthy();
     expect(screen.getByLabelText(/损坏描述/)).toBeTruthy();
-    expect(screen.getByLabelText(/申请扣除金额/)).toBeTruthy();
+    expect(screen.getByLabelText(/申请线下补偿金额/)).toBeTruthy();
   });
 
   it("租客访问被重定向", async () => {

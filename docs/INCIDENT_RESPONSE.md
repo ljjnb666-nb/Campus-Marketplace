@@ -126,7 +126,7 @@ curl -fsS https://<域名>/api/ready               # readiness：依赖状态（
   1. 确认当前 release：`curl /api/health` 的 `release` 字段
   2. 回滚走 **docs/ROLLBACK.md**（唯一权威流程）：
      - 默认 `./scripts/ops/rollback.sh <prev_sha>`（safe：不碰 DB）
-     - 涉及 schema 的破坏性迁移 → `--hard` 路径（先 restore 后切应用）
+     - 涉及 schema 的破坏性迁移 → **生产 `--hard` 已硬禁用**：禁止手工恢复旧库后重启；上报事故指挥，保持隔离并评估 forward-fix/隔离演练（Issue #198 OPEN）
   3. 回滚后 verify：/api/health release == prev_sha 且 /api/ready 全绿
   4. postmortem：坏变更如何通过 CI（补测试/门禁）
 
@@ -134,7 +134,7 @@ curl -fsS https://<域名>/api/ready               # readiness：依赖状态（
 
 - 流程：docs/ROLLBACK.md（safe/hard 决策表、`.releases.log` 标记不可逆迁移）
 - 关键纪律：
-  1. hard rollback 的前置是 restore 成功——restore 失败绝不切应用（脚本已内置）
+  1. **当前生产 hard rollback 固定拒绝** `RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED`；不得用直接 Compose/旧脚本/删除 hold 绕过。独立生产 restore 仅用于保持停写与凭据隔离；即使报告成功也绝不自动重新开放流量
   2. 回滚后必须做 release 验证（EXACT SHA）与 `/api/ready`
   3. 回滚不是终点：24h 内决定 forward-fix 还是保持
 

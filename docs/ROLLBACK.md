@@ -8,6 +8,15 @@
 > 所有 env（SITE_ADDRESS/BACKUP_DIR/POSTGRES_*）由脚本从 `.env.production`
 > 读取（经 `scripts/ops/lib.sh` 统一的 `--env-file` 约定），操作员无需手工 export。
 
+> **2026-10-31 安全状态：** 真实生产 hard rollback **禁止执行**。
+> `rollback.sh <sha> --hard` 固定返回
+> `RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED`；旧版数据库可含过期
+> passwordHash、邮箱、MFA 和角色授权。没有外部不可回退身份/RBAC
+> 真值对账、独立审批与凭据隔离解除流程之前，绝不恢复 writer/登录。
+> 安全回滚也必须通过固定宿主机生命周期锁、恢复 hold 检查、
+> 真实镜像 ID 双日志一致性和准确 release gate。
+> 生产状态 `UNVERIFIED / BLOCKED`，Issue #198 仍 OPEN。
+
 ## 原则
 
 1. **schema 只向前**。绝不自动执行 destructive down migration。
@@ -49,7 +58,7 @@ rollback 启动时先（只读）判定目标 release 的 cleanup artifact 是�
 | --- | --- |
 | 新 release 功能故障，schema 兼容 | 安全路径：`rollback.sh <prev_sha>`（不碰数据库；worker 成对切换/停止） |
 | 新迁移尚未部署就发现坏 release | 直接 `rollback.sh <prev_sha>`（无 schema 变化） |
-| 已部署的迁移使旧 release 无法工作 | --hard：restore-production-postgres.sh 恢复最近备份，成功后才按目标 policy 切 writers |
+| 已部署的迁移使旧 release 无法工作 | **生产 hard rollback 已禁用**：停止切换并升级事故响应；先在隔离环境评估快照和 forward-fix，不得手工解锁或恢复 writer |
 | 数据被应用 bug 破坏 | 恢复最近备份到临时库比对，做数据修复而非整库回滚 |
 
 ## 操作
@@ -74,27 +83,31 @@ docker compose --env-file .env.production -f compose.production.yml \
 ./scripts/ops/deploy.sh
 ```
 
-## --hard 的数据安全语义
+## --hard 的数据安全语义（生产已停用，仅保留隔离测试合同）
 
-`./scripts/ops/rollback.sh <prev_sha> --hard`（仅 schema 不兼容时）：
+`./scripts/ops/rollback.sh <prev_sha> --hard` 在真实生产路径会先以
+`RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED` 拒绝；不执行数据库
+DROP/RESTORE、不自动切 app 或任何 worker，也不会写成功日志。
+原先关于“恢复成功自动切回 app/cleanup/async-worker”的历史方案
+**不得按生产操作手册执行**。经隔离的模拟回归允许使用独立的
+`OPS_PROJECT_DIR` / restore stub，但不构成生产授权。
 
-1. 取 `BACKUP_DIR` 最新备份；**无备份直接中止**（绝不无备份覆盖生产库）
-2. 30 秒取消窗口后调用 `restore-production-postgres.sh
-   --production-restore --backup-file ... --target-db <生产库名>`：
-   **停止全部 production DB writers（app + storage-cleanup + async-worker）并逐一验证 →**
-   SHA256 强校验 → terminate 连接 → DROP/CREATE → restore → 完整性检查；
-   任一 writer 无法停止 → FAIL CLOSED（绝不带着写流量 DROP）
-3. **恢复失败（任一步非 0）→ 回滚立即中止，writers 切换绝不执行**，
-   全部 production writers 保持停止状态等待人工介入
-4. 恢复成功 → 以目标 commit 中的 worker 拓扑切换 app、cleanup、async-worker：
-   已存在的 worker 必须 exact SHA，旧版不存在的 worker 必须保持停止；
-   再执行严格 release readiness gate。**恢复失败后的停止状态禁止擅自重启。**
+单独的 `restore-production-postgres.sh` 仅在经批准的事故指挥下
+用于**进入或维持生产隔离状态**：持有宿主机生命周期锁和
+`BACKUP_DIR/.backup-restore.lock`，核验备份校验和，建立固定
+`production-recovery-hold`，停止并逐一核验三个 writer，恢复数据库、
+强制凭据隔离并撤销旧 session/challenge。任何失败均不得自动恢复服务；
+停止前发生失败时不能宣称 writer 已经停止。
 
-shell-level 回归测试（`tests/ops/rollback-restore.test.sh`）覆盖：safe 不碰 DB、
-restore 失败阻断切换、restore 成功才切换、cleanup 与 app 成对切换到 exact SHA、
-pre-worker 目标停止 cleanup、async-worker pre/post 目标切换及缺镜像拒绝、
-任一 worker 切换失败不写 SUCCESS、缺备份 fail、SHA 不一致 fail、
-缺显式确认 fail、writer 无法停止 → restore 不执行 DROP。
+**上线前缺失项**：外部不可回退身份及 RBAC 事件真值、
+独立事故审批与不可绕过的解封门禁、跨节点隔离证明、登录与邮件/MFA
+真实演练及经过签名验证的发布工件。Issue #198 保持 OPEN。
+相关证据和脚本边界见
+[恢复凭据隔离手册](./ops/production-restore-credential-recovery.md)。
+
+已存在的 shell-level tests 仍覆盖安全 rollback、旧版 hard 测试
+fixture、备份完整性、writer 停止和恢复失败时 fail-closed；这些
+测试仅验证**隔离工程行为**，不能升级生产信任等级。
 
 ## 不可逆迁移的处理
 

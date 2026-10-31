@@ -187,6 +187,8 @@ export async function eraseAccount(
 
     // ---- 匿名化（保留行，替换可识别字段） ----
     const erasedAt = new Date();
+    await client.accountSession.deleteMany({ where: { userId } });
+    await client.accountChallenge.deleteMany({ where: { userId } });
     // 随机口令哈希：原凭据永不再匹配（不做"删除"，保持字段非空约束）
     const invalidPasswordHash = await hash(randomUUID(), 10);
 
@@ -197,6 +199,12 @@ export async function eraseAccount(
         name: ERASED_USER_DISPLAY_NAME,
         email: buildErasedEmail(),
         passwordHash: invalidPasswordHash,
+        emailVerifiedAt: null,
+        mfaSecretEncrypted: null,
+        mfaPendingEncrypted: null,
+        mfaPendingExpiresAt: null,
+        mfaPendingSessionId: null,
+        mfaLastCounter: null,
         avatarUrl: null,
         bio: null,
         phone: null,
@@ -548,12 +556,31 @@ export async function eraseAccount(
       data: { ownerNote: null },
     });
 
-    // RentalReturnRecord：inspectionNote 由 owner（order.ownerId）验收时写入；
-    // photos 为双确认覆盖语义的混合归属资产引用（STORAGE_METADATA locator，
-    // 对象由 HANDOVER/RETURN 资产 lifecycle 物理删除）——不清数组
+    // New inspectionNote is owner-authored; legacy shared notes have no proven
+    // author and are cleared when either party erases. Photo locators remain;
+    // HANDOVER/RETURN asset lifecycle deletes the actual participant's objects.
     await client.rentalReturnRecord.updateMany({
-      where: { order: { ownerId: userId }, inspectionNote: { not: null } },
+      where: { inspectionNote: { not: null }, OR: [
+        { order: { ownerId: userId } },
+        { ownerInspectionRecordedAt: null, order: { renterId: userId } },
+      ] },
       data: { inspectionNote: null },
+    });
+    await client.rentalReturnRecord.updateMany({
+      where: { order: { renterId: userId }, renterInspectionNote: { not: null } },
+      data: { renterInspectionNote: null },
+    });
+    await client.rentalReturnRecord.updateMany({
+      where: { order: { OR: [{ ownerId: userId }, { renterId: userId }] }, legacyInspectionNote: { not: null } },
+      data: { legacyInspectionNote: null },
+    });
+    await client.rentalHandoverRecord.updateMany({
+      where: { order: { ownerId: userId } },
+      data: { ownerCurrentCondition: null, ownerKnownIssues: null },
+    });
+    await client.rentalHandoverRecord.updateMany({
+      where: { order: { renterId: userId } },
+      data: { renterCurrentCondition: null, renterKnownIssues: null },
     });
 
     // RentalHandoverRecord：accessories/currentCondition/knownIssues 为

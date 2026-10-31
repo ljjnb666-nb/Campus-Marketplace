@@ -77,6 +77,9 @@ export const rentalReturnConfirmSchema = z.object({
   orderId: z.string().trim().min(1, "订单不存在"),
   role: z.enum(["owner", "renter"], { message: "无权操作" }),
   inspectionNote: z.string().trim().max(1000, "验收备注不能超过1000字").optional(),
+  hasDamage: z.enum(["true", "false"], { message: "请选择物品是否损坏" }).transform(v => v === "true"),
+  needsCleaning: z.enum(["true", "false"], { message: "请选择是否需要清洁" }).transform(v => v === "true"),
+  accessoriesComplete: z.enum(["true", "false"], { message: "请选择配件是否齐全" }).transform(v => v === "true"),
 });
 
 export const rentalCancelSchema = z.object({
@@ -106,7 +109,8 @@ export const rentalDisputeSchema = z.object({
 export const rentalDamageClaimSchema = z.object({
   orderId: z.string().trim().min(1),
   damageDescription: z.string().trim().min(5).max(1000),
-  requestedDeduction: z.string().trim().refine(v => !isNaN(Number(v)) && Number(v) >= 0),
+  requestedDeduction: z.string().trim().regex(/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/, "金额最多两位小数")
+    .refine(v => Number.isFinite(Number(v)) && Number(v) > 0, "索赔金额须大于零"),
 });
 
 export const rentalReviewSchema = z.object({

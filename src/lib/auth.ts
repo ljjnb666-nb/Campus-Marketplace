@@ -6,40 +6,14 @@ import { z } from "zod";
 import { finalizeCredentialLogin } from "@/lib/credential-login-service";
 import { logger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { isRateLimited, resetRateLimit } from "@/lib/rate-limit";
-
-const LOGIN_RATE_LIMIT = 10;
-const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+import { consumeCredentialLoginBudget, finishCredentialLoginBudget } from "@/lib/login-rate-limit";
+import { describeDevice, isAccountSessionActive, revokeSignedOutSession } from "@/lib/account-session-service";
 
 const credentialsSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(8),
+  password: z.string().min(8).max(72),
+  mfaCode: z.string().max(8).optional(),
 });
-
-function resolveClientIp(headers: Record<string, unknown> | undefined) {
-  const forwardedFor = headers?.["x-forwarded-for"];
-  const headerValue = Array.isArray(forwardedFor)
-    ? forwardedFor.join(",")
-    : forwardedFor;
-
-  if (typeof headerValue === "string") {
-    const ip = headerValue.split(",")[0]?.trim();
-    if (ip) {
-      return ip;
-    }
-  }
-
-  return "unknown";
-}
-
-function resolveLoginRateLimitKey(
-  credentials: Record<string, string> | undefined,
-  headers: Record<string, unknown> | undefined,
-) {
-  const identifier = credentials?.email?.trim().toLowerCase();
-
-  return `login:${identifier || resolveClientIp(headers)}`;
-}
 
 export const authOptions: NextAuthOptions = {
   session: {
@@ -56,22 +30,16 @@ export const authOptions: NextAuthOptions = {
       credentials: {
         email: { label: "邮箱", type: "email" },
         password: { label: "密码", type: "password" },
+        mfaCode: { label: "验证器动态码", type: "text" },
       },
       async authorize(credentials, req) {
-        const rateLimitKey = resolveLoginRateLimitKey(
-          credentials,
-          req?.headers,
+        const { limited, accountSourceKey } = await consumeCredentialLoginBudget(
+          credentials?.email, req?.headers,
         );
-
-        const { limited } = await isRateLimited({
-          key: rateLimitKey,
-          limit: LOGIN_RATE_LIMIT,
-          windowMs: LOGIN_RATE_LIMIT_WINDOW_MS,
-        });
 
         if (limited) {
           // 与密码错误同样返回 null，不向客户端泄露限流状态
-          logger.warn("登录限流触发", "auth", { rateLimitKey });
+          logger.warn("登录限流触发", "auth");
           return null;
         }
 
@@ -92,6 +60,7 @@ export const authOptions: NextAuthOptions = {
           !user ||
           user.deletedAt ||
           user.erasedAt ||
+          user.credentialRecoveryRequired ||
           (user.status !== "ACTIVE" && user.status !== "SUSPENDED")
         ) {
           return null;
@@ -113,6 +82,8 @@ export const authOptions: NextAuthOptions = {
           id: user.id,
           passwordHash: user.passwordHash,
           email: user.email,
+          deviceLabel: describeDevice(req?.headers?.["user-agent"]),
+          mfaCode: parsed.data.mfaCode,
         });
 
         // bcrypt 通过但 finalization 失败 = 登录失败：不重置限流计数
@@ -120,8 +91,7 @@ export const authOptions: NextAuthOptions = {
           return null;
         }
 
-        // 登录成功后重置该账号的失败计数
-        await resetRateLimit(rateLimitKey);
+        await finishCredentialLoginBudget(accountSourceKey);
 
         return {
           id: identity.id,
@@ -129,6 +99,7 @@ export const authOptions: NextAuthOptions = {
           name: identity.name,
           image: identity.avatarUrl,
           role: identity.role,
+          sessionId: identity.sessionId,
         };
       },
     }),
@@ -138,6 +109,7 @@ export const authOptions: NextAuthOptions = {
       const typedUser = user as
         | {
             id: string;
+            sessionId?: string;
             name?: string | null;
             image?: string | null;
             role?: "STUDENT" | "ADMIN";
@@ -146,6 +118,7 @@ export const authOptions: NextAuthOptions = {
 
       if (typedUser) {
         token.id = typedUser.id;
+        token.sessionId = typedUser.sessionId;
         token.name = typedUser.name;
         token.picture = typedUser.image;
         token.role = typedUser.role ?? "STUDENT";
@@ -166,6 +139,7 @@ export const authOptions: NextAuthOptions = {
     async session({ session, token }) {
       if (session.user) {
         session.user.id = (token.id as string | undefined) ?? session.user.id;
+        session.user.sessionId = token.sessionId;
         session.user.name = (token.name as string | null | undefined) ?? null;
         session.user.image = (token.picture as string | null | undefined) ?? null;
         session.user.role =
@@ -175,9 +149,18 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
+  events: {
+    async signOut({ token }) {
+      if (token?.id && token.sessionId) {
+        await revokeSignedOutSession(token.id, token.sessionId);
+      }
+    },
+  },
   secret: process.env.NEXTAUTH_SECRET,
 };
 
-export function auth() {
-  return getServerSession(authOptions);
+export async function auth() {
+  const session = await getServerSession(authOptions);
+  if (!session?.user || !await isAccountSessionActive(session.user.id, session.user.sessionId)) return null;
+  return session;
 }

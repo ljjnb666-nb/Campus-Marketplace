@@ -59,5 +59,7 @@ describe("MessagesPage", () => {
     expect(screen.getByText("李同学")).toBeTruthy();
     expect(screen.getByText("高数教材")).toBeTruthy();
     expect(screen.getByText("PPT 美化")).toBeTruthy();
+    expect(getConversationDetailPayload).not.toHaveBeenCalled();
+    expect(screen.getByText("张同学").closest("div.hidden")).toBeNull();
   });
 });

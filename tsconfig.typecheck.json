@@ -8,6 +8,8 @@
   ],
   "exclude": [
     "node_modules",
-    ".next"
+    ".next",
+    ".tmp-scratch",
+    ".audit"
   ]
 }

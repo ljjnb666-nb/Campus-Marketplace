@@ -27,10 +27,13 @@
 #     任一失败 → 整体非 0 退出（本次备份判定 FAILED，不得宣称备份成功）
 # =============================================================================
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# Prevent a redirected checkout from addressing the production Compose namespace.
+check_ops_project_scope
 load_production_env
 
 # ---- 第一个必需配置：备份目录（状态产物落点）----
@@ -45,6 +48,18 @@ if ! touch "${BACKUP_DIR}/.write-probe" 2>/dev/null; then
   exit 1
 fi
 rm -f "${BACKUP_DIR}/.write-probe"
+
+# Prevent a scheduler pg_dump from racing a destructive pg_restore.
+# Hold the same FD through dump, checksum, offsite copy and retention.
+LOCK_FILE="${BACKUP_DIR}/${BACKUP_RESTORE_LOCK_NAME}"
+if ! exec {BACKUP_RESTORE_LOCK_FD}> "${LOCK_FILE}"; then
+  echo "[backup][FAIL] BACKUP_RESTORE_LOCK_UNAVAILABLE" >&2
+  exit 1
+fi
+if ! flock -n "${BACKUP_RESTORE_LOCK_FD}"; then
+  echo "[backup][FAIL] BACKUP_RESTORE_LOCK_BUSY: backup/restore already active" >&2
+  exit 1
+fi
 
 # ---- BACKUP_DIR 可用：立即初始化状态并注册 trap（BLOCKER 4B）----
 STATUS_FILE="${BACKUP_DIR}/backup-status.json"

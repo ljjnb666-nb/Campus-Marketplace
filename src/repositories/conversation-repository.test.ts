@@ -5,6 +5,9 @@ const {
   conversationParticipantUpdateMany,
   conversationFindFirst,
   conversationFindMany,
+  conversationCount,
+  queryRaw,
+  messageFindFirst,
   messageFindMany,
   messageGroupBy,
   messageUpdateMany,
@@ -25,6 +28,9 @@ const {
   conversationParticipantUpdateMany: vi.fn(),
   conversationFindFirst: vi.fn(),
   conversationFindMany: vi.fn(),
+  conversationCount: vi.fn(),
+  queryRaw: vi.fn(),
+  messageFindFirst: vi.fn(),
   messageFindMany: vi.fn(),
   messageGroupBy: vi.fn(),
   messageUpdateMany: vi.fn(),
@@ -44,6 +50,7 @@ const {
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    $queryRaw: queryRaw,
     conversationParticipant: {
       findMany: conversationParticipantFindMany,
       updateMany: conversationParticipantUpdateMany,
@@ -51,9 +58,11 @@ vi.mock("@/lib/prisma", () => ({
     conversation: {
       findFirst: conversationFindFirst,
       findMany: conversationFindMany,
+      count: conversationCount,
     },
     message: {
       findMany: messageFindMany,
+      findFirst: messageFindFirst,
       groupBy: messageGroupBy,
       updateMany: messageUpdateMany,
     },
@@ -98,6 +107,9 @@ describe("conversation repository", () => {
     conversationParticipantUpdateMany.mockReset();
     conversationFindFirst.mockReset();
     conversationFindMany.mockReset();
+    conversationCount.mockReset();
+    queryRaw.mockReset().mockResolvedValue([{ id: "last-message" }]);
+    messageFindFirst.mockReset();
     messageFindMany.mockReset();
     messageGroupBy.mockReset();
     messageUpdateMany.mockReset();
@@ -122,37 +134,30 @@ describe("conversation repository", () => {
     errandTaskFindUnique.mockResolvedValue(null);
   });
 
-  it("counts unread conversations with a single distinct query instead of per-conversation lookups", async () => {
-    messageFindMany.mockResolvedValue([
-      { conversationId: "conversation-1" },
-      { conversationId: "conversation-2" },
-    ]);
+  it("counts unread conversations in the database without loading messages", async () => {
+    conversationCount.mockResolvedValue(2);
 
     const count = await getUnreadConversationCount("user-1");
 
     expect(count).toBe(2);
-    expect(messageFindMany).toHaveBeenCalledTimes(1);
-    expect(messageFindMany).toHaveBeenCalledWith({
+    expect(conversationCount).toHaveBeenCalledTimes(1);
+    expect(conversationCount).toHaveBeenCalledWith({
       where: {
-        isRead: false,
-        senderId: { not: "user-1" },
-        conversation: {
-          participants: { some: { userId: "user-1" } },
-        },
+        participants: { some: { userId: "user-1" } },
+        messages: { some: { isRead: false, senderId: { not: "user-1" } } },
       },
-      select: { conversationId: true },
-      distinct: ["conversationId"],
     });
+    expect(messageFindMany).not.toHaveBeenCalled();
     expect(conversationParticipantFindMany).not.toHaveBeenCalled();
   });
 
   it("returns zero unread conversations when there are no unread messages", async () => {
-    messageFindMany.mockResolvedValue([]);
+    conversationCount.mockResolvedValue(0);
 
     const count = await getUnreadConversationCount("user-1");
 
     expect(count).toBe(0);
-    expect(messageFindMany).toHaveBeenCalledTimes(1);
+    expect(conversationCount).toHaveBeenCalledTimes(1);
   });
 
   it("maps hydrated conversations into list items with counterpart and unread state", async () => {
@@ -225,15 +230,9 @@ describe("conversation repository", () => {
 
     const items = await getConversationListItems("user-1");
 
-    // 列表查询只取最后一条消息（DISTINCT ON）而非全量消息
+    // LATERAL query selects at most one ID per conversation before hydration.
     expect(messageFindMany).toHaveBeenCalledWith({
-      where: { conversationId: { in: ["conversation-1"] } },
-      orderBy: [
-        { conversationId: "asc" },
-        { createdAt: "desc" },
-        { id: "desc" },
-      ],
-      distinct: ["conversationId"],
+      where: { id: { in: ["last-message"] } },
       include: {
         sender: {
           select: { id: true, name: true, avatarUrl: true },
@@ -987,8 +986,8 @@ describe("conversation repository", () => {
 
     const payload = await getConversationDetailPayload("conversation-1", "user-1", undefined, 2);
 
-    // 倒序取 limit+1 条，数组末尾一条被弹出作为向上翻页的 cursor
+    // Cursor is the last displayed row, never the extra unshown row.
     expect(payload?.messages.map((m) => m.id)).toEqual(["message-2", "message-1"]);
-    expect(payload?.nextCursor).toBe("message-3");
+    expect(payload?.nextCursor).toBe("message-2");
   });
 });

@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { E2E_ACCOUNTS, uniqueTag } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
 import { flushRateLimits } from "./helpers/rate-limit";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 
 /**
  * Phase 5 Golden Flows — 法务协议与同意治理

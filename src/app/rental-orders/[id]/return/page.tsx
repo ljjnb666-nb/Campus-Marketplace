@@ -1,8 +1,9 @@
 import React from "react";
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { requireUser } from "@/lib/server-auth";
 import { getRentalOrderDetail } from "@/repositories/rental-order-repository";
-import { confirmReturn, requestReturn } from "@/actions/rental-order";
+import { confirmReturn, requestReturn, completeRentalInspection } from "@/actions/rental-order";
 import { RentalActionForm } from "@/components/rental/rental-action-form";
 import { Camera } from "lucide-react";
 
@@ -22,9 +23,27 @@ export default async function ReturnVerificationPage({ params }: { params: Promi
   const isRequestingReturn =
     isRenter && ["IN_RENTAL", "OVERDUE", "PICKED_UP"].includes(order.status);
 
-  // PENDING_RETURN / PENDING_INSPECTION 走 confirmReturn 双向确认；租客发起归还走 requestReturn
-  if (order.status !== "IN_RENTAL" && order.status !== "PENDING_RETURN" && !isRequestingReturn) {
+  if (!["PENDING_RETURN", "PENDING_INSPECTION"].includes(order.status) && !isRequestingReturn) {
     redirect(`/rental-orders/${id}`);
+  }
+  const inspectionRecorded = !isRenter && order.status === "PENDING_INSPECTION";
+  const alreadyConfirmed = isRenter ? order.returnRecord?.renterConfirmed : order.returnRecord?.ownerConfirmed;
+  const pendingClaim = order.damageClaims?.some(claim => !claim.resolvedAt && !claim.supersededAt);
+  if (inspectionRecorded || (alreadyConfirmed && !isRequestingReturn)) {
+    return <div className="mx-auto max-w-2xl space-y-5 px-4 py-10">
+      <h1 className="text-2xl font-bold">归还验收记录已保存</h1>
+      <p>已确认的个人记录不能覆盖；双方可在订单详情中核对各自证据。</p>
+      {inspectionRecorded && <>
+        <p>存在待协商的验收问题。补偿和押金退还均由双方线下处理，平台不自动划款。</p>
+        {pendingClaim ? <p>已有待处理索赔，请等待租客处理。</p> : <>
+          {Number(order.depositAmount) > 0 && <Link href={`/rental-orders/${id}/claim`} className="text-indigo-600 underline">申请线下补偿</Link>}
+          <RentalActionForm action={completeRentalInspection} submitLabel="不申请补偿，完成订单">
+            <input type="hidden" name="orderId" value={id} />
+          </RentalActionForm>
+        </>}
+      </>}
+      <Link href={`/rental-orders/${id}`} className="text-indigo-600 underline">返回订单详情</Link>
+    </div>;
   }
 
   return (
@@ -39,7 +58,7 @@ export default async function ReturnVerificationPage({ params }: { params: Promi
       <RentalActionForm
         uploadCategory="return"
         action={isRequestingReturn ? requestReturn : confirmReturn}
-        submitLabel={isRenter ? "提交归还申请" : "确认完好归还"}
+        submitLabel={isRequestingReturn ? "提交归还申请" : isRenter ? "确认我的归还记录" : "提交验收结果"}
         className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-md md:p-8"
       >
         <input type="hidden" name="orderId" value={id} />
@@ -65,8 +84,22 @@ export default async function ReturnVerificationPage({ params }: { params: Promi
                   <input type="file" name="photos" accept="image/jpeg,image/png,image/webp" multiple className="hidden" />
                 </label>
               </div>
-              <p className="text-xs text-slate-500">请重点拍摄物品外观，证明物品完好无损</p>
+              <p className="text-xs text-slate-500">请如实记录外观和异常。双方证据分别保存，确认后不能覆盖。</p>
             </div>
+
+            {[
+              { name: "hasDamage", label: "物品是否损坏", yes: "有损坏", no: "无损坏" },
+              { name: "needsCleaning", label: "是否需要额外清洁", yes: "需要清洁", no: "无需清洁" },
+              { name: "accessoriesComplete", label: "配件是否齐全", yes: "配件齐全", no: "配件缺失" },
+            ].map(field => <div className="space-y-2" key={field.name}>
+              <label htmlFor={field.name} className="text-sm font-medium">{field.label}</label>
+              <select id={field.name} name={field.name} required defaultValue="" className="w-full rounded-xl border p-3">
+                <option value="" disabled>请选择</option>
+                <option value="true">{field.yes}</option>
+                <option value="false">{field.no}</option>
+              </select>
+            </div>)}
+            <p className="text-xs text-slate-500">订单完成仅表示履约记录结束，不代表平台已收款、扣款或退还押金。</p>
 
             <div className="space-y-2">
               <label className="text-sm font-medium text-slate-700">归还备注（选填）</label>

@@ -27,6 +27,11 @@ import { acquireGovernanceSubjectLock } from "@/lib/governance/governance-lock";
 import { hasActiveHold } from "@/lib/privacy/data-hold-service";
 import { withTransaction } from "@/lib/prisma";
 import { hasPermission, loadAuthorizationContext } from "@/lib/rbac/service";
+import { AssetServiceError } from "@/lib/asset-errors";
+import { validateUploadBatch } from "@/lib/upload-batch";
+import { admitUpload, withUploadSlot } from "@/lib/upload-admission";
+
+export { AssetServiceError, type AssetServiceErrorCode } from "@/lib/asset-errors";
 
 export { buildAssetReference, isAssetReference, parseAssetReference };
 
@@ -67,31 +72,6 @@ export { buildAssetReference, isAssetReference, parseAssetReference };
  *   → PENDING_DELETE → T2 释放
  * - 任意 PENDING_DELETE：重复执行安全，两个 worker 并发只有一个完成转移与减额
  */
-
-export type AssetServiceErrorCode =
-  | "INVALID_CATEGORY"
-  | "UNSUPPORTED_MIME"
-  | "FILE_TOO_LARGE"
-  | "TOO_MANY_FILES"
-  | "QUOTA_EXCEEDED"
-  | "STORAGE_UPLOAD_FAILED"
-  | "ASSET_RECORD_FAILED"
-  | "INVALID_ASSET_REFERENCE"
-  | "ASSET_CATEGORY_MISMATCH"
-  | "ASSET_ALREADY_ATTACHED"
-  | "ASSET_BIND_CONFLICT";
-
-export class AssetServiceError extends Error {
-  readonly code: AssetServiceErrorCode;
-  readonly status: number;
-
-  constructor(code: AssetServiceErrorCode, message: string, status = 400) {
-    super(message);
-    this.name = "AssetServiceError";
-    this.code = code;
-    this.status = status;
-  }
-}
 
 /** 对象 Cache-Control 策略：按访问级别显式给定，存储层不做猜测 */
 export const PUBLIC_OBJECT_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -165,6 +145,7 @@ async function reserveQuotaBytes(
     UPDATE "User"
     SET "storageUsedBytes" = "storageUsedBytes" + ${sizeBytes}
     WHERE "id" = ${userId}
+      AND "status" = 'ACTIVE' AND "deletedAt" IS NULL AND "erasedAt" IS NULL
       AND "storageUsedBytes" + ${sizeBytes} <= ${quotaBytes()}
   `;
   return reserved > 0;
@@ -216,6 +197,16 @@ export async function uploadImageAsset(params: {
   category: UploadCategory;
   file: File;
 }): Promise<UploadedAssetResult> {
+  validateUploadBatch([params.file], params.category);
+  await admitUpload(params.userId);
+  return withUploadSlot(() => uploadAdmittedImageAsset(params));
+}
+
+async function uploadAdmittedImageAsset(params: {
+  userId: string;
+  category: UploadCategory;
+  file: File;
+}): Promise<UploadedAssetResult> {
   const startedAt = Date.now();
   const { userId, category, file } = params;
 
@@ -253,6 +244,13 @@ export async function uploadImageAsset(params: {
   try {
     const created = await prisma.$transaction(async (rawTx) => {
       const tx = rawTx as unknown as Prisma.TransactionClient;
+      // Same boundary as account erasure. Entry authentication can predate
+      // multipart parsing/decoding; only this locked read authorizes T1.
+      await acquireGovernanceSubjectLock(tx, "USER", userId);
+      const context = await loadAuthorizationContext(userId, tx);
+      if (!context?.accountActive) {
+        throw new AssetServiceError("ACCOUNT_INACTIVE", "账号当前不可用", 401);
+      }
       const reserved = await reserveQuotaBytes(tx, userId, sizeBytes);
       if (!reserved) {
         throw new AssetServiceError(
@@ -368,13 +366,27 @@ export async function uploadImageAsset(params: {
     throw new AssetServiceError("STORAGE_UPLOAD_FAILED", "图片上传失败，请稍后重试", 503);
   }
 
-  // PUT 成功：条件转移 UPLOADING → UPLOADED。
-  // 转移失败（DB 故障）：行停留 UPLOADING，cleanup 会删除对象并释放配额（用户重试即可）
-  const uploaded = await prisma.uploadedAsset.updateMany({
-    where: { id: assetId, status: "UPLOADING" },
-    data: { status: "UPLOADED" },
+  // No database transaction spans the external PUT. Reconcile under the USER
+  // lock afterwards: erasure wins => durable deletion, no filename or public
+  // URL delivered; upload wins => the later erasure sees the UPLOADED row.
+  const finalized = await withTransaction(async (tx) => {
+    await acquireGovernanceSubjectLock(tx, "USER", userId);
+    const context = await loadAuthorizationContext(userId, tx);
+    const active = context?.accountActive === true;
+    const updated = await tx.uploadedAsset.updateMany({
+      where: { id: assetId, ownerId: userId, status: "UPLOADING" },
+      data: active
+        ? { status: "UPLOADED" }
+        : { status: "PENDING_DELETE", originalFileName: null },
+    });
+    return { active, count: batchCount(updated) };
   });
-  if (batchCount(uploaded) !== 1) {
+  // Throw only after committing PENDING_DELETE; throwing inside would undo
+  // reconciliation and strand the row in UPLOADING until its orphan TTL.
+  if (!finalized.active) {
+    throw new AssetServiceError("ACCOUNT_INACTIVE", "账号当前不可用", 401);
+  }
+  if (finalized.count !== 1) {
     logger.error("UPLOADED 状态转移未命中，资源将由 cleanup 回收", "asset-service", {
       operation: "upload",
       assetId,

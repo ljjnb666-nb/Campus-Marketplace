@@ -36,10 +36,54 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
-load_production_env
 
-# OPS_RESTORE_SCRIPT 仅供自动化测试注入 stub（生产路径不受影响）
-RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT:-${SCRIPT_DIR}/restore-production-postgres.sh}"
+# Pure guard checks before touching production state. In particular, the
+# production --hard and unsafe helper-overrides must retain their explicit
+# rejection reasons even when the host lock directory is not provisioned.
+require_no_production_recovery_hold
+
+# HARD RESTORE AUTHORITY: production must always call the checked-in,
+# fail-closed restore script. The OPS_RESTORE_SCRIPT test seam is permitted
+# only with an explicitly redirected, physically distinct sandbox project.
+# In particular, setting OPS_RESTORE_SCRIPT on a real production checkout
+# must never turn a no-op helper into a successful database restoration.
+REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+RESTORE_SCRIPT="${SCRIPT_DIR}/restore-production-postgres.sh"
+if [[ -n "${OPS_RESTORE_SCRIPT:-}" ]]; then
+  if [[ -z "${OPS_PROJECT_DIR:-}" ]]; then
+    echo "[rollback][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN：只有隔离测试沙箱可替换恢复脚本" >&2
+    exit 1
+  fi
+  SANDBOX_ROOT="$(cd "${PROJECT_DIR}" && pwd -P)"
+  if [[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]; then
+    echo "[rollback][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN：真实仓库不允许环境覆盖恢复脚本" >&2
+    exit 1
+  fi
+  RESTORE_SCRIPT="${OPS_RESTORE_SCRIPT}"
+fi
+# P1 recovery safety: a destructive production rollback cannot both restore
+# historic identity/role data and automatically reopen writers. An external,
+# independently reviewed identity/RBAC reconciliation gate does not yet exist.
+# Block the entire production --hard flow before any destructive side effect.
+# The physically separate OPS_PROJECT_DIR fixture remains for isolated tests.
+# Do NOT replace this with an environment flag or a self-attested file.
+if [[ "${2:-}" == "--hard" ]]; then
+  if [[ -z "${OPS_PROJECT_DIR:-}" || -z "${OPS_RESTORE_SCRIPT:-}" ]]; then
+    echo "[rollback][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: production --hard is disabled until externally verified identity/RBAC reconciliation and an independently audited release gate exist" >&2
+    exit 1
+  fi
+  SANDBOX_ROOT="$(cd "${PROJECT_DIR}" && pwd -P)" || exit 1
+  if [[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]; then
+    echo "[rollback][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: refusing production hard rollback" >&2
+    exit 1
+  fi
+fi
+# The pure hard/override validation above has no side effects. Now serialize
+# every subsequent operation and recheck hold UNDER the lock, closing the race
+# between the early guard and recovery becoming active.
+acquire_ops_lifecycle_lock
+require_no_production_recovery_hold
+load_production_env
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
 if [[ ! "${PREVIOUS_SHA}" =~ ^[a-fA-F0-9]{40}$ ]]; then
@@ -56,6 +100,19 @@ fi
 
 echo "[rollback] 回滚目标: ${PREVIOUS_SHA}（mode=${MODE:-safe}）"
 
+# A destructive restore quarantines all credentials; a subsequent SAFE
+# rollback to a legacy app would ignore the restored credential hold and
+# reauthorize obsolete password hashes. Therefore BOTH modes must reject
+# incompatible target releases, before any image/writer side effect.
+# This source check is conservative, NOT proof of deployed image identity.
+for source in src/lib/credential-login-service.ts src/lib/account-challenge-service.ts src/lib/account-session-service.ts; do
+  if ! target_source="$(git -C "${PROJECT_DIR}" cat-file -p "${PREVIOUS_SHA}:${source}" 2>/dev/null)" \
+    || ! grep -Fq 'credentialRecoveryRequired' <<< "${target_source}"; then
+    echo "[rollback][FAIL] RECOVERY_CREDENTIAL_HOLD_TARGET_INCOMPATIBLE：目标版本缺少恢复凭据隔离合同，禁止 safe/hard 回滚后重新开放旧密码登录" >&2
+    exit 1
+  fi
+done
+
 # 旧镜像必须存在（不可变 tag 保留）
 if ! docker image inspect "campus-marketplace-app:${PREVIOUS_SHA}" >/dev/null 2>&1; then
   echo "[rollback] 旧镜像 campus-marketplace-app:${PREVIOUS_SHA} 不存在" >&2
@@ -65,14 +122,22 @@ fi
 
 # -----------------------------------------------------------------------------
 # cleanup worker 目标 release 判定（只读，先于一切 side effect）：
-#   campus-marketplace-cleanup:<PREVIOUS_SHA> 存在 → post-worker 目标
-#   （rollback 必须同时切 worker）；不存在 → pre-worker 目标（停止 worker）。
+#   目标 commit 包含 worker 入口 → post-worker，且必须有该 release 镜像；
+#   目标 commit 不含入口 → pre-worker。镜像被 prune 不能改变历史拓扑。
 # 首次上线 cleanup worker 后，回滚目标可能是 pre-worker release——不得因此
 # 让 rollback 失效，也不得保留 newer cleanup worker 继续运行。
 # -----------------------------------------------------------------------------
 CLEANUP_TARGET_IMAGE="campus-marketplace-cleanup:${PREVIOUS_SHA}"
-if docker image inspect "${CLEANUP_TARGET_IMAGE}" >/dev/null 2>&1; then
+if ! git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}^{commit}" 2>/dev/null; then
+  echo "[rollback][FAIL] 无法验证目标 release commit；拒绝推断 worker 拓扑" >&2
+  exit 1
+fi
+if git -C "${PROJECT_DIR}" cat-file -e "${PREVIOUS_SHA}:scripts/ops/storage-cleanup-worker.ts" 2>/dev/null; then
   CLEANUP_TARGET_MODE="post-worker"
+  if ! docker image inspect "${CLEANUP_TARGET_IMAGE}" >/dev/null 2>&1; then
+    echo "[rollback][FAIL] 目标 release 包含 storage-cleanup，但其 immutable image 不存在，禁止降级为 pre-worker" >&2
+    exit 1
+  fi
 else
   CLEANUP_TARGET_MODE="pre-worker"
 fi
@@ -80,7 +145,7 @@ echo "[rollback] cleanup target mode = ${CLEANUP_TARGET_MODE}（${CLEANUP_TARGET
 
 # async-worker 也是数据库写入方。旧版本没有 async-worker 镜像时必须
 # 保持它停止；旧版本有镜像时必须切换并验证其运行镜像，不能遗留 newer
-# worker。镜像缺失模式沿用 cleanup 的早期 release 兼容策略。
+# worker。与 cleanup 相同，先验证目标 commit，再确认对应镜像存在。
 ASYNC_TARGET_IMAGE="campus-marketplace-async-worker:${PREVIOUS_SHA}"
 # A missing local image is NOT proof that the target release never had the
 # service. Prove its topology against the exact immutable Git commit before
@@ -99,6 +164,22 @@ else
   ASYNC_TARGET_MODE="pre-async"
 fi
 echo "[rollback] async-worker target mode = ${ASYNC_TARGET_MODE}（${ASYNC_TARGET_IMAGE}）"
+
+# Historical SHA tags can be reassigned. A rollback is authorized only when
+# the tag's current Docker image ID matches BOTH prior deployment inventories.
+# Check before any writer stop/start or destructive restore.
+require_release_image_inventory "${PREVIOUS_SHA}" "APP" "campus-marketplace-app:${PREVIOUS_SHA}" || exit 1
+APP_TARGET_ID="$(release_image_id "campus-marketplace-app:${PREVIOUS_SHA}")" || exit 1
+CLEANUP_TARGET_ID=""
+ASYNC_TARGET_ID=""
+if [[ "${CLEANUP_TARGET_MODE}" == "post-worker" ]]; then
+  require_release_image_inventory "${PREVIOUS_SHA}" "CLEANUP" "${CLEANUP_TARGET_IMAGE}" || exit 1
+  CLEANUP_TARGET_ID="$(release_image_id "${CLEANUP_TARGET_IMAGE}")" || exit 1
+fi
+if [[ "${ASYNC_TARGET_MODE}" == "post-async" ]]; then
+  require_release_image_inventory "${PREVIOUS_SHA}" "ASYNC_WORKER" "${ASYNC_TARGET_IMAGE}" || exit 1
+  ASYNC_TARGET_ID="$(release_image_id "${ASYNC_TARGET_IMAGE}")" || exit 1
+fi
 
 APP_URL="${APP_URL:-$(app_url_from_env)}"
 # OPS_HEALTH_TIMEOUT 仅调整门禁等待预算（不能把失败变成功）：
@@ -237,6 +318,25 @@ stop_async_before_switch() {
   fi
 }
 
+# The current cleanup worker may still write DB/S3 with the newer schema.
+# Quiesce it before switching the app to the target release. Post-worker
+# targets restart only after app switch; pre-worker targets remain stopped.
+stop_cleanup_before_switch() {
+  if ! compose_run stop storage-cleanup; then
+    echo "[rollback][FAIL] storage-cleanup 停止失败，拒绝切换 release" >&2
+    exit 1
+  fi
+  local running_services=""
+  if ! running_services="$(compose_run ps --status running --services)"; then
+    echo "[rollback][FAIL] storage-cleanup 停止状态无法确认，拒绝切换 release" >&2
+    exit 1
+  fi
+  if printf '%s\n' "${running_services}" | grep -qx storage-cleanup; then
+    echo "[rollback][FAIL] 旧 storage-cleanup 仍在运行，拒绝切换 release" >&2
+    exit 1
+  fi
+}
+
 ASYNC_LOG_TAG=""
 switch_async_to() {
   local target_sha="$1" resolved_images="" running_services="" runtime_json=""
@@ -309,6 +409,7 @@ fi
 # 成功后到达这里）：先 app，后 cleanup（release identity 成对，不允许 split）
 echo "[rollback] 先停止旧 async-worker，再切换目标 release ${PREVIOUS_SHA}"
 stop_async_before_switch
+stop_cleanup_before_switch
 echo "[rollback] 应用切回 ${PREVIOUS_SHA}"
 switch_app_to "${PREVIOUS_SHA}"
 switch_cleanup_to "${PREVIOUS_SHA}"
@@ -326,16 +427,16 @@ fi
 
 # 记录完整 runtime artifact 集合。pre-async / pre-cleanup 只能记录已停止，
 # 绝不写不存在的 IMAGE 或把未确认的 worker 标记为 running。
-RELEASE_LOG="$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA}"
+RELEASE_LOG="$(date -Is) ROLLBACK RELEASE_SHA=${PREVIOUS_SHA} APP_IMAGE=campus-marketplace-app:${PREVIOUS_SHA} APP_IMAGE_ID=${APP_TARGET_ID}"
 if [[ "${CLEANUP_TARGET_MODE}" == "pre-worker" ]]; then
   RELEASE_LOG="${RELEASE_LOG} CLEANUP=${CLEANUP_LOG_TAG}"
 else
-  RELEASE_LOG="${RELEASE_LOG} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP=${CLEANUP_LOG_TAG}"
+  RELEASE_LOG="${RELEASE_LOG} CLEANUP_IMAGE=campus-marketplace-cleanup:${PREVIOUS_SHA} CLEANUP_IMAGE_ID=${CLEANUP_TARGET_ID} CLEANUP=${CLEANUP_LOG_TAG}"
 fi
 if [[ "${ASYNC_TARGET_MODE}" == "pre-async" ]]; then
   RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER=${ASYNC_LOG_TAG}"
 else
-  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER=${ASYNC_LOG_TAG}"
+  RELEASE_LOG="${RELEASE_LOG} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${PREVIOUS_SHA} ASYNC_WORKER_IMAGE_ID=${ASYNC_TARGET_ID} ASYNC_WORKER=${ASYNC_LOG_TAG}"
 fi
 printf '%s MODE=%s READINESS=ready\n' "${RELEASE_LOG}" "${MODE:-safe}" >> "${PROJECT_DIR}/.releases.log"
 echo "[rollback] SUCCESS → ${PREVIOUS_SHA}（cleanup=${CLEANUP_LOG_TAG}, async-worker=${ASYNC_LOG_TAG}）"

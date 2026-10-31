@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { Info, ShoppingBag } from "lucide-react";
 import type { ConversationMessageItem } from "@/repositories/conversation-repository";
 
@@ -40,16 +40,27 @@ export function ChatMessageList({
 }: ChatMessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // 初始自动定位到底部
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages?.length]);
+  const previous = useRef<{ first?: string; height: number; top: number; nearBottom: boolean } | null>(null);
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const before = previous.current;
+    if (!before) element.scrollTop = element.scrollHeight;
+    else if (before.first !== messages[0]?.id && messages.some((message) => message.id === before.first)) {
+      element.scrollTop = before.top + element.scrollHeight - before.height;
+    } else if (before.nearBottom) element.scrollTop = element.scrollHeight;
+    previous.current = { first: messages[0]?.id, height: element.scrollHeight, top: element.scrollTop,
+      nearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 80 };
+  }, [messages]);
 
   return (
     <div
       ref={scrollRef}
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        previous.current = { first: messages[0]?.id, height: element.scrollHeight, top: element.scrollTop,
+          nearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 80 };
+      }}
       className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50/50 dark:bg-slate-950/30"
     >
       {/* 顶部加载更多历史消息按钮 */}

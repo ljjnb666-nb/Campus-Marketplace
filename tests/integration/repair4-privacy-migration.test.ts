@@ -103,13 +103,12 @@ function replayPreMigrations(tempUrl: string): void {
 function replayPostMigrations(tempUrl: string): void {
   const migrationsDir = join(process.cwd(), "prisma", "migrations");
   const postMigrations = readdirSync(migrationsDir)
-    .filter((name) => /^\d{14}_/.test(name) && name > NEW_MIGRATION)
+    .filter((name) => /^\d{12,14}_/.test(name) && name > NEW_MIGRATION)
     .sort();
   expect(postMigrations.length).toBeGreaterThan(0);
-  const sql = postMigrations
-    .map((name) => readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"))
-    .join("\n\n");
-  runPrismaDbExecute(sql, tempUrl);
+  for (const name of postMigrations) {
+    runPrismaDbExecute(readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"), tempUrl);
+  }
 }
 
 function newMigrationSql(): string {
@@ -141,25 +140,17 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
           schoolName: "集成测试大学",
         },
       });
-      const erased = await db.user.create({
-        data: {
-          name: "历史注销用户",
-          email: `erased-${randomUUID().slice(0, 8)}@it.local`,
-          passwordHash: "test-only",
-          schoolName: "示例大学",
-          campusId: campus.id,
-          erasedAt: new Date("2026-09-01T00:00:00Z"),
-        },
-      });
-      const survivor = await db.user.create({
-        data: {
-          name: "在册对照用户",
-          email: `survivor-${randomUUID().slice(0, 8)}@it.local`,
-          passwordHash: "test-only",
-          schoolName: "示例大学",
-          campusId: campus.id,
-        },
-      });
+      const erased = { id: randomUUID() };
+      const survivor = { id: randomUUID() };
+      // The current Prisma client would write columns absent before this migration.
+      await db.$executeRaw`
+        INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId", "erasedAt", "updatedAt")
+        VALUES (${erased.id}, '历史注销用户', ${`erased-${randomUUID().slice(0,8)}@it.local`}, 'test-only', '示例大学', ${campus.id}, ${new Date('2026-09-01T00:00:00Z')}, CURRENT_TIMESTAMP)
+      `;
+      await db.$executeRaw`
+        INSERT INTO "User" ("id", "name", "email", "passwordHash", "schoolName", "campusId", "updatedAt")
+        VALUES (${survivor.id}, '在册对照用户', ${`survivor-${randomUUID().slice(0,8)}@it.local`}, 'test-only', '示例大学', ${campus.id}, CURRENT_TIMESTAMP)
+      `;
       const erasedMembership = await db.campusMembership.create({
         data: { userId: erased.id, campusId: campus.id, status: "LEFT" },
       });
@@ -173,6 +164,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
 
       // R4-01 canary：erased 用户 schoolName 仍为原值（迁移后 → marker）
       await db.user.update({
+        select: { id: true },
         where: { id: erased.id },
         data: { schoolName: "隐私学校-DO-NOT-SURVIVE" },
       });
@@ -401,18 +393,18 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
       });
 
       // RentalHandoverRecord participant-erasure（renter=erased）
-      await db.rentalHandoverRecord.create({
-        data: {
-          orderId: rentalOrder.id,
-          photos: [],
-          accessories: "私人配件备注",
-          currentCondition: "私人现状说明",
-          knownIssues: "私人问题说明",
-        },
-      });
+      // Current Prisma defaults include participant columns absent in this
+      // historical schema, so write the exact historical shape explicitly.
+      await db.$executeRaw`
+        INSERT INTO "RentalHandoverRecord"
+          ("id", "orderId", "photos", "accessories", "currentCondition", "knownIssues", "updatedAt")
+        VALUES (${randomUUID()}, ${rentalOrder.id}, ARRAY[]::TEXT[],
+          '私人配件备注', '私人现状说明', '私人问题说明', CURRENT_TIMESTAMP)
+      `;
 
       // damage claim（挂在既有 rentalOrder：owner=survivor, renter=erased）
       await db.rentalDamageClaim.create({
+        select: { id: true },
         data: {
           orderId: rentalOrder.id,
           submittedById: survivor.id,
@@ -422,6 +414,7 @@ describe.skipIf(!integrationDatabaseUrl)("Repair 4 privacy backfill migration (r
         },
       });
       await db.rentalDamageClaim.create({
+        select: { id: true },
         data: {
           orderId: rentalOrder.id,
           submittedById: survivor.id,

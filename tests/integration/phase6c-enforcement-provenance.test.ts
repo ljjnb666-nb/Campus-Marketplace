@@ -336,7 +336,7 @@ describe.skipIf(!integrationDatabaseUrl)(
             await tx.$executeRaw`INSERT INTO "EnforcementAction"
               ("id","type","actorId","targetId","campusId","scopeKey","reasonCode",
                "note","sourceType","sourceId","previousState","resultState")
-             VALUES ('${RUN_TAG}-invert-B', 'ACCOUNT_REINSTATE', ${secondAdmin.id}, ${target.id},
+             VALUES (${`${RUN_TAG}-invert-B`}, 'ACCOUNT_REINSTATE', ${secondAdmin.id}, ${target.id},
                      NULL, 'GLOBAL', 'FALSE_POSITIVE_CORRECTION', NULL, NULL, NULL,
                      'USER:SUSPENDED', 'USER:ACTIVE')`;
 
@@ -366,7 +366,7 @@ describe.skipIf(!integrationDatabaseUrl)(
       // ---- 释放 B：B 取同一 target 锁 → 完整 REINSTATE → EA B → commit ----
       releaseB();
       const txBResult = await txBPromise;
-      expect(txBResult.fulfilled).toBe(true);
+      expect(txBResult.fulfilled, txBResult.fulfilled ? undefined : String(txBResult.error)).toBe(true);
 
       // ---- 断言：两边都产生了真实 EA ----
       const actions = await rawClient!.enforcementAction.findMany({
@@ -870,14 +870,13 @@ describe.skipIf(!integrationDatabaseUrl)(
         // ---- pre-6C schema（全部既有迁移，按目录名升序，排除新迁移）----
         const migrationsDir = path.resolve("prisma", "migrations");
         const preMigrations = readdirSync(migrationsDir)
-          .filter((name) => /^\d{14}_/.test(name) && name !== NEW_MIGRATION)
+          .filter((name) => /^\d{12,14}_/.test(name) && name !== NEW_MIGRATION)
           .sort();
         expect(preMigrations.length).toBeGreaterThan(0);
 
-        const preSql = preMigrations
-          .map((name) => readFileSync(path.join(migrationsDir, name, "migration.sql"), "utf8"))
-          .join("\n\n");
-        runPrismaDbExecute(preSql, tempUrl);
+        for (const name of preMigrations) {
+          runPrismaDbExecute(readFileSync(path.join(migrationsDir, name, "migration.sql"), "utf8"), tempUrl);
+        }
 
         // ---- 既有 EA 行（pre-6C 形状：无 previousState / enforcementSeq 列）----
         tempClient = new PrismaClient({ datasources: { db: { url: tempUrl } }, log: ["error"] });

@@ -1,5 +1,6 @@
 import { execFile, execSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -17,6 +18,15 @@ function hasBash(): boolean {
   }
 }
 
+function hasFlock(): boolean {
+  try {
+    execSync("bash -c 'command -v flock'", { stdio: "ignore", timeout: 30_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hasDocker(): boolean {
   try {
     execSync("docker version --format ok", { stdio: "ignore", timeout: 30_000 });
@@ -25,6 +35,38 @@ function hasDocker(): boolean {
     return false;
   }
 }
+
+describe("production lifecycle lock shell-level regression", () => {
+  it.skipIf(!hasBash() || !hasFlock())(
+    "deploy, rollback and restore all fail closed under an active host lifecycle lock",
+    async () => {
+      const { stdout } = await execFileAsync("bash", ["tests/ops/lifecycle-lock.test.sh"], {
+        cwd: repoRoot,
+        timeout: 60_000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      expect(stdout).toMatch(/PASS=7 FAIL=0/);
+    },
+    90_000,
+  );
+
+  it("the shared lock is acquired before side effects in all three entrypoints", () => {
+    const lib = readFileSync(path.join(repoRoot, "scripts/ops/lib.sh"), "utf8");
+    expect(lib).toContain('OPS_LIFECYCLE_LOCK_NAME=".production-lifecycle.lock"');
+    expect(lib).toContain('lock_dir="/var/lib/campus-marketplace"');
+    expect(lib).toContain("flock -n");
+    for (const file of [
+      "scripts/ops/deploy.sh",
+      "scripts/ops/rollback.sh",
+      "scripts/ops/restore-production-postgres.sh",
+    ]) {
+      const content = readFileSync(path.join(repoRoot, file), "utf8");
+      expect(content).toContain("acquire_ops_lifecycle_lock");
+      expect(content.indexOf("\nacquire_ops_lifecycle_lock\n"))
+        .toBeLessThan(content.indexOf("\nload_production_env\n"));
+    }
+  });
+});
 
 describe("rollback / restore shell-level regression（tests/ops/rollback-restore.test.sh）", () => {
   it.skipIf(!hasBash())(
@@ -124,13 +166,6 @@ describe("compose production config（--env-file 统一插值来源）", () => {
   it.skipIf(!hasDocker())(
     "docker compose --env-file <synthetic> -f compose.production.yml config 在 shell 未导出任何生产变量时 PASS",
     async () => {
-      const envFile = path.join(repoRoot, ".env.production");
-      const syntheticFile = path.join(repoRoot, ".env.production.synthetic");
-      const existedBefore = existsSync(envFile);
-      const originalContent = existedBefore ? readFileSync(envFile, "utf8") : null;
-      copyFileSync(syntheticFile, envFile);
-
-      try {
         // 清空 shell 中可能存在的生产变量：插值必须只来自 --env-file
         const cleared = Object.fromEntries(
           Object.entries(process.env).filter(
@@ -149,27 +184,44 @@ describe("compose production config（--env-file 统一插值来源）", () => {
               ].includes(key),
           ),
         );
-        const { stdout } = await execFileAsync(
-          "docker",
-          [
-            "compose",
-            "--env-file",
-            ".env.production",
-            "-f",
-            "compose.production.yml",
-            "--profile",
-            "ops",
-            "--profile",
-            "selfhosted-minio",
-            "config",
-          ],
-          {
-            cwd: repoRoot,
-            env: { NODE_ENV: "test", ...cleared },
-            timeout: 120_000,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
+        // Compose env_file is a list that merges across -f overrides, so an
+        // overlay cannot remove the original missing .env.production. Use an
+        // isolated copy of the canonical production topology and redirect ONLY
+        // service env_file paths to the committed nonsecret synthetic fixture.
+        // Never create or read a real .env.production in CI.
+        const configDir = mkdtempSync(path.join(tmpdir(), "campus-compose-config-"));
+        let stdout = "";
+        try {
+          const configPath = path.join(configDir, "compose.synthetic.yml");
+          const original = readFileSync(path.join(repoRoot, "compose.production.yml"), "utf8");
+          const sanitized = original.replace(
+            /^([ \t]*env_file:[ \t]*)\.env\.production[ \t]*$/gm,
+            "$1.env.production.synthetic",
+          );
+          expect(sanitized).not.toBe(original);
+          expect(sanitized).not.toMatch(/^\s*env_file:\s*\.env\.production\s*$/m);
+          writeFileSync(configPath, sanitized);
+          ({ stdout } = await execFileAsync(
+            "docker",
+            [
+              "compose",
+              "--project-directory", repoRoot,
+              "--env-file", ".env.production.synthetic",
+              "-f", configPath,
+              "--profile", "ops",
+              "--profile", "selfhosted-minio",
+              "config", "--no-env-resolution",
+            ],
+            {
+              cwd: repoRoot,
+              env: { NODE_ENV: "test", ...cleared },
+              timeout: 120_000,
+              maxBuffer: 10 * 1024 * 1024,
+            },
+          ));
+        } finally {
+          rmSync(configDir, { recursive: true, force: true });
+        }
         // 插值来自 .env.production：synthetic 值必须出现在渲染结果中
         expect(stdout).toContain("campus.example.edu.cn");
         expect(stdout).toContain("campus_marketplace");
@@ -188,16 +240,42 @@ describe("compose production config（--env-file 统一插值来源）", () => {
         ]) {
           expect(stdout).toContain(service);
         }
-      } finally {
-        if (originalContent !== null) {
-          writeFileSync(envFile, originalContent);
-        } else {
-          rmSync(envFile);
-        }
-      }
     },
     150_000,
   );
+});
+
+describe("hard rollback restore authority", () => {
+  it("keeps production restore fixed to the checked-in helper", () => {
+    const content = readFileSync(path.join(repoRoot, "scripts/ops/rollback.sh"), "utf8");
+    expect(content).toContain("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN");
+    expect(content).toContain('RESTORE_SCRIPT="${SCRIPT_DIR}/restore-production-postgres.sh"');
+    expect(content).toContain('[[ "${SANDBOX_ROOT}" == "${REPOSITORY_ROOT}" ]]');
+    expect(content.indexOf("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN"))
+      .toBeLessThan(content.indexOf("load_production_env"));
+  });
+
+  it.skipIf(!hasBash())("refuses fake successful restores before production side effects, with or without OPS_PROJECT_DIR", async () => {
+    const script = path.join(repoRoot, "scripts/ops/rollback.sh");
+    for (const projectDir of ["", repoRoot]) {
+      let rejected: { code?: number; stderr?: string } | undefined;
+      try {
+        await execFileAsync("bash", [script, "a".repeat(40), "--hard"], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            OPS_PROJECT_DIR: projectDir,
+            OPS_RESTORE_SCRIPT: "/bin/true",
+          },
+          timeout: 30_000,
+        });
+      } catch (error) {
+        rejected = error as { code?: number; stderr?: string };
+      }
+      expect(rejected?.code, "unsafe restore override must exit nonzero").not.toBe(0);
+      expect(rejected?.stderr).toContain("PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN");
+    }
+  });
 });
 
 describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
@@ -265,7 +343,7 @@ describe("ops scripts 静态红线（关键路径绝不允许吞错）", () => {
     const envCheck = content.indexOf("production-env-check");
     const build = content.indexOf('compose_run build');
     const backup = content.indexOf("backup-postgres.sh");
-    const migrate = content.indexOf("run --rm migrate");
+    const migrate = content.indexOf("run --rm --no-deps --no-build --pull never migrate");
     const up = content.indexOf("up -d --no-deps --wait app");
     const gate = content.indexOf("release readiness gate");
     for (const [name, idx] of [

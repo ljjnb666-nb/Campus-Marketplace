@@ -177,11 +177,14 @@ describe.skipIf(!hasDocker())("DOCKER_CONTEXT_PROVENANCE dynamic canary（真实
         containerId = cid.trim();
 
         // 3) 列举 context 全部文件（export tar 条目形如 context/<path>，规范化去除前缀）
+        const archive = path.join(repoRoot, ".tmp-scratch", `${imageTag}.tar`);
+        mkdirSync(path.dirname(archive), { recursive: true });
+        await execFileAsync("docker", ["export", "--output", archive, containerId], { timeout: 120_000 });
         const { stdout } = await execFileAsync(
-          "bash",
-          ["-c", `docker export ${containerId} | tar -tf -`],
+          "tar",
+          ["-tf", archive],
           { cwd: repoRoot, timeout: 120_000, maxBuffer: 64 * 1024 * 1024 },
-        );
+        ).finally(() => rmSync(archive, { force: true }));
         const contextFiles = new Set(
           stdout
             .split(/\r?\n/)

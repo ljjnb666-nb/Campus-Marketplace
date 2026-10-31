@@ -1,5 +1,6 @@
 "use server";
 
+import { mapUploadsWithConcurrency, validateUploadBatch } from "@/lib/upload-batch";
 import { requireNewActivityAllowed } from "@/lib/feature-flags/feature-flag-guard";
 import { RentalListingStatus } from "@prisma/client";
 import { revalidatePath } from "next/cache";
@@ -33,20 +34,16 @@ async function extractImageTokens(formData: FormData, ownerId: string) {
   const imageUrls = formData.getAll("imageUrls").map((value) => String(value).trim());
   const imageFiles = formData.getAll("imageFiles");
 
-  const values = await Promise.all(
-    Array.from({ length: Math.max(imageUrls.length, imageFiles.length) }, async (_, index) => {
-      const file = imageFiles[index];
-
-      if (file instanceof File && file.size > 0) {
-        const result = await uploadImageAsset({ userId: ownerId, category: "rental", file });
-        return buildAssetReference(result.assetId);
-      }
-
-      return imageUrls[index] || null;
-    }),
-  );
-
-  return values.filter((value): value is string => Boolean(value));
+  const entries = Array.from({ length: Math.max(imageUrls.length, imageFiles.length) }, (_, index) => {
+    const file = imageFiles[index];
+    return file instanceof File && file.size > 0 ? file : imageUrls[index] || "";
+  }).filter((entry) => typeof entry !== "string" || entry.length > 0);
+  validateUploadBatch(entries, "rental");
+  return mapUploadsWithConcurrency(entries, async (entry) => {
+    if (typeof entry === "string") return entry;
+    const result = await uploadImageAsset({ userId: ownerId, category: "rental", file: entry });
+    return buildAssetReference(result.assetId);
+  });
 }
 
 export async function createRentalListing(

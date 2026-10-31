@@ -3,6 +3,7 @@ import type { NotificationType } from "@prisma/client";
 
 import { PermanentJobFailure } from "@/lib/async/job-types";
 import { escapeHtml } from "@/lib/notifications/email-escape";
+import { challengeToken } from "@/lib/account-security-crypto";
 
 /**
  * Phase 9B：canonical notification definition registry（§5/§6/§7）。
@@ -154,6 +155,30 @@ function errandStatusLabel(status: string): string {
 // ============================================================
 
 const NOTIFICATIONS: RegisteredNotificationDefinition[] = [
+  defineNotification({
+    kind: "ACCOUNT_SECURITY_EVENT", schemaVersion: 1,
+    payloadSchema: z.object({ event: z.enum(["PASSWORD_CHANGED", "PASSWORD_RESET", "SESSIONS_REVOKED", "MFA_ENABLED", "MFA_DISABLED"]), occurrenceId: idField() }).strict(),
+    channels: [NOTIFICATION_CHANNEL_IN_APP, NOTIFICATION_CHANNEL_EMAIL],
+    renderInApp: () => ({ type: "SYSTEM", title: "账号安全设置已变更", content: "请前往账号安全查看近期记录。如非本人操作，请立即修改密码并撤销其他会话。" }),
+    renderEmail: (_payload, _recipient, { appBaseUrl }) => {
+      const url = new URL("/my/security", appBaseUrl).toString();
+      return { subject: "账号安全设置已变更", text: `请检查近期安全记录。如非本人操作，请修改密码并撤销其他会话。${url}`,
+        html: `<p>账号安全设置已变更。如非本人操作，请修改密码并撤销其他会话。</p><a href="${escapeHtml(url)}">查看安全记录</a>` };
+    },
+  }),
+  defineNotification({
+    kind: "ACCOUNT_SECURITY_CHALLENGE", schemaVersion: 1,
+    payloadSchema: z.object({ challengeId: z.string().uuid(), purpose: z.enum(["VERIFY_EMAIL", "RESET_PASSWORD"]) }).strict(),
+    channels: [NOTIFICATION_CHANNEL_IN_APP, NOTIFICATION_CHANNEL_EMAIL],
+    renderInApp: () => ({ type: "SYSTEM", title: "账号安全邮件已申请", content: "请检查邮箱。邮件链接有效期为 15 分钟，若非本人申请可忽略。" }),
+    renderEmail: (payload, _recipient, { appBaseUrl }) => {
+      const url = new URL("/account/confirm", appBaseUrl);
+      url.hash = new URLSearchParams({ id: payload.challengeId, purpose: payload.purpose, token: challengeToken(payload.challengeId, payload.purpose) }).toString();
+      const subject = payload.purpose === "VERIFY_EMAIL" ? "验证邮箱" : "重置密码";
+      return { subject, text: `${subject}：${url.toString()}\n15 分钟内有效，仅可使用一次。若非本人申请请忽略。`,
+        html: `<p>${subject}。15 分钟内有效，仅可使用一次；若非本人申请请忽略。</p><a href="${escapeHtml(url.toString())}">${subject}</a>` };
+    },
+  }),
   defineNotification({
     kind: PRODUCT_ORDER_CREATED_KIND,
     schemaVersion: NOTIFICATION_SCHEMA_VERSION,

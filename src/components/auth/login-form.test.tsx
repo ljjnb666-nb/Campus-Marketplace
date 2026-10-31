@@ -45,6 +45,13 @@ describe("LoginForm", () => {
     expect(signIn).not.toHaveBeenCalled();
   });
 
+  it("exposes appeal self-service while retaining MFA and password recovery", () => {
+    render(<LoginForm />);
+    expect(screen.getByRole("link", { name: "账号受限？进入申诉" })).toHaveAttribute("href", "/appeals");
+    expect(screen.getByRole("link", { name: "忘记密码" })).toHaveAttribute("href", "/forgot-password");
+    expect(screen.getByLabelText("动态验证码（已启用双重验证时必填）")).toHaveAttribute("name", "mfaCode");
+  });
+
   it("enables credentials submission when mounted client-side", async () => {
     render(<LoginForm />);
     await waitFor(() => {
@@ -54,16 +61,19 @@ describe("LoginForm", () => {
     expect(signIn).not.toHaveBeenCalled();
   });
 
-  it("submits credentials through next-auth signIn", async () => {
+  it.each(["", "123456"])("submits a form-safe MFA value through next-auth signIn (%s)", async (mfaCode) => {
     signIn.mockResolvedValue({ url: "/" });
 
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
+    });
+    fireEvent.change(screen.getByLabelText("动态验证码（已启用双重验证时必填）"), {
+      target: { value: mfaCode },
     });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
 
@@ -71,6 +81,7 @@ describe("LoginForm", () => {
       expect(signIn).toHaveBeenCalledWith("credentials", {
         email: "student1@campus.local",
         password: TEST_PASSWORD,
+        mfaCode,
         redirect: false,
         callbackUrl: "/",
       });
@@ -82,10 +93,10 @@ describe("LoginForm", () => {
     signIn.mockResolvedValueOnce({ error: "CredentialsSignin" });
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -96,7 +107,7 @@ describe("LoginForm", () => {
     expect(screen.queryByText("SENSITIVE_INTERNAL_AUTH_EXCEPTION")).toBeNull();
 
     fireEvent.click(submit);
-    expect(await screen.findByText("邮箱或密码错误")).toBeTruthy();
+    expect(await screen.findByText("邮箱、密码或动态验证码错误")).toBeTruthy();
     expect(submit.disabled).toBe(false);
     expect(signIn).toHaveBeenCalledTimes(2);
   });
@@ -104,10 +115,10 @@ describe("LoginForm", () => {
   it("treats an absent auth result as failure, not successful navigation", async () => {
     signIn.mockResolvedValue(undefined);
     render(<LoginForm />);
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -124,10 +135,10 @@ describe("LoginForm", () => {
   ])("does not navigate on a non-success signIn object ($label)", async ({ result }) => {
     signIn.mockResolvedValue(result);
     render(<LoginForm />);
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: TEST_PASSWORD },
     });
     fireEvent.click(screen.getByRole("button", { name: "登录" }));
@@ -143,14 +154,14 @@ describe("LoginForm", () => {
 
     render(<LoginForm />);
 
-    fireEvent.change(screen.getByPlaceholderText("student1@campus.local"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入校园邮箱"), {
       target: { value: "student1@campus.local" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Student123456"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入密码"), {
       target: { value: "wrong-password" },
     });
     fireEvent.submit(screen.getByRole("button", { name: "登录" }).closest("form") as HTMLFormElement);
 
-    expect(await screen.findByText("邮箱或密码错误")).toBeTruthy();
+    expect(await screen.findByText("邮箱、密码或动态验证码错误")).toBeTruthy();
   });
 });

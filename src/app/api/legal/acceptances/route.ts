@@ -26,7 +26,7 @@ function privateCache(): Record<string, string> {
 
 /** GET /api/legal/acceptances —— 本人同意历史。 */
 async function listHandler() {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(
@@ -74,7 +74,7 @@ async function listHandler() {
  * consent gate 自身入口不要求已同意（否则无法解除）。
  */
 async function postHandler(request: NextRequest) {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(

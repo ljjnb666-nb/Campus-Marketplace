@@ -13,7 +13,7 @@
 #           app + migrate + storage-cleanup + async-worker
 #   STEP 3  备份当前数据库
 #   STEP 4  migrate deploy（一次性容器，禁止 app 启动时并发迁移）+ 迁移验证
-#   STEP 5  app 滚动更新
+#   STEP 5  app 单实例替换（会有短暂中断，不宣称滚动发布）
 #   STEP 6  storage-cleanup worker 切换 + 运行时验证 + dry-run smoke；
 #           async-worker 切换 + 运行时验证（Phase 9A）
 #           （worker 使用当前 schema：只在 migrate 完成后切换，绝不让新
@@ -42,6 +42,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+
+# Hold the production lifecycle lock through backup, migration, all writer
+# switches, readiness verification and release-log commit. Restore cannot
+# begin in the middle of a deployment after its initial recovery-hold check.
+acquire_ops_lifecycle_lock
+# Fail before any image, migration, restore or writer side effect.
+require_no_production_recovery_hold
 load_production_env
 
 APP_URL="${APP_URL:-$(app_url_from_env)}"
@@ -123,15 +130,70 @@ npx --prefix "${PROJECT_DIR}" tsx scripts/production-env-check.ts --file "${ENV_
 echo "[deploy] step 2/7 构建 release artifact set（tag=${GIT_SHA}：app + migrate + storage-cleanup + async-worker）"
 GIT_SHA="${GIT_SHA}" compose_run build app migrate storage-cleanup async-worker
 
+# The migration artifact is part of this release, including on hosts which
+# still have an older :local image. Never let Compose build/pull a fallback.
+MIGRATOR_IMAGE="campus-marketplace-migrator:${GIT_SHA}"
+# `config --images migrate` also lists dependency images (PostgreSQL). Read the
+# named service from the resolved model instead of assuming a one-line result.
+MIGRATOR_RESOLVED="$(GIT_SHA="${GIT_SHA}" compose_run --profile ops config --format json migrate | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{const image=JSON.parse(s).services?.migrate?.image;if(typeof image!=="string")process.exit(1);process.stdout.write(image)})')"
+if [[ "${MIGRATOR_RESOLVED}" != "${MIGRATOR_IMAGE}" ]] || ! docker image inspect "${MIGRATOR_IMAGE}" >/dev/null 2>&1; then
+  echo "[deploy][FAIL] MIGRATOR_IMAGE_MISMATCH：迁移镜像必须是当前 release 已构建的镜像" >&2
+  exit 1
+fi
+
+# Pin the actual local content identities before executing migrations.
+# SHA tags and baked RELEASE_SHA alone are not sufficient evidence.
+APP_IMAGE_ID="$(release_image_id "campus-marketplace-app:${GIT_SHA}")" || { echo "[deploy][FAIL] APP_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+CLEANUP_IMAGE_ID="$(release_image_id "campus-marketplace-cleanup:${GIT_SHA}")" || { echo "[deploy][FAIL] CLEANUP_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+ASYNC_WORKER_IMAGE_ID="$(release_image_id "campus-marketplace-async-worker:${GIT_SHA}")" || { echo "[deploy][FAIL] ASYNC_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+MIGRATOR_IMAGE_ID="$(release_image_id "${MIGRATOR_IMAGE}")" || { echo "[deploy][FAIL] MIGRATOR_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+
 # 3) 迁移（先备份，后迁移）
 echo "[deploy] step 3/7 备份当前数据库"
 "${SCRIPT_DIR}/backup-postgres.sh"
 
+# Stop the old consumer before any migration/app switch. If the release fails,
+# leave it stopped: restarting an old consumer against new job contracts is unsafe.
+echo "[deploy] 停止旧 async-worker，隔离跨版本任务消费"
+if ! compose_run stop async-worker; then
+  echo "[deploy][FAIL] 旧 async-worker 无法停止，拒绝迁移或切换 app" >&2
+  exit 1
+fi
+if ! OLD_WORKER_RUNNING="$(compose_run ps --status running --services)"; then
+  echo "[deploy][FAIL] 无法确认旧 async-worker 停止状态，拒绝发布" >&2
+  exit 1
+fi
+if printf '%s\n' "${OLD_WORKER_RUNNING}" | grep -qx async-worker; then
+  echo "[deploy][FAIL] 旧 async-worker 仍在运行，拒绝发布" >&2
+  exit 1
+fi
+
+# Cleanup is also a production DB/S3 writer. It must not keep running while
+# Prisma migrations replace the schema or a new app release is switched in.
+# Unknown/failed stop state is a hard blocker; never mistake "ps" failure
+# for a successfully quiesced process.
+echo "[deploy] 停止旧 storage-cleanup，隔离跨版本存储写入"
+if ! compose_run stop storage-cleanup; then
+  echo "[deploy][FAIL] 旧 storage-cleanup 无法停止，拒绝迁移或切换 app" >&2
+  exit 1
+fi
+if ! OLD_CLEANUP_RUNNING="$(compose_run ps --status running --services)"; then
+  echo "[deploy][FAIL] 无法确认旧 storage-cleanup 停止状态，拒绝发布" >&2
+  exit 1
+fi
+if printf '%s\n' "${OLD_CLEANUP_RUNNING}" | grep -qx storage-cleanup; then
+  echo "[deploy][FAIL] 旧 storage-cleanup 仍在运行，拒绝发布" >&2
+  exit 1
+fi
+
 echo "[deploy] step 4/7 migrate deploy"
-compose_run --profile ops run --rm migrate
+GIT_SHA="${GIT_SHA}" compose_run --profile ops run --rm --no-deps --no-build --pull never migrate
 
 # 迁移验证：再次执行必须显示 no pending migration
-MIGRATE_OUT="$(compose_run --profile ops run --rm migrate 2>&1 || true)"
+if ! MIGRATE_OUT="$(GIT_SHA="${GIT_SHA}" compose_run --profile ops run --rm --no-deps --no-build --pull never migrate 2>&1)"; then
+  echo "[deploy][FAIL] 迁移重复执行失败" >&2
+  exit 1
+fi
 if ! echo "${MIGRATE_OUT}" | grep -qiE "No pending migrations|already in sync"; then
   echo "[deploy] 迁移重复执行未显示 no pending migration，请人工检查：" >&2
   echo "${MIGRATE_OUT}" >&2
@@ -139,8 +201,8 @@ if ! echo "${MIGRATE_OUT}" | grep -qiE "No pending migrations|already in sync"; 
 fi
 echo "[deploy] 迁移验证通过（no pending migration）"
 
-# 5) app 滚动更新
-echo "[deploy] step 5/7 滚动更新 app"
+# 5) app 单实例替换
+echo "[deploy] step 5/7 替换 app"
 if ! GIT_SHA="${GIT_SHA}" compose_run up -d --no-deps --wait app; then
   echo "[deploy] app 启动失败，回滚见 scripts/ops/rollback.sh" >&2
   exit 1
@@ -243,5 +305,20 @@ fi
 
 # release 日志（仅 verifier PASS 后才写；不记录 dependency URLs/credentials/bucket names）
 LOG_FILE="${PROJECT_DIR}/.releases.log"
-echo "$(date -Is) RELEASE_SHA=${GIT_SHA} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${GIT_SHA} CLEANUP=running ASYNC_WORKER=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
+# A tag moved during deployment is not a trustworthy artifact set.
+for role in APP CLEANUP ASYNC_WORKER MIGRATOR; do
+  case "${role}" in
+    APP) image="campus-marketplace-app:${GIT_SHA}"; expected="${APP_IMAGE_ID}" ;;
+    CLEANUP) image="campus-marketplace-cleanup:${GIT_SHA}"; expected="${CLEANUP_IMAGE_ID}" ;;
+    ASYNC_WORKER) image="campus-marketplace-async-worker:${GIT_SHA}"; expected="${ASYNC_WORKER_IMAGE_ID}" ;;
+    MIGRATOR) image="${MIGRATOR_IMAGE}"; expected="${MIGRATOR_IMAGE_ID}" ;;
+  esac
+  actual="$(release_image_id "${image}")" || { echo "[deploy][FAIL] RELEASE_IMAGE_ID_MISMATCH: ${role}" >&2; exit 1; }
+  [[ "${actual}" == "${expected}" ]] || { echo "[deploy][FAIL] RELEASE_IMAGE_ID_MISMATCH: ${role}" >&2; exit 1; }
+done
+ARTIFACT_IDS="RELEASE_SHA=${GIT_SHA} APP_IMAGE_ID=${APP_IMAGE_ID} CLEANUP_IMAGE_ID=${CLEANUP_IMAGE_ID} ASYNC_WORKER_IMAGE_ID=${ASYNC_WORKER_IMAGE_ID} MIGRATOR_IMAGE_ID=${MIGRATOR_IMAGE_ID}"
+echo "$(date -Is) ${ARTIFACT_IDS} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${GIT_SHA} CLEANUP=running ASYNC_WORKER=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
+# Fail closed on a torn log write: rollback requires the same IDs in BOTH logs.
+printf '%s\n' "${ARTIFACT_IDS}" >> "${PROJECT_DIR}/.release-image-ids.log"
+
 echo "[deploy] SUCCESS ${GIT_SHA}（release artifact 集合记录于 ${LOG_FILE}）"

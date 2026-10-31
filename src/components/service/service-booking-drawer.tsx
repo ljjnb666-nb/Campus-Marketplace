@@ -160,7 +160,7 @@ export function ServiceBookingDrawer({
 
             <div className="flex items-start gap-2 rounded-xl bg-indigo-50/70 p-3 text-[11px] text-indigo-800 border border-indigo-200/50 dark:bg-indigo-950/40 dark:text-indigo-300">
               <AlertTriangle className="size-4 shrink-0 text-indigo-600 mt-0.5" />
-              <span>温馨提示：提交预约后，请通过私聊与服务者保持沟通确认时间安排。</span>
+              <span>展示金额是服务者的参考单价，不是结算总额。提交预约后，请通过私聊确认服务时长、数量、交付范围与最终总价，并线下结算；平台不收款或自动退款。</span>
             </div>
 
             {errorMsg && <p className="text-xs text-rose-600 font-medium">{errorMsg}</p>}

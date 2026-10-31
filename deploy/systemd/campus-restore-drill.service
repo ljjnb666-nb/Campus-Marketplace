@@ -1,0 +1,13 @@
+[Unit]
+Description=Campus restore drill using an offsite backup in an isolated PostgreSQL project
+After=docker.service network-online.target
+OnFailure=campus-ops-alert@%n.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/campus-marketplace
+# This env must point OPS_PROJECT_DIR at a SEPARATE Compose project/database,
+# and DRILL_OFFSITE_PREFIX at the offsite bucket/prefix (read-only AWS role).
+EnvironmentFile=/etc/campus-marketplace/restore-drill.env
+UMask=0077
+ExecStart=/bin/bash scripts/ops/restore-offsite-drill.sh
+TimeoutStartSec=2h

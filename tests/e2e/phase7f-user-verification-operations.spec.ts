@@ -3,7 +3,7 @@ import { hashSync } from "bcryptjs";
 
 import { uniqueTag, E2E_ACCOUNTS, storageStatePath } from "./helpers/e2e";
 import { e2eDb } from "./helpers/db";
-import { loginViaUI } from "./helpers/auth";
+import { loginViaUI } from "./helpers/account-security";
 import { createTestFixtureAcceptance } from "../../prisma/legal-seed-content";
 
 /**
@@ -83,6 +83,7 @@ async function createE2EUser(input: {
     data: {
       email: input.email,
       name: input.name,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(password, 10),
       schoolName: "E2E 大学",
       campusId: input.campusId,
@@ -181,6 +182,7 @@ test("7F-E2E02 校区认证审核员：见本校区，不可见跨校区（详�
     data: {
       email: `p7f-b-${tag}@e2e.test`,
       name: `E2E7F跨校学生 ${tag}`,
+      emailVerifiedAt: new Date(),
       passwordHash: hashSync(`${TEST_PASSWORD_PREFIX}User#2026`, 10),
       schoolName: "E2E 大学",
       campusId: campusB.id,

@@ -5,6 +5,8 @@ import {
   getVerifiedSession,
   requireAdmin,
   requireUser,
+  requireVerifiedPageUser,
+  VERIFIED_SESSION_HTTP_STATUS,
 } from "@/lib/server-auth";
 import { ADMIN_SURFACE_PERMISSION_KEYS } from "@/lib/rbac/permissions";
 
@@ -13,11 +15,13 @@ const {
   mockRedirect,
   mockFindUnique,
   mockGetUserAcceptanceStatus,
+  mockPrivilegedSessionNeedsMfa,
 } = vi.hoisted(() => ({
   mockAuth: vi.fn(),
   mockRedirect: vi.fn(),
   mockFindUnique: vi.fn(),
   mockGetUserAcceptanceStatus: vi.fn(),
+  mockPrivilegedSessionNeedsMfa: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -39,12 +43,14 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/legal/policy-service", () => ({
   getUserAcceptanceStatus: mockGetUserAcceptanceStatus,
 }));
+vi.mock("@/lib/account-mfa-service", () => ({ privilegedSessionNeedsMfa: mockPrivilegedSessionNeedsMfa }));
 
 const ACTIVE_USER = {
   id: "user-1",
   role: "STUDENT" as const,
   name: "小林",
   email: "lin@example.com",
+  emailVerifiedAt: new Date("2026-01-01T00:00:00Z"),
   avatarUrl: null,
   verificationStatus: "VERIFIED",
   status: "ACTIVE" as const,
@@ -63,6 +69,7 @@ beforeEach(() => {
   mockRedirect.mockReset();
   mockFindUnique.mockReset();
   mockGetUserAcceptanceStatus.mockReset();
+  mockPrivilegedSessionNeedsMfa.mockReset().mockResolvedValue(false);
   mockRedirect.mockImplementation((target: string) => {
     throw new Error(`REDIRECT:${target}`);
   });
@@ -303,6 +310,51 @@ describe("getVerifiedSession（API 路由会话校验）", () => {
       ok: true,
       user: { id: "user-1", email: "lin@example.com", name: "小林", role: "STUDENT" },
     });
+  });
+});
+
+describe("account security gates", () => {
+  beforeEach(() => {
+    mockAuth.mockResolvedValue({ user: { id: "user-1", sessionId: "session-1" } });
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER });
+  });
+
+  it("requires a proved mailbox for business entry and mutations", async () => {
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, emailVerifiedAt: null });
+    await expect(requireUser()).rejects.toThrow("REDIRECT:/my/security?step=email");
+    expect(await getVerifiedSession({ requireConsent: true })).toEqual({ ok: false, reason: "EMAIL_VERIFICATION_REQUIRED" });
+    expect(VERIFIED_SESSION_HTTP_STATUS.EMAIL_VERIFICATION_REQUIRED).toBe(403);
+    expect(mockGetUserAcceptanceStatus).not.toHaveBeenCalled();
+  });
+
+  it("passes the server session id into the privileged gate", async () => {
+    mockPrivilegedSessionNeedsMfa.mockResolvedValue(true);
+    await expect(requireUser()).rejects.toThrow("REDIRECT:/my/security?step=mfa");
+    expect(mockPrivilegedSessionNeedsMfa).toHaveBeenCalledWith("user-1", "session-1");
+    expect(VERIFIED_SESSION_HTTP_STATUS.STRONG_AUTH_REQUIRED).toBe(403);
+  });
+
+  it("gates private reads even when consent is not required", async () => {
+    mockPrivilegedSessionNeedsMfa.mockResolvedValue(true);
+    for (const options of [{}, { requireConsent: false }, { requireConsent: true }]) {
+      expect(await getVerifiedSession(options)).toEqual({ ok: false, reason: "STRONG_AUTH_REQUIRED" });
+    }
+  });
+
+  it("keeps the explicit privacy/legal exit and security enrollment available", async () => {
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, emailVerifiedAt: null });
+    mockPrivilegedSessionNeedsMfa.mockResolvedValue(true);
+    expect((await getVerifiedSession({ requireConsent: false, requireStrongAuth: false })).ok).toBe(true);
+    expect(await requireVerifiedPageUser()).toMatchObject({ id: "user-1", sessionId: "session-1" });
+    expect(mockPrivilegedSessionNeedsMfa).not.toHaveBeenCalled();
+    expect(mockGetUserAcceptanceStatus).not.toHaveBeenCalled();
+  });
+
+  it("cannot bypass the active-account boundary using recovery options", async () => {
+    mockFindUnique.mockResolvedValue({ ...ACTIVE_USER, erasedAt: new Date() });
+    expect(await getVerifiedSession({ requireConsent: false, requireStrongAuth: false })).toEqual({ ok: false, reason: "ACCOUNT_INACTIVE" });
+    await expect(requireVerifiedPageUser()).rejects.toThrow("REDIRECT:/login");
+    expect(mockPrivilegedSessionNeedsMfa).not.toHaveBeenCalled();
   });
 });
 

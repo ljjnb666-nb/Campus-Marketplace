@@ -82,8 +82,8 @@ const schemaFields = parseSchemaModelFields(schemaText);
 const schemaModelNames = parseSchemaModelNames(schemaText);
 
 describe("REGISTRY-01：冻结 personal models 全部分类（completeness）", () => {
-  it("21 个冻结 personal-bearing models 全部有 model 级 policy（Phase 10A +DomainEvent）", () => {
-    expect(FROZEN_PERSONAL_MODELS).toHaveLength(21);
+  it("23 个 personal-bearing models 全部有 model 级 policy（含账号会话与安全挑战）", () => {
+    expect(FROZEN_PERSONAL_MODELS).toHaveLength(23);
 
     for (const model of FROZEN_PERSONAL_MODELS) {
       const policy = getModelPrivacyPolicy(model);
@@ -335,8 +335,8 @@ describe("REGISTRY-09_CURRENT_SOURCE_TRUTH（每个 source 对应当前真实 va
     expect(ERASURE_FIELD_COVERAGE.has("RentalReview.tags")).toBe(true);
   });
 
-  it("FINAL SSOT：当前生产输入清单计数锁定（44；Phase 8D-01 +OrderMeetup.locationTextSnapshot）", () => {
-    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(44);
+  it("FINAL SSOT：当前生产输入清单计数锁定（47；双方租赁证据独立归属）", () => {
+    expect(USER_INPUT_FIELD_EXPECTATIONS).toHaveLength(47);
   });
 
   it("RB01 SOURCE TRUTH：OrderMeetup.locationTextSnapshot 登记的是真实输入属性（非字符串占位）", () => {

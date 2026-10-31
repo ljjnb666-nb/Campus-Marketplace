@@ -58,7 +58,8 @@ describe("Issue #155 dependency lock security gates", () => {
     const entries = Object.entries(lock.packages).filter(
       ([path]) => path === "node_modules/brace-expansion" || path.endsWith("/node_modules/brace-expansion"),
     );
-    expect(entries.length).toBeGreaterThanOrEqual(5);
+    // Deduplication can change the number of paths; every installed copy must be patched.
+    expect(entries.length).toBeGreaterThan(0);
     for (const [path, entry] of entries) {
       const [major] = components(entry.version ?? "0.0.0");
       const floor = ({ 1: "1.1.21", 2: "2.1.7", 3: "3.0.9", 5: "5.0.12" } as Record<number, string>)[major];
@@ -69,7 +70,7 @@ describe("Issue #155 dependency lock security gates", () => {
   });
 
   it("keeps patched production transitive dependencies", () => {
-    for (const [name, floor] of [["fast-uri", "3.1.8"], ["source-map-js", "1.2.2"]]) {
+    for (const [name, floor] of [["fast-uri", "3.1.9"], ["zod", "4.6.6"], ["source-map-js", "1.2.2"]]) {
       const entry = locked(name);
       expect(atLeast(entry.version!, floor), name).toBe(true);
       expect(hasVerifiedIntegrity(entry), name).toBe(true);

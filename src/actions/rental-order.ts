@@ -4,6 +4,7 @@ import { withTransaction } from "@/lib/prisma";
 import type { AssetCategory, Prisma } from "@prisma/client";
 import { readOrderOriginCookie, clearOrderOriginCookie } from "@/lib/analytics/order-origin-cookie";
 import { logger } from "@/lib/logger";
+import { validateUploadBatch, mapUploadsWithConcurrency } from "@/lib/upload-batch";
 import { parseMarketplaceDateTimeLocal } from "@/lib/marketplace-time";
 import { isGovernanceError } from "@/lib/governance/domain-errors";
 import { isEnforcementError } from "@/lib/enforcement/errors";
@@ -21,6 +22,7 @@ import {
   cancelRentalOrderTx,
   confirmPickupTx,
   confirmReturnTx,
+  completeRentalInspectionTx,
   createRentalOrderTx,
   initiateDisputeTx,
   rejectExtensionTx,
@@ -102,7 +104,8 @@ async function uploadOrderPhotos(
   if (submitted.length > limits.maxCount) {
     throw new AssetServiceError("TOO_MANY_FILES", `最多上传${limits.maxCount}张图片`);
   }
-  return Promise.all(submitted.map(async (value) => {
+  validateUploadBatch(submitted, scope);
+  return mapUploadsWithConcurrency(submitted, async (value) => {
     if (typeof value === "string") {
       if (!parseAssetReference(value)) {
         throw new AssetServiceError("INVALID_ASSET_REFERENCE", "照片引用无效，请重新上传");
@@ -111,7 +114,7 @@ async function uploadOrderPhotos(
     }
     const result = await uploadImageAsset({ userId: ownerId, category: scope, file: value });
     return buildAssetReference(result.assetId);
-  }));
+  });
 }
 
 /** R10：照片引用与 ATTACHED 状态必须属于同一数据库事务。 */
@@ -327,14 +330,14 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
     orderId: formData.get("orderId") ?? "",
     role: formData.get("role") ?? "",
     inspectionNote: formData.get("inspectionNote") ?? undefined,
+    hasDamage: formData.get("hasDamage"),
+    needsCleaning: formData.get("needsCleaning"),
+    accessoriesComplete: formData.get("accessoriesComplete"),
   });
   if (!parsed.success) {
     return { success: false, message: parsed.error.issues[0]?.message ?? "参数不正确" };
   }
-  const { orderId, role, inspectionNote } = parsed.data;
-  const hasDamage = formData.get("hasDamage") === "true";
-  const needsCleaning = formData.get("needsCleaning") === "true";
-  const accessoriesComplete = formData.get("accessoriesComplete") === "true";
+  const { orderId, role, inspectionNote, hasDamage, needsCleaning, accessoriesComplete } = parsed.data;
 
   try {
     const photoTokens = await uploadOrderPhotos(formData.getAll("photos"), "return", user.id);
@@ -363,6 +366,23 @@ export async function confirmReturn(formData: FormData): Promise<RentalOrderActi
 
   revalidateRentalOrderViews(orderId);
   return { success: true, message: "已确认归还" };
+}
+
+export async function completeRentalInspection(formData: FormData): Promise<RentalOrderActionState> {
+  const user = await requireUser();
+  const parsed = rentalOrderIdSchema.safeParse({ orderId: formData.get("orderId") });
+  if (!parsed.success) return { success: false, message: "订单不存在" };
+  try {
+    const result = await withTransaction(tx => completeRentalInspectionTx(tx, {
+      orderId: parsed.data.orderId, userId: user.id,
+    }));
+    if ('error' in result) return { success: false, message: result.error };
+    revalidateRentalOrderViews(parsed.data.orderId);
+    return { success: true, message: "验收已结束；线下款项请双方自行核对" };
+  } catch (error) {
+    logger.error("rental-order action failed", "rental-order", { action: "completeRentalInspection", error });
+    return { success: false, message: "结束验收失败，请重试" };
+  }
 }
 
 export async function cancelRentalOrder(formData: FormData): Promise<RentalOrderActionState> {

@@ -29,7 +29,7 @@ function privateCache(headers: Record<string, string> = {}): Record<string, stri
 
 /** GET /api/privacy/requests —— 本人请求历史（仅本人，服务端解析身份）。 */
 async function listHandler() {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(
@@ -56,7 +56,7 @@ async function listHandler() {
  * 同步导出的唯一执行入口是 GET /api/privacy/export（POST 会得到明确指引）。
  */
 async function postHandler(request: NextRequest) {
-  const verified = await getVerifiedSession({ requireConsent: false });
+  const verified = await getVerifiedSession({ requireConsent: false, requireStrongAuth: false });
 
   if (!verified.ok) {
     return NextResponse.json(

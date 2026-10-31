@@ -106,12 +106,12 @@ export function counterpartyId(order: RentalOrderParty, userId: string): string 
   return order.ownerId === userId ? order.renterId : order.ownerId;
 }
 
-/** 完成订单后的押金状态：有押金进入待退回，无押金保持原状 */
+/** Offline agreements are not money movement. Never manufacture a refund fact. */
 export function depositStatusAfterCompletion(order: {
   depositAmount: Prisma.Decimal;
   depositStatus: DepositStatus;
 }): DepositStatus {
-  return order.depositAmount.gt(0) ? "PENDING_REFUND" : order.depositStatus;
+  return order.depositAmount.gt(0) ? "OFFLINE_UNVERIFIED" : "NOT_REQUIRED";
 }
 
 /** 订单完成时给双方累加租赁参与计数 */
@@ -280,7 +280,7 @@ export async function createRentalOrderTx(
     const finalAmount = rentalAmount.add(depositAmount);
 
     const orderStatus = listing.requiresApproval ? 'PENDING_APPROVAL' : 'PENDING_PICKUP';
-    const depositStatus = depositAmount.gt(0) ? 'PENDING_PAYMENT' : 'NOT_REQUIRED';
+    const depositStatus = depositAmount.gt(0) ? 'OFFLINE_UNVERIFIED' : 'NOT_REQUIRED';
 
     const order = await tx.rentalOrder.create({
       data: {
@@ -352,15 +352,18 @@ export async function approveRentalOrderTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
   if (!order) return { error: "订单不存在或状态不允许" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
     data: { status: 'PENDING_PICKUP' },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
@@ -385,13 +388,15 @@ export async function rejectRentalOrderTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
+
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
   });
   if (!order) return { error: "订单不存在或状态不允许" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_APPROVAL' },
     data: {
       status: 'REJECTED',
       cancellationNote: input.rejectReason,
@@ -400,6 +405,7 @@ export async function rejectRentalOrderTx(
       cancelledAt: new Date(),
     },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   // Repair 4 / RB-04 secondary-copy rule：rejectReason 是 user free text，
   // 唯一权威保存在 RentalOrder.cancellationNote（由 lifecycle/erasure 策略
@@ -453,24 +459,24 @@ export async function confirmPickupTx(
     return { error: "不能重复确认" };
   }
 
-  const dataToUpdate: Record<string, unknown> = {
-    photos: input.photos.length ? input.photos : undefined,
-    currentCondition: input.currentCondition || undefined,
-    knownIssues: input.knownIssues || undefined,
-  };
-  dataToUpdate[role === 'owner' ? 'ownerConfirmed' : 'renterConfirmed'] = true;
+  const now = new Date();
+  const photos = [...new Set([...(order.handoverRecord?.photos ?? []), ...input.photos])];
+  // Per-participant immutable submissions. Shared legacy text is not attributed
+  // retroactively; photos remains an append-only union for asset retention.
+  const participantData = role === 'owner'
+    ? { ownerPhotos: input.photos, ownerCurrentCondition: input.currentCondition,
+        ownerKnownIssues: input.knownIssues, ownerConfirmed: true, ownerConfirmedAt: now }
+    : { renterPhotos: input.photos, renterCurrentCondition: input.currentCondition,
+        renterKnownIssues: input.knownIssues, renterConfirmed: true, renterConfirmedAt: now };
 
   const newRecord = await tx.rentalHandoverRecord.upsert({
     where: { orderId },
     create: {
       orderId,
-      photos: input.photos,
-      currentCondition: input.currentCondition,
-      knownIssues: input.knownIssues,
-      ownerConfirmed: role === 'owner',
-      renterConfirmed: role === 'renter',
+      photos,
+      ...participantData,
     },
-    update: dataToUpdate,
+    update: { photos, ...participantData },
   });
 
   if (newRecord.ownerConfirmed && newRecord.renterConfirmed) {
@@ -513,15 +519,17 @@ export async function requestReturnTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId, activeAccountSeams);
 
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, renterId: input.userId, status: { in: ['IN_RENTAL', 'OVERDUE', 'PICKED_UP'] } },
   });
   if (!order) return { error: "订单状态错误" };
 
-  await tx.rentalOrder.update({
-    where: { id: input.orderId },
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: input.orderId, renterId: input.userId, status: order.status },
     data: { status: 'PENDING_RETURN' },
   });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
 
   await writeStatusLog(tx, {
     orderId: input.orderId,
@@ -556,6 +564,7 @@ export async function confirmReturnTx(
   await prepareActiveAccountMutation(tx, input.userId);
 
   const { orderId, userId, role, photos, hasDamage, needsCleaning, accessoriesComplete } = input;
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: orderId, status: { in: ['PENDING_RETURN', 'PENDING_INSPECTION'] } },
     include: {
@@ -565,42 +574,40 @@ export async function confirmReturnTx(
   });
   if (!order) return { error: "订单状态错误" };
   if (!isRentalOrderRoleParticipant(order, role, userId)) return { error: "无权操作" };
-
-  const dataToUpdate: Record<string, unknown> = {
-    photos: photos.length ? photos : undefined,
-    hasDamage,
-    needsCleaning,
-    accessoriesComplete,
-    inspectionNote: input.inspectionNote || undefined,
-  };
-  dataToUpdate[role === 'owner' ? 'ownerConfirmed' : 'renterConfirmed'] = true;
+  if (role === 'owner' && order.status !== 'PENDING_RETURN') return { error: "订单状态错误" };
 
   if (order.returnRecord && ((role === 'owner' && order.returnRecord.ownerConfirmed) || (role === 'renter' && order.returnRecord.renterConfirmed))) {
     return { error: "不能重复确认" };
   }
 
+  const now = new Date();
+  const mergedPhotos = [...new Set([...(order.returnRecord?.photos ?? []), ...photos])];
+  // The owner's inspection is authoritative for disposition; the renter's
+  // statement is independently retained and cannot rewrite that inspection.
+  const participantData = role === 'owner'
+    ? { ownerPhotos: photos, hasDamage, needsCleaning, accessoriesComplete,
+        inspectionNote: input.inspectionNote, ownerConfirmed: true, ownerConfirmedAt: now,
+        ownerInspectionRecordedAt: now }
+    : { renterPhotos: photos, renterHasDamage: hasDamage, renterNeedsCleaning: needsCleaning,
+        renterAccessoriesComplete: accessoriesComplete, renterInspectionNote: input.inspectionNote,
+        renterConfirmed: true, renterConfirmedAt: now };
   await tx.rentalReturnRecord.upsert({
     where: { orderId },
     create: {
       orderId,
-      photos,
-      hasDamage,
-      needsCleaning,
-      accessoriesComplete,
-      inspectionNote: input.inspectionNote,
-      ownerConfirmed: role === 'owner',
-      renterConfirmed: role === 'renter',
+      photos: mergedPhotos,
+      ...participantData,
     },
-    update: dataToUpdate,
+    update: { photos: mergedPhotos, ...participantData },
   });
 
   if (role === 'owner') {
-    const now = new Date();
-    const nextStatus = hasDamage ? 'PENDING_INSPECTION' : 'COMPLETED';
+    const requiresInspection = hasDamage || needsCleaning || !accessoriesComplete;
+    const nextStatus = requiresInspection ? 'PENDING_INSPECTION' : 'COMPLETED';
     const depStatus = nextStatus === 'COMPLETED' ? depositStatusAfterCompletion(order) : order.depositStatus;
 
-    await tx.rentalOrder.update({
-      where: { id: orderId },
+    const moved = await tx.rentalOrder.updateMany({
+      where: { id: orderId, ownerId: userId, status: 'PENDING_RETURN' },
       data: {
         actualReturnTime: now,
         status: nextStatus,
@@ -608,13 +615,14 @@ export async function confirmReturnTx(
         depositStatus: depStatus,
       },
     });
+    if (moved.count !== 1) throw new Error("RENTAL_RETURN_ORDER_STATE_CONFLICT");
 
     await writeStatusLog(tx, {
       orderId,
       fromStatus: order.status,
       toStatus: nextStatus,
       operatorId: userId,
-      note: `出租者已确认归还${hasDamage ? '，物品有损坏' : ''}`,
+      note: `出租者已确认归还${requiresInspection ? '，存在待协商的验收问题' : ''}`,
     });
 
     if (nextStatus === 'COMPLETED') {
@@ -635,6 +643,43 @@ export async function confirmReturnTx(
       payload: { orderId: order.id, hasDamage },
     }]);
   }
+  return { success: true };
+}
+
+/** Owner may close an inspection without compensation; recorded evidence stays immutable. */
+export async function completeRentalInspectionTx(
+  tx: Prisma.TransactionClient,
+  input: { orderId: string; userId: string },
+): Promise<RentalOrderTxError | { success: true }> {
+  await prepareActiveAccountMutation(tx, input.userId);
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
+  const order = await tx.rentalOrder.findFirst({
+    where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_INSPECTION' },
+    include: { rentalListing: { select: { campusId: true } } },
+  });
+  if (!order) return { error: "订单状态错误" };
+  const pending = await tx.rentalDamageClaim.findFirst({
+    where: { orderId: order.id, resolvedAt: null, supersededAt: null }, select: { id: true },
+  });
+  if (pending) return { error: "已有待处理索赔，请等待租客处理" };
+  const now = new Date();
+  const moved = await tx.rentalOrder.updateMany({
+    where: { id: order.id, ownerId: input.userId, status: 'PENDING_INSPECTION' },
+    data: { status: 'COMPLETED', completedAt: now, depositStatus: depositStatusAfterCompletion(order) },
+  });
+  if (moved.count !== 1) return { error: "订单状态已变化，请重试" };
+  await writeStatusLog(tx, { orderId: order.id, fromStatus: 'PENDING_INSPECTION',
+    toStatus: 'COMPLETED', operatorId: input.userId, note: '出租者结束验收，未申请线下补偿' });
+  await recordLiquidityTransactionCompletionFactsTx(tx, {
+    transactionId: order.id, transactionType: 'RENTAL', campusId: order.rentalListing.campusId,
+    occurredAt: now, bookedValue: computeRentalCompletedBookedValue(order),
+  });
+  await incrementRentalCompletionCounters(tx, order);
+  await emitNotificationsTx(tx, [{ kind: RENTAL_RETURN_CONFIRMED_KIND,
+    recipientUserId: order.renterId,
+    dedupeKey: `${RENTAL_RETURN_CONFIRMED_KIND}:${order.id}:inspection-cleared:${order.renterId}`,
+    payload: { orderId: order.id, hasDamage: false },
+  }]);
   return { success: true };
 }
 
@@ -1166,18 +1211,30 @@ export async function submitDamageClaimTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${input.orderId} FOR UPDATE`;
   const order = await tx.rentalOrder.findFirst({
     where: { id: input.orderId, ownerId: input.userId, status: 'PENDING_INSPECTION' },
   });
   if (!order) return { error: "状态错误" };
-  if (new Prisma.Decimal(input.requestedDeduction).gt(order.depositAmount)) return { error: "索赔金额不能大于押金" };
+  let requested: Prisma.Decimal;
+  try { requested = new Prisma.Decimal(input.requestedDeduction); }
+  catch { return { error: "索赔金额格式不正确" }; }
+  if (!requested.isFinite() || requested.lte(0) || requested.decimalPlaces() > 2) {
+    return { error: "索赔金额须大于零且最多两位小数" };
+  }
+  if (requested.gt(order.depositAmount)) return { error: "索赔金额不能大于押金" };
+  const pending = await tx.rentalDamageClaim.findFirst({
+    where: { orderId: order.id, resolvedAt: null, supersededAt: null },
+    select: { id: true },
+  });
+  if (pending) return { error: "该订单已有待处理的损坏索赔，请等待租客处理" };
 
   const claim = await tx.rentalDamageClaim.create({
     data: {
       orderId: input.orderId,
       submittedById: input.userId,
       damageDescription: input.damageDescription,
-      requestedDeduction: new Prisma.Decimal(input.requestedDeduction),
+      requestedDeduction: requested,
       photos: input.photos,
     },
   });
@@ -1197,8 +1254,13 @@ export async function respondDamageClaimTx(
 ): Promise<RentalOrderTxError | { success: true }> {
   await prepareActiveAccountMutation(tx, input.userId);
 
+  const candidate = await tx.rentalDamageClaim.findFirst({
+    where: { id: input.claimId }, select: { orderId: true },
+  });
+  if (!candidate) return { error: "无效请求" };
+  await tx.$queryRaw`SELECT "id" FROM "RentalOrder" WHERE "id" = ${candidate.orderId} FOR UPDATE`;
   const claim = await tx.rentalDamageClaim.findFirst({
-    where: { id: input.claimId, resolvedAt: null },
+    where: { id: input.claimId, orderId: candidate.orderId, resolvedAt: null, supersededAt: null },
     include: {
       order: {
         include: {
@@ -1207,44 +1269,31 @@ export async function respondDamageClaimTx(
       },
     },
   });
-  if (!claim || claim.order.renterId !== input.userId) return { error: "无效请求" };
+  if (!claim || claim.order.renterId !== input.userId || claim.orderId !== candidate.orderId) return { error: "无效请求" };
   if (claim.order.status !== "PENDING_INSPECTION") {
     return { error: "订单已进入其他处理状态，不能处理旧索赔" };
   }
 
   const responded = await tx.rentalDamageClaim.updateMany({
-    where: { id: input.claimId, resolvedAt: null },
-    data: { renterAgreed: input.agreed, renterNote: input.renterNote, resolvedAt: new Date() },
+    where: { id: input.claimId, resolvedAt: null, supersededAt: null },
+    data: { renterAgreed: input.agreed, renterNote: input.renterNote, resolvedAt: new Date(),
+      approvedDeduction: input.agreed ? claim.requestedDeduction : new Prisma.Decimal(0) },
   });
   if (responded.count !== 1) return { error: "索赔已处理" };
 
   const now = new Date();
-  if (input.agreed) {
-    const changed = await tx.rentalOrder.updateMany({
-      where: { id: claim.orderId, status: "PENDING_INSPECTION" },
-      data: {
-        depositDeduction: claim.requestedDeduction,
-        depositStatus: 'PARTIALLY_REFUNDED', // Simplified
-        status: 'COMPLETED',
-        completedAt: now,
-      },
-    });
-    // A dispute may have won the RentalOrder lock after our initial read.
-    // Reject the stale claim and roll back its resolvedAt in the same tx.
-    if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
-  } else {
-    // 租客拒绝索赔：物品已实际归还，订单完成、押金不扣除并进入退回流程；
-    // 出租者若不认可，仍可在 COMPLETED 状态发起纠纷（initiateDispute 允许该状态）。
-    const changed = await tx.rentalOrder.updateMany({
-      where: { id: claim.orderId, status: "PENDING_INSPECTION" },
-      data: {
-        status: 'COMPLETED',
-        completedAt: now,
-        depositStatus: depositStatusAfterCompletion(claim.order),
-      },
-    });
-    if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
-  }
+  // This records an agreement only. No deposit has been debited/refunded by
+  // this platform, so neither depositDeduction nor paid/refunded states change.
+  const changed = await tx.rentalOrder.updateMany({
+    where: { id: claim.orderId, renterId: input.userId, status: "PENDING_INSPECTION" },
+    data: { status: 'COMPLETED', completedAt: now,
+      depositStatus: depositStatusAfterCompletion(claim.order) },
+  });
+  if (changed.count !== 1) throw new Error("RENTAL_CLAIM_ORDER_STATE_CONFLICT");
+  await tx.rentalDamageClaim.updateMany({
+    where: { orderId: claim.orderId, id: { not: claim.id }, resolvedAt: null, supersededAt: null },
+    data: { supersededAt: now },
+  });
 
   // Guard above already proved PENDING_INSPECTION; every accepted response
   // transitions to COMPLETED exactly once after CAS success.

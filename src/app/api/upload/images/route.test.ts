@@ -136,19 +136,15 @@ describe("POST /api/upload/images", () => {
     expect(uploadImageAsset).not.toHaveBeenCalled();
   });
 
-  it("rate limits each uploading user to 20 requests per minute", async () => {
-    isRateLimited.mockReturnValue({ limited: true, remaining: 0 });
+  it("maps shared service throttling to 429 without double-counting at the route", async () => {
+    uploadImageAsset.mockRejectedValue(new AssetServiceError("UPLOAD_RATE_LIMITED", "上传过于频繁，请稍后再试", 429));
 
     const response = await POST(buildUploadRequest());
 
-    expect(isRateLimited).toHaveBeenCalledWith({
-      key: "user-1",
-      limit: 20,
-      windowMs: 60000,
-    });
+    expect(isRateLimited).not.toHaveBeenCalled();
     expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ error: "上传过于频繁，请稍后再试" });
-    expect(uploadImageAsset).not.toHaveBeenCalled();
+    expect(await response.json()).toEqual({ error: "上传过于频繁，请稍后再试", code: "UPLOAD_RATE_LIMITED" });
+    expect(uploadImageAsset).toHaveBeenCalledTimes(1);
   });
 
   it("uploads a public image and returns asset metadata without legacy url-only shape", async () => {

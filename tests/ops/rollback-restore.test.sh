@@ -71,6 +71,8 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  # An OPS_PROJECT_DIR fixture must never target the production Compose namespace.
+  printf 'name: campus-restore-drill-test\n' > "${SANDBOX}/compose.production.yml"
   cat > "${SANDBOX}/.env.production" <<'ENV'
 SITE_ADDRESS=campus.example.edu.cn
 POSTGRES_USER=campus_app
@@ -110,11 +112,18 @@ state_has() { grep -qx "\$1" "\$STATE" 2>/dev/null; }
 state_add() { state_has "\$1" || printf '%s\n' "\$1" >> "\$STATE"; }
 state_remove() { grep -vx "\$1" "\$STATE" 2>/dev/null > "\${STATE}.tmp" || true; mv "\${STATE}.tmp" "\$STATE" 2>/dev/null || : > "\$STATE"; }
 case "\$ARGS" in
+  *"image inspect --format "*"{{.Id}}"*)
+    if [[ -n "\${WRONG_IMAGE_ID_STUB_MODE:-}" ]]; then
+      printf 'sha256:%064d\\n' 2
+    else
+      printf 'sha256:%064d\\n' 1
+    fi
+    exit 0 ;;
   *"image inspect"*)
     if [[ "\$ARGS" == *"campus-marketplace-app:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]]; then
       exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-cleanup:"* ]]; then
-      [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]] && exit 1 || exit 0
+      [[ "\${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" || "\${CLEANUP_STUB_MODE:-post-worker}" == "missing-image" ]] && exit 1 || exit 0
     elif [[ "\$ARGS" == *"campus-marketplace-async-worker:"* ]]; then
       [[ "\${ASYNC_STUB_MODE:-post-async}" == "pre-async" || "\${ASYNC_STUB_MODE:-post-async}" == "missing-image" ]] && exit 1 || exit 0
     else
@@ -196,6 +205,23 @@ case "\$ARGS" in
     elif [[ "\$ARGS" == *"COUNT(*)"* ]]; then
       echo "0"
     fi
+    # Capture the new post-restore SQL transaction, not merely a filename check.
+    # The only -X invocation is the mandatory security invalidation gate.
+    if [[ "\$ARGS" == *"psql -X"* ]]; then
+      security_sql="\$(cat)"
+      if [[ "\$security_sql" == *"RECOVERY_ACCOUNT_SESSION_SCHEMA_MISSING"* &&
+            "\$security_sql" == *"RECOVERY_CREDENTIAL_HOLD_SCHEMA_MISSING"* &&
+            "\$security_sql" == *'UPDATE "User"'* &&
+            "\$security_sql" == *"RECOVERY_CHALLENGE_INVALIDATION_INCOMPLETE"* &&
+            "\$security_sql" == *'UPDATE "AccountSession"'* &&
+            "\$security_sql" == *'UPDATE "AccountChallenge"'* ]]; then
+        echo "security_invalidate_called" >> "${SANDBOX}/calls.log"
+      else
+        echo "security_invalidation_sql_invalid" >> "${SANDBOX}/calls.log"
+        exit 1
+      fi
+      if [[ "\${RECOVERY_SECURITY_STUB_MODE:-}" == "fail" ]]; then exit 1; fi
+    fi
     exit 0 ;;
   *"compose"*"exec -T postgres pg_dump"*)
     echo "pg_dump_called" >> "${SANDBOX}/calls.log"; echo "DUMMYDUMP"; exit 0 ;;
@@ -209,8 +235,16 @@ STUB
   # image 被 prune 的情况误认成历史 release 不存在此服务。
   cat > "${SANDBOX}/bin/git" <<'GIT_STUB'
 #!/usr/bin/env bash
+if [[ "$*" == *"cat-file -p"* ]]; then
+  # Target-commit restore credential contract. Legacy release must refuse
+  # hard restore BEFORE any production database or writer mutation.
+  if [[ "${RECOVERY_HOLD_STUB_MODE:-compatible}" == "legacy" ]]; then exit 1; fi
+  echo 'credentialRecoveryRequired'
+  exit 0
+fi
 if [[ "$*" != *"cat-file -e"* ]]; then exit 1; fi
 if [[ "$*" == *"scripts/ops/async-worker.ts"* && "${ASYNC_STUB_MODE:-post-async}" == "pre-async" ]]; then exit 1; fi
+if [[ "$*" == *"scripts/ops/storage-cleanup-worker.ts"* && "${CLEANUP_STUB_MODE:-post-worker}" == "pre-worker" ]]; then exit 1; fi
 exit 0
 GIT_STUB
   chmod +x "${SANDBOX}/bin/git"
@@ -274,7 +308,15 @@ run_rollback() {
     shift
   fi
   CALL_LOG=""
-  rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
+  rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log" "${SANDBOX}/.release-image-ids.log"
+  # Seed a historical, already-verified release. The fixture's normal
+  # tests still assert no NEW success log after a failed rollback.
+  local proof_id="sha256:$(printf '%064d' 1)"
+  local proof_line="RELEASE_SHA=${PREV_SHA} APP_IMAGE_ID=${proof_id} CLEANUP_IMAGE_ID=${proof_id} ASYNC_WORKER_IMAGE_ID=${proof_id}"
+  if [[ "${PROOF_LOG_STUB_MODE:-valid}" != "missing" ]]; then
+    printf '%s\n' "${proof_line}" > "${SANDBOX}/.releases.log"
+    printf '%s\n' "${proof_line}" > "${SANDBOX}/.release-image-ids.log"
+  fi
   # 一律经 env 命令注入环境：展开形式的 VAR=v 不能作为 assignment 前缀
   env "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
     RESTORE_STUB_MODE="${RESTORE_STUB_MODE:-success}" \
@@ -287,6 +329,12 @@ run_rollback() {
   local rc=$?
   LAST_ROLLBACK_RC="$rc"
   [[ -f "${SANDBOX}/calls.log" ]] && CALL_LOG="$(cat "${SANDBOX}/calls.log")"
+  # Strip only the historical fixture entry. A newly written success entry
+  # remains visible; a failed rollback must leave no new release record.
+  if [[ -f "${SANDBOX}/.releases.log" ]]; then
+    sed -i '1d' "${SANDBOX}/.releases.log"
+    [[ -s "${SANDBOX}/.releases.log" ]] || rm -f "${SANDBOX}/.releases.log"
+  fi
   return "${rc}"
 }
 
@@ -334,6 +382,21 @@ PREV_SHA="0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 # 与 PREV_SHA 不同的合法 40-hex（release mismatch 用例的 fake app 自报值）
 OTHER_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 EXTRA_ENV=()
+
+# Production hard rollback must be rejected before env, Docker or restore.
+# The fixture uses the actual checkout, without OPS test hooks.
+echo "== P1. production hard restore requires independently audited identity release gate =="
+HARD_GUARD_OUTPUT="$(mktemp)"
+env -u OPS_PROJECT_DIR -u OPS_RESTORE_SCRIPT \
+  bash "${REPO_ROOT}/scripts/ops/rollback.sh" "${PREV_SHA}" --hard \
+  > "${HARD_GUARD_OUTPUT}" 2>&1
+HARD_GUARD_RC=$?
+if [[ "${HARD_GUARD_RC}" -ne 0 ]] && grep -qF 'RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED' "${HARD_GUARD_OUTPUT}"; then
+  pass_test
+else
+  fail_test "production --hard must fail closed without restore or writer launch"
+fi
+rm -f "${HARD_GUARD_OUTPUT}"
 
 # Issue #97: validate both assertions in every synthetic large-log scenario.
 echo "== 0. pipefail 长日志位置矩阵 =="
@@ -485,6 +548,29 @@ run_rollback "${PREV_SHA}" --hard; rc=$?
 assert_exit 1 "$rc" "missing backup"
 assert_log_not_contains "restore_called"
 
+echo "== 4b. hard rollback to old app without recovery hold rejects before restore and writers =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(RECOVERY_HOLD_STUB_MODE=legacy)
+run_rollback "${PREV_SHA}" --hard; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "hard rollback incompatible target credential hold"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "app_up_called"
+
+echo "== 4c. safe rollback to legacy app must reject before any writer switch =="
+RESTORE_STUB_MODE=success make_sandbox
+EXTRA_ENV=(RECOVERY_HOLD_STUB_MODE=legacy)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "safe rollback incompatible target credential hold"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "app_stop_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "config --images"
+
 echo "== 5. SHA256 不一致 → 失败（真实 restore 脚本）=="
 make_sandbox
 printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
@@ -511,6 +597,7 @@ assert_log_contains "app_stop_called"
 assert_log_contains "cleanup_stop_called"
 assert_log_contains "async_stop_called"
 assert_log_contains "pg_restore_called"
+assert_log_contains "security_invalidate_called"
 # 顺序硬门禁：两个 writer 的停止标记都必须先于第一次 psql（terminate connections）
 stop_app_line="$(printf '%s' "$CALL_LOG" | grep -n "app_stop_called" | head -1 | cut -d: -f1)"
 stop_cleanup_line="$(printf '%s' "$CALL_LOG" | grep -n "cleanup_stop_called" | head -1 | cut -d: -f1)"
@@ -522,6 +609,21 @@ if [[ -n "$stop_app_line" && -n "$stop_cleanup_line" && -n "$stop_async_line" &&
 else
   fail_test "必须在 terminate DB connections 之前停止 app / storage-cleanup / async-worker"
 fi
+
+echo "== 5b-security. 恢复后凭据失效失败 → FAIL CLOSED：不可宣告恢复成功 =="
+make_sandbox
+printf 'REALDUMPDATA' > "${SANDBOX}/backups/db-20260101.dump"
+echo "$(sha256sum "${SANDBOX}/backups/db-20260101.dump" | awk '{print $1}')  db-20260101.dump" > "${SANDBOX}/backups/db-20260101.dump.sha256"
+OPS_PROJECT_DIR="${SANDBOX}" OPS_SLEEP_SECONDS=0 PATH="${SANDBOX}/bin:${PATH}" \
+  RECOVERY_SECURITY_STUB_MODE=fail \
+  bash "${REPO_ROOT}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${SANDBOX}/backups/db-20260101.dump" \
+    --target-db campus_marketplace >"${SANDBOX}/security-failure.log" 2>&1; rc=$?
+CALL_LOG="$(cat "${SANDBOX}/calls.log" 2>/dev/null || true)"
+assert_exit 1 "$rc" "post-restore auth invalidation failed"
+assert_log_contains "pg_restore_called"
+assert_log_contains "security_invalidate_called"
+if grep -qF "恢复后的登录会话或账号恢复链接未能全部失效" "${SANDBOX}/security-failure.log"; then pass_test; else fail_test "缺少认证失效门禁错误标志"; fi
 
 echo "== 5c. storage-cleanup 无法停止 → FAIL CLOSED：不 terminate、不 DROP/restore =="
 make_sandbox
@@ -857,6 +959,73 @@ assert_exit 1 "$rc" "async stop failure"
 assert_log_contains "async_stop_called"
 assert_log_not_contains "app_up_called"
 if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "async 停止未验证不得写日志"; else pass_test; fi
+
+echo "== 9o. post-worker release 镜像已 prune → 不得伪装 pre-worker =="
+make_sandbox
+CLEANUP_STUB_MODE=missing-image run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "cleanup missing image"
+assert_log_not_contains "cleanup_stop_called"
+assert_log_not_contains "app_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup 镜像缺失不得写日志"; else pass_test; fi
+
+echo "== 9p. cleanup stop failure blocks rollback before app switch =="
+make_sandbox
+STOP_FAILURE_STUB_MODE=storage-cleanup run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "cleanup stop failure"
+assert_log_contains "async_stop_called"
+assert_log_contains "cleanup_stop_called"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+if [[ -e "${SANDBOX}/.releases.log" ]]; then fail_test "cleanup stop failure must not write release log"; else pass_test; fi
+
+echo "== 9q. recovered host hold blocks safe rollback before image/writer actions =="
+make_sandbox
+printf 'RECOVERY_HOLD=1\n' > "${SANDBOX}/.production-recovery-hold"
+run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "safe rollback while recovery hold active"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "cleanup_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "image inspect"
+assert_contains_file "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "/tmp/rb-out.${BASHPID}" "recovery hold prevents rollback"
+
+echo "== P1-A. isolated worktree may not select production Compose project =="
+make_sandbox
+printf 'name: campus-marketplace-production\n' > "${SANDBOX}/compose.production.yml"
+run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "production Compose namespace refused for safe rollback"
+assert_contains_file "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "/tmp/rb-out.${BASHPID}" "production scope refusal"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "docker called"
+
+echo "== P1-A. hard restore seam may not use production Compose project =="
+run_rollback "${PREV_SHA}" --hard; rc=$?
+assert_exit 1 "$rc" "production Compose namespace refused for hard rollback"
+assert_contains_file "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "/tmp/rb-out.${BASHPID}" "hard scope refusal"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "docker called"
+
+echo "== P1-C. missing prior image inventory must block rollback =="
+make_sandbox
+PROOF_LOG_STUB_MODE=missing run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "missing image evidence fail closed"
+assert_contains_file "RELEASE_IMAGE_ID_EVIDENCE_MISSING" "/tmp/rb-out.${BASHPID}" "missing evidence diagnostic"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "cleanup_up_called"
+
+echo "== P1-C. re-tagged image ID must block rollback before writers =="
+make_sandbox
+EXTRA_ENV=(WRONG_IMAGE_ID_STUB_MODE=1)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "wrong image ID fail closed"
+assert_contains_file "RELEASE_IMAGE_ID_MISMATCH" "/tmp/rb-out.${BASHPID}" "image mismatch diagnostic"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "cleanup_up_called"
 
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox

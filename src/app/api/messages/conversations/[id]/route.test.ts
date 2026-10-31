@@ -19,6 +19,15 @@ vi.mock("@/repositories/conversation-repository", () => ({
 import { GET } from "@/app/api/messages/conversations/[id]/route";
 
 describe("GET /api/messages/conversations/[id]", () => {
+  it("forwards the cursor and prevents private response caching", async () => {
+    getVerifiedSession.mockResolvedValue({ ok: true, user: { id: "user-1" } });
+    getConversationDetailPayload.mockResolvedValue({ id: "conversation-1", messages: [], nextCursor: null });
+    const response = await GET(new Request("http://localhost?cursor=message-20"), {
+      params: Promise.resolve({ id: "conversation-1" }),
+    });
+    expect(getConversationDetailPayload).toHaveBeenCalledWith("conversation-1", "user-1", "message-20");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+  });
   beforeEach(() => {
     getVerifiedSession.mockReset();
     getConversationDetailPayload.mockReset();
@@ -46,7 +55,7 @@ describe("GET /api/messages/conversations/[id]", () => {
     const body = await response.json();
 
     expect(response.status).toBe(404);
-    expect(getConversationDetailPayload).toHaveBeenCalledWith("missing-conversation", "user-1");
+    expect(getConversationDetailPayload).toHaveBeenCalledWith("missing-conversation", "user-1", undefined);
     expect(body).toEqual({ message: "会话不存在或无权访问" });
   });
 
@@ -74,7 +83,7 @@ describe("GET /api/messages/conversations/[id]", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(getConversationDetailPayload).toHaveBeenCalledWith("conversation-1", "user-1");
+    expect(getConversationDetailPayload).toHaveBeenCalledWith("conversation-1", "user-1", undefined);
     expect(body).toEqual({
       id: "conversation-1",
       title: "商品咨询：高数教材",

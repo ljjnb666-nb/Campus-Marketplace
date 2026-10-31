@@ -7,7 +7,7 @@ import { getConversationDetailPayload } from "@/repositories/conversation-reposi
 export const dynamic = "force-dynamic";
 
 async function getHandler(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -19,13 +19,17 @@ async function getHandler(
     }
 
     const { id } = await params;
-    const payload = await getConversationDetailPayload(id, verified.user.id);
+    const cursor = new URL(request.url).searchParams.get("cursor") || undefined;
+    if (cursor && cursor.length > 200) {
+      return NextResponse.json({ message: "无效的消息位置" }, { status: 400 });
+    }
+    const payload = await getConversationDetailPayload(id, verified.user.id, cursor);
 
     if (!payload) {
       return NextResponse.json({ message: "会话不存在或无权访问" }, { status: 404 });
     }
 
-    return NextResponse.json(payload);
+    return NextResponse.json(payload, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     const handled = handleError(error, "GET /api/messages/conversations/[id]");
     return NextResponse.json({ message: handled.message }, { status: handled.statusCode });

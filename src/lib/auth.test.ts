@@ -11,6 +11,7 @@ const {
   userFindUnique,
   userUpdate,
   finalizeCredentialLogin,
+  isAccountSessionActive,
 } = vi.hoisted(() => ({
   compare: vi.fn(),
   getServerSession: vi.fn(),
@@ -18,11 +19,17 @@ const {
   userFindUnique: vi.fn(),
   userUpdate: vi.fn(),
   finalizeCredentialLogin: vi.fn(),
+  isAccountSessionActive: vi.fn(),
 }));
 
 // RB-03 REVIEW FIX：post-bcrypt authoritative finalization 边界
 vi.mock("@/lib/credential-login-service", () => ({
   finalizeCredentialLogin,
+}));
+vi.mock("@/lib/account-session-service", () => ({
+  describeDevice: () => "未知设备 · 浏览器",
+  isAccountSessionActive,
+  revokeSignedOutSession: vi.fn(),
 }));
 
 vi.mock("bcryptjs", () => ({
@@ -48,6 +55,7 @@ vi.mock("@/lib/prisma", () => ({
 
 import { auth, authOptions } from "@/lib/auth";
 import { resetRateLimit } from "@/lib/rate-limit";
+import { loginRateLimitKeys } from "@/lib/login-rate-limit";
 
 type AuthorizeCredentials = Record<string, string> | undefined;
 type AuthorizeRequest = {
@@ -71,6 +79,7 @@ const ACTIVE_USER = {
   status: "ACTIVE",
   deletedAt: null,
   passwordHash: "hashed-password",
+  credentialRecoveryRequired: false,
 };
 
 function mockValidCredentials() {
@@ -82,6 +91,7 @@ describe("auth options", () => {
   beforeEach(() => {
     compare.mockReset();
     getServerSession.mockReset();
+    isAccountSessionActive.mockReset().mockResolvedValue(true);
     credentialsProvider.mockClear();
     userFindUnique.mockReset();
     userUpdate.mockReset();
@@ -195,6 +205,15 @@ describe("auth options", () => {
     expect(compare).not.toHaveBeenCalled();
   });
 
+  it("RECOVERY-HOLD-04：恢复账号拒绝密码登录，且不消耗 bcrypt/新建会话", async () => {
+    const authorize = getCredentialsAuthorize();
+    userFindUnique.mockResolvedValue({ ...ACTIVE_USER, credentialRecoveryRequired: true });
+    const result = await authorize?.({ email: ACTIVE_USER.email, password: TEST_PASSWORD });
+    expect(result).toBeNull();
+    expect(compare).not.toHaveBeenCalled();
+    expect(finalizeCredentialLogin).not.toHaveBeenCalled();
+  });
+
   it("returns the session user and updates last login time after a successful login", async () => {
     const authorize = getCredentialsAuthorize();
     userFindUnique.mockResolvedValue({
@@ -220,6 +239,8 @@ describe("auth options", () => {
       id: "user-1",
       passwordHash: "hashed-password",
       email: "student1@campus.local",
+      deviceLabel: "未知设备 · 浏览器",
+      mfaCode: undefined,
     });
     expect(result).toEqual({
       id: "user-1",
@@ -243,6 +264,8 @@ describe("auth options", () => {
       id: "user-1",
       passwordHash: "hashed-password",
       email: "student1@campus.local",
+      deviceLabel: "未知设备 · 浏览器",
+      mfaCode: undefined,
     });
   });
 
@@ -294,6 +317,13 @@ describe("auth options", () => {
     expect(result).toEqual({ user: { id: "user-1" } });
   });
 
+  it("rejects a cryptographically valid JWT whose session has been revoked", async () => {
+    getServerSession.mockResolvedValue({ user: { id: "user-1", sessionId: "revoked" } });
+    isAccountSessionActive.mockResolvedValue(false);
+    expect(await auth()).toBeNull();
+    expect(isAccountSessionActive).toHaveBeenCalledWith("user-1", "revoked");
+  });
+
   describe("login rate limiting", () => {
     const limitedEmail = "bruteforce@campus.local";
     const validPassword = TEST_PASSWORD;
@@ -306,11 +336,14 @@ describe("auth options", () => {
       return getCredentialsAuthorize()?.(credentials, req);
     }
 
-    beforeEach(() => {
-      resetRateLimit(`login:${limitedEmail}`);
-      resetRateLimit("login:203.0.113.7");
-      resetRateLimit("login:reset-success@campus.local");
-      resetRateLimit("login:window-expiry@campus.local");
+    beforeEach(async () => {
+      for (const email of [limitedEmail, undefined, "reset-success@campus.local", "window-expiry@campus.local"]) {
+        for (const headers of [undefined, { "x-forwarded-for": "203.0.113.7" }]) {
+          const keys = loginRateLimitKeys(email, headers);
+          await resetRateLimit(keys.sourceKey);
+          await resetRateLimit(keys.accountSourceKey);
+        }
+      }
       consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     });
 
@@ -338,7 +371,7 @@ describe("auth options", () => {
       expect(userFindUnique).toHaveBeenCalledTimes(10);
       expect(userUpdate).not.toHaveBeenCalled();
       expect(consoleWarn).toHaveBeenCalledWith(
-        expect.stringContaining("login:bruteforce@campus.local"),
+        expect.stringContaining("登录限流触发"),
       );
     });
 
@@ -370,7 +403,7 @@ describe("auth options", () => {
       await attemptLogin(noCredentials, req);
 
       expect(consoleWarn).toHaveBeenCalledWith(
-        expect.stringContaining("login:203.0.113.7"),
+        expect.stringContaining("登录限流触发"),
       );
       expect(userFindUnique).not.toHaveBeenCalled();
     });

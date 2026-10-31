@@ -92,6 +92,22 @@ type ConversationRecord = {
 const DEFAULT_CONVERSATION_LIST_LIMIT = 50;
 const MAX_CONVERSATION_LIST_LIMIT = 100;
 
+// PostgreSQL selects one indexed row per authorized conversation before hydration.
+// Prisma 6 `distinct` deduplicates in memory and must not scan entire histories here.
+async function getLastMessages(conversationIds: string[]) {
+  const ids = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    SELECT latest.id FROM unnest(ARRAY[${Prisma.join(conversationIds)}]::text[]) AS c(id)
+    CROSS JOIN LATERAL (
+      SELECT m.id FROM "Message" m WHERE m."conversationId" = c.id
+      ORDER BY m."createdAt" DESC, m.id DESC LIMIT 1
+    ) latest
+  `);
+  return prisma.message.findMany({
+    where: { id: { in: ids.map((row) => row.id) } },
+    include: { sender: { select: { id: true, name: true, avatarUrl: true } } },
+  });
+}
+
 function resolveConversationListLimit(limit?: number): number {
   if (limit === undefined || !Number.isFinite(limit) || limit <= 0) {
     return DEFAULT_CONVERSATION_LIST_LIMIT;
@@ -134,21 +150,7 @@ async function hydrateConversations(conversations: ConversationRecord[], userId:
       },
       orderBy: { joinedAt: "asc" },
     }),
-    // 每个会话仅取最后一条消息（PostgreSQL DISTINCT ON，避免全量加载消息）
-    prisma.message.findMany({
-      where: { conversationId: { in: conversationIds } },
-      orderBy: [{ conversationId: "asc" }, { createdAt: "desc" }, { id: "desc" }],
-      distinct: ["conversationId"],
-      include: {
-        sender: {
-          select: {
-            id: true,
-            name: true,
-            avatarUrl: true,
-          },
-        },
-      },
-    }),
+    getLastMessages(conversationIds),
     // 每个会话的未读消息数（对方发来且尚未读）
     prisma.message.groupBy({
       by: ["conversationId"],
@@ -231,20 +233,12 @@ async function hydrateConversations(conversations: ConversationRecord[], userId:
 }
 
 export async function getUnreadConversationCount(userId: string): Promise<number> {
-  // 单条查询：统计存在"对方发来且未读"消息的会话数量（DISTINCT 去重后按会话计数）
-  const unreadConversations = await prisma.message.findMany({
+  return prisma.conversation.count({
     where: {
-      isRead: false,
-      senderId: { not: userId },
-      conversation: {
-        participants: { some: { userId } },
-      },
+      participants: { some: { userId } },
+      messages: { some: { isRead: false, senderId: { not: userId } } },
     },
-    select: { conversationId: true },
-    distinct: ["conversationId"],
   });
-
-  return unreadConversations.length;
 }
 
 export async function getConversationListItems(
@@ -380,6 +374,13 @@ export async function getConversationDetailPayload(
     return null;
   }
 
+  const pageLimit = Number.isFinite(limit) ? Math.max(1, Math.min(100, Math.trunc(limit))) : 20;
+  const anchor = cursor ? await prisma.message.findFirst({
+    where: { id: cursor, conversationId },
+    select: { id: true, createdAt: true },
+  }) : null;
+  if (cursor && !anchor) return null;
+
   const [hydrated] = await hydrateConversations([conversation], userId);
   const counterpart = hydrated.participants.find((p) => p.userId !== userId)?.user;
 
@@ -418,7 +419,7 @@ export async function getConversationDetailPayload(
   );
 
   // 标记当前用户已读并全量已读本会话
-  await Promise.all([
+  if (!cursor) await Promise.all([
     prisma.conversationParticipant.updateMany({
       where: { conversationId, userId },
       data: { lastReadAt: new Date() },
@@ -435,10 +436,12 @@ export async function getConversationDetailPayload(
 
   // 分页获取消息 (Cursor 向上翻页)
   const messagesRaw = await prisma.message.findMany({
-    where: { conversationId },
-    take: limit + 1,
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    orderBy: { createdAt: "desc" },
+    where: { conversationId, ...(anchor ? { OR: [
+      { createdAt: { lt: anchor.createdAt } },
+      { createdAt: anchor.createdAt, id: { lt: anchor.id } },
+    ] } : {}) },
+    take: pageLimit + 1,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     include: {
       sender: {
         select: { id: true, name: true, avatarUrl: true },
@@ -447,9 +450,9 @@ export async function getConversationDetailPayload(
   });
 
   let nextCursor: string | null = null;
-  if (messagesRaw.length > limit) {
-    const nextItem = messagesRaw.pop();
-    nextCursor = nextItem?.id ?? null;
+  if (messagesRaw.length > pageLimit) {
+    messagesRaw.pop();
+    nextCursor = messagesRaw.at(-1)?.id ?? null;
   }
 
   const messages: ConversationMessageItem[] = messagesRaw.reverse().map((msg) => ({
@@ -512,7 +515,7 @@ export async function getConversationDetailPayload(
       type: "PRODUCT_ORDER",
       id: hydrated.order.id,
       title: `交易订单 (${hydrated.order.orderNo})`,
-      priceText: `实付 ¥${Number(hydrated.order.amount).toFixed(2)}`,
+      priceText: `订单金额 ¥${Number(hydrated.order.amount).toFixed(2)}（线下结算）`,
       detailUrl: `/my/orders`,
     };
   } else if (hydrated.rentalOrder) {
