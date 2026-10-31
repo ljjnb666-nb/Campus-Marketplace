@@ -225,12 +225,40 @@ app_url_from_env() {
   printf 'https://%s' "$site_address"
 }
 
-# A database restore must not silently become a normal deploy/rollback.
-# This host-local marker is a defense-in-depth stop, NOT an approval record.
-# Operators must never clear it merely because health checks are green.
-RECOVERY_HOLD_FILE="${PROJECT_DIR}/.production-recovery-hold"
+# Disaster-recovery hold belongs to the production HOST, not to a checkout.
+# In production the path cannot be redirected using OPS_PROJECT_DIR.
+# Sandboxes remain isolated and must declare an unambiguously non-production
+# Compose project; COMPOSE_PROJECT_NAME would override its YAML name.
+PRODUCTION_RECOVERY_HOLD_FILE="/var/lib/campus-marketplace/production-recovery-hold"
+RECOVERY_HOLD_FILE="${PRODUCTION_RECOVERY_HOLD_FILE}"
+
+check_ops_project_scope() {
+  if [[ -z "${OPS_PROJECT_DIR}" ]]; then
+    RECOVERY_HOLD_FILE="${PRODUCTION_RECOVERY_HOLD_FILE}"
+    return 0
+  fi
+  local root scope compose_name
+  root="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
+  if ! scope="$(cd "${PROJECT_DIR}" && pwd -P)" || [[ "${scope}" == "${root}" ]]; then
+    echo "[ops][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN: invalid sandbox root" >&2
+    return 1
+  fi
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" || ! -f "${COMPOSE_FILE}" ]]; then
+    echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: missing isolated Compose model or external project-name override" >&2
+    return 1
+  fi
+  compose_name="$(sed -nE 's/^[[:space:]]*name:[[:space:]]*["'"']?([a-zA-Z0-9_-]+)["'"']?[[:space:]]*$/\1/p' "${COMPOSE_FILE}" | head -n 1)"
+  case "${compose_name}" in
+    campus-restore-drill-*|campus-ops-test-*) ;;
+    *) echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: sandbox requires isolated project name" >&2; return 1 ;;
+  esac
+  # This only scopes test adapters. Host administrators still can bypass a
+  # shell script; it is not an external disaster-recovery approval authority.
+  RECOVERY_HOLD_FILE="${scope}/.production-recovery-hold"
+}
 
 require_no_production_recovery_hold() {
+  check_ops_project_scope || return 1
   if [[ -e "${RECOVERY_HOLD_FILE}" || -L "${RECOVERY_HOLD_FILE}" ]]; then
     echo "[ops][FAIL] RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED: recovery hold exists; service restart/rollback prohibited until independently reviewed recovery procedure exists" >&2
     return 1
