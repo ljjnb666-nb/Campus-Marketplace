@@ -237,7 +237,7 @@ check_ops_project_scope() {
     echo "[ops][FAIL] PRODUCTION_RESTORE_OVERRIDE_FORBIDDEN: invalid sandbox root" >&2
     return 1
   fi
-  if [[ -n "${COMPOSE_PROJECT_NAME:-}" || ! -f "${COMPOSE_FILE}" ]]; then
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" || ! -f "${COMPOSE_FILE}" ]] || { [[ -f "${ENV_FILE}" ]] && grep -Eq '^[[:space:]]*COMPOSE_PROJECT_NAME[[:space:]]*=' "${ENV_FILE}"; }; then
     echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: missing isolated Compose model or external project-name override" >&2
     return 1
   fi
