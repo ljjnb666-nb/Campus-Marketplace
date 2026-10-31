@@ -34,6 +34,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# Prevent a redirected checkout from addressing the production Compose namespace.
+check_ops_project_scope
 load_production_env
 
 PRODUCTION_RESTORE_FLAG=""
