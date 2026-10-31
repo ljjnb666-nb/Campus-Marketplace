@@ -84,13 +84,6 @@ if [[ "${TARGET_DB}" != "${PRODUCTION_DB}" ]]; then
   fail "--target-db (${TARGET_DB}) 与 .env.production 的 POSTGRES_DB (${PRODUCTION_DB}) 不一致；拒绝恢复到非生产目标，请改用 restore-postgres.sh"
 fi
 
-# Exclude scheduled backup/retention for the entire destructive restore.
-# The lock must be acquired before any writer is stopped or DB is dropped.
-BACKUP_DIR="$(require_env_var BACKUP_DIR)" || fail "无法获取备份目录，不能申请备份/恢复互斥锁"
-[[ -d "${BACKUP_DIR}" ]] || fail "备份目录不存在，不能申请互斥锁"
-exec 9>"${BACKUP_DIR}/.backup-restore.lock" || fail "无法打开备份/恢复互斥锁"
-flock -n 9 || fail "BACKUP_RESTORE_LOCK_BUSY：另一备份或恢复正在执行，禁止破坏性恢复"
-
 # Backup and destructive restore must never run at the same time.
 # Acquire the same host-local FD as backup-postgres.sh before quiescing writers,
 # checksum checks or DROP/CREATE; never wait indefinitely for a scheduler.
