@@ -241,7 +241,7 @@ check_ops_project_scope() {
     echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: missing isolated Compose model or external project-name override" >&2
     return 1
   fi
-  compose_name="$(sed -nE 's/^[[:space:]]*name:[[:space:]]*([a-zA-Z0-9_-]+)[[:space:]]*$/\\1/p' "${COMPOSE_FILE}" | head -n 1)"
+  compose_name="$(awk '/^[[:space:]]*name:[[:space:]]*/ {print $2; exit}' "${COMPOSE_FILE}")"
   case "${compose_name}" in
     campus-restore-drill-*|campus-ops-test-*) ;;
     *) echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: sandbox requires isolated project name" >&2; return 1 ;;
