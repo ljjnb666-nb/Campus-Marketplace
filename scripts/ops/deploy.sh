@@ -302,14 +302,7 @@ fi
 # release 日志（仅 verifier PASS 后才写；不记录 dependency URLs/credentials/bucket names）
 LOG_FILE="${PROJECT_DIR}/.releases.log"
 # A tag moved during deployment is not a trustworthy artifact set.
-for binding in "APP:${APP_IMAGE_ID}:campus-marketplace-app:${GIT_SHA}" \
-               "CLEANUP:${CLEANUP_IMAGE_ID}:campus-marketplace-cleanup:${GIT_SHA}" \
-               "ASYNC_WORKER:${ASYNC_WORKER_IMAGE_ID}:campus-marketplace-async-worker:${GIT_SHA}" \
-               "MIGRATOR:${MIGRATOR_IMAGE_ID}:campus-marketplace-migrator:${GIT_SHA}"; do
-  role="${binding%%:*}"
-  remaining="${binding#*:}"
-  expected="${remaining%%:campus-marketplace-*}"
-  # Use explicit role mapping: Docker IDs are sha256:... and contain colons.
+for role in APP CLEANUP ASYNC_WORKER MIGRATOR; do
   case "${role}" in
     APP) image="campus-marketplace-app:${GIT_SHA}"; expected="${APP_IMAGE_ID}" ;;
     CLEANUP) image="campus-marketplace-cleanup:${GIT_SHA}"; expected="${CLEANUP_IMAGE_ID}" ;;
