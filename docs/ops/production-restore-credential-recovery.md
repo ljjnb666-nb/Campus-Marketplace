@@ -30,6 +30,13 @@
 
 **重要限制**：标记是本机防误操作哨兵，不是不可伪造的审批证据，也不具备多宿主机一致性；有宿主机权限的人仍可能删除，直接 Docker/Compose、其他工作树以及手工启动不受此标记强制保护。生产事故不能自行删除标记后恢复服务。仍需实现外部不可回退身份/RBAC 权威来源、独立操作授权、跨宿主机封锁和不可被旧部署绕过的 runtime gate，才能申请生产放行。
 
+## 2026-10-31 只读独立审计 P1-A/P1-C/P2-D 最小工程整改
+
+- **P1-A / 固定宿主机标记**：正式生产恢复写入固定路径 `/var/lib/campus-marketplace/production-recovery-hold`，不再依赖 checkout/ `OPS_PROJECT_DIR`。生产恢复前必须由受控运维预先创建并限制 `/var/lib/campus-marketplace` 目录权限；无法写入标记会直接拒绝恢复。测试 `OPS_PROJECT_DIR` 只准指向物理独立且声明 `campus-ops-test-*` 或 `campus-restore-drill-*` 的 Compose 项目，拒绝生产项目名与 `COMPOSE_PROJECT_NAME` 覆盖。绝不可将真实生产环境变量、Docker Socket 或数据库密码放入测试沙箱。
+- **P1-C / 镜像本机绑定**：成功部署后除 `.releases.log` 外还生成 `.release-image-ids.log`；记录 app、cleanup、async-worker、migrator 的 Docker `sha256` Image ID。回滚在切换任何 writer 之前核对两份历史日志与目标镜像当前 ID；缺少历史记录或标签重新指向其他 ID 则拒绝。早于该机制、缺少 ID 证据的历史 release 默认不能自动回滚，必须另经独立审核并构建可信发布工件。**Image ID 仍不是签名 provenance，也不证明 Dockerfile 的浮动 `node:24-bookworm-slim` 基础镜像与固定 Git tree 一致**；此项作为供应链残留风险继续阻断正式生产。
+- **P2-D / 同步互斥**：备份与破坏性恢复在 `BACKUP_DIR/.backup-restore.lock` 使用同一 `flock -n`。锁已占用、目录缺失或锁无法获取即拒绝，恢复必须在停写与 DROP 前拿到锁。备份选取最新 dump 的人工审查仍不可省略；生产 `--hard` 在外部审批前继续停用。
+- **边界**：这些检查仅覆盖受控宿主机、受控脚本；拥有 root/Docker 权限者、旧版脚本、第二宿主机和直接 Docker 操作仍可绕过。唯一充分方案仍需独立身份/RBAC 事实源、跨节点恢复授权与签名供应链/不可变镜像仓库验证；生产仍 `UNVERIFIED / BLOCKED`。
+
 ## 恢复/发布操作员门禁
 
 1. 在独立演练环境先确认受影响账号集合、T0/T1 差异、凭据和授权事件的**外部不可回退证据**，评估失陷范围；现场备份、离站副本、通知系统和管理员操作权限均需审查。
