@@ -91,6 +91,19 @@ BACKUP_DIR="$(require_env_var BACKUP_DIR)" || fail "无法获取备份目录，�
 exec 9>"${BACKUP_DIR}/.backup-restore.lock" || fail "无法打开备份/恢复互斥锁"
 flock -n 9 || fail "BACKUP_RESTORE_LOCK_BUSY：另一备份或恢复正在执行，禁止破坏性恢复"
 
+# Backup and destructive restore must never run at the same time.
+# Acquire the same host-local FD as backup-postgres.sh before quiescing writers,
+# checksum checks or DROP/CREATE; never wait indefinitely for a scheduler.
+LOCK_DIR="$(require_env_var BACKUP_DIR)" || fail "BACKUP_RESTORE_LOCK_DIR_UNAVAILABLE"
+[[ -d "${LOCK_DIR}" ]] || fail "BACKUP_RESTORE_LOCK_DIR_UNAVAILABLE"
+LOCK_FILE="${LOCK_DIR}/${BACKUP_RESTORE_LOCK_NAME}"
+if ! exec {BACKUP_RESTORE_LOCK_FD}> "${LOCK_FILE}"; then
+  fail "BACKUP_RESTORE_LOCK_UNAVAILABLE"
+fi
+if ! flock -n "${BACKUP_RESTORE_LOCK_FD}"; then
+  fail "BACKUP_RESTORE_LOCK_BUSY: another backup/restore is active"
+fi
+
 # SHA256 强校验：伴随文件必须存在且一致
 SHA_FILE="${BACKUP_FILE}.sha256"
 [[ -f "${SHA_FILE}" ]] || fail "缺少 SHA256 伴随文件 ${SHA_FILE}（无法验证备份完整性）"
