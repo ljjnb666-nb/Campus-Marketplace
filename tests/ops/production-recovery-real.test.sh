@@ -103,6 +103,28 @@ UPDATE "AccountChallenge" SET "consumedAt" = CURRENT_TIMESTAMP WHERE "consumedAt
 MUTATE
 
 export PROOF_SANDBOX="${sandbox}" PROOF_REAL_DOCKER="${real_docker}"
+
+# P2-D: an in-flight backup owns the lock. Restore must fail before any
+# compose call (especially DROP), leaving the T1 rotated hash intact.
+exec {proof_lock_fd}> "${sandbox}/backups/.backup-restore.lock"
+flock -n "${proof_lock_fd}"
+if OPS_PROJECT_DIR="${sandbox}" PATH="${sandbox}/bin:${PATH}" \
+  bash "${repo_root}/scripts/ops/restore-production-postgres.sh" \
+    --production-restore --backup-file "${sandbox}/backups/proof.dump" \
+    --target-db "${proof_db}" > "${sandbox}/lock-denied.log" 2>&1; then
+  echo "[recovery-proof][FAIL] restore ignored the shared backup lock" >&2
+  exit 1
+fi
+if ! grep -Fq "BACKUP_RESTORE_LOCK_BUSY" "${sandbox}/lock-denied.log"; then
+  echo "[recovery-proof][FAIL] restore failed without reporting the lock gate" >&2
+  exit 1
+fi
+[[ ! -e "${sandbox}/events.log" ]] || {
+  echo "[recovery-proof][FAIL] locked restore touched Compose" >&2
+  exit 1
+}
+flock -u "${proof_lock_fd}"
+exec {proof_lock_fd}>&-
 OPS_PROJECT_DIR="${sandbox}" PATH="${sandbox}/bin:${PATH}" \
   bash "${repo_root}/scripts/ops/restore-production-postgres.sh" \
     --production-restore --backup-file "${sandbox}/backups/proof.dump" \
