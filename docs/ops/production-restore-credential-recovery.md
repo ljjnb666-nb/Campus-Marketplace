@@ -37,6 +37,28 @@
 - **P2-D / 同步互斥**：备份与破坏性恢复在 `BACKUP_DIR/.backup-restore.lock` 使用同一 `flock -n`。锁已占用、目录缺失或锁无法获取即拒绝，恢复必须在停写与 DROP 前拿到锁。备份选取最新 dump 的人工审查仍不可省略；生产 `--hard` 在外部审批前继续停用。
 - **边界**：这些检查仅覆盖受控宿主机、受控脚本；拥有 root/Docker 权限者、旧版脚本、第二宿主机和直接 Docker 操作仍可绕过。唯一充分方案仍需独立身份/RBAC 事实源、跨节点恢复授权与签名供应链/不可变镜像仓库验证；生产仍 `UNVERIFIED / BLOCKED`。
 
+## 2026-10-31 宿主机生命周期并发锁（准确 HEAD CI 已验收）
+
+- `deploy.sh`、`rollback.sh`、`restore-production-postgres.sh` 在受控生产
+  操作期间持有固定宿主机 `/var/lib/campus-marketplace/.production-lifecycle.lock`；
+  锁竞争即时 `OPS_LIFECYCLE_LOCK_BUSY`。部署的内部备份再获取独立的
+  `BACKUP_DIR/.backup-restore.lock`，锁顺序不得反转。
+- 受信主机管理员须离线预先创建 `/var/lib/campus-marketplace`；
+  建议由专用 ops 账号拥有，目录权限 `0700`，禁止链接、开放
+  其他用户的目录写入或使用工作树本地文件伪造受控宿主机。
+  运维交接必须记录所有者、权限、ACL、实际运行账号及变更审批。
+  **当前脚本并未验证 owner/ACL 完整权威**，故仍须真实宿主机验收。
+- 单宿主机合作脚本持锁是 defense-in-depth；第二宿主机、旧脚本、
+  直接 Docker/Compose、host root/Docker 管理员绕过以及独立审批
+  缺失仍然构成生产发布阻断。
+- 工程证据：`tests/ops/lifecycle-lock.test.sh` 以真实 shell 验证
+  竞争锁拒绝三个入口且不触碰 Docker；
+  `tests/ops/deploy-gate.test.sh` 在独立模拟 checkout 忽略运行时锁，
+  但普通未跟踪源码仍被 release identity gate 拒绝。准确 HEAD
+  `7b7789868131909b25315940282c5a4585afb772` 的 CI
+  4,881/4,881 Vitest、110/110 Playwright、五镜像通过；
+  **仅是工程验收，不是生产宿主机或身份恢复放行**。
+
 ## 恢复/发布操作员门禁
 
 1. 在独立演练环境先确认受影响账号集合、T0/T1 差异、凭据和授权事件的**外部不可回退证据**，评估失陷范围；现场备份、离站副本、通知系统和管理员操作权限均需审查。
@@ -45,7 +67,7 @@
    `SELECT count(*) FROM "User" WHERE "credentialRecoveryRequired" IS DISTINCT FROM TRUE;` → **0**；旧 session/challenge 未消费数量 → 0。任何异常立即停止；不可打印用户哈希、邮箱或恢复令牌到日志。
 4. `rollback.sh --hard` 还需在**任何恢复副作用之前**检查目标旧 release 的 `credential-login-service.ts`、`account-challenge-service.ts` 与 `account-session-service.ts` 是否支持 `credentialRecoveryRequired`，否则 `RECOVERY_CREDENTIAL_HOLD_TARGET_INCOMPATIBLE` 拒绝切换。该检查是保守的源码兼容门禁，不等于镜像已通过生产运行时审计；正常 safe rollback 也不能被当成恢复后放行捷径。
 5. **不得因为脚本报告数据库恢复完成就重新开放登录或业务流量。** 在恢复的身份和 RBAC 历史状态与外部事实对齐、邮件送达和 MFA 验证能力恢复、受控用户恢复流程及滥用监测得到人工审批之前，保持生产 `BLOCKED`。
-6. 对受影响账号，采用经批准的邮箱/MFA/人工补充核验程序重新确认真实归属；新密码验证后自动解除单账号 hold。历史邮箱可能已被弃用/转移，不能单凭从备份恢复出的旧邮箱确认所有者。
+6. **未来待实现**：经独立批准的邮箱/MFA/人工补充核验与外部身份事件对账，确认真实归属后才能设计专用的单账号 hold 解除流程。**当前没有可自动解除 hold 的正式路径**，新密码验证不等于批准解锁。历史邮箱可能已被弃用/转移，不能单凭从备份恢复出的旧邮箱确认所有者。
 7. 检查恢复后未授权角色恢复、订单/支付凭据/对象存储或其他外部状态发生时间回退的影响。所有放行须记录审批人、准确 release SHA、证据位置、健康与安全指标、异常回滚计划。
 
 ## 可重复的隔离工程测试

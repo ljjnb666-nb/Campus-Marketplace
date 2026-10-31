@@ -76,58 +76,50 @@ Internet ── 80/443 ──▶ caddy（唯一公网入口）
 
 - 操作员无需手工 export 任何变量；脚本自行从 `.env.production` 读取。
 
-## 3. 首次部署
+## 3. 首次部署（生产当前 BLOCKED，不得按旧脚本手工开机）
 
-1. **准备 env**：
-   ```bash
-   cp .env.production.example .env.production
-   # 逐项填写；POSTGRES_PASSWORD/REDIS_PASSWORD/NEXTAUTH_SECRET 用
-   # openssl rand -base64 32 生成
-   npx tsx scripts/production-env-check.ts   # preflight，只打印 PASS/FAIL 不输出秘密
-   ```
-2. **启动数据层**：
-   `docker compose --env-file .env.production -f compose.production.yml up -d postgres redis`
-3. **对象存储**：外部提供商直接填 env；自建 MinIO（幂等，可重复运行）：
-   ```bash
-   docker compose --env-file .env.production -f compose.production.yml \
-     --profile selfhosted-minio up -d minio
-   docker compose --env-file .env.production -f compose.production.yml \
-     --profile selfhosted-minio up minio-init
-   ```
-   minio-init 会：建 public/private 桶 → Phase 1 匿名策略（public 仅下载 /
-   private 全私有）→ 创建应用专用用户 → 绑定 least-privilege policy
-   （仅两个业务桶业务读写，无 admin 权限）。
-   轮换 `S3_SECRET_ACCESS_KEY` 后需同步更新 MinIO 用户：
-   `mc admin user add local <S3_ACCESS_KEY_ID> <新secret>`（用 root 凭据执行）。
-4. **迁移**（一次性容器，禁止 `migrate dev` / `db push`）：
-   ```bash
-   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
-     -f compose.production.yml --profile ops run --rm migrate
-   ```
-5. **构建并启动全栈**：
-   ```bash
-   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
-     -f compose.production.yml --profile ops up -d --build
-   ```
-6. **验证**：`curl https://<域名>/api/health` → `{"status":"ok","release":"<sha>",...}`，
-   release 必须等于部署 SHA。
-7. **统一运维检查**（部署后一次性验证 env 契约/依赖连通性/备份健康/release
-   identity 六项，LAUNCH_REHEARSAL_REPAIR R1 起为唯一 canonical 生产命令）：
-   ```bash
-   GIT_SHA=$(git rev-parse HEAD) docker compose --env-file .env.production \
-     -f compose.production.yml --profile ops run --rm --no-deps --build ops-check
-   ```
-   `--no-deps` 为诊断合同（OBSERVE ONLY：不启动/修复被观察依赖）。
-   前提：`BACKUP_DIR` 已配置（宿主机绝对路径；该目录被 ops-check 只读挂载）
-   且已有一次成功备份；生产合同要求 `BACKUP_OFFSITE_TARGET` 异地副本成功，
-   未配置时 `backup_health` FAIL 属 Phase 3B 设计语义。详见
-   [OBSERVABILITY.md §7](./OBSERVABILITY.md#7-统一运维检查)。
+> **2026-10-31 更新，取代原首次部署 1–7 步中的直接 Compose 迁移、
+> `up -d --build`、手工重启 writer 流程。** 本仓库目前只具备隔离
+> CI/运行时演练的工程证据，没有真实服务器的凭据、独立身份/RBAC
+> 恢复授权、异地恢复及生产签名工件证明。**禁止把本文当成上线许可。**
 
-日常部署直接用封装脚本：`./scripts/ops/deploy.sh`（= preflight → 备份 → 迁移 →
-滚动更新 → RELEASE READINESS GATE → 写 release 日志）。deploy.sh 与 rollback.sh
-的 SUCCESS 都必须通过统一发布门禁
-`scripts/ops/release-readiness-check.ts`（见 §3.1），仅 verifier PASS 才写
-`.releases.log`（记录 `READINESS=ready`，不含 dependency URLs/credentials/bucket names）。
+生产操作的不可变顺序：
+
+1. **只准备配置，不开放服务**：按 `.env.production.example` 配置真实
+   `.env.production`（不得入库）；准备生产域名、TLS、独立离站备份、
+   真实邮件/告警，以及运维操作者/独立审批人的职责边界。
+2. **离线预配置主机固定锁目录**：受信主机管理员在部署主机上创建
+   `/var/lib/campus-marketplace`，实际运行 deploy/rollback/restore 的
+   受信 ops 账号必须能写，目录本身不得是符号链接，不得授予普通用户
+   写入/替换锁文件或 `production-recovery-hold` 的权限。推荐目录为
+   受信 ops 账号拥有、权限 `0700`；在生产变更工单里记录绝对路径、
+   `stat` 返回的所有者/权限、执行账号及复核人。**现有脚本只检查目录
+   存在及非符号链接，不自动证明 POSIX owner/ACL 权威；此项必须另行验收。**
+   目录缺失时 `OPS_LIFECYCLE_LOCK_UNAVAILABLE` 是安全拒绝，禁止通过
+   设置 `OPS_PROJECT_DIR` 或把锁放进 checkout 来绕过。
+3. **只读验收**：验证 exact SHA、受控镜像身份、数据库迁移/备份合同、
+   登录隔离状态、release read/ready 与所有生产外部依赖；除 CI 已通过
+   的隔离测试外，真实服务器、外部审批、离站恢复结果仍需单独取证。
+4. **取得独立生产上线授权后才允许执行**受控
+   `./scripts/ops/deploy.sh <40位准确SHA>`；该脚本自行执行备份、迁移、
+   app/cleanup/async-worker 顺序切换和 release readiness gate。
+   **不得改用裸 `docker compose up`、手工 `migrate` 或旧版脚本**，
+   因为它们不受生命周期锁和灾难恢复 hold 门禁约束。
+5. **灾难恢复仍是独立阻断项**：`rollback.sh <sha> --hard` 当前始终
+   `RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED`，没有生产可用的
+   “恢复成功后自动放行”流程；详见
+   [恢复凭据隔离手册](./ops/production-restore-credential-recovery.md)。
+
+当前受控脚本均从 `scripts/ops/lib.sh` 取得同一单宿主机
+`/var/lib/campus-marketplace/.production-lifecycle.lock`：部署覆盖构建、
+内嵌备份、迁移、writer 切换和提交发布日志；回滚覆盖安全校验与切换；
+生产恢复覆盖写流量停止、恢复和凭据隔离。备份/恢复原有
+`BACKUP_DIR/.backup-restore.lock` 继续独立存在。两类锁均仅保证
+**同一主机、合作脚本内**互斥，不保证跨节点、直接 Docker 命令、旧镜像
+和管理员绕过安全；生产外部控制仍 `UNVERIFIED/BLOCKED`。
+
+日常升级只允许在上述所有真实门禁通过后由受控脚本执行；非零退出时
+不得手工创建成功日志，也不得仅因 `/api/health` 返回 200 宣称部署成功。
 
 ### 3.1 健康语义与发布门禁（RB-06）
 
@@ -293,16 +285,17 @@ $COMPOSE run --rm storage-cleanup --run-once --dry-run
 ### 5.2 生产数据库恢复的 writer quiesce（restore）
 
 `restore-production-postgres.sh` 覆盖生产库前必须停止**全部 production DB
-writers**（app + storage-cleanup）并逐一验证已停止。语义全部 fail closed——
+writers**（app + storage-cleanup + async-worker）并逐一验证已停止。语义全部 fail closed——
 **writer 状态未知 ≠ writer 已停止**：`compose ps` 命令失败（无论发现阶段还是
 停止后验证阶段）都直接失败，绝不把命令失败解释成"无容器/已停止"；容器不存在 =
 无该 writer（pre-worker release 兼容）；停止命令失败或停止后仍在 running →
 FAIL CLOSED，绝不执行 terminate/DROP/restore。失败消息区分两个阶段：quiesce
 完成前失败只声明"未执行任何破坏性恢复操作"（不声称 writers 已停止）；quiesce
 成功后的失败才声明"production writers 保持停止"。恢复后（无论成败）writers
-状态由操作员按目标 release topology 恢复：post-worker release 启动
-app + storage-cleanup；pre-worker 目标仅启动 app（cleanup 保持停止）。
-`rollback.sh --hard` 会自动按该 policy 切换。
+状态在恢复后必须继续维持隔离：**当前不可自动重新启动任何 writer**。
+生产 `rollback.sh --hard` 在开始恢复前即固定拒绝
+`RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED`，外部身份/RBAC 回退事实
+对账和独立放行门禁尚未实现；不能通过手工 Compose 启动替代。
 
 ## 6. 迁移纪律
 
