@@ -970,6 +970,23 @@ assert_log_not_contains "restore_called"
 assert_log_not_contains "image inspect"
 assert_contains_file "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "/tmp/rb-out.${BASHPID}" "recovery hold prevents rollback"
 
+echo "== P1-A. isolated worktree may not select production Compose project =="
+make_sandbox
+printf 'name: campus-marketplace-production\n' > "${SANDBOX}/compose.production.yml"
+run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "production Compose namespace refused for safe rollback"
+assert_contains_file "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "/tmp/rb-out.${BASHPID}" "production scope refusal"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "docker called"
+
+echo "== P1-A. hard restore seam may not use production Compose project =="
+run_rollback "${PREV_SHA}" --hard; rc=$?
+assert_exit 1 "$rc" "production Compose namespace refused for hard rollback"
+assert_contains_file "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "/tmp/rb-out.${BASHPID}" "hard scope refusal"
+assert_log_not_contains "restore_called"
+assert_log_not_contains "docker called"
+
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
 source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
