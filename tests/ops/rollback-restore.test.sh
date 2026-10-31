@@ -309,7 +309,15 @@ run_rollback() {
     shift
   fi
   CALL_LOG=""
-  rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log"
+  rm -f "${SANDBOX}/calls.log" "${SANDBOX}/.releases.log" "${SANDBOX}/.release-image-ids.log"
+  # Seed a historical, already-verified release. The fixture's normal
+  # tests still assert no NEW success log after a failed rollback.
+  local proof_id="sha256:$(printf '%064d' 1)"
+  local proof_line="RELEASE_SHA=${PREV_SHA} APP_IMAGE_ID=${proof_id} CLEANUP_IMAGE_ID=${proof_id} ASYNC_WORKER_IMAGE_ID=${proof_id}"
+  if [[ "${PROOF_LOG_STUB_MODE:-valid}" != "missing" ]]; then
+    printf '%s\\n' "${proof_line}" > "${SANDBOX}/.releases.log"
+    printf '%s\\n' "${proof_line}" > "${SANDBOX}/.release-image-ids.log"
+  fi
   # 一律经 env 命令注入环境：展开形式的 VAR=v 不能作为 assignment 前缀
   env "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
     RESTORE_STUB_MODE="${RESTORE_STUB_MODE:-success}" \
@@ -322,6 +330,12 @@ run_rollback() {
   local rc=$?
   LAST_ROLLBACK_RC="$rc"
   [[ -f "${SANDBOX}/calls.log" ]] && CALL_LOG="$(cat "${SANDBOX}/calls.log")"
+  # Strip only the historical fixture entry. A newly written success entry
+  # remains visible; a failed rollback must leave no new release record.
+  if [[ -f "${SANDBOX}/.releases.log" ]]; then
+    sed -i '1d' "${SANDBOX}/.releases.log"
+    [[ -s "${SANDBOX}/.releases.log" ]] || rm -f "${SANDBOX}/.releases.log"
+  fi
   return "${rc}"
 }
 
