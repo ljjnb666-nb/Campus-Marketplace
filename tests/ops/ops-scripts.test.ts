@@ -18,6 +18,15 @@ function hasBash(): boolean {
   }
 }
 
+function hasFlock(): boolean {
+  try {
+    execSync("bash -c 'command -v flock'", { stdio: "ignore", timeout: 30_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function hasDocker(): boolean {
   try {
     execSync("docker version --format ok", { stdio: "ignore", timeout: 30_000 });
@@ -26,6 +35,38 @@ function hasDocker(): boolean {
     return false;
   }
 }
+
+describe("production lifecycle lock shell-level regression", () => {
+  it.skipIf(!hasBash() || !hasFlock())(
+    "deploy, rollback and restore all fail closed under an active host lifecycle lock",
+    async () => {
+      const { stdout } = await execFileAsync("bash", ["tests/ops/lifecycle-lock.test.sh"], {
+        cwd: repoRoot,
+        timeout: 60_000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      expect(stdout).toMatch(/PASS=4 FAIL=0/);
+    },
+    90_000,
+  );
+
+  it("the shared lock is acquired before side effects in all three entrypoints", () => {
+    const lib = readFileSync(path.join(repoRoot, "scripts/ops/lib.sh"), "utf8");
+    expect(lib).toContain('OPS_LIFECYCLE_LOCK_NAME=".production-lifecycle.lock"');
+    expect(lib).toContain('lock_dir="/var/lib/campus-marketplace"');
+    expect(lib).toContain("flock -n");
+    for (const file of [
+      "scripts/ops/deploy.sh",
+      "scripts/ops/rollback.sh",
+      "scripts/ops/restore-production-postgres.sh",
+    ]) {
+      const content = readFileSync(path.join(repoRoot, file), "utf8");
+      expect(content).toContain("acquire_ops_lifecycle_lock");
+      expect(content.indexOf("\nacquire_ops_lifecycle_lock\n"))
+        .toBeLessThan(content.indexOf("\nload_production_env\n"));
+    }
+  });
+});
 
 describe("rollback / restore shell-level regression（tests/ops/rollback-restore.test.sh）", () => {
   it.skipIf(!hasBash())(

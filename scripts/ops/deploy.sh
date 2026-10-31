@@ -43,6 +43,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Hold the production lifecycle lock through backup, migration, all writer
+# switches, readiness verification and release-log commit. Restore cannot
+# begin in the middle of a deployment after its initial recovery-hold check.
+acquire_ops_lifecycle_lock
 # Fail before any image, migration, restore or writer side effect.
 require_no_production_recovery_hold
 load_production_env

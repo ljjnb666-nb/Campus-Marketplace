@@ -34,8 +34,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
-# Prevent a redirected checkout from addressing the production Compose namespace.
-check_ops_project_scope
+# Serialize destructive recovery with entire deploy/rollback lifecycles.
+# Lock first, then acquire BACKUP_RESTORE_LOCK below; never invert the order.
+# Production hard rollback is independently disabled until external approval
+# is implemented; its sandbox restore-stub path is not a production waiver.
+acquire_ops_lifecycle_lock
 load_production_env
 
 PRODUCTION_RESTORE_FLAG=""

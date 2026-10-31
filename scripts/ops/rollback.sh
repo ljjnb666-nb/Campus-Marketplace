@@ -37,6 +37,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Hold the shared production lifecycle lock across all target checks and
+# writer switches; a concurrent disaster recovery must fail closed.
+acquire_ops_lifecycle_lock
 # Fail before any image, migration, restore or writer side effect.
 require_no_production_recovery_hold
 

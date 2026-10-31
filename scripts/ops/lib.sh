@@ -146,6 +146,39 @@ check_ops_project_scope() {
   RECOVERY_HOLD_FILE="${scope}/.production-recovery-hold"
 }
 
+# Serialize all production writer lifecycle operations with destructive recovery.
+# The backup/restore flock remains a separate nested lock: deploy holds this
+# lifecycle lock while its backup subprocess takes only the backup lock.
+# A production host must pre-provision /var/lib/campus-marketplace, writable
+# only by the trusted ops account; NEVER fall back to a checkout-local lock.
+OPS_LIFECYCLE_LOCK_NAME=".production-lifecycle.lock"
+acquire_ops_lifecycle_lock() {
+  check_ops_project_scope || return 1
+  local lock_dir lock_path
+  if [[ -n "${OPS_PROJECT_DIR}" ]]; then
+    lock_dir="$(cd "${PROJECT_DIR}" && pwd -P)" || return 1
+  else
+    lock_dir="/var/lib/campus-marketplace"
+  fi
+  if [[ ! -d "${lock_dir}" || -L "${lock_dir}" ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: trusted host lock directory is missing" >&2
+    return 1
+  fi
+  lock_path="${lock_dir}/${OPS_LIFECYCLE_LOCK_NAME}"
+  if [[ -L "${lock_path}" ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: symlink lock is forbidden" >&2
+    return 1
+  fi
+  if ! exec {OPS_LIFECYCLE_LOCK_FD}> "${lock_path}"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: cannot open host lock" >&2
+    return 1
+  fi
+  if ! flock -n "${OPS_LIFECYCLE_LOCK_FD}"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_BUSY: a deploy, rollback or restore is already active" >&2
+    return 1
+  fi
+}
+
 require_no_production_recovery_hold() {
   check_ops_project_scope || return 1
   if [[ -e "${RECOVERY_HOLD_FILE}" || -L "${RECOVERY_HOLD_FILE}" ]]; then
