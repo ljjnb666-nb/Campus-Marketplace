@@ -37,10 +37,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
-# Hold the shared production lifecycle lock across all target checks and
-# writer switches; a concurrent disaster recovery must fail closed.
-acquire_ops_lifecycle_lock
-# Fail before any image, migration, restore or writer side effect.
+# Pure guard checks before touching production state. In particular, the
+# production --hard and unsafe helper-overrides must retain their explicit
+# rejection reasons even when the host lock directory is not provisioned.
 require_no_production_recovery_hold
 
 # HARD RESTORE AUTHORITY: production must always call the checked-in,
@@ -79,6 +78,11 @@ if [[ "${2:-}" == "--hard" ]]; then
     exit 1
   fi
 fi
+# The pure hard/override validation above has no side effects. Now serialize
+# every subsequent operation and recheck hold UNDER the lock, closing the race
+# between the early guard and recovery becoming active.
+acquire_ops_lifecycle_lock
+require_no_production_recovery_hold
 load_production_env
 
 PREVIOUS_SHA="${1:?用法: rollback.sh <previous_git_sha> [--hard]}"
