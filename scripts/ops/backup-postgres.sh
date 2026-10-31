@@ -61,15 +61,6 @@ if ! flock -n "${BACKUP_RESTORE_LOCK_FD}"; then
   exit 1
 fi
 
-# Keep a single backup/restore exclusion lock through dump, checksum,
-# offsite replication and retention. A concurrent restore must never observe
-# a partially written dump as the newest backup.
-exec 9>"${BACKUP_DIR}/.backup-restore.lock"
-if ! flock -n 9; then
-  echo "[backup][FAIL] BACKUP_RESTORE_LOCK_BUSY: another backup/restore is active" >&2
-  exit 1
-fi
-
 # ---- BACKUP_DIR 可用：立即初始化状态并注册 trap（BLOCKER 4B）----
 STATUS_FILE="${BACKUP_DIR}/backup-status.json"
 PENDING_STATUS="failed"      # 任何未走到 success 收尾的退出都按 failed 记录
