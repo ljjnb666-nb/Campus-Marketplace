@@ -113,6 +113,7 @@ compose.production.yml
 .env.production
 .releases.log
 compose.production.yml
+.release-image-ids.log
 GITIGNORE
   echo "committed source marker" > "${SANDBOX}/app-source-marker.txt"
   git -C "${SANDBOX}" add .gitignore app-source-marker.txt
@@ -135,6 +136,13 @@ GITIGNORE
 ARGS="\$*"
 echo "docker_called:\${ARGS}" >> "${SANDBOX}/calls.log"
 case "\$ARGS" in
+  *"image inspect --format "*"{{.Id}}"*)
+    if [[ -n "\${WRONG_IMAGE_ID_STUB_MODE:-}" ]]; then
+      printf 'sha256:%064d\\n' 2
+    else
+      printf 'sha256:%064d\\n' 1
+    fi
+    exit 0 ;;
   *"compose"*"config --format json migrate"*)
     if [[ -n "\${WRONG_MIGRATOR_IMAGE:-}" ]]; then image="campus-marketplace-migrator:local";
     else image="campus-marketplace-migrator:\${GIT_SHA:-local}"; fi
@@ -318,7 +326,7 @@ UNSET_ENV_ARGS=(
 )
 
 run_deploy() {  # $1=输出文件；$2=可选显式 SHA；APP_URL 等经 EXTRA_ENV 注入
-  rm -f "${SANDBOX}/.releases.log" "${SANDBOX}/calls.log"
+  rm -f "${SANDBOX}/.releases.log" "${SANDBOX}/.release-image-ids.log" "${SANDBOX}/calls.log"
   if [[ $# -ge 2 && -n "${2:-}" ]]; then
     env "${UNSET_ENV_ARGS[@]}" "${EXTRA_ENV[@]}" PATH="${SANDBOX}/bin:${PATH}" \
       OPS_PROJECT_DIR="${SANDBOX}" \
