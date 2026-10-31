@@ -44,10 +44,13 @@
   锁竞争即时 `OPS_LIFECYCLE_LOCK_BUSY`。部署的内部备份再获取独立的
   `BACKUP_DIR/.backup-restore.lock`，锁顺序不得反转。
 - 受信主机管理员须离线预先创建 `/var/lib/campus-marketplace`；
-  建议由专用 ops 账号拥有，目录权限 `0700`，禁止链接、开放
-  其他用户的目录写入或使用工作树本地文件伪造受控宿主机。
-  运维交接必须记录所有者、权限、ACL、实际运行账号及变更审批。
-  **当前脚本并未验证 owner/ACL 完整权威**，故仍须真实宿主机验收。
+  **必须由实际执行脚本的 ops 账号拥有，目录私有权限 `0700`**，
+  不允许符号链接、开放其他本机用户访问或使用工作树本地文件代替。
+  `acquire_ops_lifecycle_lock` 现在会用 Linux `stat` 核验 UID 和
+  组/其他权限位；不满足就报
+  `OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY` 并拒绝实际操作。
+  运维交接仍须独立核验 owner、mode、ACL、运行账号、父路径信任及
+  宿主机 Docker 管理员边界（脚本本身不能替代主机管理审计）。
 - 单宿主机合作脚本持锁是 defense-in-depth；第二宿主机、旧脚本、
   直接 Docker/Compose、host root/Docker 管理员绕过以及独立审批
   缺失仍然构成生产发布阻断。

@@ -56,4 +56,45 @@ if ! bash -c 'source "$1"; acquire_ops_lifecycle_lock' _ "${repo_root}/scripts/o
   exit 1
 fi
 PASS=$((PASS + 1))
+# Host directory 0777 permits a different user to unlink/replace the flock
+# inode: reject it before any deployment, rollback or database side effects.
+chmod 0777 "${sandbox}"
+if bash -c 'source "$1"; acquire_ops_lifecycle_lock' _ "${repo_root}/scripts/ops/lib.sh" > "${sandbox}/untrusted.log" 2>&1; then
+  echo "[lifecycle-lock][FAIL] world-writable host directory was accepted" >&2
+  exit 1
+fi
+grep -Fq 'OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY' "${sandbox}/untrusted.log" || {
+  echo "[lifecycle-lock][FAIL] missing world-writable directory diagnostic" >&2
+  exit 1
+}
+PASS=$((PASS + 1))
+chmod 0700 "${sandbox}"
+# A read/execute-accessible host directory also violates the 0700 contract.
+chmod 0750 "${sandbox}"
+if bash -c 'source "$1"; acquire_ops_lifecycle_lock' _ "${repo_root}/scripts/ops/lib.sh" > "${sandbox}/untrusted.log" 2>&1; then
+  echo "[lifecycle-lock][FAIL] group-accessible host directory was accepted" >&2
+  exit 1
+fi
+grep -Fq 'OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY' "${sandbox}/untrusted.log" || {
+  echo "[lifecycle-lock][FAIL] missing group-accessible directory diagnostic" >&2
+  exit 1
+}
+PASS=$((PASS + 1))
+chmod 0700 "${sandbox}"
+# The directory and the lock file itself must not be symlinks.
+rm -f -- "${sandbox}/.production-lifecycle.lock"
+ln -s "${sandbox}/backups/proof.dump" "${sandbox}/.production-lifecycle.lock"
+if bash -c 'source "$1"; acquire_ops_lifecycle_lock' _ "${repo_root}/scripts/ops/lib.sh" > "${sandbox}/untrusted.log" 2>&1; then
+  echo "[lifecycle-lock][FAIL] symlink host lock was accepted" >&2
+  exit 1
+fi
+grep -Fq 'OPS_LIFECYCLE_LOCK_UNAVAILABLE' "${sandbox}/untrusted.log" || {
+  echo "[lifecycle-lock][FAIL] missing symlink lock diagnostic" >&2
+  exit 1
+}
+PASS=$((PASS + 1))
+if [[ -e "${sandbox}/side-effects.log" ]]; then
+  echo "[lifecycle-lock][FAIL] negative host-permissions probes reached Docker" >&2
+  exit 1
+fi
 echo "PASS=${PASS} FAIL=0"

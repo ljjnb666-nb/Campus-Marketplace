@@ -45,7 +45,7 @@ describe("production lifecycle lock shell-level regression", () => {
         timeout: 60_000,
         maxBuffer: 2 * 1024 * 1024,
       });
-      expect(stdout).toMatch(/PASS=4 FAIL=0/);
+      expect(stdout).toMatch(/PASS=7 FAIL=0/);
     },
     90_000,
   );

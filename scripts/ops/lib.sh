@@ -164,6 +164,24 @@ acquire_ops_lifecycle_lock() {
     echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: trusted host lock directory is missing" >&2
     return 1
   fi
+  # POSIX Linux host trust boundary: an unrelated local user must not be
+  # able to replace the flock inode while another process holds its FD.
+  # Require the actual running ops identity to own a private 0700 directory.
+  # An ACL granting other identities access is reflected in group mode bits.
+  local owner_and_mode lock_owner lock_mode
+  if ! owner_and_mode="$(stat -c '%u %a' -- "${lock_dir}")"; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: cannot stat host lock directory" >&2
+    return 1
+  fi
+  read -r lock_owner lock_mode <<< "${owner_and_mode}"
+  if [[ ! "${lock_owner}" =~ ^[0-9]+$ || ! "${lock_mode}" =~ ^[0-7]{3,4}$ ]]; then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: invalid owner/mode" >&2
+    return 1
+  fi
+  if [[ "${lock_owner}" != "$(id -u)" ]] || (( (8#${lock_mode} & 0077) != 0 )); then
+    echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNTRUSTED_DIRECTORY: must be owned by running ops account and private (0700)" >&2
+    return 1
+  fi
   lock_path="${lock_dir}/${OPS_LIFECYCLE_LOCK_NAME}"
   if [[ -L "${lock_path}" ]]; then
     echo "[ops][FAIL] OPS_LIFECYCLE_LOCK_UNAVAILABLE: symlink lock is forbidden" >&2
