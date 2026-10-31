@@ -672,6 +672,28 @@ assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "production nam
 assert_zero_side_effects "production namespace fail-closed"
 rm -f "${OUT}"
 
+echo "== P1-A: redirected sandbox may NOT target production Compose =="
+make_sandbox
+printf 'name: campus-marketplace-production\n' > "${SANDBOX}/compose.production.yml"
+OUT="$(mktemp)"
+EXTRA_ENV=()
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "redirected production project must be rejected"
+assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "redirected project denial"
+assert_zero_side_effects "production project sandbox bypass"
+rm -f "${OUT}"
+
+echo "== P1-A: COMPOSE_PROJECT_NAME override cannot change sandbox namespace =="
+make_sandbox
+OUT="$(mktemp)"
+EXTRA_ENV=(COMPOSE_PROJECT_NAME=campus-marketplace-production)
+run_deploy "${OUT}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "environment project-name override must be rejected"
+assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "env project-name override denial"
+assert_zero_side_effects "COMPOSE_PROJECT_NAME bypass"
+rm -f "${OUT}"
+
 echo "=============================="
 echo "PASS=${PASS} FAIL=${FAIL}"
 if [[ "${FAIL}" != "0" ]]; then exit 1; fi
