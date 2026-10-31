@@ -24,12 +24,6 @@ fi
 ENV_FILE="${PROJECT_DIR}/.env.production"
 COMPOSE_FILE="${PROJECT_DIR}/compose.production.yml"
 
-# OPS_PROJECT_DIR is a test-only seam. It must NEVER select the production
-# Compose namespace, even if the caller supplies a second checkout.
-if [[ -n "${OPS_PROJECT_DIR}" ]]; then
-  if [[ ! -f "${COMPOSE_FILE}" ]] || \
-     ! grep -Eq '^[[:space:]]*name:[[:space:]]*campus-restore-drill-[A-Za-z0-9_-]+[[:space:]]*
-
 # 解析 KEY=VALUE env 文件（去引号、跳过注释/空行；不 export 到当前 shell，
 # 只输出到 stdout —— 调用方按需读取，避免把秘密整体倒进环境）
 parse_env_file() {
@@ -247,7 +241,7 @@ check_ops_project_scope() {
     echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: missing isolated Compose model or external project-name override" >&2
     return 1
   fi
-  compose_name="$(sed -nE 's/^[[:space:]]*name:[[:space:]]*["'"']?([a-zA-Z0-9_-]+)["'"']?[[:space:]]*$/\1/p' "${COMPOSE_FILE}" | head -n 1)"
+  compose_name="$(sed -nE 's/^[[:space:]]*name:[[:space:]]*([a-zA-Z0-9_-]+)[[:space:]]*$/\\1/p' "${COMPOSE_FILE}" | head -n 1)"
   case "${compose_name}" in
     campus-restore-drill-*|campus-ops-test-*) ;;
     *) echo "[ops][FAIL] PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN: sandbox requires isolated project name" >&2; return 1 ;;
