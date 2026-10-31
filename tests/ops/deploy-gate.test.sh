@@ -103,6 +103,9 @@ ENV
   cat > "${SANDBOX}/.gitignore" <<'GITIGNORE'
 bin/
 backups/
+# The production lifecycle lock lives outside the checkout; the synthetic
+# project is itself the checkout, so ignore only this operational lock file.
+.production-lifecycle.lock
 calls.log
 fake-app.out
 async.running
