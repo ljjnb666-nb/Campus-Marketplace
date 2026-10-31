@@ -113,6 +113,13 @@ state_has() { grep -qx "\$1" "\$STATE" 2>/dev/null; }
 state_add() { state_has "\$1" || printf '%s\n' "\$1" >> "\$STATE"; }
 state_remove() { grep -vx "\$1" "\$STATE" 2>/dev/null > "\${STATE}.tmp" || true; mv "\${STATE}.tmp" "\$STATE" 2>/dev/null || : > "\$STATE"; }
 case "\$ARGS" in
+  *"image inspect --format "*"{{.Id}}"*)
+    if [[ -n "\${WRONG_IMAGE_ID_STUB_MODE:-}" ]]; then
+      printf 'sha256:%064d\\n' 2
+    else
+      printf 'sha256:%064d\\n' 1
+    fi
+    exit 0 ;;
   *"image inspect"*)
     if [[ "\$ARGS" == *"campus-marketplace-app:0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"* ]]; then
       exit 0
