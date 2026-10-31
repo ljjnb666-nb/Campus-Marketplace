@@ -659,6 +659,17 @@ assert_contains "RECOVERY_EXTERNAL_IDENTITY_APPROVAL_REQUIRED" "${OUT}" "restore
 assert_zero_side_effects "restore hold rejects release"
 rm -f "${OUT}"
 
+echo "== PROJECT-OVERRIDE: production Compose namespace must be denied before side effects =="
+make_sandbox
+printf 'name: campus-marketplace-production\n' > "${SANDBOX}/compose.production.yml"
+OUT="$(mktemp)"
+EXTRA_ENV=()
+run_deploy "${OUT}"; rc=$?
+assert_exit 1 "$rc" "production namespace override"
+assert_contains "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "${OUT}" "production namespace rejected"
+assert_zero_side_effects "production namespace fail-closed"
+rm -f "${OUT}"
+
 echo "=============================="
 echo "PASS=${PASS} FAIL=${FAIL}"
 if [[ "${FAIL}" != "0" ]]; then exit 1; fi
