@@ -60,6 +60,7 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  printf 'name: campus-ops-test-deploy\n' > "${SANDBOX}/compose.production.yml"
   # An OPS_PROJECT_DIR fixture must never target the production Compose namespace.
   printf 'name: campus-restore-drill-test\n' > "${SANDBOX}/compose.production.yml"
   cat > "${SANDBOX}/.env.production" <<'ENV'
@@ -111,6 +112,7 @@ migration.count
 compose.production.yml
 .env.production
 .releases.log
+compose.production.yml
 GITIGNORE
   echo "committed source marker" > "${SANDBOX}/app-source-marker.txt"
   git -C "${SANDBOX}" add .gitignore app-source-marker.txt
