@@ -358,6 +358,8 @@ OUT="$(mktemp)"
 OPS_HEALTH_TIMEOUT=15 run_deploy "${OUT}"; rc=$?
 assert_exit 0 "$rc" "SOURCE-01 deploy"
 assert_contains "side_effect:app_up GIT_SHA=${SANDBOX_HEAD}" "${SANDBOX}/calls.log" "SOURCE-01 以 HEAD 为 release 更新 app"
+assert_contains "APP_IMAGE_ID=sha256:" "${SANDBOX}/.releases.log" "SOURCE-01 release log includes app image ID"
+assert_contains "ASYNC_WORKER_IMAGE_ID=sha256:" "${SANDBOX}/.release-image-ids.log" "SOURCE-01 independent inventory includes worker ID"
 assert_contains "RELEASE_SHA=${SANDBOX_HEAD}" "${SANDBOX}/.releases.log" "SOURCE-01 release log 记录 HEAD"
 assert_contains "READINESS=ready" "${SANDBOX}/.releases.log" "SOURCE-01 release log readiness"
 
