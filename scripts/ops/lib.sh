@@ -262,3 +262,34 @@ require_no_production_recovery_hold() {
     return 1
   fi
 }
+
+# Docker tags can be reassigned. Verify the content-addressed local image ID
+# against BOTH recorded release logs before a rollback switches any writer.
+release_image_id() {
+  local id
+  id="$(docker image inspect --format '{{.Id}}' "$1" 2>/dev/null)" || return 1
+  [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$id"
+}
+
+require_release_image_inventory() {
+  local sha="$1" key="$2" image="$3" manifest_line release_line expected release_id actual
+  local inventory_file="${PROJECT_DIR}/.release-image-ids.log"
+  local release_file="${PROJECT_DIR}/.releases.log"
+  [[ -f "$inventory_file" && -f "$release_file" ]] || {
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_EVIDENCE_MISSING: no verified deployment inventory" >&2
+    return 1
+  }
+  manifest_line="$(awk -v key="RELEASE_SHA=$sha" '{for(i=1;i<=NF;i++)if($i==key){print;break}}' "$inventory_file" | tail -n 1)"
+  release_line="$(awk -v key="RELEASE_SHA=$sha" '{for(i=1;i<=NF;i++)if($i==key){print;break}}' "$release_file" | tail -n 1)"
+  expected="$(printf '%s\n' "$manifest_line" | tr ' ' '\n' | grep -E "^${key}_IMAGE_ID=sha256:[0-9a-f]{64}$" | cut -d= -f2- | head -n 1)"
+  release_id="$(printf '%s\n' "$release_line" | tr ' ' '\n' | grep -E "^${key}_IMAGE_ID=sha256:[0-9a-f]{64}$" | cut -d= -f2- | head -n 1)"
+  if [[ -z "$expected" || "$expected" != "$release_id" ]]; then
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_EVIDENCE_MISSING: missing or inconsistent recorded image identity for $key" >&2
+    return 1
+  fi
+  if ! actual="$(release_image_id "$image")" || [[ "$actual" != "$expected" ]]; then
+    echo "[ops][FAIL] RELEASE_IMAGE_ID_MISMATCH: target image differs from verified deployment identity for $key" >&2
+    return 1
+  fi
+}
