@@ -1008,6 +1008,26 @@ assert_contains_file "PRODUCTION_PROJECT_OVERRIDE_FORBIDDEN" "/tmp/rb-out.${BASH
 assert_log_not_contains "restore_called"
 assert_log_not_contains "docker called"
 
+echo "== P1-C. missing prior image inventory must block rollback =="
+make_sandbox
+PROOF_LOG_STUB_MODE=missing run_rollback "${PREV_SHA}"; rc=$?
+assert_exit 1 "$rc" "missing image evidence fail closed"
+assert_contains_file "RELEASE_IMAGE_ID_EVIDENCE_MISSING" "/tmp/rb-out.${BASHPID}" "missing evidence diagnostic"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "cleanup_up_called"
+
+echo "== P1-C. re-tagged image ID must block rollback before writers =="
+make_sandbox
+EXTRA_ENV=(WRONG_IMAGE_ID_STUB_MODE=1)
+run_rollback "${PREV_SHA}"; rc=$?
+EXTRA_ENV=()
+assert_exit 1 "$rc" "wrong image ID fail closed"
+assert_contains_file "RELEASE_IMAGE_ID_MISMATCH" "/tmp/rb-out.${BASHPID}" "image mismatch diagnostic"
+assert_log_not_contains "app_up_called"
+assert_log_not_contains "async_up_called"
+assert_log_not_contains "cleanup_up_called"
+
 echo "== 10. optional_env_var：retention 遵守统一 env contract =="
 make_sandbox
 source_lib="${REPO_ROOT}/scripts/ops/lib.sh"
