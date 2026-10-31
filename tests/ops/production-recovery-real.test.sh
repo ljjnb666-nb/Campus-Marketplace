@@ -17,6 +17,7 @@ sandbox="$(mktemp -d)"
 proof_db="campus_restore_proof_$(date +%s)_${RANDOM}"
 [[ "${proof_db}" =~ ^campus_restore_proof_[0-9]+_[0-9]+$ ]] || exit 1
 mkdir -p "${sandbox}/bin" "${sandbox}/backups"
+printf 'name: campus-restore-drill-actual-pg\n' > "${sandbox}/compose.production.yml"
 
 pg() {
   "${real_docker}" run --rm --network host -i \
