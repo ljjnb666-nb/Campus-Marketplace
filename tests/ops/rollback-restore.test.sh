@@ -71,6 +71,7 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  printf 'name: campus-ops-test-rollback\n' > "${SANDBOX}/compose.production.yml"
   # An OPS_PROJECT_DIR fixture must never target the production Compose namespace.
   printf 'name: campus-restore-drill-test\n' > "${SANDBOX}/compose.production.yml"
   cat > "${SANDBOX}/.env.production" <<'ENV'
