@@ -219,6 +219,10 @@ app_url_from_env() {
   printf 'https://%s' "$site_address"
 }
 
+# All backup and destructive restore jobs on one host use the same flock inode.
+# Do not move the lock relative to a selected backup filename or latest dump.
+BACKUP_RESTORE_LOCK_NAME=".backup-restore.lock"
+
 # Disaster-recovery hold belongs to the production HOST, not to a checkout.
 # In production the path cannot be redirected using OPS_PROJECT_DIR.
 # Sandboxes remain isolated and must declare an unambiguously non-production
