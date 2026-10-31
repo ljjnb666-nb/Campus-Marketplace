@@ -137,6 +137,13 @@ if [[ "${MIGRATOR_RESOLVED}" != "${MIGRATOR_IMAGE}" ]] || ! docker image inspect
   exit 1
 fi
 
+# Pin the actual local content identities before executing migrations.
+# SHA tags and baked RELEASE_SHA alone are not sufficient evidence.
+APP_IMAGE_ID="$(release_image_id "campus-marketplace-app:${GIT_SHA}")" || { echo "[deploy][FAIL] APP_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+CLEANUP_IMAGE_ID="$(release_image_id "campus-marketplace-cleanup:${GIT_SHA}")" || { echo "[deploy][FAIL] CLEANUP_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+ASYNC_WORKER_IMAGE_ID="$(release_image_id "campus-marketplace-async-worker:${GIT_SHA}")" || { echo "[deploy][FAIL] ASYNC_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+MIGRATOR_IMAGE_ID="$(release_image_id "${MIGRATOR_IMAGE}")" || { echo "[deploy][FAIL] MIGRATOR_IMAGE_ID_UNVERIFIED" >&2; exit 1; }
+
 # 3) 迁移（先备份，后迁移）
 echo "[deploy] step 3/7 备份当前数据库"
 "${SCRIPT_DIR}/backup-postgres.sh"
@@ -294,5 +301,27 @@ fi
 
 # release 日志（仅 verifier PASS 后才写；不记录 dependency URLs/credentials/bucket names）
 LOG_FILE="${PROJECT_DIR}/.releases.log"
-echo "$(date -Is) RELEASE_SHA=${GIT_SHA} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${GIT_SHA} CLEANUP=running ASYNC_WORKER=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
+# A tag moved during deployment is not a trustworthy artifact set.
+for binding in "APP:${APP_IMAGE_ID}:campus-marketplace-app:${GIT_SHA}" \
+               "CLEANUP:${CLEANUP_IMAGE_ID}:campus-marketplace-cleanup:${GIT_SHA}" \
+               "ASYNC_WORKER:${ASYNC_WORKER_IMAGE_ID}:campus-marketplace-async-worker:${GIT_SHA}" \
+               "MIGRATOR:${MIGRATOR_IMAGE_ID}:campus-marketplace-migrator:${GIT_SHA}"; do
+  role="${binding%%:*}"
+  remaining="${binding#*:}"
+  expected="${remaining%%:campus-marketplace-*}"
+  # Use explicit role mapping: Docker IDs are sha256:... and contain colons.
+  case "${role}" in
+    APP) image="campus-marketplace-app:${GIT_SHA}"; expected="${APP_IMAGE_ID}" ;;
+    CLEANUP) image="campus-marketplace-cleanup:${GIT_SHA}"; expected="${CLEANUP_IMAGE_ID}" ;;
+    ASYNC_WORKER) image="campus-marketplace-async-worker:${GIT_SHA}"; expected="${ASYNC_WORKER_IMAGE_ID}" ;;
+    MIGRATOR) image="${MIGRATOR_IMAGE}"; expected="${MIGRATOR_IMAGE_ID}" ;;
+  esac
+  actual="$(release_image_id "${image}")" || { echo "[deploy][FAIL] RELEASE_IMAGE_ID_MISMATCH: ${role}" >&2; exit 1; }
+  [[ "${actual}" == "${expected}" ]] || { echo "[deploy][FAIL] RELEASE_IMAGE_ID_MISMATCH: ${role}" >&2; exit 1; }
+done
+ARTIFACT_IDS="RELEASE_SHA=${GIT_SHA} APP_IMAGE_ID=${APP_IMAGE_ID} CLEANUP_IMAGE_ID=${CLEANUP_IMAGE_ID} ASYNC_WORKER_IMAGE_ID=${ASYNC_WORKER_IMAGE_ID} MIGRATOR_IMAGE_ID=${MIGRATOR_IMAGE_ID}"
+echo "$(date -Is) ${ARTIFACT_IDS} APP_IMAGE=campus-marketplace-app:${GIT_SHA} CLEANUP_IMAGE=campus-marketplace-cleanup:${GIT_SHA} ASYNC_WORKER_IMAGE=campus-marketplace-async-worker:${GIT_SHA} CLEANUP=running ASYNC_WORKER=running DEPLOYED_AT=$(date -Is) MIGRATION=deployed READINESS=ready" >> "${LOG_FILE}"
+# Fail closed on a torn log write: rollback requires the same IDs in BOTH logs.
+printf '%s\n' "${ARTIFACT_IDS}" >> "${PROJECT_DIR}/.release-image-ids.log"
+
 echo "[deploy] SUCCESS ${GIT_SHA}（release artifact 集合记录于 ${LOG_FILE}）"
