@@ -49,6 +49,18 @@ if ! touch "${BACKUP_DIR}/.write-probe" 2>/dev/null; then
 fi
 rm -f "${BACKUP_DIR}/.write-probe"
 
+# Prevent a scheduler pg_dump from racing a destructive pg_restore.
+# Hold the same FD through dump, checksum, offsite copy and retention.
+LOCK_FILE="${BACKUP_DIR}/${BACKUP_RESTORE_LOCK_NAME}"
+if ! exec {BACKUP_RESTORE_LOCK_FD}> "${LOCK_FILE}"; then
+  echo "[backup][FAIL] BACKUP_RESTORE_LOCK_UNAVAILABLE" >&2
+  exit 1
+fi
+if ! flock -n "${BACKUP_RESTORE_LOCK_FD}"; then
+  echo "[backup][FAIL] BACKUP_RESTORE_LOCK_BUSY: backup/restore already active" >&2
+  exit 1
+fi
+
 # Keep a single backup/restore exclusion lock through dump, checksum,
 # offsite replication and retention. A concurrent restore must never observe
 # a partially written dump as the newest backup.
