@@ -60,6 +60,8 @@ make_sandbox() {
   [[ -n "${SANDBOX}" ]] && rm -rf "${SANDBOX}"
   SANDBOX="$(mktemp -d)"
   mkdir -p "${SANDBOX}/bin" "${SANDBOX}/backups"
+  # An OPS_PROJECT_DIR fixture must never target the production Compose namespace.
+  printf 'name: campus-restore-drill-test\n' > "${SANDBOX}/compose.production.yml"
   cat > "${SANDBOX}/.env.production" <<'ENV'
 SITE_ADDRESS=campus.example.edu.cn
 POSTGRES_USER=campus_app
@@ -106,6 +108,7 @@ fake-app.out
 async.running
 cleanup.running
 migration.count
+compose.production.yml
 .env.production
 .releases.log
 GITIGNORE
